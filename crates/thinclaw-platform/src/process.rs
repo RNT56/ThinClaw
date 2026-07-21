@@ -559,9 +559,23 @@ impl Drop for DescendantOwnership {
     }
 }
 
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::{DescendantOwnership, OwnedChild, OwnedStdChild};
+
+    #[test]
+    fn process_ownership_types_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<DescendantOwnership>();
+        assert_send_sync::<OwnedChild>();
+        assert_send_sync::<OwnedStdChild>();
+    }
+}
+
 #[cfg(windows)]
 struct DescendantOwnership {
-    job: windows_sys::Win32::Foundation::HANDLE,
+    job: Option<std::os::windows::io::OwnedHandle>,
 }
 
 #[cfg(windows)]
@@ -584,7 +598,7 @@ impl DescendantOwnership {
     }
 
     fn attach_handle(process: windows_sys::Win32::Foundation::HANDLE) -> std::io::Result<Self> {
-        use windows_sys::Win32::Foundation::CloseHandle;
+        use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -598,40 +612,42 @@ impl DescendantOwnership {
             if job.is_null() {
                 return Err(std::io::Error::last_os_error());
             }
+            // SAFETY: CreateJobObjectW returned a fresh owned handle. Wrapping
+            // it immediately gives the handle standard Send-safe RAII
+            // semantics on every return path.
+            let job = OwnedHandle::from_raw_handle(job);
+            let raw_job = job.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             if SetInformationJobObject(
-                job,
+                raw_job,
                 JobObjectExtendedLimitInformation,
                 (&raw const info).cast(),
                 std::mem::size_of_val(&info) as u32,
             ) == 0
             {
-                let error = std::io::Error::last_os_error();
-                CloseHandle(job);
-                return Err(error);
+                return Err(std::io::Error::last_os_error());
             }
-            if AssignProcessToJobObject(job, process) == 0 {
-                let error = std::io::Error::last_os_error();
-                CloseHandle(job);
-                return Err(error);
+            if AssignProcessToJobObject(raw_job, process) == 0 {
+                return Err(std::io::Error::last_os_error());
             }
-            Ok(Self { job })
+            Ok(Self { job: Some(job) })
         }
     }
 
     fn terminate(&mut self) {
-        use windows_sys::Win32::Foundation::CloseHandle;
+        use std::os::windows::io::AsRawHandle as _;
         use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-        if self.job.is_null() {
+        let Some(job) = self.job.take() else {
             return;
-        }
+        };
         // SAFETY: `job` is an owned handle created by CreateJobObjectW.
         unsafe {
-            TerminateJobObject(self.job, 1);
-            CloseHandle(self.job);
+            TerminateJobObject(
+                job.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+                1,
+            );
         }
-        self.job = std::ptr::null_mut();
     }
 }
 
