@@ -430,6 +430,10 @@ mod stubs {
             &self.name
         }
 
+        pub fn capabilities(&self) -> super::ChannelCapabilities {
+            super::ChannelCapabilities::for_channel(&self.name)
+        }
+
         pub async fn endpoints(&self) -> Vec<RegisteredEndpoint> {
             Vec::new()
         }

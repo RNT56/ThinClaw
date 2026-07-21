@@ -113,9 +113,10 @@ pub async fn direct_media_transcribe_audio(
     #[cfg(feature = "mlx")]
     {
         // MLX builds don't ship the whisper CLI binary — the server must be running
-        return Err(
-            "STT server not running. Please start it from Settings → STT first.".to_string(),
-        );
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "STT server not running. Please start it from Settings → STT first."
+                .to_string(),
+        });
     }
 
     #[cfg(not(feature = "mlx"))]

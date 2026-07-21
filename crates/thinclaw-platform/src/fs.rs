@@ -49,7 +49,7 @@ fn read_regular_file_bounded_impl(
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.len() > max_bytes
-        || (require_single_link && !metadata_has_single_link(&metadata))
+        || (require_single_link && !preopen_metadata_has_single_link(&metadata))
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -73,10 +73,12 @@ fn read_regular_file_bounded_impl(
     }
     let mut file = options.open(path)?;
     let opened = file.metadata()?;
+    let opened_has_single_link =
+        !require_single_link || opened_file_has_single_link(&file, &opened)?;
     if !opened.is_file()
         || opened.len() != metadata.len()
         || opened.len() > max_bytes
-        || (require_single_link && !metadata_has_single_link(&opened))
+        || !opened_has_single_link
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -104,20 +106,61 @@ fn read_regular_file_bounded_impl(
 }
 
 #[cfg(unix)]
-fn metadata_has_single_link(metadata: &std::fs::Metadata) -> bool {
+fn preopen_metadata_has_single_link(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt as _;
     metadata.nlink() == 1
 }
 
 #[cfg(windows)]
-fn metadata_has_single_link(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-    metadata.number_of_links() == Some(1)
+fn preopen_metadata_has_single_link(_metadata: &std::fs::Metadata) -> bool {
+    // Stable Rust does not expose the Windows link count through Metadata.
+    // The opened handle is checked authoritatively below.
+    true
 }
 
 #[cfg(not(any(unix, windows)))]
-fn metadata_has_single_link(_metadata: &std::fs::Metadata) -> bool {
+fn preopen_metadata_has_single_link(_metadata: &std::fs::Metadata) -> bool {
     false
+}
+
+#[cfg(unix)]
+fn opened_file_has_single_link(
+    _file: &std::fs::File,
+    metadata: &std::fs::Metadata,
+) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+    Ok(metadata.nlink() == 1)
+}
+
+#[cfg(windows)]
+fn opened_file_has_single_link(
+    file: &std::fs::File,
+    _metadata: &std::fs::Metadata,
+) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` owns a live kernel handle for the duration of this call,
+    // and `information` is a valid writable output buffer of the required type.
+    let succeeded = unsafe {
+        GetFileInformationByHandle(file.as_raw_handle(), std::ptr::from_mut(&mut information))
+    };
+    if succeeded == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(information.nNumberOfLinks == 1)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn opened_file_has_single_link(
+    _file: &std::fs::File,
+    _metadata: &std::fs::Metadata,
+) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 /// Async-runtime-safe wrapper around [`read_regular_file_bounded`].

@@ -100,20 +100,20 @@ pub async fn direct_runtime_start_chat_server(
     // pick a model through the engine's own selector instead.
     #[cfg(feature = "mlx")]
     {
-        return Err(
-            "This build uses the MLX engine. GGUF/llama.cpp models are not supported. \
-             Please select an MLX-compatible model (safetensors directory) from the model list."
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "This build uses the MLX engine. GGUF/llama.cpp models are not supported. \
+                      Please select an MLX-compatible model (safetensors directory) from the model list."
                 .to_string(),
-        );
+        });
     }
 
     #[cfg(all(feature = "vllm", not(feature = "mlx")))]
     {
-        return Err(
-            "This build uses the vLLM engine. GGUF/llama.cpp models are not supported. \
-             Please select a vLLM-compatible model (safetensors directory) from the model list."
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "This build uses the vLLM engine. GGUF/llama.cpp models are not supported. \
+                      Please select a vLLM-compatible model (safetensors directory) from the model list."
                 .to_string(),
-        );
+        });
     }
 
     // llama.cpp path — only reached in llamacpp builds

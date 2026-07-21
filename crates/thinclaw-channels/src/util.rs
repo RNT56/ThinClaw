@@ -15,6 +15,7 @@ pub(crate) fn floor_char_boundary(s: &str, pos: usize) -> usize {
 /// Decode text selected through SQLite's `hex(...)` function. Channel queries
 /// use this representation so embedded pipes, CR/LF, and NUL bytes cannot
 /// forge additional CLI rows or shift columns.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn decode_sqlite_hex(value: &str) -> Option<String> {
     String::from_utf8(hex::decode(value).ok()?).ok()
 }

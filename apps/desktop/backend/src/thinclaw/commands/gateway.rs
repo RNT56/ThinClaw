@@ -712,7 +712,9 @@ pub async fn thinclaw_copy_gateway_token(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = token;
-        Err("secure native clipboard copy is not available on this platform".to_string())
+        Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "secure native clipboard copy is not available on this platform".to_string(),
+        })
     }
 }
 

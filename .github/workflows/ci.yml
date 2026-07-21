@@ -41,6 +41,8 @@ jobs:
         run: scripts/ci/check-msrv-sync.py
       - name: Check release automation contract
         run: python3 scripts/ci/check-release-automation.py
+      - name: Check coverage gate accounting
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
       - name: Check desktop bridge command boundaries
         run: python3 -m unittest discover -s desktop-sidecars -p 'test_*.py'
       - name: Check crate boundaries
@@ -924,10 +926,19 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Select coverage build storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          if mountpoint -q /mnt; then
+            cargo_target_dir=/mnt/thinclaw-coverage-target
+            sudo install -d -o "$(id -u)" -g "$(id -g)" "$cargo_target_dir"
+            echo "CARGO_TARGET_DIR=$cargo_target_dir" >> "$GITHUB_ENV"
+          fi
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@9458fed45835344deb5e69e06e831be047c96abf # cargo-llvm-cov
       - name: Run tests with coverage
-        run: cargo llvm-cov --all-features --lib --lcov --output-path coverage.lcov -- --nocapture
+        run: cargo llvm-cov --workspace --all-features --lib --lcov --output-path coverage.lcov -- --nocapture
       - name: Validate coverage report
         env:
           BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -948,7 +959,8 @@ jobs:
           python3 scripts/ci/check-coverage.py coverage.lcov \
             --base "$BASE_REVISION" \
             --project-min 38 \
-            --patch-min 70
+            --patch-min 70 \
+            --debt-baseline scripts/ci/coverage-debt.json
       - name: Upload coverage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
