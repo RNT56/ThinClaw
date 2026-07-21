@@ -176,7 +176,7 @@
       "test_owner": "thinclaw-tools tests",
       "prompt_paths": [
         "crates/thinclaw-tools/src/smart_approve.rs",
-        "crates/thinclaw-tools/src/mcp/client.rs"
+        "crates/thinclaw-tools/src/mcp/client/support.rs"
       ],
       "path_prefixes": ["crates/thinclaw-tools/src/", "src/tools/"]
     },
@@ -193,6 +193,7 @@
       "model_capabilities": "provider-specific transport",
       "test_owner": "provider adapter tests",
       "prompt_paths": [
+        "src/orchestrator/api.rs",
         "src/llm/bedrock.rs",
         "crates/thinclaw-gateway/src/web/ports.rs",
         "crates/thinclaw-llm-core/src/provider.rs",
