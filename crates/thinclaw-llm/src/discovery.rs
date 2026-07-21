@@ -10,9 +10,221 @@
 //! let models = disco.discover_openai_compatible("http://localhost:11434", Some("Bearer xxx")).await;
 //! ```
 
+use std::collections::HashSet;
+use std::net::IpAddr;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+const MAX_MODEL_DISCOVERY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DISCOVERY_URL_BYTES: usize = 16 * 1024;
+const MAX_DISCOVERY_HEADER_BYTES: usize = 64 * 1024;
+const MAX_DISCOVERY_DNS_ADDRESSES: usize = 64;
+const MAX_DISCOVERED_MODELS: usize = 4096;
+const MAX_DISCOVERED_MODEL_ID_BYTES: usize = 1024;
+const MAX_MODEL_ENDPOINTS: usize = 32;
+const MAX_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+fn normalized_timeout(timeout: Duration) -> Duration {
+    timeout
+        .max(Duration::from_millis(1))
+        .min(MAX_DISCOVERY_TIMEOUT)
+}
+
+fn validate_header_value(value: &str, name: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > MAX_DISCOVERY_HEADER_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(format!("{name} is empty, oversized, or malformed"));
+    }
+    Ok(())
+}
+
+fn configured_address_allowed(address: IpAddr) -> bool {
+    !address.is_unspecified()
+        && !address.is_multicast()
+        && !matches!(address, IpAddr::V4(address) if address.is_broadcast())
+}
+
+fn plaintext_address_allowed(address: IpAddr) -> bool {
+    configured_address_allowed(address) && !thinclaw_tools_core::is_public_outbound_ip(address)
+}
+
+/// Build a no-proxy, no-redirect HTTP client pinned to the endpoint addresses.
+/// Public endpoints require HTTPS; configured endpoints may use plaintext HTTP
+/// only when every resolved address is local or private.
+#[doc(hidden)]
+pub async fn client_for_endpoint(
+    endpoint: &str,
+    timeout: Duration,
+    public_only: bool,
+) -> Result<(reqwest::Client, reqwest::Url), String> {
+    if endpoint.is_empty() || endpoint.len() > MAX_DISCOVERY_URL_BYTES {
+        return Err("model discovery endpoint is empty or oversized".to_string());
+    }
+    let parsed = reqwest::Url::parse(endpoint)
+        .map_err(|error| format!("invalid model discovery endpoint: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(
+            "model discovery endpoint must be HTTP(S), without credentials, a query, or a fragment"
+                .to_string(),
+        );
+    }
+    let plaintext = parsed.scheme() == "http";
+    if public_only && plaintext {
+        return Err("public model discovery endpoints must use HTTPS".to_string());
+    }
+
+    let timeout = normalized_timeout(timeout);
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "model discovery endpoint has no host".to_string())?
+        .to_string();
+    let mut pinned_addrs = Vec::new();
+    if public_only {
+        let guarded = thinclaw_tools_core::validate_outbound_url_pinned_async(
+            parsed.as_str(),
+            &thinclaw_tools_core::OutboundUrlGuardOptions {
+                require_https: true,
+                upgrade_http_to_https: false,
+                allowlist: vec![host.clone()],
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        pinned_addrs = guarded.pinned_addrs;
+    } else if let Ok(address) = host.parse::<IpAddr>() {
+        if !configured_address_allowed(address) {
+            return Err("model discovery endpoint uses an invalid address".to_string());
+        }
+        if plaintext && !plaintext_address_allowed(address) {
+            return Err(
+                "plaintext model discovery is allowed only for local or private addresses"
+                    .to_string(),
+            );
+        }
+    } else {
+        let port = parsed.port_or_known_default().ok_or_else(|| {
+            "model discovery endpoint uses a scheme without a known port".to_string()
+        })?;
+        let addresses = tokio::time::timeout(
+            timeout.min(Duration::from_secs(5)),
+            tokio::net::lookup_host((host.as_str(), port)),
+        )
+        .await
+        .map_err(|_| "model discovery endpoint DNS lookup timed out".to_string())?
+        .map_err(|error| format!("model discovery endpoint DNS lookup failed: {error}"))?;
+        let mut seen = HashSet::new();
+        for address in addresses {
+            if pinned_addrs.len() >= MAX_DISCOVERY_DNS_ADDRESSES {
+                return Err("model discovery endpoint resolved to too many addresses".to_string());
+            }
+            if !configured_address_allowed(address.ip()) {
+                return Err(format!(
+                    "model discovery endpoint resolved to invalid address {}",
+                    address.ip()
+                ));
+            }
+            if plaintext && !plaintext_address_allowed(address.ip()) {
+                return Err(
+                    "plaintext model discovery resolved to a public address; use HTTPS".to_string(),
+                );
+            }
+            if seen.insert(address) {
+                pinned_addrs.push(address);
+            }
+        }
+        if pinned_addrs.is_empty() {
+            return Err("model discovery endpoint did not resolve".to_string());
+        }
+    }
+
+    let mut builder = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(Duration::from_secs(10)))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if !pinned_addrs.is_empty() {
+        builder = builder.resolve_to_addrs(&host, &pinned_addrs);
+    }
+    let client = builder
+        .build()
+        .map_err(|error| format!("failed to build model discovery client: {error}"))?;
+    Ok((client, parsed))
+}
+
+fn openai_models_endpoint(base_url: &str) -> Result<reqwest::Url, String> {
+    if base_url.is_empty() || base_url.len() > MAX_DISCOVERY_URL_BYTES {
+        return Err("model discovery base URL is empty or oversized".to_string());
+    }
+    let mut endpoint = reqwest::Url::parse(base_url.trim())
+        .map_err(|error| format!("invalid model discovery base URL: {error}"))?;
+    if endpoint.query().is_some() || endpoint.fragment().is_some() {
+        return Err("model discovery base URL cannot contain a query or fragment".to_string());
+    }
+    let trimmed_path = endpoint.path().trim_end_matches('/');
+    let path = if trimmed_path.ends_with("/models") {
+        trimmed_path.to_string()
+    } else if trimmed_path.ends_with("/v1")
+        || trimmed_path.ends_with("/v2")
+        || trimmed_path.ends_with("/openai")
+    {
+        format!("{trimmed_path}/models")
+    } else if trimmed_path.is_empty() {
+        "/v1/models".to_string()
+    } else {
+        format!("{trimmed_path}/v1/models")
+    };
+    endpoint.set_path(&path);
+    Ok(endpoint)
+}
+
+fn ollama_models_endpoint(base_url: &str) -> Result<reqwest::Url, String> {
+    if base_url.is_empty() || base_url.len() > MAX_DISCOVERY_URL_BYTES {
+        return Err("Ollama base URL is empty or oversized".to_string());
+    }
+    let mut endpoint = reqwest::Url::parse(base_url.trim())
+        .map_err(|error| format!("invalid Ollama base URL: {error}"))?;
+    if endpoint.query().is_some() || endpoint.fragment().is_some() {
+        return Err("Ollama base URL cannot contain a query or fragment".to_string());
+    }
+    let trimmed_path = endpoint.path().trim_end_matches('/');
+    endpoint.set_path(&format!("{trimmed_path}/api/tags"));
+    Ok(endpoint)
+}
+
+fn safe_endpoint_label(value: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(value) else {
+        return "<invalid endpoint>".to_string();
+    };
+    let _ = parsed.set_password(None);
+    let _ = parsed.set_username("");
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
+}
+
+fn valid_discovered_model_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_DISCOVERED_MODEL_ID_BYTES
+        && !value.chars().any(char::is_control)
+}
+
+fn validate_model_count(count: usize) -> Result<(), String> {
+    if count > MAX_DISCOVERED_MODELS {
+        Err(format!(
+            "provider returned more than {MAX_DISCOVERED_MODELS} models"
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 /// Discovered model information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +256,6 @@ pub struct DiscoveryResult {
 
 /// Model discovery service.
 pub struct ModelDiscovery {
-    client: reqwest::Client,
     timeout: Duration,
 }
 
@@ -52,7 +263,6 @@ impl ModelDiscovery {
     /// Create a new discovery service with default timeout (5s).
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
             timeout: Duration::from_secs(5),
         }
     }
@@ -60,8 +270,7 @@ impl ModelDiscovery {
     /// Create with a custom timeout.
     pub fn with_timeout(timeout: Duration) -> Self {
         Self {
-            client: reqwest::Client::new(),
-            timeout,
+            timeout: normalized_timeout(timeout),
         }
     }
 
@@ -74,7 +283,18 @@ impl ModelDiscovery {
         base_url: &str,
         auth_header: Option<&str>,
     ) -> DiscoveryResult {
-        self.discover_openai_compatible_with_headers(base_url, auth_header, &[])
+        self.discover_openai_compatible_with_headers_inner(base_url, auth_header, &[], false)
+            .await
+    }
+
+    /// Discover models from a known public OpenAI-compatible service while
+    /// rejecting private DNS answers for its HTTPS endpoint.
+    pub async fn discover_public_openai_compatible(
+        &self,
+        base_url: &str,
+        auth_header: Option<&str>,
+    ) -> DiscoveryResult {
+        self.discover_openai_compatible_with_headers_inner(base_url, auth_header, &[], true)
             .await
     }
 
@@ -86,23 +306,81 @@ impl ModelDiscovery {
         auth_header: Option<&str>,
         extra_headers: &[(String, String)],
     ) -> DiscoveryResult {
-        let start = std::time::Instant::now();
-        let trimmed = base_url.trim_end_matches('/');
-        // Build the /models endpoint URL.  The base_url may already end
-        // with a versioned path (e.g. `/v1`, `/v2`, `/v1beta/openai`).
-        // Only append `/v1/models` if the URL looks like a bare host.
-        let endpoint = if trimmed.ends_with("/models") {
-            trimmed.to_string()
-        } else if trimmed.ends_with("/v1")
-            || trimmed.ends_with("/v2")
-            || trimmed.ends_with("/openai")
-        {
-            format!("{trimmed}/models")
-        } else {
-            format!("{trimmed}/v1/models")
-        };
+        self.discover_openai_compatible_with_headers_inner(
+            base_url,
+            auth_header,
+            extra_headers,
+            false,
+        )
+        .await
+    }
 
-        let mut req = self.client.get(&endpoint).timeout(self.timeout);
+    async fn discover_openai_compatible_with_headers_inner(
+        &self,
+        base_url: &str,
+        auth_header: Option<&str>,
+        extra_headers: &[(String, String)],
+        public_only: bool,
+    ) -> DiscoveryResult {
+        let start = std::time::Instant::now();
+        let endpoint_url = match openai_models_endpoint(base_url) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                return DiscoveryResult {
+                    models: Vec::new(),
+                    endpoint: safe_endpoint_label(base_url),
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    error: Some(error),
+                };
+            }
+        };
+        let endpoint = endpoint_url.to_string();
+
+        if let Some(auth) = auth_header
+            && let Err(error) = validate_header_value(auth, "authorization header")
+        {
+            return DiscoveryResult {
+                models: Vec::new(),
+                endpoint,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                error: Some(error),
+            };
+        }
+        for (name, value) in extra_headers {
+            if name.is_empty()
+                || name.len() > 256
+                || reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err()
+            {
+                return DiscoveryResult {
+                    models: Vec::new(),
+                    endpoint,
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    error: Some("provider header name is malformed".to_string()),
+                };
+            }
+            if let Err(error) = validate_header_value(value, "provider header value") {
+                return DiscoveryResult {
+                    models: Vec::new(),
+                    endpoint,
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    error: Some(error),
+                };
+            }
+        }
+        let (client, endpoint_url) =
+            match client_for_endpoint(&endpoint, self.timeout, public_only).await {
+                Ok(value) => value,
+                Err(error) => {
+                    return DiscoveryResult {
+                        models: Vec::new(),
+                        endpoint,
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        error: Some(error),
+                    };
+                }
+            };
+
+        let mut req = client.get(endpoint_url);
         if let Some(auth) = auth_header {
             req = req.header("Authorization", auth);
         }
@@ -112,30 +390,26 @@ impl ModelDiscovery {
 
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
-                match resp.json::<OpenAiModelsResponse>().await {
-                    Ok(body) => {
-                        let models = body
-                            .data
-                            .into_iter()
-                            .map(|m| {
-                                let is_chat = is_chat_model(&m.id);
-                                let id = m.id;
-                                DiscoveredModel {
-                                    name: m.name.unwrap_or_else(|| id.clone()),
-                                    id,
-                                    provider: "openai_compatible".to_string(),
-                                    is_chat,
-                                    context_length: m.context_length,
-                                }
-                            })
-                            .collect();
-                        DiscoveryResult {
+                match thinclaw_types::http_response::bounded_json::<OpenAiModelsResponse>(
+                    resp,
+                    MAX_MODEL_DISCOVERY_RESPONSE_BYTES,
+                )
+                .await
+                {
+                    Ok(body) => match openai_models_from_response(body) {
+                        Ok(models) => DiscoveryResult {
                             models,
                             endpoint,
                             elapsed_ms: start.elapsed().as_millis() as u64,
                             error: None,
-                        }
-                    }
+                        },
+                        Err(error) => DiscoveryResult {
+                            models: vec![],
+                            endpoint,
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            error: Some(error),
+                        },
+                    },
                     Err(e) => DiscoveryResult {
                         models: vec![],
                         endpoint,
@@ -154,7 +428,7 @@ impl ModelDiscovery {
                 models: vec![],
                 endpoint,
                 elapsed_ms: start.elapsed().as_millis() as u64,
-                error: Some(format!("Connection failed: {}", e)),
+                error: Some(format!("Connection failed: {}", e.without_url())),
             },
         }
     }
@@ -162,31 +436,66 @@ impl ModelDiscovery {
     /// Discover Cohere chat-capable models from the native list-models API.
     pub async fn discover_cohere(&self, api_key: &str) -> DiscoveryResult {
         let start = std::time::Instant::now();
-        let endpoint = "https://api.cohere.com/v1/models?endpoint=chat".to_string();
+        let endpoint = "https://api.cohere.com/v1/models".to_string();
 
-        let resp = self
-            .client
-            .get(&endpoint)
+        if let Err(error) = validate_header_value(api_key, "Cohere API key") {
+            return DiscoveryResult {
+                models: Vec::new(),
+                endpoint,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                error: Some(error),
+            };
+        }
+        let (client, endpoint_url) = match client_for_endpoint(&endpoint, self.timeout, true).await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return DiscoveryResult {
+                    models: Vec::new(),
+                    endpoint,
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    error: Some(error),
+                };
+            }
+        };
+
+        let resp = client
+            .get(endpoint_url)
+            .query(&[("endpoint", "chat")])
             .header("Authorization", format!("Bearer {api_key}"))
-            .timeout(self.timeout)
             .send()
             .await;
 
         match resp {
-            Ok(r) if r.status().is_success() => match r.json::<CohereModelsResponse>().await {
-                Ok(body) => DiscoveryResult {
-                    models: cohere_models_from_response(body),
-                    endpoint,
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                    error: None,
-                },
-                Err(e) => DiscoveryResult {
-                    models: vec![],
-                    endpoint,
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                    error: Some(format!("Failed to parse response: {}", e)),
-                },
-            },
+            Ok(r) if r.status().is_success() => {
+                match thinclaw_types::http_response::bounded_json::<CohereModelsResponse>(
+                    r,
+                    MAX_MODEL_DISCOVERY_RESPONSE_BYTES,
+                )
+                .await
+                {
+                    Ok(body) => match cohere_models_from_response(body) {
+                        Ok(models) => DiscoveryResult {
+                            models,
+                            endpoint,
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            error: None,
+                        },
+                        Err(error) => DiscoveryResult {
+                            models: vec![],
+                            endpoint,
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            error: Some(error),
+                        },
+                    },
+                    Err(e) => DiscoveryResult {
+                        models: vec![],
+                        endpoint,
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        error: Some(format!("Failed to parse response: {}", e)),
+                    },
+                }
+            }
             Ok(r) => DiscoveryResult {
                 models: vec![],
                 endpoint,
@@ -197,7 +506,7 @@ impl ModelDiscovery {
                 models: vec![],
                 endpoint,
                 elapsed_ms: start.elapsed().as_millis() as u64,
-                error: Some(format!("Connection failed: {}", e)),
+                error: Some(format!("Connection failed: {}", e.without_url())),
             },
         }
     }
@@ -207,44 +516,64 @@ impl ModelDiscovery {
         let start = std::time::Instant::now();
         let endpoint = "https://api.anthropic.com/v1/models".to_string();
 
-        let resp = self
-            .client
-            .get(&endpoint)
+        if let Err(error) = validate_header_value(api_key, "Anthropic API key") {
+            return DiscoveryResult {
+                models: Vec::new(),
+                endpoint,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                error: Some(error),
+            };
+        }
+        let (client, endpoint_url) = match client_for_endpoint(&endpoint, self.timeout, true).await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return DiscoveryResult {
+                    models: Vec::new(),
+                    endpoint,
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    error: Some(error),
+                };
+            }
+        };
+
+        let resp = client
+            .get(endpoint_url)
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
-            .timeout(self.timeout)
             .send()
             .await;
 
         match resp {
-            Ok(r) if r.status().is_success() => match r.json::<AnthropicModelsResponse>().await {
-                Ok(body) => {
-                    let models = body
-                        .data
-                        .into_iter()
-                        .filter(|m| !m.id.contains("embedding") && !m.id.contains("audio"))
-                        .map(|m| DiscoveredModel {
-                            name: m.id.clone(),
-                            id: m.id,
-                            provider: "anthropic".to_string(),
-                            is_chat: true,
-                            context_length: None,
-                        })
-                        .collect();
-                    DiscoveryResult {
-                        models,
+            Ok(r) if r.status().is_success() => {
+                match thinclaw_types::http_response::bounded_json::<AnthropicModelsResponse>(
+                    r,
+                    MAX_MODEL_DISCOVERY_RESPONSE_BYTES,
+                )
+                .await
+                {
+                    Ok(body) => match anthropic_models_from_response(body) {
+                        Ok(models) => DiscoveryResult {
+                            models,
+                            endpoint,
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            error: None,
+                        },
+                        Err(error) => DiscoveryResult {
+                            models: vec![],
+                            endpoint,
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            error: Some(error),
+                        },
+                    },
+                    Err(e) => DiscoveryResult {
+                        models: vec![],
                         endpoint,
                         elapsed_ms: start.elapsed().as_millis() as u64,
-                        error: None,
-                    }
+                        error: Some(format!("Failed to parse response: {}", e)),
+                    },
                 }
-                Err(e) => DiscoveryResult {
-                    models: vec![],
-                    endpoint,
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                    error: Some(format!("Failed to parse response: {}", e)),
-                },
-            },
+            }
             Ok(r) => DiscoveryResult {
                 models: vec![],
                 endpoint,
@@ -255,7 +584,7 @@ impl ModelDiscovery {
                 models: vec![],
                 endpoint,
                 elapsed_ms: start.elapsed().as_millis() as u64,
-                error: Some(format!("Connection failed: {}", e)),
+                error: Some(format!("Connection failed: {}", e.without_url())),
             },
         }
     }
@@ -263,43 +592,63 @@ impl ModelDiscovery {
     /// Discover models from a local Ollama instance.
     pub async fn discover_ollama(&self, base_url: &str) -> DiscoveryResult {
         let start = std::time::Instant::now();
-        let endpoint = format!("{}/api/tags", base_url.trim_end_matches('/'));
-
-        let resp = self
-            .client
-            .get(&endpoint)
-            .timeout(self.timeout)
-            .send()
-            .await;
-
-        match resp {
-            Ok(r) if r.status().is_success() => match r.json::<OllamaTagsResponse>().await {
-                Ok(body) => {
-                    let models = body
-                        .models
-                        .into_iter()
-                        .map(|m| DiscoveredModel {
-                            name: m.name.clone(),
-                            id: m.name,
-                            provider: "ollama".to_string(),
-                            is_chat: true,
-                            context_length: None,
-                        })
-                        .collect();
-                    DiscoveryResult {
-                        models,
-                        endpoint,
-                        elapsed_ms: start.elapsed().as_millis() as u64,
-                        error: None,
-                    }
-                }
-                Err(e) => DiscoveryResult {
-                    models: vec![],
+        let endpoint_url = match ollama_models_endpoint(base_url) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                return DiscoveryResult {
+                    models: Vec::new(),
+                    endpoint: safe_endpoint_label(base_url),
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    error: Some(error),
+                };
+            }
+        };
+        let endpoint = endpoint_url.to_string();
+        let (client, endpoint_url) = match client_for_endpoint(&endpoint, self.timeout, false).await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return DiscoveryResult {
+                    models: Vec::new(),
                     endpoint,
                     elapsed_ms: start.elapsed().as_millis() as u64,
-                    error: Some(format!("Failed to parse response: {}", e)),
-                },
-            },
+                    error: Some(error),
+                };
+            }
+        };
+
+        let resp = client.get(endpoint_url).send().await;
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                match thinclaw_types::http_response::bounded_json::<OllamaTagsResponse>(
+                    r,
+                    MAX_MODEL_DISCOVERY_RESPONSE_BYTES,
+                )
+                .await
+                {
+                    Ok(body) => match ollama_models_from_response(body) {
+                        Ok(models) => DiscoveryResult {
+                            models,
+                            endpoint,
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            error: None,
+                        },
+                        Err(error) => DiscoveryResult {
+                            models: vec![],
+                            endpoint,
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            error: Some(error),
+                        },
+                    },
+                    Err(e) => DiscoveryResult {
+                        models: vec![],
+                        endpoint,
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        error: Some(format!("Failed to parse response: {}", e)),
+                    },
+                }
+            }
             Ok(r) => DiscoveryResult {
                 models: vec![],
                 endpoint,
@@ -310,7 +659,7 @@ impl ModelDiscovery {
                 models: vec![],
                 endpoint,
                 elapsed_ms: start.elapsed().as_millis() as u64,
-                error: Some(format!("Connection failed: {}", e)),
+                error: Some(format!("Connection failed: {}", e.without_url())),
             },
         }
     }
@@ -334,8 +683,11 @@ impl ModelDiscovery {
                 if let Ok(key) = std::env::var("OPENAI_API_KEY") {
                     let auth = format!("Bearer {}", key);
                     results.push(
-                        self.discover_openai_compatible("https://api.openai.com", Some(&auth))
-                            .await,
+                        self.discover_public_openai_compatible(
+                            "https://api.openai.com",
+                            Some(&auth),
+                        )
+                        .await,
                     );
                 }
             }
@@ -363,8 +715,11 @@ impl ModelDiscovery {
                 if let Ok(key) = std::env::var("OPENAI_API_KEY") {
                     let auth = format!("Bearer {}", key);
                     results.push(
-                        self.discover_openai_compatible("https://api.openai.com", Some(&auth))
-                            .await,
+                        self.discover_public_openai_compatible(
+                            "https://api.openai.com",
+                            Some(&auth),
+                        )
+                        .await,
                     );
                 }
                 let ollama = std::env::var("OLLAMA_BASE_URL")
@@ -384,8 +739,19 @@ impl Default for ModelDiscovery {
 }
 
 /// Build the native Bedrock Mantle base URL for a region.
-pub fn bedrock_mantle_base_url(region: &str) -> String {
-    format!("https://bedrock-mantle.{}.api.aws/v1", region.trim())
+pub fn bedrock_mantle_base_url(region: &str) -> Result<String, String> {
+    let region = region.trim();
+    if region.is_empty()
+        || region.len() > 64
+        || !region
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || region.starts_with('-')
+        || region.ends_with('-')
+    {
+        return Err("AWS region is malformed".to_string());
+    }
+    Ok(format!("https://bedrock-mantle.{region}.api.aws/v1"))
 }
 
 // --- Model filtering ---
@@ -614,8 +980,48 @@ struct OllamaModelEntry {
     name: String,
 }
 
-fn cohere_models_from_response(body: CohereModelsResponse) -> Vec<DiscoveredModel> {
-    body.models
+fn openai_models_from_response(body: OpenAiModelsResponse) -> Result<Vec<DiscoveredModel>, String> {
+    validate_model_count(body.data.len())?;
+    if body.data.iter().any(|model| {
+        !valid_discovered_model_value(&model.id)
+            || model
+                .name
+                .as_deref()
+                .is_some_and(|name| !valid_discovered_model_value(name))
+    }) {
+        return Err("provider returned a malformed model identifier".to_string());
+    }
+    Ok(body
+        .data
+        .into_iter()
+        .map(|model| {
+            let is_chat = is_chat_model(&model.id);
+            let id = model.id;
+            DiscoveredModel {
+                name: model.name.unwrap_or_else(|| id.clone()),
+                id,
+                provider: "openai_compatible".to_string(),
+                is_chat,
+                context_length: model.context_length,
+            }
+        })
+        .collect())
+}
+
+fn cohere_models_from_response(body: CohereModelsResponse) -> Result<Vec<DiscoveredModel>, String> {
+    validate_model_count(body.models.len())?;
+    if body.models.iter().any(|model| {
+        !valid_discovered_model_value(&model.name)
+            || model.endpoints.len() > MAX_MODEL_ENDPOINTS
+            || model
+                .endpoints
+                .iter()
+                .any(|endpoint| !valid_discovered_model_value(endpoint))
+    }) {
+        return Err("provider returned malformed model metadata".to_string());
+    }
+    Ok(body
+        .models
         .into_iter()
         .filter(|model| !model.is_deprecated)
         .filter(|model| {
@@ -632,7 +1038,54 @@ fn cohere_models_from_response(body: CohereModelsResponse) -> Vec<DiscoveredMode
             is_chat: true,
             context_length: model.context_length,
         })
-        .collect()
+        .collect())
+}
+
+fn anthropic_models_from_response(
+    body: AnthropicModelsResponse,
+) -> Result<Vec<DiscoveredModel>, String> {
+    validate_model_count(body.data.len())?;
+    if body
+        .data
+        .iter()
+        .any(|model| !valid_discovered_model_value(&model.id))
+    {
+        return Err("provider returned a malformed model identifier".to_string());
+    }
+    Ok(body
+        .data
+        .into_iter()
+        .filter(|model| !model.id.contains("embedding") && !model.id.contains("audio"))
+        .map(|model| DiscoveredModel {
+            name: model.id.clone(),
+            id: model.id,
+            provider: "anthropic".to_string(),
+            is_chat: true,
+            context_length: None,
+        })
+        .collect())
+}
+
+fn ollama_models_from_response(body: OllamaTagsResponse) -> Result<Vec<DiscoveredModel>, String> {
+    validate_model_count(body.models.len())?;
+    if body
+        .models
+        .iter()
+        .any(|model| !valid_discovered_model_value(&model.name))
+    {
+        return Err("provider returned a malformed model identifier".to_string());
+    }
+    Ok(body
+        .models
+        .into_iter()
+        .map(|model| DiscoveredModel {
+            name: model.name.clone(),
+            id: model.name,
+            provider: "ollama".to_string(),
+            is_chat: true,
+            context_length: None,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -758,9 +1211,11 @@ mod tests {
     #[test]
     fn test_bedrock_mantle_base_url() {
         assert_eq!(
-            bedrock_mantle_base_url("us-east-1"),
+            bedrock_mantle_base_url("us-east-1").expect("valid AWS region"),
             "https://bedrock-mantle.us-east-1.api.aws/v1"
         );
+        assert!(bedrock_mantle_base_url("us-east-1.evil.example").is_err());
+        assert!(bedrock_mantle_base_url("../metadata").is_err());
     }
 
     #[test]
@@ -803,10 +1258,32 @@ mod tests {
                     is_deprecated: true,
                 },
             ],
-        });
+        })
+        .expect("valid Cohere fixture");
 
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].id, "command-a-03-2025");
         assert_eq!(parsed[0].context_length, Some(256_000));
+    }
+
+    #[test]
+    fn rejects_oversized_or_malformed_provider_model_lists() {
+        let too_many = OllamaTagsResponse {
+            models: (0..=MAX_DISCOVERED_MODELS)
+                .map(|index| OllamaModelEntry {
+                    name: format!("model-{index}"),
+                })
+                .collect(),
+        };
+        assert!(ollama_models_from_response(too_many).is_err());
+
+        let malformed = OpenAiModelsResponse {
+            data: vec![OpenAiModelEntry {
+                id: "bad\nmodel".to_string(),
+                name: None,
+                context_length: None,
+            }],
+        };
+        assert!(openai_models_from_response(malformed).is_err());
     }
 }

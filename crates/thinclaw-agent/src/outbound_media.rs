@@ -63,11 +63,18 @@ pub fn attachment_digest(attachment: &MediaContent) -> String {
 }
 
 pub fn safe_basename(value: &str) -> Option<String> {
-    Path::new(value)
+    let name = Path::new(value)
         .file_name()
         .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
-        .map(str::to_string)
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")?;
+    let sanitized = name
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        })
+        .take(255)
+        .collect::<String>();
+    (!sanitized.is_empty() && sanitized != "." && sanitized != "..").then_some(sanitized)
 }
 
 pub fn supported_generated_media_mime(mime_type: &str) -> bool {
@@ -99,15 +106,15 @@ async fn attachments_from_generation_outputs(result_json: &serde_json::Value) ->
 
     let max_bytes = MediaLimits::from_env().default_max_bytes;
     let mut attachments = Vec::new();
-    for output in outputs {
+    for (output_index, output) in outputs.iter().enumerate() {
         let Some(file_path) = output.get("file_path").and_then(|value| value.as_str()) else {
             continue;
         };
         match media_from_path(output, file_path, max_bytes).await {
             Ok(Some(media)) => attachments.push(media),
             Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(path = %file_path, error = %error, "Skipping generated media output");
+            Err(_) => {
+                tracing::warn!(output_index, "Skipping invalid generated media output");
             }
         }
     }
@@ -127,12 +134,16 @@ async fn media_from_path(
             canonical.display()
         );
     }
-    let metadata = tokio::fs::metadata(&canonical).await?;
-    if !metadata.is_file() || metadata.len() > max_bytes {
-        return Ok(None);
-    }
-
-    let bytes = tokio::fs::read(&canonical).await?;
+    let bytes = match thinclaw_platform::read_regular_file_bounded_single_link_async(
+        canonical.clone(),
+        max_bytes,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     let filename = output
         .get("filename")
         .and_then(|value| value.as_str())
@@ -141,7 +152,7 @@ async fn media_from_path(
             canonical
                 .file_name()
                 .and_then(|name| name.to_str())
-                .map(str::to_string)
+                .and_then(safe_basename)
         })
         .unwrap_or_else(|| "generated-media".to_string());
     let mime_type = output
@@ -156,13 +167,14 @@ async fn media_from_path(
                 .to_string()
         });
     if !supported_generated_media_mime(&mime_type) {
-        anyhow::bail!("unsupported generated media MIME type: {mime_type}");
+        anyhow::bail!("unsupported generated media MIME type");
     }
 
+    // The attachment bytes are already embedded. Do not put the host's
+    // absolute cache path in `source_url`: several channel adapters render
+    // that field directly into recipient-visible text.
     Ok(Some(
-        MediaContent::new(bytes, mime_type)
-            .with_filename(filename)
-            .with_source_url(canonical.to_string_lossy().to_string()),
+        MediaContent::new(bytes, mime_type).with_filename(filename),
     ))
 }
 

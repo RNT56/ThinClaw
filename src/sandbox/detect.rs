@@ -140,7 +140,7 @@ pub async fn check_docker() -> DockerDetection {
             // Docker Desktop versions that move the socket, OrbStack, Colima with a
             // non-default socket path, etc.
             #[cfg(any(windows, target_os = "macos"))]
-            if docker_cli_daemon_reachable() {
+            if docker_cli_daemon_reachable().await {
                 return DockerStatus::Available;
             }
 
@@ -165,54 +165,24 @@ pub async fn check_docker() -> DockerDetection {
 
 /// Check if the `docker` binary exists on PATH.
 fn docker_binary_exists() -> bool {
-    #[cfg(unix)]
-    {
-        command_status_success_with_timeout("which", &["docker"], std::time::Duration::from_secs(1))
-    }
-    #[cfg(windows)]
-    {
-        command_status_success_with_timeout("where", &["docker"], std::time::Duration::from_secs(1))
-    }
+    thinclaw_platform::find_executable_in_path("docker").is_some()
 }
 
-fn command_status_success_with_timeout(
+#[cfg(any(windows, target_os = "macos"))]
+async fn command_status_success_with_timeout(
     command: &str,
     args: &[&str],
     timeout: std::time::Duration,
 ) -> bool {
-    let mut child = match std::process::Command::new(command)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return false,
-    };
-
-    let started = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) if started.elapsed() < timeout => {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
-            }
-        }
-    }
+    let mut command = tokio::process::Command::new(command);
+    command.args(args);
+    thinclaw_platform::bounded_command_output(&mut command, timeout, 1024, 1024)
+        .await
+        .is_ok_and(|output| output.status.success())
 }
 
 #[cfg(any(windows, target_os = "macos"))]
-fn docker_cli_daemon_reachable() -> bool {
+async fn docker_cli_daemon_reachable() -> bool {
     let docker = crate::util::resolve_binary("docker");
     let timeout = std::time::Duration::from_secs(DOCKER_CLI_PROBE_TIMEOUT_SECS);
 
@@ -221,7 +191,8 @@ fn docker_cli_daemon_reachable() -> bool {
         &docker,
         &["version", "--format", "{{.Server.Version}}"],
         timeout,
-    );
+    )
+    .await;
 
     if version_ok {
         return true;
@@ -233,6 +204,7 @@ fn docker_cli_daemon_reachable() -> bool {
         &["info", "--format", "{{.ServerVersion}}"],
         timeout,
     )
+    .await
 }
 
 #[cfg(test)]
@@ -280,15 +252,16 @@ mod tests {
         }
     }
 
-    #[test]
-    #[cfg(unix)]
-    fn command_status_timeout_kills_hung_probe() {
+    #[tokio::test]
+    #[cfg(any(windows, target_os = "macos"))]
+    async fn command_status_timeout_kills_hung_probe() {
         let started = std::time::Instant::now();
         let ok = command_status_success_with_timeout(
             "sh",
             &["-c", "sleep 5"],
             std::time::Duration::from_millis(100),
-        );
+        )
+        .await;
 
         assert!(!ok);
         assert!(started.elapsed() < std::time::Duration::from_secs(2));

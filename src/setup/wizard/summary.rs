@@ -31,7 +31,7 @@ impl SetupWizard {
         if current_prompt_ui_mode() == PromptRenderMode::Tui {
             print_success("Configuration saved to database");
             print_info(&self.runtime_handoff_summary());
-            self.offer_path_setup();
+            self.offer_path_setup().await;
             return Ok(());
         }
 
@@ -308,7 +308,7 @@ impl SetupWizard {
         // ── PATH check & symlink offer ──────────────────────────
         // If the current binary isn't on PATH, offer to create a symlink so
         // the user can just type `thinclaw` from any terminal.
-        self.offer_path_setup();
+        self.offer_path_setup().await;
 
         println!("Resume Later");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -323,7 +323,7 @@ impl SetupWizard {
 
     /// Check if `thinclaw` is accessible on PATH and offer to create a
     /// symlink if it isn't.
-    pub(super) fn offer_path_setup(&self) {
+    pub(super) async fn offer_path_setup(&self) {
         use std::path::Path;
 
         // Check if `thinclaw` is already findable on PATH
@@ -435,11 +435,32 @@ impl SetupWizard {
             true,
         ) {
             Ok(true) => {
-                let status = std::process::Command::new("sudo")
+                let mut command = tokio::process::Command::new("sudo");
+                command
                     .args(["ln", "-sf"])
-                    .arg(current_exe.display().to_string())
-                    .arg(target.display().to_string())
-                    .status();
+                    .arg(&current_exe)
+                    .arg(&target)
+                    .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit());
+                let status = match thinclaw_platform::OwnedChild::spawn(&mut command) {
+                    Ok(mut child) => match tokio::time::timeout(
+                        std::time::Duration::from_secs(5 * 60),
+                        child.wait(),
+                    )
+                    .await
+                    {
+                        Ok(status) => status,
+                        Err(_) => {
+                            let _ = child.kill().await;
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "sudo symlink command timed out",
+                            ))
+                        }
+                    },
+                    Err(error) => Err(error),
+                };
 
                 match status {
                     Ok(s) if s.success() => {

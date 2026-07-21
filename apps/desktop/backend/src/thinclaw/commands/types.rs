@@ -50,6 +50,7 @@ pub struct ThinClawStatus {
     /// Whether the first-run identity bootstrap ritual has been completed.
     pub bootstrap_completed: bool,
     pub custom_llm_url: Option<String>,
+    pub has_custom_llm_key: bool,
     pub custom_llm_key: Option<String>,
     pub custom_llm_model: Option<String>,
     pub custom_llm_enabled: bool,
@@ -512,8 +513,6 @@ pub struct RoutingRulesResponse {
 #[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct GmailOAuthResult {
     pub success: bool,
-    pub access_token: Option<String>,
-    pub refresh_token: Option<String>,
     pub expires_in: Option<u32>,
     pub scope: Option<String>,
     pub error: Option<String>,
@@ -602,6 +601,7 @@ pub struct GmailStatusResponse {
     pub status: String,
     pub project_id: String,
     pub subscription_id: String,
+    pub topic_id: String,
     pub label_filters: Vec<String>,
     pub allowed_senders: Vec<String>,
     pub missing_fields: Vec<String>,

@@ -1,6 +1,9 @@
 //! Local STT backend — wraps existing whisper-server.
 
-use crate::inference::stt::{SttBackend, SttRequest};
+use crate::inference::stt::{
+    audio_file_metadata, bounded_stt_json, stt_http_client, validate_stt_request,
+    validate_transcript, SttBackend, SttRequest,
+};
 use crate::inference::{BackendInfo, InferenceError, InferenceResult};
 use async_trait::async_trait;
 
@@ -27,7 +30,8 @@ impl SttBackend for LocalSttBackend {
     }
 
     async fn transcribe(&self, request: SttRequest) -> InferenceResult<String> {
-        let client = reqwest::Client::new();
+        validate_stt_request(&request)?;
+        let client = stt_http_client(true)?;
 
         let endpoint = if self.model_family == "mlx-whisper" {
             format!("http://127.0.0.1:{}/v1/audio/transcriptions", self.port)
@@ -35,12 +39,15 @@ impl SttBackend for LocalSttBackend {
             format!("http://127.0.0.1:{}/inference", self.port)
         };
 
+        let (filename, mime_type, _) = audio_file_metadata(request.format);
         let part = reqwest::multipart::Part::bytes(request.audio)
-            .file_name("audio.wav")
-            .mime_str("audio/wav")
+            .file_name(filename)
+            .mime_str(mime_type)
             .map_err(|e| InferenceError::other(e.to_string()))?;
 
-        let form = reqwest::multipart::Form::new().part("file", part);
+        let form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("model", "thinclaw-whisper");
 
         let response = client
             .post(&endpoint)
@@ -52,10 +59,8 @@ impl SttBackend for LocalSttBackend {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
             return Err(InferenceError::provider(format!(
-                "STT server error ({}): {}",
-                status, text
+                "STT server error ({status})"
             )));
         }
 
@@ -64,11 +69,8 @@ impl SttBackend for LocalSttBackend {
             text: String,
         }
 
-        let json: WhisperResponse = response
-            .json()
-            .await
-            .map_err(|e| InferenceError::provider(format!("Parse error: {}", e)))?;
+        let json: WhisperResponse = bounded_stt_json(response).await?;
 
-        Ok(json.text.trim().to_string())
+        validate_transcript(json.text)
     }
 }

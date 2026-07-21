@@ -7,14 +7,15 @@ use thinclaw_agent::heartbeat::{
     HeartbeatLlmPort, HeartbeatOutcomeSummaryPort, HeartbeatRunner as ExtractedHeartbeatRunner,
 };
 
+#[allow(unused_imports)] // compatibility re-export for downstream root-crate callers
 pub use thinclaw_agent::heartbeat::{
     HeartbeatConfig, HeartbeatResult, build_daily_context, is_effectively_empty,
 };
 
 use crate::db::Database;
 use crate::llm::{CompletionRequest, LlmProvider, Reasoning};
-use crate::workspace::Workspace;
 use crate::workspace::hygiene::HygieneConfig;
+use crate::workspace::{AuthorizedWorkspace, Workspace};
 
 /// Heartbeat runner preserving the root crate constructor and builder API.
 pub struct HeartbeatRunner {
@@ -32,6 +33,23 @@ impl HeartbeatRunner {
     ) -> Self {
         let llm = Arc::new(RootHeartbeatLlm::new(llm));
         let inner = ExtractedHeartbeatRunner::new(config, hygiene_config, workspace, llm.clone());
+        Self { inner, llm }
+    }
+
+    /// Create a standalone heartbeat bound to the caller's exact memory scope.
+    pub fn new_authorized(
+        config: HeartbeatConfig,
+        hygiene_config: HygieneConfig,
+        workspace: Arc<AuthorizedWorkspace>,
+        llm: Arc<dyn LlmProvider>,
+    ) -> Self {
+        let llm = Arc::new(RootHeartbeatLlm::new(llm));
+        let inner = ExtractedHeartbeatRunner::new_authorized(
+            config,
+            hygiene_config,
+            workspace,
+            llm.clone(),
+        );
         Self { inner, llm }
     }
 
@@ -85,7 +103,7 @@ impl RootHeartbeatLlm {
         *self
             .cost_tracker
             .lock()
-            .expect("cost tracker mutex poisoned") = Some(tracker);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tracker);
     }
 }
 
@@ -104,7 +122,7 @@ impl HeartbeatLlmPort for RootHeartbeatLlm {
         let tracker = self
             .cost_tracker
             .lock()
-            .expect("cost tracker mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         if let Some(tracker) = tracker {
             reasoning = reasoning.with_cost_tracker(tracker);

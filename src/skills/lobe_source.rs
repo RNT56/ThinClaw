@@ -6,21 +6,18 @@ use super::remote_source::{RemoteSkill, RemoteSkillSource};
 use crate::settings::SkillTapTrustLevel;
 
 const DEFAULT_LOBEHUB_SKILLS_URL: &str = "https://lobehub.com/api/skill-tower/skills";
+const MAX_INDEX_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SKILLS_PER_INDEX: usize = 512;
 
 pub struct LobeHubSkillSource {
     index_url: String,
-    client: reqwest::Client,
 }
 
 impl LobeHubSkillSource {
     pub fn new(index_url: Option<String>) -> anyhow::Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .user_agent(concat!("thinclaw/", env!("CARGO_PKG_VERSION")))
-            .build()?;
         Ok(Self {
             index_url: index_url.unwrap_or_else(|| DEFAULT_LOBEHUB_SKILLS_URL.to_string()),
-            client,
         })
     }
 
@@ -34,6 +31,7 @@ impl LobeHubSkillSource {
 
         entries
             .into_iter()
+            .take(MAX_SKILLS_PER_INDEX)
             .filter_map(|entry| self.skill_from_entry(entry))
             .collect()
     }
@@ -78,14 +76,12 @@ impl RemoteSkillSource for LobeHubSkillSource {
     }
 
     async fn search(&self, query: &str) -> anyhow::Result<Vec<RemoteSkill>> {
-        let value = self
-            .client
-            .get(&self.index_url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Value>()
-            .await?;
+        let response = super::remote_http::get_public_https(
+            &self.index_url,
+            std::time::Duration::from_secs(15),
+        )
+        .await?;
+        let value = crate::http_response::bounded_json::<Value>(response, MAX_INDEX_BYTES).await?;
         let query = query.to_ascii_lowercase();
         Ok(self
             .parse_index(value)
@@ -109,13 +105,10 @@ impl RemoteSkillSource for LobeHubSkillSource {
 
     async fn download_skill(&self, skill: &RemoteSkill) -> anyhow::Result<SkillContent> {
         let raw_content = if let Some(url) = &skill.manifest_url {
-            self.client
-                .get(url)
-                .send()
-                .await?
-                .error_for_status()?
-                .text()
-                .await?
+            let response =
+                super::remote_http::get_public_https(url, std::time::Duration::from_secs(15))
+                    .await?;
+            crate::http_response::bounded_text(response, MAX_MANIFEST_BYTES).await?
         } else {
             synthesized_skill_md(skill)
         };

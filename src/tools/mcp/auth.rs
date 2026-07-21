@@ -15,10 +15,11 @@ use crate::tools::mcp::config::McpServerConfig;
 pub use thinclaw_tools::mcp::auth::{
     AccessToken, AuthError, AuthorizationServerMetadata, ClientRegistrationRequest,
     ClientRegistrationResponse, DEFAULT_OAUTH_CALLBACK_PORT, OAuthDiscoveryBundle,
-    OAuthFlowOptions, PkceChallenge, ProtectedResourceMetadata, bind_callback_listener,
-    build_authorization_url, discover_authorization_server, discover_full_oauth_metadata,
-    discover_oauth_bundle, discover_oauth_endpoints, discover_protected_resource,
-    exchange_code_for_token, get_access_token, is_authenticated, refresh_access_token,
+    OAuthFlowOptions, PkceChallenge, PreparedMcpAuthorization, ProtectedResourceMetadata,
+    bind_callback_listener, build_authorization_url, complete_mcp_authorization,
+    discover_authorization_server, discover_full_oauth_metadata, discover_oauth_bundle,
+    discover_oauth_endpoints, discover_protected_resource, exchange_code_for_token,
+    get_access_token, is_authenticated, prepare_mcp_authorization, refresh_access_token,
     register_client, store_client_id, store_tokens,
 };
 

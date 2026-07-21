@@ -63,6 +63,9 @@ readabilityrs = { version = "0.1.2", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 secrecy = "0.10"
 

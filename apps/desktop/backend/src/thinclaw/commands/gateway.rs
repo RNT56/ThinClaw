@@ -30,32 +30,20 @@ pub async fn thinclaw_get_status(
     let config = state.get_config().await;
 
     let engine_running = ironclaw.is_initialized() || ironclaw.is_remote_mode().await;
-    let remote_mode = ironclaw.is_remote_mode().await
-        || config
-            .as_ref()
-            .map(|c| c.gateway_mode == "remote")
-            .unwrap_or(false);
-
     Ok(ThinClawStatus {
         gateway_mode: config
             .as_ref()
             .map(|c| c.gateway_mode.clone())
             .unwrap_or_else(|| "local".to_string()),
         remote_url: config.as_ref().and_then(|c| c.remote_url.clone()),
-        remote_token: if remote_mode {
-            None
-        } else {
-            config.as_ref().and_then(|c| c.remote_token.clone())
-        },
+        // Credentials are never included in periodic renderer status payloads.
+        remote_token: None,
         port: config.as_ref().map(|c| c.port).unwrap_or(18789),
         device_id: config
             .as_ref()
             .map(|c| c.device_id.clone())
             .unwrap_or_default(),
-        auth_token: config
-            .as_ref()
-            .map(|c| c.auth_token.clone())
-            .unwrap_or_default(),
+        auth_token: String::new(),
         state_dir: config
             .as_ref()
             .map(|c| c.base_dir.to_string_lossy().to_string())
@@ -164,11 +152,12 @@ pub async fn thinclaw_get_status(
             .map(|cfg| cfg.bootstrap_completed)
             .unwrap_or(false),
         custom_llm_url: config.as_ref().and_then(|cfg| cfg.custom_llm_url.clone()),
-        custom_llm_key: if remote_mode {
-            None
-        } else {
-            config.as_ref().and_then(|cfg| cfg.custom_llm_key.clone())
-        },
+        has_custom_llm_key: config.as_ref().is_some_and(|cfg| {
+            cfg.custom_llm_key
+                .as_deref()
+                .is_some_and(|key| !key.is_empty())
+        }),
+        custom_llm_key: None,
         custom_llm_model: config.as_ref().and_then(|cfg| cfg.custom_llm_model.clone()),
         custom_llm_enabled: config
             .as_ref()
@@ -184,7 +173,12 @@ pub async fn thinclaw_get_status(
             .unwrap_or_default(),
         profiles: config
             .as_ref()
-            .map(|cfg| cfg.profiles.clone())
+            .map(|cfg| {
+                cfg.profiles
+                    .iter()
+                    .map(crate::thinclaw::config::AgentProfile::without_token)
+                    .collect()
+            })
             .unwrap_or_default(),
         // Implicit cloud provider status
         has_xai_key: config
@@ -393,13 +387,20 @@ pub async fn thinclaw_start_gateway(
         }
 
         let proxy =
-            crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&remote_url, &remote_token);
+            crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&remote_url, &remote_token)
+                .map_err(|error| format!("Invalid remote gateway configuration: {error}"))?;
 
         // Verify connectivity before activating
-        proxy
+        let authenticated = proxy
             .health_check()
             .await
             .map_err(|e| format!("Cannot connect to remote gateway: {}", e))?;
+        if !authenticated {
+            return Err(
+                "Remote gateway rejected the configured bearer token or failed its health check"
+                    .to_string(),
+            );
+        }
 
         // Start SSE subscription (forwards remote events as Tauri events)
         proxy
@@ -618,8 +619,67 @@ pub async fn thinclaw_test_connection(url: String, token: Option<String>) -> Res
     let clean_url = url.trim_end_matches('/').to_string();
     let token_str = token.as_deref().unwrap_or("");
 
-    let proxy = crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&clean_url, token_str);
+    let proxy = crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&clean_url, token_str)?;
     proxy.health_check().await
+}
+
+/// Copy the local gateway credential without including it in periodic status
+/// payloads or returning it through renderer IPC.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_copy_gateway_token(state: State<'_, ThinClawManager>) -> Result<(), String> {
+    let cfg = if let Some(config) = state.get_config().await {
+        config
+    } else {
+        state.init_config().await?
+    };
+    let token = zeroize::Zeroizing::new(cfg.auth_token.clone());
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Stdio;
+        use std::time::Duration;
+        use thinclaw_tools::execution::OwnedChild;
+        use tokio::io::AsyncWriteExt;
+
+        let mut command = tokio::process::Command::new("/usr/bin/pbcopy");
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = OwnedChild::spawn(&mut command)
+            .map_err(|error| format!("failed to start the system clipboard helper: {error}"))?;
+        let mut stdin = child
+            .take_stdin()
+            .ok_or_else(|| "clipboard helper did not expose stdin".to_string())?;
+        stdin
+            .write_all(token.as_bytes())
+            .await
+            .map_err(|error| format!("failed to write gateway token to clipboard: {error}"))?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|error| format!("failed to close clipboard input: {error}"))?;
+        drop(stdin);
+
+        let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+            Ok(result) => result.map_err(|error| format!("clipboard helper failed: {error}"))?,
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err("clipboard helper timed out".to_string());
+            }
+        };
+        if !status.success() {
+            return Err("system clipboard helper exited unsuccessfully".to_string());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = token;
+        Err("secure native clipboard copy is not available on this platform".to_string())
+    }
 }
 
 /// Switch the active agent to a different profile.
@@ -653,20 +713,24 @@ pub async fn thinclaw_switch_to_profile(
         .cloned()
         .ok_or_else(|| format!("Profile '{}' not found", profile_id))?;
 
-    // Update gateway settings from profile
-    cfg.gateway_mode = profile.mode.clone();
-    cfg.remote_url = if profile.mode == "remote" && !profile.url.is_empty() {
+    let remote_url = if profile.mode == "remote" && !profile.url.is_empty() {
         Some(profile.url.clone())
     } else {
         None
     };
-    // Token: update in config (stored separately from Keychain for profiles)
-    if let Some(token) = &profile.token {
-        cfg.remote_token = Some(token.clone());
-    }
-
-    // Persist updated config
-    cfg.save_identity().map_err(|e| e.to_string())?;
+    let remote_token = if profile.mode == "remote" {
+        Some(
+            profile
+                .token
+                .clone()
+                .filter(|token| !token.is_empty())
+                .ok_or_else(|| "Remote agent profile has no stored bearer token".to_string())?,
+        )
+    } else {
+        None
+    };
+    cfg.update_gateway_settings(profile.mode.clone(), remote_url, remote_token)
+        .map_err(|error| error.to_string())?;
     *state.config.write().await = Some(cfg);
 
     info!(

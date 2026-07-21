@@ -14,6 +14,8 @@ use tokio::task::JoinHandle;
 use crate::skills::registry::SkillRegistry;
 
 const WATCHER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_WATCHED_DIRECTORY_ENTRIES: usize = 10_000;
+const MAX_WATCHED_SKILL_FILES: usize = 1_000;
 
 /// Configuration for the skill watcher.
 #[derive(Debug, Clone)]
@@ -56,7 +58,12 @@ impl SkillWatcher {
 
     /// Override the default watcher configuration.
     pub fn with_config(mut self, config: SkillWatcherConfig) -> Self {
-        self.config = config;
+        self.config = SkillWatcherConfig {
+            poll_interval: config
+                .poll_interval
+                .clamp(Duration::from_millis(100), Duration::from_secs(3_600)),
+            debounce: config.debounce.min(Duration::from_secs(60)),
+        };
         self
     }
 
@@ -175,17 +182,39 @@ async fn scan_skill_files(
     let mut files = HashMap::new();
 
     for dir in dirs {
-        if !tokio::fs::try_exists(dir).await.unwrap_or(false) {
-            continue;
+        match tokio::fs::symlink_metadata(dir).await {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "skill watcher root is not a real directory",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         }
 
         let flat_skill = dir.join("SKILL.md");
-        if tokio::fs::try_exists(&flat_skill).await.unwrap_or(false) {
-            files.insert(flat_skill.clone(), metadata_mtime(&flat_skill).await?);
+        if let Some(modified) = regular_file_mtime_if_present(&flat_skill).await? {
+            files.insert(flat_skill, modified);
+        }
+        if files.len() > MAX_WATCHED_SKILL_FILES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "skill watcher exceeds the file limit",
+            ));
         }
 
         let mut entries = tokio::fs::read_dir(dir).await?;
+        let mut scanned = 0_usize;
         while let Some(entry) = entries.next_entry().await? {
+            scanned = scanned.saturating_add(1);
+            if scanned > MAX_WATCHED_DIRECTORY_ENTRIES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "skill watcher directory exceeds the entry limit",
+                ));
+            }
             let path = entry.path();
             let meta = tokio::fs::symlink_metadata(&path).await?;
             if meta.is_symlink() {
@@ -193,9 +222,15 @@ async fn scan_skill_files(
             }
             if meta.is_dir() {
                 let nested_skill = path.join("SKILL.md");
-                if tokio::fs::try_exists(&nested_skill).await.unwrap_or(false) {
-                    files.insert(nested_skill.clone(), metadata_mtime(&nested_skill).await?);
+                if let Some(modified) = regular_file_mtime_if_present(&nested_skill).await? {
+                    files.insert(nested_skill, modified);
                 }
+            }
+            if files.len() > MAX_WATCHED_SKILL_FILES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "skill watcher exceeds the file limit",
+                ));
             }
         }
     }
@@ -203,9 +238,15 @@ async fn scan_skill_files(
     Ok(files)
 }
 
-async fn metadata_mtime(path: &Path) -> Result<SystemTime, std::io::Error> {
-    let metadata = tokio::fs::metadata(path).await?;
-    metadata.modified()
+async fn regular_file_mtime_if_present(path: &Path) -> Result<Option<SystemTime>, std::io::Error> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            metadata.modified().map(Some)
+        }
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 async fn drain_watcher_task(mut handle: JoinHandle<()>, name: &'static str) {

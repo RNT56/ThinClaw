@@ -128,6 +128,34 @@ pub async fn register_plugin_bundle_from_capabilities_file(
     }
 }
 
+/// Register hooks parsed from the same locked capabilities snapshot as a WASM
+/// tool. This avoids reopening a sidecar that may have been upgraded after the
+/// executable generation was loaded.
+pub async fn register_plugin_bundle_from_hooks_value(
+    registry: &Arc<HookRegistry>,
+    source: &str,
+    hooks: Option<serde_json::Value>,
+) -> HookRegistrationSummary {
+    let Some(hooks) = hooks else {
+        return HookRegistrationSummary::default();
+    };
+    match HookBundleConfig::from_value(&hooks) {
+        Ok(bundle) => register_bundle(registry, source, bundle).await,
+        Err(error) => {
+            tracing::warn!(
+                source = source,
+                error = %error,
+                "Skipping plugin hook bundle"
+            );
+            HookRegistrationSummary {
+                hooks: 0,
+                outbound_webhooks: 0,
+                errors: 1,
+            }
+        }
+    }
+}
+
 async fn collect_plugin_capability_files(
     wasm_tools_dir: &Path,
     wasm_channels_dir: &Path,
@@ -230,12 +258,48 @@ fn insert_unique(
 async fn load_plugin_bundle_from_capabilities_file(
     path: &Path,
 ) -> Result<Option<HookBundleConfig>, String> {
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|e| format!("read failed: {e}"))?;
+    const MAX_PLUGIN_CAPABILITIES_BYTES: usize = 2 * 1024 * 1024;
+    let wasm_path = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".capabilities.json"))
+        .map(|stem| path.with_file_name(format!("{stem}.wasm")));
+    let publication_guard = if let Some(wasm_path) = wasm_path.as_ref() {
+        match tokio::fs::symlink_metadata(wasm_path).await {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                let guard = thinclaw_platform::acquire_artifact_read_lock(wasm_path.clone())
+                    .await
+                    .map_err(|error| format!("package lock failed: {error}"))?;
+                let wasm_name = wasm_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| "WASM package filename is invalid".to_string())?;
+                let marker = wasm_path.with_file_name(format!(".{wasm_name}.installing.json"));
+                match tokio::fs::symlink_metadata(marker).await {
+                    Ok(_) => return Err("package publication is incomplete".to_string()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(format!("publication check failed: {error}")),
+                }
+                Some(guard)
+            }
+            Ok(_) => return Err("adjacent WASM package is not a regular file".to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("WASM package inspection failed: {error}")),
+        }
+    } else {
+        None
+    };
+    let bytes = crate::registry::installer::read_regular_file_bounded(
+        path.to_path_buf(),
+        MAX_PLUGIN_CAPABILITIES_BYTES,
+    )
+    .await
+    .map_err(|error| format!("read failed: {error}"))?
+    .ok_or_else(|| "capabilities file disappeared".to_string())?;
 
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|e| format!("invalid JSON: {e}"))?;
+    drop(publication_guard);
 
     let Some(hooks_value) = extract_hooks_section(&value) else {
         return Ok(None);

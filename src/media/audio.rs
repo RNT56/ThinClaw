@@ -5,6 +5,67 @@
 
 use super::types::{MediaContent, MediaExtractError, MediaExtractor, MediaType};
 
+const MAX_WHISPER_ENDPOINT_BYTES: usize = 4096;
+const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
+const WHISPER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+pub(crate) async fn guarded_whisper_http_client(
+    endpoint: &str,
+) -> Result<(reqwest::Client, reqwest::Url), String> {
+    if endpoint.is_empty() || endpoint.len() > MAX_WHISPER_ENDPOINT_BYTES {
+        return Err("Whisper endpoint is empty or too long".to_string());
+    }
+    let parsed = reqwest::Url::parse(endpoint)
+        .map_err(|error| format!("Invalid Whisper endpoint: {error}"))?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+        || parsed.query().is_some()
+    {
+        return Err(
+            "Whisper endpoint cannot contain credentials, a query, or a fragment".to_string(),
+        );
+    }
+
+    let is_loopback = matches!(parsed.host_str(), Some("127.0.0.1" | "::1"));
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(WHISPER_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        // Proxies would bypass the DNS address selected by the outbound URL
+        // guard and would also receive authenticated transcription traffic.
+        .no_proxy();
+    let url = if is_loopback {
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err("Loopback Whisper endpoint must use HTTP or HTTPS".to_string());
+        }
+        parsed
+    } else {
+        let guarded = thinclaw_tools_core::validate_outbound_url_pinned_async(
+            endpoint,
+            &thinclaw_tools_core::OutboundUrlGuardOptions {
+                require_https: true,
+                upgrade_http_to_https: false,
+                allowlist: Vec::new(),
+            },
+        )
+        .await
+        .map_err(|error| format!("Unsafe Whisper endpoint: {error}"))?;
+        if !guarded.pinned_addrs.is_empty() {
+            let host = guarded
+                .url
+                .host_str()
+                .ok_or_else(|| "Whisper endpoint has no host".to_string())?;
+            builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+        }
+        guarded.url
+    };
+    let client = builder
+        .build()
+        .map_err(|error| format!("Could not build Whisper HTTP client: {error}"))?;
+    Ok((client, url))
+}
+
 /// Default Whisper HTTP endpoint (local).
 const DEFAULT_WHISPER_URL: &str = "http://127.0.0.1:53757/v1/audio/transcriptions";
 
@@ -24,6 +85,8 @@ pub struct AudioExtractor {
     max_audio_size: usize,
     /// Model to request (default: "whisper-1").
     model: String,
+    /// Optional bearer credential for an authenticated Whisper endpoint.
+    token: Option<String>,
 }
 
 impl AudioExtractor {
@@ -35,21 +98,19 @@ impl AudioExtractor {
             .flatten()
             .unwrap_or_else(|| DEFAULT_WHISPER_URL.to_string());
 
-        // Log a warning if the URL is not using HTTPS (defense-in-depth)
-        if !whisper_url.starts_with("https://")
-            && !whisper_url.starts_with("http://127.0.0.1")
-            && !whisper_url.starts_with("http://localhost")
-        {
-            tracing::warn!(
-                url = %whisper_url,
-                "Whisper endpoint is using plaintext HTTP to a non-loopback address; consider HTTPS"
-            );
-        }
+        let model = crate::config::helpers::optional_env("WHISPER_HTTP_MODEL")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "whisper-1".to_string());
+        let token = crate::config::helpers::optional_env("WHISPER_HTTP_TOKEN")
+            .ok()
+            .flatten();
 
         Self {
             whisper_url,
             max_audio_size: 25 * 1024 * 1024,
-            model: "whisper-1".to_string(),
+            model,
+            token,
         }
     }
 
@@ -106,8 +167,15 @@ impl AudioExtractor {
                 max: self.max_audio_size,
             });
         }
+        if self.model.is_empty() || self.model.len() > 256 {
+            return Err(MediaExtractError::ExtractionFailed {
+                reason: "Whisper model identifier is empty or too long".to_string(),
+            });
+        }
 
-        let client = reqwest::Client::new();
+        let (client, endpoint) = guarded_whisper_http_client(&self.whisper_url)
+            .await
+            .map_err(|reason| MediaExtractError::ExtractionFailed { reason })?;
         let filename = content
             .filename
             .clone()
@@ -125,26 +193,26 @@ impl AudioExtractor {
             .text("model", self.model.clone())
             .text("response_format", "text");
 
-        let resp = client
-            .post(&self.whisper_url)
-            .multipart(form)
-            .timeout(std::time::Duration::from_secs(120))
+        let mut request = client.post(endpoint).multipart(form);
+        if let Some(token) = self.token.as_deref() {
+            request = request.bearer_auth(token);
+        }
+
+        let resp = request
             .send()
             .await
             .map_err(|e| MediaExtractError::FetchFailed {
-                reason: format!("Whisper endpoint unreachable: {}", e),
+                reason: format!("Whisper endpoint unreachable: {}", e.without_url()),
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             return Err(MediaExtractError::ExtractionFailed {
-                reason: format!("Whisper returned HTTP {}: {}", status, body),
+                reason: format!("Whisper returned HTTP {status}"),
             });
         }
 
-        let text = resp
-            .text()
+        let text = crate::http_response::bounded_text(resp, MAX_TRANSCRIPT_BYTES)
             .await
             .map_err(|e| MediaExtractError::ExtractionFailed {
                 reason: format!("Failed to read Whisper response: {}", e),

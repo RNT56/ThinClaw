@@ -4,8 +4,9 @@ pub use thinclaw_tools::wasm::oauth::{
     GOOGLE_OAUTH_TOKEN, LEGACY_GMAIL_OAUTH_TOKEN, OAuthPkcePair, OAuthRefreshConfig,
     ResolvedOAuthConfig, WasmOAuthTokenExchange, WasmToolAuthCheck, WasmToolAuthMode,
     WasmToolAuthStatus, WasmToolAuthorizationRequest, WasmToolOAuthError, WasmToolOAuthFlow,
-    build_authorization_url, canonical_secret_name, is_google_secret_name, refresh_secret_name,
-    scopes_secret_name, shared_auth_provider,
+    build_authorization_url, canonical_secret_name, client_id_secret_name,
+    client_secret_secret_name, is_google_secret_name, refresh_secret_name, scopes_secret_name,
+    shared_auth_provider,
 };
 
 use crate::tools::wasm::CapabilitiesFile;

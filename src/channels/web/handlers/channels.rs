@@ -10,6 +10,7 @@ use axum::{
 
 use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
+use thinclaw_gateway::web::settings::validate_setting_entry;
 
 fn config_value_is_valid(
     field: &thinclaw_channels::ConfigField,
@@ -74,6 +75,13 @@ pub(crate) async fn channel_config_submit_handler(
     Json(values): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let values = values.as_object().cloned().ok_or(StatusCode::BAD_REQUEST)?;
+    if channel_id.trim().is_empty()
+        || channel_id.len() > 128
+        || channel_id.chars().any(char::is_control)
+        || values.len() > 256
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let manager = state
         .channel_manager
         .as_ref()
@@ -92,24 +100,32 @@ pub(crate) async fn channel_config_submit_handler(
         if !config_value_is_valid(field, value) {
             return Err(StatusCode::BAD_REQUEST);
         }
+        // Password fields need a declared encrypted-secret binding. The
+        // generic settings fallback has no such binding and must never place
+        // their plaintext in the exportable settings table.
+        if field.field_type == "password" {
+            return Err(StatusCode::FORBIDDEN);
+        }
     }
 
     if let Some(store) = state.store.as_ref() {
+        let mut persisted = std::collections::HashMap::with_capacity(values.len());
         for (field, value) in &values {
             let key = format!("channels.{channel_id}_{field}");
-            store
-                .set_setting(&request_identity.principal_id, &key, value)
-                .await
-                .map_err(|error| {
-                    tracing::error!(
-                        channel = %channel_id,
-                        field,
-                        error = %error,
-                        "Failed to persist channel runtime setting"
-                    );
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
+            validate_setting_entry(&key, value)?;
+            persisted.insert(key, value.clone());
         }
+        store
+            .set_all_settings(&request_identity.principal_id, &persisted)
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    channel = %channel_id,
+                    error = %error,
+                    "Failed to atomically persist channel runtime settings"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
     }
 
     manager

@@ -317,13 +317,18 @@ impl SetupWizard {
             .unwrap_or_else(|| "us-east-1".to_string())
     }
 
-    async fn resolve_bedrock_model_fetch_target(&mut self) -> (String, Option<String>) {
+    async fn resolve_bedrock_model_fetch_target(&mut self) -> (String, Option<String>, bool) {
         if let Some(api_key) = self
             .resolve_provider_secret_value("BEDROCK_API_KEY", "llm_bedrock_api_key")
             .await
         {
-            let base_url = crate::llm::discovery::bedrock_mantle_base_url(&self.bedrock_region());
-            return (base_url, Some(format!("Bearer {api_key}")));
+            match crate::llm::discovery::bedrock_mantle_base_url(&self.bedrock_region()) {
+                Ok(base_url) => return (base_url, Some(format!("Bearer {api_key}")), true),
+                Err(error) => {
+                    tracing::warn!(%error, "Ignoring malformed Bedrock region during model discovery");
+                    return (String::new(), None, true);
+                }
+            }
         }
 
         let base_url = self
@@ -336,7 +341,7 @@ impl SetupWizard {
             .resolve_provider_secret_value("BEDROCK_PROXY_API_KEY", "llm_bedrock_proxy_api_key")
             .await
             .map(|key| format!("Bearer {key}"));
-        (base_url, auth)
+        (base_url, auth, false)
     }
 
     pub(in crate::setup::wizard) async fn fetch_models_for_provider(
@@ -425,6 +430,7 @@ impl SetupWizard {
                         let mut models = fetch_openai_compatible_models(
                             &endpoint.base_url,
                             auth_header.as_deref(),
+                            true,
                             vec![(
                                 endpoint.default_model.to_string(),
                                 endpoint.default_model.to_string(),
@@ -464,15 +470,18 @@ impl SetupWizard {
                 fetch_openai_compatible_models(
                     &base_url,
                     auth_header.as_deref(),
+                    false,
                     vec![("default".to_string(), "default".to_string())],
                 )
                 .await
             }
             "bedrock" => {
-                let (base_url, auth_header) = self.resolve_bedrock_model_fetch_target().await;
+                let (base_url, auth_header, public_only) =
+                    self.resolve_bedrock_model_fetch_target().await;
                 fetch_openai_compatible_models(
                     &base_url,
                     auth_header.as_deref(),
+                    public_only,
                     vec![
                         (
                             "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
@@ -495,6 +504,7 @@ impl SetupWizard {
                 fetch_openai_compatible_models(
                     &base_url,
                     None,
+                    false,
                     vec![("llama-local".to_string(), "llama-local".to_string())],
                 )
                 .await

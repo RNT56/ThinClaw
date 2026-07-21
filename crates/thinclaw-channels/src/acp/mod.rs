@@ -1416,6 +1416,9 @@ pub fn acp_metadata(session_id: &str, principal_id: &str) -> Value {
         "thread_id": session_id,
         "tool_profile": "acp",
         "principal_id": principal_id,
+        "actor_id": principal_id,
+        "conversation_kind": "direct",
+        "principal_admin": true,
         "session_key": mint_session_key("acp", "session", session_id),
     })
 }

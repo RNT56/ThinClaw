@@ -1,7 +1,10 @@
 //! Canvas-panel management dashboard RPC commands.
 
+use std::collections::HashMap;
+
 use tauri::State;
 
+use crate::thinclaw::commands::types::ThinClawRpcResponse;
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 /// List all active canvas panels.
@@ -55,4 +58,41 @@ pub async fn thinclaw_canvas_panel_dismiss(
     let agent = ironclaw.agent().await?;
     let store = agent.canvas_store().ok_or("Canvas store not available")?;
     Ok(store.dismiss(&panel_id).await)
+}
+
+/// Route a button/form action to the exact actor and conversation that
+/// produced the panel. The client supplies only the opaque public panel
+/// handle; identity and thread routing come from the stored ingress envelope.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_canvas_panel_action(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+    panel_id: String,
+    action: String,
+    values: HashMap<String, serde_json::Value>,
+) -> Result<ThinClawRpcResponse, String> {
+    let agent = ironclaw.agent().await?;
+    let store = agent.canvas_store().ok_or("Canvas store not available")?;
+    let panel = store
+        .get(&panel_id)
+        .await
+        .ok_or_else(|| "Canvas panel not found or expired".to_string())?;
+    store
+        .dispatch_action(&panel, action, values)
+        .await
+        .map_err(|error| match error {
+            thinclaw_core::channels::canvas_gateway::CanvasDispatchError::Full => {
+                "Agent ingress queue is full; retry the Canvas action".to_string()
+            }
+            thinclaw_core::channels::canvas_gateway::CanvasDispatchError::Unavailable => {
+                "Agent ingress is unavailable".to_string()
+            }
+            thinclaw_core::channels::canvas_gateway::CanvasDispatchError::Invalid(message) => {
+                format!("Invalid Canvas action: {message}")
+            }
+        })?;
+    Ok(ThinClawRpcResponse {
+        ok: true,
+        message: Some("Canvas action submitted".to_string()),
+    })
 }

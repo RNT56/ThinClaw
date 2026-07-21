@@ -62,6 +62,7 @@ function fileIcon(path: string) {
 const PROTECTED_DB_FILES = new Set([
     'README.md', 'IDENTITY.md', 'SOUL.md', 'USER.md',
     'AGENTS.md', 'MEMORY.md', 'HEARTBEAT.md', 'BOOT.md', 'TOOLS.md',
+    'actor/IDENTITY.md',
 ]);
 
 function DbFilesTab() {
@@ -129,7 +130,7 @@ function DbFilesTab() {
     };
 
     const handleDelete = async () => {
-        if (!activeFile || PROTECTED_DB_FILES.has(activeFile)) return;
+        if (!activeFile || PROTECTED_DB_FILES.has(activeFile) || activeFile.startsWith('shared/')) return;
 
         // Two-click confirmation: first click shows confirm state, second click deletes
         if (!confirmDelete) {
@@ -157,7 +158,8 @@ function DbFilesTab() {
         }
     };
 
-    const canDelete = activeFile != null && !PROTECTED_DB_FILES.has(activeFile);
+    const isSharedKnowledge = activeFile?.startsWith('shared/') ?? false;
+    const canDelete = activeFile != null && !PROTECTED_DB_FILES.has(activeFile) && !isSharedKnowledge;
 
     useEffect(() => { fetchFiles(true); }, []);
 
@@ -294,9 +296,9 @@ function DbFilesTab() {
                                         {confirmDelete ? 'Confirm?' : 'Delete'}
                                     </button>
                                 )}
-                                <button onClick={handleSave} disabled={!hasChanges || isSaving}
+                                <button onClick={handleSave} disabled={!hasChanges || isSaving || isSharedKnowledge}
                                     className={cn("flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-all",
-                                        hasChanges ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90" : "bg-muted/30 text-muted-foreground cursor-not-allowed")}>
+                                        hasChanges && !isSharedKnowledge ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:opacity-90" : "bg-muted/30 text-muted-foreground cursor-not-allowed")}>
                                     {isSaving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                                     {isSaving ? 'Saving...' : 'Commit'}
                                 </button>
@@ -308,7 +310,7 @@ function DbFilesTab() {
                                     <RefreshCw className="w-8 h-8 text-primary animate-spin" />
                                 </div>
                             ) : (
-                                <textarea value={content} onChange={e => setContent(e.target.value)}
+                                <textarea value={content} onChange={e => setContent(e.target.value)} readOnly={isSharedKnowledge}
                                     className="absolute inset-0 w-full h-full p-8 bg-transparent text-sm font-mono text-foreground/70 outline-hidden resize-none leading-relaxed"
                                     placeholder="# Start writing..." spellCheck={false} />
                             )}

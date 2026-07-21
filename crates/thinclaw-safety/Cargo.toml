@@ -17,6 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.11"
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
+thinclaw-tools-core = { version = "0.1.0", path = "../thinclaw-tools-core" }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["sync"] }
 tracing = { workspace = true }

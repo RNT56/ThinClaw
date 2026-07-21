@@ -6,8 +6,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use thinclaw_llm_core::{ChatMessage, CompletionRequest};
-use thinclaw_workspace::Workspace;
 use thinclaw_workspace::hygiene::HygieneConfig;
+use thinclaw_workspace::{AuthorizedWorkspace, Workspace};
 
 /// Configuration for the heartbeat runner.
 #[derive(Debug, Clone)]
@@ -106,9 +106,39 @@ pub trait HeartbeatOutcomeSummaryPort: Send + Sync {
 /// Heartbeat runner for proactive periodic execution.
 pub struct HeartbeatRunner {
     enabled: bool,
-    workspace: Arc<Workspace>,
+    workspace: HeartbeatWorkspace,
     llm: Arc<dyn HeartbeatLlmPort>,
     outcome_summary: Option<Arc<dyn HeartbeatOutcomeSummaryPort>>,
+}
+
+enum HeartbeatWorkspace {
+    Legacy(Arc<Workspace>),
+    Authorized(Arc<AuthorizedWorkspace>),
+}
+
+impl HeartbeatWorkspace {
+    async fn heartbeat_checklist(
+        &self,
+    ) -> Result<Option<String>, thinclaw_types::error::WorkspaceError> {
+        match self {
+            Self::Legacy(workspace) => workspace.heartbeat_checklist().await,
+            Self::Authorized(workspace) => workspace.heartbeat_checklist().await,
+        }
+    }
+
+    async fn daily_context(&self) -> String {
+        match self {
+            Self::Legacy(workspace) => build_daily_context(workspace).await,
+            Self::Authorized(workspace) => build_authorized_daily_context(workspace).await,
+        }
+    }
+
+    async fn system_prompt(&self) -> Result<String, thinclaw_types::error::WorkspaceError> {
+        match self {
+            Self::Legacy(workspace) => workspace.system_prompt().await,
+            Self::Authorized(workspace) => workspace.trusted_system_prompt(false).await,
+        }
+    }
 }
 
 impl HeartbeatRunner {
@@ -142,7 +172,24 @@ impl HeartbeatRunner {
     ) -> Self {
         Self {
             enabled: config.enabled,
-            workspace,
+            workspace: HeartbeatWorkspace::Legacy(workspace),
+            llm,
+            outcome_summary: None,
+        }
+    }
+
+    /// Create a heartbeat runner bound to an exact actor/conversation
+    /// authorization scope. User-facing and scheduled surfaces should prefer
+    /// this constructor so checklists and daily logs cannot cross namespaces.
+    pub fn new_authorized(
+        config: HeartbeatConfig,
+        _hygiene_config: HygieneConfig,
+        workspace: Arc<AuthorizedWorkspace>,
+        llm: Arc<dyn HeartbeatLlmPort>,
+    ) -> Self {
+        Self {
+            enabled: config.enabled,
+            workspace: HeartbeatWorkspace::Authorized(workspace),
             llm,
             outcome_summary: None,
         }
@@ -169,37 +216,22 @@ impl HeartbeatRunner {
             Err(e) => return HeartbeatResult::Failed(format!("Failed to read checklist: {}", e)),
         };
 
-        let daily_context = build_daily_context(&self.workspace).await;
-        let logs_note = if daily_context.is_empty() {
-            "\n\nNote: No daily logs exist yet (no conversations recorded). \
-             Any checklist items that reference daily logs are automatically satisfied. \
-             If all items depend on daily logs, return status `no_action`."
+        let daily_context = self.workspace.daily_context().await;
+        let no_daily_logs = daily_context.is_empty();
+        let logs_instruction = if no_daily_logs {
+            " No daily logs exist yet. Treat checklist items that require daily-log evidence as satisfied; if every item depends on those logs, return `no_action`."
         } else {
             ""
         };
         let outcome_summary = match &self.outcome_summary {
-            Some(summary) => match summary.heartbeat_review_summary().await {
-                Ok(Some(summary)) => format!("\n\n## {}\n", summary),
-                _ => String::new(),
-            },
+            Some(summary) => summary
+                .heartbeat_review_summary()
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
             None => String::new(),
         };
-
-        let prompt = format!(
-            "Read the HEARTBEAT.md checklist below and follow it strictly. \
-             Do not infer or repeat old tasks. Check each item and report findings.\n\
-             \n\
-             Return exactly one JSON object with this shape:\n\
-             {{\"status\":\"no_action|attention\",\"summary\":null,\"actions\":[]}}\n\
-             Use `no_action` only when nothing needs attention. For `attention`, provide a \
-             short, specific summary and zero or more concrete actions. Do not add prose \
-             outside the JSON and do not echo these instructions.\n\
-             \n\
-             ## HEARTBEAT.md\n\
-             \n\
-             {}{}{}{}",
-            checklist, daily_context, outcome_summary, logs_note
-        );
 
         let system_prompt = match self.workspace.system_prompt().await {
             Ok(p) => p,
@@ -209,28 +241,80 @@ impl HeartbeatRunner {
             }
         };
 
-        let messages = if system_prompt.is_empty() {
-            vec![ChatMessage::user(&prompt)]
-        } else {
-            vec![
-                ChatMessage::system(&system_prompt),
-                ChatMessage::user(&prompt),
-            ]
-        };
-
-        let max_tokens = match self.llm.context_length().await {
-            Ok(context_length) => {
-                let from_api = context_length.map(|ctx| ctx / 4).unwrap_or(2048);
-                from_api.clamp(512, 2048)
-            }
+        let context_length = match self.llm.context_length().await {
+            Ok(context_length) => context_length.filter(|length| *length > 0),
             Err(e) => {
                 tracing::warn!(
-                    "Could not fetch model metadata, using default max_tokens: {}",
+                    "Could not fetch model metadata, using default context limit: {}",
                     e
                 );
-                2048
+                None
             }
         };
+        let max_tokens = match context_length {
+            Some(context_length) => {
+                let from_api = context_length / 4;
+                from_api.clamp(512, 2048)
+            }
+            None => 2048,
+        };
+
+        // Keep authority explicit. The workspace identity and user-authored
+        // checklist are trusted configuration; daily logs and outcome text are
+        // evidence and must never be able to rewrite policy or permissions.
+        let mut fixed_messages = Vec::new();
+        if !system_prompt.is_empty() {
+            fixed_messages.push(ChatMessage::trusted_prompt(
+                "heartbeat_workspace",
+                system_prompt,
+            ));
+        }
+        fixed_messages.push(ChatMessage::immutable_policy(
+            "heartbeat_policy",
+            "Check the configured heartbeat tasks using only supported evidence. Do not infer or repeat old tasks. Return exactly one JSON object with this shape: {\"status\":\"no_action|attention\",\"summary\":null,\"actions\":[]}. Use `no_action` only when nothing needs attention. For `attention`, provide a short, specific summary and zero or more concrete actions. Do not add prose outside the JSON and do not echo these instructions.",
+        ));
+        fixed_messages.push(ChatMessage::trusted_prompt(
+            "heartbeat_checklist",
+            format!("Configured HEARTBEAT.md checklist:\n\n{checklist}"),
+        ));
+        fixed_messages.push(ChatMessage::user(format!(
+            "Run the configured heartbeat check now.{logs_instruction}"
+        )));
+
+        let evidence = serde_json::json!({
+            "daily_logs": daily_context,
+            "outcome_review": outcome_summary,
+            "daily_logs_available": !no_daily_logs,
+        });
+        let evidence = serde_json::to_string_pretty(&evidence).unwrap_or_default();
+        let monitor =
+            crate::context_monitor::ContextMonitor::new().with_limit(context_length.map_or_else(
+                || crate::context_monitor::ContextMonitor::new().limit(),
+                |length| length as usize,
+            ));
+        let Some(bounded_evidence) = crate::context_monitor::bound_recent_untrusted_context(
+            &monitor,
+            &fixed_messages,
+            "heartbeat_evidence",
+            "workspace_and_outcomes",
+            &evidence,
+            max_tokens as usize,
+            crate::context_monitor::AUXILIARY_CONTEXT_SAFETY_MARGIN_PERCENT,
+        ) else {
+            return HeartbeatResult::Failed(format!(
+                "Heartbeat policy/checklist exceeds the active model context window ({} tokens).",
+                monitor.limit()
+            ));
+        };
+        if bounded_evidence.was_truncated {
+            tracing::warn!(
+                context_limit = monitor.limit(),
+                retained_chars = bounded_evidence.retained_chars,
+                "Heartbeat evidence was truncated to the active model window"
+            );
+        }
+        let mut messages = fixed_messages;
+        messages.push(bounded_evidence.message);
 
         let request = CompletionRequest::new(messages)
             .with_max_tokens(max_tokens)
@@ -368,6 +452,36 @@ pub async fn build_daily_context(workspace: &Workspace) -> String {
     daily_context
 }
 
+async fn build_authorized_daily_context(workspace: &AuthorizedWorkspace) -> String {
+    let mut daily_context = String::new();
+    let today = workspace.local_today().await;
+
+    if let Ok(doc) = workspace.daily_log(today).await
+        && !doc.content.trim().is_empty()
+    {
+        let capped = cap_daily_log(&doc.content, 3000);
+        daily_context.push_str(&format!(
+            "\n\n## Daily Log - {} (today)\n\n{}",
+            today.format("%Y-%m-%d"),
+            capped
+        ));
+    }
+
+    if let Some(yesterday) = today.pred_opt()
+        && let Ok(doc) = workspace.daily_log(yesterday).await
+        && !doc.content.trim().is_empty()
+    {
+        let capped = cap_daily_log(&doc.content, 2000);
+        daily_context.push_str(&format!(
+            "\n\n## Daily Log - {} (yesterday)\n\n{}",
+            yesterday.format("%Y-%m-%d"),
+            capped
+        ));
+    }
+
+    daily_context
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +522,17 @@ mod tests {
         }
 
         async fn update_document(&self, _id: Uuid, _content: &str) -> Result<(), WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn append_document_by_path(
+            &self,
+            _user_id: &str,
+            _agent_id: Option<Uuid>,
+            _path: &str,
+            _separator: &str,
+            _content: &str,
+        ) -> Result<MemoryDocument, WorkspaceError> {
             unreachable!("disabled heartbeat must not touch the workspace store")
         }
 
@@ -456,6 +581,15 @@ mod tests {
             _content: &str,
             _embedding: Option<&[f32]>,
         ) -> Result<Uuid, WorkspaceError> {
+            unreachable!("disabled heartbeat must not touch the workspace store")
+        }
+
+        async fn replace_chunks_if_current(
+            &self,
+            _document_id: Uuid,
+            _expected_content: &str,
+            _chunks: &[(i32, String, Option<Vec<f32>>)],
+        ) -> Result<bool, WorkspaceError> {
             unreachable!("disabled heartbeat must not touch the workspace store")
         }
 

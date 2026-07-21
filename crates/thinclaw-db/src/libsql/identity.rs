@@ -483,7 +483,7 @@ impl IdentityRegistryStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                &format!("SELECT {ACTOR_COLUMNS_SELECT} FROM actor_endpoints e JOIN actors a ON a.actor_id = e.actor_id WHERE e.channel = ?1 AND e.external_user_id = ?2"),
+                &format!("SELECT {ACTOR_COLUMNS_SELECT} FROM actor_endpoints e JOIN actors a ON a.actor_id = e.actor_id WHERE e.channel = ?1 AND e.external_user_id = ?2 AND e.approval_status = 'approved' AND a.status = 'active'"),
                 params![channel, external_user_id],
             )
             .await
@@ -579,6 +579,59 @@ mod tests {
         assert!(
             backend
                 .get_actor_endpoint("telegram", "1234")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_resolution_requires_approved_endpoint_and_active_actor() {
+        let (backend, _dir) = test_backend().await;
+        let actor = backend
+            .create_actor(&NewActorRecord {
+                principal_id: "default".into(),
+                display_name: "Casey".into(),
+                status: ActorStatus::Active,
+                preferred_delivery_endpoint: None,
+                last_active_direct_endpoint: None,
+            })
+            .await
+            .unwrap();
+
+        backend
+            .upsert_actor_endpoint(&NewActorEndpointRecord {
+                endpoint: ActorEndpointRef::new("signal", "pending-user"),
+                actor_id: actor.actor_id,
+                metadata: serde_json::json!({}),
+                approval_status: EndpointApprovalStatus::Pending,
+            })
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .resolve_actor_for_endpoint("signal", "pending-user")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        backend
+            .upsert_actor_endpoint(&NewActorEndpointRecord {
+                endpoint: ActorEndpointRef::new("signal", "approved-user"),
+                actor_id: actor.actor_id,
+                metadata: serde_json::json!({}),
+                approval_status: EndpointApprovalStatus::Approved,
+            })
+            .await
+            .unwrap();
+        backend
+            .set_actor_status(actor.actor_id, ActorStatus::Inactive)
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .resolve_actor_for_endpoint("signal", "approved-user")
                 .await
                 .unwrap()
                 .is_none()

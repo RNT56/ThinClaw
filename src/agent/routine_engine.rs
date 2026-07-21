@@ -14,24 +14,26 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Timelike, Utc};
+use futures::{FutureExt, future::join_all};
 use regex::Regex;
 use thinclaw_agent::loop_control::{LoopKind, LoopStopReason};
 use thinclaw_agent::routine_engine::{
     ClaimedScheduledTriggerDecisionInput, EVENT_CONTENT_PREVIEW_LIMIT, FullJobRuntimeMetadata,
     HeartbeatTarget, RoutineEventEvaluationPlan, RoutineEventFilterOutcome, ScheduledTriggerAction,
-    active_hour_allows, build_heartbeat_prompt, build_lightweight_routine_prompt,
-    build_routine_event_from_message, build_routine_notification, build_scheduled_routine_triggers,
+    active_hour_allows, build_heartbeat_prompt, build_routine_event_from_message,
+    build_routine_notification, build_scheduled_routine_triggers,
     classify_lightweight_routine_response, compare_event_cache_routines,
     decide_claimed_scheduled_trigger, decide_missing_scheduled_trigger_routine,
     decide_routine_event_dispatch, effective_lightweight_max_tokens,
     evaluate_routine_event_filters, fair_interleave_routine_events, full_job_metadata,
-    heartbeat_job_metadata, increment_decision_count, lightweight_routine_messages,
-    render_trigger_payload_block, routine_cooldown_allows, routine_event_attempts_exhausted,
-    routine_event_evaluation_details, routine_event_fairness_key, routine_event_owner_matches,
-    routine_queue_retry_delay, routine_requests_desktop_capabilities,
-    routine_runtime_update_for_run, sanitize_routine_name, scheduled_run_trigger_key,
-    should_continue_queue_drain, should_jitter_trigger_type, should_refresh_event_cache,
-    summarize_runtime_capabilities, truncate,
+    heartbeat_critique_setting_key, heartbeat_job_metadata, increment_decision_count,
+    lightweight_routine_evidence, lightweight_routine_fixed_messages, render_trigger_payload_block,
+    routine_cooldown_allows, routine_event_attempts_exhausted, routine_event_evaluation_details,
+    routine_event_fairness_key, routine_event_owner_matches, routine_failure_backoff,
+    routine_queue_retry_delay, routine_requests_desktop_capabilities, routine_should_auto_disable,
+    sanitize_routine_name, scheduled_run_trigger_key, should_continue_queue_drain,
+    should_jitter_trigger_type, should_refresh_event_cache, summarize_runtime_capabilities,
+    truncate,
 };
 use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
@@ -43,6 +45,7 @@ use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineEvent, RoutineEventDecision,
     RoutineEventEvaluation, RoutineRun, RoutineTrigger, RoutineTriggerDecision, RoutineTriggerKind,
     RunStatus, Trigger, compile_event_trigger_pattern, next_fire_for_routine,
+    routine_timezone_setting,
 };
 use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
 use crate::agent::{AgentRunArtifact, AgentRunStatus};
@@ -50,16 +53,30 @@ use crate::api::experiments as experiments_api;
 use crate::channels::web::types::SseEvent;
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
-use crate::db::Database;
+use crate::db::{Database, RoutineRunAdmission, RoutineRunCompletion};
 use crate::error::{DatabaseError, RoutineError};
 use crate::llm::{CompletionRequest, LlmProvider};
 use crate::observability::{LoopMetricGuard, NoopObserver, Observer};
 use crate::tools::ToolProfile;
 use crate::tools::execution_backend::routine_engine_runtime_descriptor;
-use crate::workspace::Workspace;
+use crate::workspace::{AuthorizedWorkspace, Workspace};
 
 mod execution;
 use execution::execute_routine;
+
+fn routine_identity(routine: &Routine) -> crate::identity::ResolvedIdentity {
+    let actor_id = routine.owner_actor_id().to_string();
+    let stable_external_conversation_key =
+        thinclaw_identity::direct_conversation_key(&routine.user_id, &actor_id);
+    crate::identity::ResolvedIdentity {
+        principal_id: routine.user_id.clone(),
+        actor_id: actor_id.clone(),
+        conversation_scope_id: thinclaw_identity::direct_scope_id(&routine.user_id, &actor_id),
+        conversation_kind: crate::identity::ConversationKind::Direct,
+        raw_sender_id: actor_id,
+        stable_external_conversation_key,
+    }
+}
 
 /// The routine execution engine.
 pub struct RoutineEngine {
@@ -92,6 +109,14 @@ pub struct RoutineEngine {
     /// Uses `std::sync::Mutex` intentionally: `JoinSet::spawn()` is synchronous
     /// and we must never hold an `async` lock across a non-async call (Bug 14 fix).
     active_tasks: Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
+    /// Admission gate serialized with `active_tasks` registration. Closing it
+    /// during shutdown prevents an in-flight fire from spawning into a fresh
+    /// task set after the shutdown drain has already taken the old one.
+    task_admission_open: std::sync::Mutex<bool>,
+    /// Durable run/routine IDs for inline routine tasks. A drop guard removes
+    /// entries on every normal, panic, or abort path; shutdown snapshots any
+    /// entries that remain immediately before a forced abort.
+    active_task_runs: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, Uuid>>>,
     /// User timezone (IANA) for active-hours checks. Populated from Settings.
     user_timezone: Option<String>,
     /// Stable worker id used when claiming persisted event inbox items.
@@ -127,6 +152,23 @@ fn next_trigger_retry_attempt(diagnostics: &serde_json::Value, field: &str) -> u
 /// chance to renew it. Generous enough to cover engine scheduling jitter
 /// and job-dispatch latency without masking a genuinely dead run for long.
 const INITIAL_ROUTINE_RUN_LEASE_SECS: i64 = 300;
+const ROUTINE_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+const ROUTINE_DB_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+struct ActiveRoutineTaskRegistration {
+    run_id: Uuid,
+    active_runs: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, Uuid>>>,
+}
+
+impl Drop for ActiveRoutineTaskRegistration {
+    fn drop(&mut self) {
+        let mut active_runs = self
+            .active_runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active_runs.remove(&self.run_id);
+    }
+}
 
 #[derive(Clone)]
 struct CachedEventRoutine {
@@ -143,6 +185,43 @@ fn routine_event_batch_source_count(events: &[RoutineEvent]) -> usize {
 }
 
 impl RoutineEngine {
+    async fn effective_timezone_for_routine(&self, routine: &Routine) -> Option<String> {
+        if let Some(timezone) = routine
+            .state
+            .get("user_timezone")
+            .and_then(|value| value.as_str())
+        {
+            return Some(timezone.to_string());
+        }
+
+        let workspace = self
+            .workspace
+            .scoped_clone(routine.user_id.clone(), self.workspace.agent_id());
+        if let Some(timezone) = workspace
+            .extract_user_timezone_from_path(&crate::workspace::paths::actor_user(
+                routine.owner_actor_id(),
+            ))
+            .await
+        {
+            return Some(timezone);
+        }
+        if let Some(timezone) = workspace.extract_user_timezone().await {
+            return Some(timezone);
+        }
+        if routine.user_id == self.workspace.user_id()
+            && let Some(timezone) = self.user_timezone.as_ref()
+        {
+            return Some(timezone.clone());
+        }
+        Some(
+            workspace
+                .effective_timezone_for_identity(&routine_identity(routine))
+                .await
+                .name()
+                .to_string(),
+        )
+    }
+
     pub fn new(
         config: RoutineConfig,
         store: Arc<dyn Database>,
@@ -166,6 +245,8 @@ impl RoutineEngine {
             system_event_tx: None,
             subagent_executor: None,
             active_tasks: Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
+            task_admission_open: std::sync::Mutex::new(true),
+            active_task_runs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             user_timezone: None,
             worker_id: Uuid::new_v4().to_string(),
             observer: Arc::new(NoopObserver),
@@ -352,11 +433,6 @@ impl RoutineEngine {
                 name: routine.name.clone(),
             });
         }
-        if !self.check_concurrent(&routine).await {
-            return Err(RoutineError::MaxConcurrent {
-                name: routine.name.clone(),
-            });
-        }
         self.spawn_fire(routine, "port", None, Some(trigger_key))
             .await
     }
@@ -427,12 +503,6 @@ impl RoutineEngine {
             });
         }
 
-        if !self.check_concurrent(&routine).await {
-            return Err(RoutineError::MaxConcurrent {
-                name: routine.name.clone(),
-            });
-        }
-
         let trigger_type = if payload.is_some() {
             "webhook"
         } else {
@@ -463,9 +533,10 @@ impl RoutineEngine {
         routine: &Routine,
         now: chrono::DateTime<Utc>,
     ) -> Result<(), RoutineError> {
+        let user_timezone = self.effective_timezone_for_routine(routine).await;
         for trigger in build_scheduled_routine_triggers(
             routine,
-            self.user_timezone.as_deref(),
+            user_timezone.as_deref(),
             now,
             TRIGGER_QUEUE_BATCH_LIMIT as usize,
         )? {
@@ -624,16 +695,11 @@ impl RoutineEngine {
         {
             true
         } else {
-            let global_running =
-                self.store
-                    .count_all_running_routine_runs()
-                    .await
-                    .map_err(|error| RoutineError::Database {
-                        reason: error.to_string(),
-                    })?;
+            let global_running = self.count_global_running().await?;
             global_running < self.config.max_concurrent_routines as i64
         };
 
+        let user_timezone = self.effective_timezone_for_routine(&routine).await;
         let plan = decide_claimed_scheduled_trigger(ClaimedScheduledTriggerDecisionInput {
             routine: &routine,
             trigger: &trigger,
@@ -641,7 +707,7 @@ impl RoutineEngine {
             cooldown_allowed,
             routine_capacity_available,
             global_capacity_available,
-            user_timezone: self.user_timezone.as_deref(),
+            user_timezone: user_timezone.as_deref(),
             now: Utc::now(),
         })?;
 
@@ -814,15 +880,22 @@ impl RoutineEngine {
                 reason: "system event queue is not available".to_string(),
             })?;
 
+        let identity = routine_identity(routine);
+        let user_timezone = self.effective_timezone_for_routine(routine).await;
         let event_message = IncomingMessage::new("heartbeat", "system", message.clone())
             .with_metadata(serde_json::json!({
                 "source": "system_event",
+                "conversation_kind": "direct",
+                "conversation_scope_id": identity.conversation_scope_id.to_string(),
+                "stable_external_conversation_key": identity.stable_external_conversation_key.clone(),
+                "user_timezone": user_timezone.clone(),
                 "routine_id": routine.id.to_string(),
                 "routine_name": routine.name,
                 "trigger_id": trigger.id.to_string(),
                 "trigger_key": trigger_key,
                 "scheduled_due_at": trigger.due_at.to_rfc3339(),
-            }));
+            }))
+            .with_identity(identity);
         tx.send(event_message)
             .await
             .map_err(|error| RoutineError::ExecutionFailed {
@@ -830,20 +903,13 @@ impl RoutineEngine {
             })?;
 
         let now = Utc::now();
-        let next_fire = next_fire_for_routine(routine, self.user_timezone.as_deref(), now)?;
-        persist_routine_runtime_update(
-            &self.store,
-            routine.id,
-            now,
-            next_fire,
-            routine.run_count + 1,
-            0,
-            &routine.state,
-        )
-        .await
-        .map_err(|error| RoutineError::Database {
-            reason: error.to_string(),
-        })?;
+        let next_fire = next_fire_for_routine(routine, user_timezone.as_deref(), now)?;
+        self.store
+            .advance_routine_runtime(routine.id, now, next_fire)
+            .await
+            .map_err(|error| RoutineError::Database {
+                reason: error.to_string(),
+            })?;
 
         Ok(())
     }
@@ -853,10 +919,8 @@ impl RoutineEngine {
         routine: &Routine,
         next_fire_at: Option<chrono::DateTime<Utc>>,
     ) -> Result<(), RoutineError> {
-        let mut updated = routine.clone();
-        updated.next_fire_at = next_fire_at;
         self.store
-            .update_routine(&updated)
+            .set_routine_next_fire_at(routine.id, next_fire_at)
             .await
             .map_err(|error| RoutineError::Database {
                 reason: error.to_string(),
@@ -1043,13 +1107,7 @@ impl RoutineEngine {
 
         let cache = self.event_cache.read().await.clone();
         let total_event_routines = cache.len() as u32;
-        let global_running =
-            self.store
-                .count_all_running_routine_runs()
-                .await
-                .map_err(|error| RoutineError::Database {
-                    reason: error.to_string(),
-                })?;
+        let global_running = self.count_global_running().await?;
 
         let now = Utc::now();
         let content_preview = truncate(&event.content, EVENT_CONTENT_PREVIEW_LIMIT);
@@ -1307,46 +1365,13 @@ impl RoutineEngine {
         trigger_detail: Option<String>,
         trigger_key: Option<String>,
     ) -> Result<Uuid, RoutineError> {
-        let run = RoutineRun {
-            id: Uuid::new_v4(),
-            routine_id: routine.id,
-            trigger_type: trigger_type.to_string(),
-            trigger_detail,
-            trigger_key,
-            started_at: Utc::now(),
-            completed_at: None,
-            status: RunStatus::Running,
-            result_summary: None,
-            tokens_used: None,
-            job_id: None,
-            created_at: Utc::now(),
-        };
-
-        self.store
-            .create_routine_run(&run)
-            .await
-            .map_err(|error| RoutineError::Database {
-                reason: format!("failed to create run record: {error}"),
-            })?;
-
-        // Set an initial lease immediately at spawn so the run is protected
-        // from the zombie reaper from the moment it's created — lightweight
-        // and immediate runs may otherwise sit with no lease for a moment
-        // before the worker/subagent takes over and starts renewing it.
-        // `INITIAL_ROUTINE_RUN_LEASE_SECS` only needs to cover the window
-        // until the first renewal; workers/subagents extend it from there.
-        if let Err(error) = self
-            .store
-            .renew_routine_run_lease(run.id, INITIAL_ROUTINE_RUN_LEASE_SECS)
-            .await
-        {
-            tracing::warn!(
-                routine = %routine.name,
-                run_id = %run.id,
-                "Failed to set initial routine run lease: {}", error
-            );
-        }
-
+        // Resolve all fallible runtime inputs before the durable admission.
+        // Once the transaction commits there is deliberately no await point
+        // before task registration, minimizing the cancellation window that
+        // would otherwise leave a leased but unowned Running row.
+        let user_timezone = self.effective_timezone_for_routine(&routine).await;
+        let started_at = Utc::now();
+        let next_fire_at = next_fire_for_routine(&routine, user_timezone.as_deref(), started_at)?;
         let engine = EngineContext {
             store: self.store.clone(),
             llm: self.llm.clone(),
@@ -1356,9 +1381,48 @@ impl RoutineEngine {
             sse_tx: self.sse_tx.clone(),
             system_event_tx: self.system_event_tx.clone(),
             subagent_executor: self.subagent_executor.clone(),
-            user_timezone: self.user_timezone.clone(),
+            user_timezone,
             desktop_autonomy_manager: self.desktop_autonomy_manager.clone(),
         };
+
+        let run = RoutineRun {
+            id: Uuid::new_v4(),
+            routine_id: routine.id,
+            trigger_type: trigger_type.to_string(),
+            trigger_detail,
+            trigger_key,
+            started_at,
+            completed_at: None,
+            status: RunStatus::Running,
+            result_summary: None,
+            tokens_used: None,
+            job_id: None,
+            created_at: started_at,
+        };
+        let initial_lease_expires_at =
+            started_at + ChronoDuration::seconds(INITIAL_ROUTINE_RUN_LEASE_SECS);
+        let global_limit = i64::try_from(self.config.max_concurrent_routines).unwrap_or(i64::MAX);
+        match self
+            .store
+            .try_admit_routine_run(
+                &run,
+                i64::from(routine.guardrails.max_concurrent),
+                global_limit,
+                initial_lease_expires_at,
+                next_fire_at,
+            )
+            .await
+            .map_err(|error| RoutineError::Database {
+                reason: format!("failed to admit routine run: {error}"),
+            })? {
+            RoutineRunAdmission::Admitted => {}
+            RoutineRunAdmission::Duplicate(existing_run_id) => return Ok(existing_run_id),
+            RoutineRunAdmission::RoutineCapacity | RoutineRunAdmission::GlobalCapacity => {
+                return Err(RoutineError::MaxConcurrent {
+                    name: routine.name.clone(),
+                });
+            }
+        }
 
         let routine_name = routine.name.clone();
         let run_id = run.id;
@@ -1372,25 +1436,105 @@ impl RoutineEngine {
         } else {
             std::time::Duration::ZERO
         };
-        self.spawn_tracked_task(&routine_name, async move {
+        if !self.spawn_tracked_task(&routine_name, run.id, routine.id, async move {
             if !cron_jitter.is_zero() {
                 tokio::time::sleep(cron_jitter).await;
             }
             execute_routine(engine, routine, run_for_task).await;
-        });
+        }) {
+            let reason = "Runtime shutdown closed routine task admission";
+            if let Err(error) = finalize_routine_run_record(
+                &self.store,
+                run.id,
+                RunStatus::Failed,
+                Some(reason),
+                None,
+            )
+            .await
+            {
+                tracing::error!(run_id = %run.id, %error, "Failed to close routine run rejected during shutdown");
+            }
+            return Err(RoutineError::ExecutionFailed {
+                reason: reason.to_string(),
+            });
+        }
 
         Ok(run_id)
     }
 
-    /// IC-018: Abort all running routine tasks. Called on engine shutdown.
+    /// IC-018: Gracefully drain running inline routine tasks, then abort and
+    /// durably fail only rows that are still Running. Called on engine shutdown.
     pub async fn abort_all(&self) {
-        // std::sync::Mutex — lock is sync, no await inside the guard scope.
-        let mut guard = self.active_tasks.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("Recovering poisoned routine task registry during shutdown");
-            poisoned.into_inner()
-        });
-        guard.abort_all();
-        tracing::info!("Aborted all running routine tasks");
+        let mut tasks = {
+            // Lock order is admission -> task set, matching spawn_tracked_task.
+            let mut admission = self
+                .task_admission_open
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *admission = false;
+            let mut guard = self.active_tasks.lock().unwrap_or_else(|poisoned| {
+                tracing::warn!("Recovering poisoned routine task registry during shutdown");
+                poisoned.into_inner()
+            });
+            std::mem::take(&mut *guard)
+        };
+
+        let graceful = async {
+            while let Some(result) = tasks.join_next().await {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "Routine task failed during shutdown drain");
+                }
+            }
+        };
+        if tokio::time::timeout(ROUTINE_TASK_SHUTDOWN_GRACE, graceful)
+            .await
+            .is_ok()
+        {
+            tracing::info!("Drained all running routine tasks");
+            return;
+        }
+
+        let interrupted = self
+            .active_task_runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result
+                && !error.is_cancelled()
+            {
+                tracing::warn!(%error, "Routine task failed while aborting during shutdown");
+            }
+        }
+
+        let reason = "Runtime shutdown interrupted routine execution";
+        join_all(interrupted.into_keys().map(|run_id| async move {
+            match tokio::time::timeout(
+                ROUTINE_DB_OPERATION_TIMEOUT,
+                finalize_routine_run_record(
+                    &self.store,
+                    run_id,
+                    RunStatus::Failed,
+                    Some(reason),
+                    None,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::error!(%run_id, %error, "Failed to close interrupted routine run");
+                }
+                Err(_) => tracing::error!(
+                    %run_id,
+                    timeout_secs = ROUTINE_DB_OPERATION_TIMEOUT.as_secs(),
+                    "Timed out closing interrupted routine run"
+                ),
+            }
+        }))
+        .await;
+        tracing::info!("Aborted remaining routine tasks after shutdown grace period");
     }
 
     /// IC-006: Reap zombie routine runs whose lease has expired.
@@ -1410,9 +1554,17 @@ impl RoutineEngine {
             .cleanup_stale_routine_runs(crate::db::DEFAULT_LEGACY_ROUTINE_RUN_TTL_SECS)
             .await
         {
-            Ok(reaped) => {
-                if reaped > 0 {
-                    tracing::info!("IC-006: Reaped {} zombie routine runs", reaped);
+            Ok(result) => {
+                for (routine_id, consecutive_failures) in &result.failure_streaks {
+                    apply_routine_failure_streak_policy(
+                        &self.store,
+                        *routine_id,
+                        *consecutive_failures,
+                    )
+                    .await;
+                }
+                if result.reaped > 0 {
+                    tracing::info!("IC-006: Reaped {} zombie routine runs", result.reaped);
                 }
             }
             Err(e) => {
@@ -1426,22 +1578,68 @@ impl RoutineEngine {
     }
 
     async fn check_concurrent(&self, routine: &Routine) -> bool {
-        match self.store.count_running_routine_runs(routine.id).await {
-            Ok(count) => count < routine.guardrails.max_concurrent as i64,
-            Err(e) => {
+        match tokio::time::timeout(
+            ROUTINE_DB_OPERATION_TIMEOUT,
+            self.store.count_running_routine_runs(routine.id),
+        )
+        .await
+        {
+            Ok(Ok(count)) => count < i64::from(routine.guardrails.max_concurrent),
+            Ok(Err(e)) => {
                 tracing::error!(
                     routine = %routine.name,
                     "Failed to check concurrent runs: {}", e
                 );
                 false
             }
+            Err(_) => {
+                tracing::error!(
+                    routine = %routine.name,
+                    timeout_secs = ROUTINE_DB_OPERATION_TIMEOUT.as_secs(),
+                    "Timed out checking concurrent routine runs"
+                );
+                false
+            }
         }
     }
 
-    fn spawn_tracked_task<F>(&self, routine_name: &str, task: F)
+    async fn count_global_running(&self) -> Result<i64, RoutineError> {
+        match tokio::time::timeout(
+            ROUTINE_DB_OPERATION_TIMEOUT,
+            self.store.count_all_running_routine_runs(),
+        )
+        .await
+        {
+            Ok(Ok(count)) => Ok(count),
+            Ok(Err(error)) => Err(RoutineError::Database {
+                reason: error.to_string(),
+            }),
+            Err(_) => Err(RoutineError::Database {
+                reason: format!(
+                    "timed out counting running routines after {} seconds",
+                    ROUTINE_DB_OPERATION_TIMEOUT.as_secs()
+                ),
+            }),
+        }
+    }
+
+    fn spawn_tracked_task<F>(
+        &self,
+        routine_name: &str,
+        run_id: Uuid,
+        routine_id: Uuid,
+        task: F,
+    ) -> bool
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        let admission = self
+            .task_admission_open
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*admission {
+            return false;
+        }
         let mut guard = self.active_tasks.lock().unwrap_or_else(|poisoned| {
             tracing::warn!(
                 routine = routine_name,
@@ -1469,7 +1667,59 @@ impl RoutineEngine {
                 );
             }
         }
-        guard.spawn(task);
+        self.active_task_runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(run_id, routine_id);
+        let registration = ActiveRoutineTaskRegistration {
+            run_id,
+            active_runs: Arc::clone(&self.active_task_runs),
+        };
+        let store = Arc::clone(&self.store);
+        let routine_name = routine_name.to_string();
+        guard.spawn(async move {
+            let _registration = registration;
+            if let Err(panic) = std::panic::AssertUnwindSafe(task).catch_unwind().await {
+                let panic_message = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                let reason = format!("Routine task panicked: {panic_message}");
+                tracing::error!(
+                    routine = %routine_name,
+                    %run_id,
+                    %panic_message,
+                    "Routine execution task panicked"
+                );
+                match tokio::time::timeout(
+                    ROUTINE_DB_OPERATION_TIMEOUT,
+                    finalize_routine_run_record(
+                        &store,
+                        run_id,
+                        RunStatus::Failed,
+                        Some(&reason),
+                        None,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => tracing::error!(
+                        routine = %routine_name,
+                        %run_id,
+                        %error,
+                        "Failed to close panicked routine run"
+                    ),
+                    Err(_) => tracing::error!(
+                        routine = %routine_name,
+                        %run_id,
+                        "Timed out closing panicked routine run"
+                    ),
+                }
+            }
+        });
+        true
     }
 }
 
@@ -1501,48 +1751,61 @@ impl EngineContext {
     }
 }
 
-pub(crate) async fn persist_routine_runtime_update(
+/// Win a routine run's terminal compare-and-set and apply failure policy
+/// against the exact failure streak produced by that transition.
+///
+/// Returns `Ok(false)` when another finalizer already committed the terminal
+/// result. Callers must then skip duplicate notifications/artifacts.
+pub(crate) async fn finalize_routine_run_record(
+    store: &Arc<dyn Database>,
+    run_id: Uuid,
+    status: RunStatus,
+    result_summary: Option<&str>,
+    tokens_used: Option<i32>,
+) -> Result<bool, DatabaseError> {
+    let completion = store
+        .complete_routine_run(run_id, status, result_summary, tokens_used)
+        .await?;
+    let RoutineRunCompletion::Completed {
+        routine_id,
+        consecutive_failures,
+    } = completion
+    else {
+        return Ok(false);
+    };
+
+    apply_routine_failure_streak_policy(store, routine_id, consecutive_failures).await;
+
+    Ok(true)
+}
+
+pub(crate) async fn apply_routine_failure_streak_policy(
     store: &Arc<dyn Database>,
     routine_id: Uuid,
-    last_run_at: chrono::DateTime<Utc>,
-    next_fire_at: Option<chrono::DateTime<Utc>>,
-    run_count: u64,
     consecutive_failures: u32,
-    state: &serde_json::Value,
-) -> Result<(), DatabaseError> {
-    let mut last_error = None;
-    for attempt in 1..=3 {
-        match store
-            .update_routine_runtime(
-                routine_id,
-                last_run_at,
-                next_fire_at,
-                run_count,
-                consecutive_failures,
-                state,
-            )
-            .await
-        {
-            Ok(()) => {
-                auto_disable_failing_routine(store, routine_id, consecutive_failures).await;
-                return Ok(());
-            }
-            Err(error) => {
-                last_error = Some(error);
-                if attempt < 3 {
-                    tracing::warn!(
-                        routine_id = %routine_id,
-                        attempt,
-                        "Failed to persist routine runtime update; retrying"
-                    );
-                    tokio::time::sleep(Duration::from_millis(100 * attempt as u64)).await;
-                }
-            }
-        }
+) {
+    let Some(backoff) = routine_failure_backoff(consecutive_failures) else {
+        return;
+    };
+    let disable = routine_should_auto_disable(consecutive_failures);
+    let not_before = Utc::now() + backoff;
+    match store
+        .apply_routine_failure_policy(routine_id, consecutive_failures, not_before, disable)
+        .await
+    {
+        Ok(true) if disable => tracing::warn!(
+            %routine_id,
+            consecutive_failures,
+            "Routine auto-disabled after repeated consecutive failures"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::error!(
+            %routine_id,
+            consecutive_failures,
+            %error,
+            "Failed to apply routine failure backoff/disable policy"
+        ),
     }
-
-    Err(last_error
-        .unwrap_or_else(|| DatabaseError::Query("unknown runtime update failure".to_string())))
 }
 
 /// Renew a routine run's reaper lease if enough of the window has elapsed.
@@ -1573,52 +1836,6 @@ pub(crate) async fn renew_routine_run_lease_if_due(
         }
         Err(e) => {
             tracing::debug!(run_id = %run_id, "Failed to renew routine run lease: {}", e);
-        }
-    }
-}
-
-/// Disable a routine that has crossed the consecutive-failure threshold.
-/// Runs after every runtime update so all finalization paths (engine,
-/// worker, subagent) share the same policy; before this, a routine whose
-/// runs failed every time kept firing at full cadence forever.
-async fn auto_disable_failing_routine(
-    store: &Arc<dyn Database>,
-    routine_id: Uuid,
-    consecutive_failures: u32,
-) {
-    if !thinclaw_agent::routine_engine::routine_should_auto_disable(consecutive_failures) {
-        return;
-    }
-    // Reload rather than reusing a caller-held copy: update_routine writes the
-    // full row and a stale copy would clobber the runtime fields just written.
-    match store.get_routine(routine_id).await {
-        Ok(Some(mut routine)) if routine.enabled => {
-            routine.enabled = false;
-            match store.update_routine(&routine).await {
-                Ok(()) => {
-                    tracing::warn!(
-                        routine = %routine.name,
-                        consecutive_failures,
-                        "Routine auto-disabled after repeated consecutive failures; \
-                         re-enable it via routine_update once the cause is fixed"
-                    );
-                }
-                Err(error) => {
-                    tracing::error!(
-                        routine = %routine.name,
-                        "Failed to auto-disable repeatedly failing routine: {}",
-                        error
-                    );
-                }
-            }
-        }
-        Ok(_) => {}
-        Err(error) => {
-            tracing::error!(
-                routine_id = %routine_id,
-                "Failed to load routine for auto-disable check: {}",
-                error
-            );
         }
     }
 }

@@ -26,6 +26,7 @@ pub use tailscale::TailscaleTunnel;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
+use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::sync::Mutex;
 
 /// Lock-free URL storage. Uses `std::sync::RwLock` so `public_url()` (sync)
@@ -65,7 +66,55 @@ pub trait Tunnel: Send + Sync {
 
 /// Wraps a spawned tunnel child process.
 pub(crate) struct TunnelProcess {
-    pub child: tokio::process::Child,
+    pub child: thinclaw_platform::OwnedChild,
+    pub _output_tasks: Vec<TunnelOutputTask>,
+}
+
+pub(crate) struct TunnelOutputTask {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for TunnelOutputTask {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+pub(crate) fn drain_tunnel_output<R>(mut reader: R) -> TunnelOutputTask
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    TunnelOutputTask {
+        handle: tokio::spawn(async move {
+            let mut buffer = [0_u8; 8192];
+            loop {
+                match reader.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }),
+    }
+}
+
+pub(crate) async fn read_tunnel_output_bounded<R>(mut reader: R, limit: usize) -> (Vec<u8>, bool)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::with_capacity(limit.min(8192));
+    let mut buffer = [0_u8; 8192];
+    let mut exceeded = false;
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                let retained = read.min(limit.saturating_sub(bytes.len()));
+                bytes.extend_from_slice(&buffer[..retained]);
+                exceeded |= retained < read;
+            }
+        }
+    }
+    (bytes, exceeded)
 }
 
 pub(crate) type SharedProcess = Arc<Mutex<Option<TunnelProcess>>>;
@@ -79,7 +128,6 @@ pub(crate) async fn kill_shared(proc: &SharedProcess) -> Result<()> {
     let mut guard = proc.lock().await;
     if let Some(ref mut tp) = *guard {
         tp.child.kill().await.ok();
-        tp.child.wait().await.ok();
     }
     *guard = None;
     Ok(())
@@ -118,7 +166,10 @@ pub fn create_tunnel(config: &TunnelProviderConfig) -> Result<Option<Box<dyn Tun
             let cf = config.cloudflare.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("TUNNEL_PROVIDER=cloudflare but no TUNNEL_CF_TOKEN configured")
             })?;
-            Ok(Some(Box::new(CloudflareTunnel::new(cf.token.clone()))))
+            Ok(Some(Box::new(CloudflareTunnel::new(
+                cf.token.clone(),
+                cf.hostname.clone(),
+            ))))
         }
 
         "tailscale" => {
@@ -209,6 +260,7 @@ mod tests {
             provider: "cloudflare".into(),
             cloudflare: Some(CloudflareTunnelConfig {
                 token: "test-token".into(),
+                hostname: "https://agent.example.com".into(),
             }),
             ..Default::default()
         };
@@ -284,16 +336,19 @@ mod tests {
     async fn kill_shared_terminates_child() {
         let proc = new_shared_process();
 
-        let child = Command::new("sleep")
+        let mut command = Command::new("sleep");
+        command
             .arg("30")
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("sleep should spawn");
+            .stderr(std::process::Stdio::null());
+        let child = thinclaw_platform::OwnedChild::spawn(&mut command).expect("sleep should spawn");
 
         {
             let mut guard = proc.lock().await;
-            *guard = Some(TunnelProcess { child });
+            *guard = Some(TunnelProcess {
+                child,
+                _output_tasks: Vec::new(),
+            });
         }
 
         kill_shared(&proc).await.unwrap();

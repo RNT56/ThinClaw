@@ -129,7 +129,7 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
             setEnabledModels(status.enabled_cloud_models || {});
             setCustomLlmConfig({
                 url: status.custom_llm_url || '',
-                key: status.custom_llm_key || '',
+                key: null,
                 model: status.custom_llm_model || '',
                 enabled: status.custom_llm_enabled || false
             });
@@ -510,7 +510,9 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                                             type="password"
                                             value={customLlmConfig.key || ''}
                                             onChange={e => setCustomLlmConfig((p: thinclaw.CustomLlmConfigInput) => ({ ...p, key: e.target.value }))}
-                                            placeholder="sk-..."
+                                            placeholder={status?.has_custom_llm_key
+                                                ? 'Stored securely — leave blank to keep it'
+                                                : 'Optional API key'}
                                             className="w-full bg-muted/50 border border-border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-hidden focus:border-primary/50 transition-colors"
                                         />
                                     </div>

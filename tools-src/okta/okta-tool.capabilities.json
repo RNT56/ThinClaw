@@ -69,23 +69,7 @@
   "auth": {
     "secret_name": "okta_oauth_token",
     "display_name": "Okta",
-    "oauth": {
-      "authorization_url": "https://{okta_domain}/oauth2/v1/authorize",
-      "token_url": "https://{okta_domain}/oauth2/v1/token",
-      "client_id_env": "OKTA_OAUTH_CLIENT_ID",
-      "client_secret_env": "OKTA_OAUTH_CLIENT_SECRET",
-      "scopes": [
-        "openid",
-        "profile",
-        "email",
-        "offline_access",
-        "okta.users.read.self",
-        "okta.users.manage.self",
-        "okta.apps.read"
-      ],
-      "use_pkce": true
-    },
-    "instructions": "1. In your Okta Admin Console, go to Applications > Create App Integration\n2. Select 'OIDC - OpenID Connect', then 'Web Application'\n3. Set Sign-in redirect URI to http://localhost:9876/callback (through :9886)\n4. Under Okta API Scopes, grant: okta.users.read.self, okta.users.manage.self, okta.apps.read\n5. Copy the Client ID and Client Secret\n6. IMPORTANT: You must use the Org Authorization Server (not a custom one)\n7. Store your Okta domain in workspace at 'okta/domain' (e.g., 'mycompany.okta.com')\n8. For custom domains, add them to okta-tool.capabilities.json allowlist",
+    "instructions": "Paste an OAuth access token issued by your Okta organization with the scopes required for the actions you plan to use. Store your Okta domain in workspace at 'okta/domain' (for example, 'mycompany.okta.com'). ThinClaw cannot safely construct a browser OAuth flow until the organization domain is configured, so this integration uses explicit token setup.",
     "setup_url": "https://developer.okta.com/docs/guides/implement-oauth-for-okta/main/",
     "token_hint": "OAuth2 access token (JWT)",
     "env_var": "OKTA_OAUTH_TOKEN"

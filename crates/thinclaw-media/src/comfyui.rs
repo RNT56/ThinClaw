@@ -5,18 +5,26 @@
 //! ComfyUI's HTTP and WebSocket APIs directly.
 
 use std::collections::BTreeSet;
+use std::io::Write as _;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use tokio::io::AsyncWriteExt;
-use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
 const DEFAULT_CLIENT_ID_PREFIX: &str = "thinclaw";
+const MAX_COMFY_URL_BYTES: usize = 4 * 1024;
+const MAX_COMFY_API_KEY_BYTES: usize = 8 * 1024;
+const MAX_COMFY_JSON_BYTES: usize = 16 * 1024 * 1024;
+const MAX_COMFY_WORKFLOW_NODES: usize = 4_096;
+const MAX_COMFY_JSON_VALUES: usize = 100_000;
+const MAX_COMFY_JSON_DEPTH: usize = 128;
+const MAX_COMFY_OUTPUTS: usize = 128;
+const MAX_COMFY_DNS_ADDRESSES: usize = 64;
+const COMFY_DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -33,7 +41,7 @@ impl ComfyUiMode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ComfyUiConfig {
     pub mode: ComfyUiMode,
     pub host: String,
@@ -41,6 +49,38 @@ pub struct ComfyUiConfig {
     pub output_dir: PathBuf,
     pub request_timeout: Duration,
     pub max_output_bytes: u64,
+}
+
+impl std::fmt::Debug for ComfyUiConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ComfyUiConfig")
+            .field("mode", &self.mode)
+            .field("host", &redacted_comfy_endpoint(&self.host))
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("output_dir", &self.output_dir)
+            .field("request_timeout", &self.request_timeout)
+            .field("max_output_bytes", &self.max_output_bytes)
+            .finish()
+    }
+}
+
+fn redacted_comfy_endpoint(raw: &str) -> String {
+    let Ok(url) = Url::parse(raw) else {
+        return "<invalid-url>".to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return "<invalid-url>".to_string();
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
 }
 
 impl Default for ComfyUiConfig {
@@ -176,9 +216,6 @@ pub enum ComfyError {
     #[error("ComfyUI URL error: {0}")]
     Url(#[from] url::ParseError),
 
-    #[error("ComfyUI websocket error: {0}")]
-    WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
-
     #[error("ComfyUI I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -195,25 +232,48 @@ pub enum ComfyError {
     UnsafeOutput(String),
 }
 
-impl From<tokio_tungstenite::tungstenite::Error> for ComfyError {
-    fn from(error: tokio_tungstenite::tungstenite::Error) -> Self {
-        Self::WebSocket(Box::new(error))
-    }
-}
-
 #[derive(Clone)]
 pub struct ComfyUiClient {
     config: ComfyUiConfig,
-    client: reqwest::Client,
 }
 
 impl ComfyUiClient {
     pub fn new(config: ComfyUiConfig) -> Result<Self, ComfyError> {
-        let client = reqwest::Client::builder()
-            .timeout(config.request_timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-        Ok(Self { config, client })
+        if config.host.is_empty()
+            || config.host.len() > MAX_COMFY_URL_BYTES
+            || config.request_timeout.is_zero()
+            || config.request_timeout > Duration::from_secs(24 * 60 * 60)
+            || config.max_output_bytes == 0
+            || config.max_output_bytes > 1024 * 1024 * 1024
+        {
+            return Err(ComfyError::Api(
+                "ComfyUI timeout or output limit is outside the supported bounds".to_string(),
+            ));
+        }
+        let base = Url::parse(&config.host)?;
+        if !matches!(base.scheme(), "http" | "https")
+            || base.host_str().is_none()
+            || !base.username().is_empty()
+            || base.password().is_some()
+            || base.query().is_some()
+            || base.fragment().is_some()
+            || (config.mode.is_cloud() && base.scheme() != "https")
+        {
+            return Err(ComfyError::Api(
+                "ComfyUI host must be an HTTP(S) base URL without credentials, query, or fragment"
+                    .to_string(),
+            ));
+        }
+        if config.api_key.as_ref().is_some_and(|api_key| {
+            api_key.is_empty()
+                || api_key.len() > MAX_COMFY_API_KEY_BYTES
+                || api_key.chars().any(char::is_control)
+        }) {
+            return Err(ComfyError::Api(
+                "ComfyUI API key is empty, oversized, or contains control characters".to_string(),
+            ));
+        }
+        Ok(Self { config })
     }
 
     pub fn config(&self) -> &ComfyUiConfig {
@@ -302,7 +362,8 @@ impl ComfyUiClient {
         request: ComfyGenerateRequest,
     ) -> Result<ComfyGeneration, ComfyError> {
         validate_api_workflow(&request.workflow)?;
-        tokio::fs::create_dir_all(&self.config.output_dir).await?;
+        validate_generate_request(&request)?;
+        let output_dir = ensure_real_output_directory(&self.config.output_dir).await?;
 
         let mut workflow = request.workflow.clone();
         let (default_width, default_height) = request.aspect_ratio.dimensions();
@@ -332,6 +393,7 @@ impl ComfyUiClient {
                 model: request.model.as_deref(),
             },
         )?;
+        validate_api_workflow(&workflow)?;
 
         let client_id = format!("{DEFAULT_CLIENT_ID_PREFIX}-{}", uuid::Uuid::new_v4());
         let prompt_id = self.queue_prompt(&workflow, &client_id).await?;
@@ -348,12 +410,15 @@ impl ComfyUiClient {
             });
         }
 
-        let history = if request.use_websocket {
-            self.wait_for_prompt_ws(&prompt_id, &client_id).await?
-        } else {
-            self.wait_for_prompt_polling(&prompt_id).await?
-        };
-        let outputs = self.download_outputs(&prompt_id, &history).await?;
+        if request.use_websocket {
+            tracing::debug!(
+                "ComfyUI websocket completion requested; using DNS-pinned HTTP polling"
+            );
+        }
+        let history = self.wait_for_prompt_polling(&prompt_id).await?;
+        let outputs = self
+            .download_outputs(&prompt_id, &history, &output_dir)
+            .await?;
 
         Ok(ComfyGeneration {
             prompt_id,
@@ -371,17 +436,21 @@ impl ComfyUiClient {
         workflow: &Value,
         client_id: &str,
     ) -> Result<String, ComfyError> {
+        validate_api_workflow(workflow)?;
+        validate_identifier("client_id", client_id)?;
         let response = self
             .post_json(
                 "/prompt",
                 &json!({ "prompt": workflow, "client_id": client_id }),
             )
             .await?;
-        response
+        let prompt_id = response
             .get("prompt_id")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
-            .ok_or_else(|| ComfyError::Api(format!("missing prompt_id in response: {response}")))
+            .ok_or_else(|| ComfyError::Api("ComfyUI response omitted prompt_id".to_string()))?;
+        validate_identifier("prompt_id", &prompt_id)?;
+        Ok(prompt_id)
     }
 
     pub async fn interrupt(&self) -> Result<(), ComfyError> {
@@ -397,68 +466,67 @@ impl ComfyUiClient {
                 ComfyError::UnsafeOutput(format!("invalid input image path {}", path.display()))
             })?
             .to_string();
-        let bytes = tokio::fs::read(path).await?;
-        let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.clone());
+        if file_name.is_empty()
+            || file_name.len() > 255
+            || file_name.chars().any(char::is_control)
+            || file_name.contains(['/', '\\'])
+        {
+            return Err(ComfyError::UnsafeOutput(
+                "input image filename is malformed".to_string(),
+            ));
+        }
+        let bytes = thinclaw_platform::read_regular_file_bounded_async(
+            path.to_path_buf(),
+            self.config.max_output_bytes,
+        )
+        .await?;
+        let upload_name = format!("thinclaw_{}_{}", uuid::Uuid::new_v4().simple(), file_name);
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(upload_name.clone());
         let form = reqwest::multipart::Form::new()
             .part("image", part)
-            .text("overwrite", "true");
-        let value = self
-            .request(reqwest::Method::POST, "/upload/image")?
+            .text("overwrite", "false");
+        let response = self
+            .request(reqwest::Method::POST, "/upload/image")
+            .await?
             .multipart(form)
             .send()
             .await?
-            .error_for_status()?
-            .json::<Value>()
-            .await?;
-        Ok(value
+            .error_for_status()?;
+        let value: Value = thinclaw_types::http_response::bounded_json(response, 4 * 1024 * 1024)
+            .await
+            .map_err(|error| ComfyError::Api(format!("invalid upload response: {error}")))?;
+        let returned_name = value
             .get("name")
             .and_then(Value::as_str)
-            .unwrap_or(&file_name)
-            .to_string())
+            .unwrap_or(&upload_name);
+        if returned_name.is_empty()
+            || returned_name.len() > 1024
+            || returned_name.chars().any(char::is_control)
+            || returned_name.contains(['/', '\\'])
+        {
+            return Err(ComfyError::UnsafeOutput(
+                "ComfyUI returned an unsafe upload name".to_string(),
+            ));
+        }
+        Ok(returned_name.to_string())
     }
 
     async fn wait_for_prompt_polling(&self, prompt_id: &str) -> Result<Value, ComfyError> {
         let start = Instant::now();
         loop {
-            if start.elapsed() > self.config.request_timeout {
+            let Some(remaining) = self.config.request_timeout.checked_sub(start.elapsed()) else {
                 return Err(ComfyError::Timeout(self.config.request_timeout));
-            }
-            let history = self.history(prompt_id).await?;
+            };
+            let history = tokio::time::timeout(remaining, self.history(prompt_id))
+                .await
+                .map_err(|_| ComfyError::Timeout(self.config.request_timeout))??;
             if history_contains_prompt(&history, prompt_id) {
                 return Ok(history);
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-    }
-
-    async fn wait_for_prompt_ws(
-        &self,
-        prompt_id: &str,
-        client_id: &str,
-    ) -> Result<Value, ComfyError> {
-        let ws_url = self.ws_url(client_id)?;
-        let (mut ws, _) = tokio_tungstenite::connect_async(ws_url.as_str()).await?;
-        let deadline = Instant::now() + self.config.request_timeout;
-
-        loop {
-            if Instant::now() > deadline {
+            let Some(remaining) = self.config.request_timeout.checked_sub(start.elapsed()) else {
                 return Err(ComfyError::Timeout(self.config.request_timeout));
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match tokio::time::timeout(remaining, ws.next()).await {
-                Ok(Some(Ok(Message::Text(text)))) => {
-                    if ws_message_marks_complete(&text, prompt_id) {
-                        let _ = ws.close(None).await;
-                        return self.history(prompt_id).await;
-                    }
-                }
-                Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
-                    return self.history(prompt_id).await;
-                }
-                Ok(Some(Ok(_))) => {}
-                Ok(Some(Err(error))) => return Err(ComfyError::from(error)),
-                Err(_) => return Err(ComfyError::Timeout(self.config.request_timeout)),
-            }
+            };
+            tokio::time::sleep(Duration::from_secs(2).min(remaining)).await;
         }
     }
 
@@ -484,23 +552,26 @@ impl ComfyUiClient {
         &self,
         prompt_id: &str,
         history: &Value,
+        output_dir: &Path,
     ) -> Result<Vec<ComfySavedOutput>, ComfyError> {
-        let output_entries = collect_output_entries(prompt_id, history);
+        let output_entries = collect_output_entries(prompt_id, history)?;
         let mut saved = Vec::new();
+        let mut total_bytes = 0_u64;
 
         for entry in output_entries {
-            let bytes = self.download_view(&entry).await?;
-            if bytes.len() as u64 > self.config.max_output_bytes {
+            let remaining = self.config.max_output_bytes.saturating_sub(total_bytes);
+            if remaining == 0 {
                 return Err(ComfyError::UnsafeOutput(format!(
-                    "output {} exceeded {} bytes",
-                    entry.filename, self.config.max_output_bytes
+                    "ComfyUI outputs exceeded the {}-byte aggregate limit",
+                    self.config.max_output_bytes
                 )));
             }
+            let bytes = self.download_view(&entry, remaining).await?;
+            total_bytes = total_bytes.saturating_add(bytes.len() as u64);
             let filename = safe_output_filename(&entry.filename)?;
-            let path = unique_output_path(&self.config.output_dir, &filename);
-            let mut file = tokio::fs::File::create(&path).await?;
-            file.write_all(&bytes).await?;
-            file.flush().await?;
+            let path = unique_output_path(output_dir, &filename);
+            write_new_output_file(path.clone(), bytes).await?;
+            let size_bytes = tokio::fs::metadata(&path).await?.len();
             let mime_type = mime_guess::from_path(&path)
                 .first_or_octet_stream()
                 .essence_str()
@@ -509,7 +580,7 @@ impl ComfyUiClient {
                 file_path: path,
                 filename,
                 mime_type,
-                size_bytes: bytes.len() as u64,
+                size_bytes,
                 media_type: entry.media_type,
             });
         }
@@ -517,7 +588,11 @@ impl ComfyUiClient {
         Ok(saved)
     }
 
-    async fn download_view(&self, entry: &ComfyOutputEntry) -> Result<Vec<u8>, ComfyError> {
+    async fn download_view(
+        &self,
+        entry: &ComfyOutputEntry,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, ComfyError> {
         let mut url = self.url("/view")?;
         {
             let mut qp = url.query_pairs_mut();
@@ -526,58 +601,98 @@ impl ComfyUiClient {
             qp.append_pair("type", &entry.output_type);
         }
         let response = self
-            .client
-            .get(url)
-            .headers(self.auth_headers()?)
+            .request_url(reqwest::Method::GET, url)
+            .await?
             .send()
             .await?;
 
         if response.status().is_redirection() {
-            let location = response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| {
-                    ComfyError::Api(
-                        "redirect without Location while downloading output".to_string(),
-                    )
-                })?;
-            let redirected = self.client.get(location).send().await?.error_for_status()?;
-            return Ok(redirected.bytes().await?.to_vec());
+            return Err(ComfyError::Api(
+                "ComfyUI output redirects are not accepted".to_string(),
+            ));
         }
 
-        Ok(response.error_for_status()?.bytes().await?.to_vec())
+        let limit = usize::try_from(max_bytes).map_err(|_| {
+            ComfyError::UnsafeOutput("ComfyUI output limit does not fit this platform".to_string())
+        })?;
+        thinclaw_types::http_response::bounded_bytes(response.error_for_status()?, limit)
+            .await
+            .map_err(|error| ComfyError::UnsafeOutput(error.to_string()))
     }
 
     async fn get_json(&self, path: &str) -> Result<Value, ComfyError> {
         let response = self
-            .request(reqwest::Method::GET, path)?
+            .request(reqwest::Method::GET, path)
+            .await?
             .send()
             .await?
             .error_for_status()?;
-        Ok(response.json().await?)
+        thinclaw_types::http_response::bounded_json(response, MAX_COMFY_JSON_BYTES)
+            .await
+            .map_err(|error| ComfyError::Api(format!("invalid ComfyUI JSON response: {error}")))
     }
 
     async fn post_json(&self, path: &str, body: &Value) -> Result<Value, ComfyError> {
         let response = self
-            .request(reqwest::Method::POST, path)?
+            .request(reqwest::Method::POST, path)
+            .await?
             .json(body)
             .send()
             .await?
             .error_for_status()?;
-        Ok(response.json().await?)
+        thinclaw_types::http_response::bounded_json(response, MAX_COMFY_JSON_BYTES)
+            .await
+            .map_err(|error| ComfyError::Api(format!("invalid ComfyUI JSON response: {error}")))
     }
 
-    fn request(
+    async fn request(
         &self,
         method: reqwest::Method,
         path: &str,
     ) -> Result<reqwest::RequestBuilder, ComfyError> {
         let url = self.url(path)?;
-        Ok(self
-            .client
-            .request(method, url)
-            .headers(self.auth_headers()?))
+        self.request_url(method, url).await
+    }
+
+    async fn request_url(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+    ) -> Result<reqwest::RequestBuilder, ComfyError> {
+        let client = self.client_for_url(&url).await?;
+        Ok(client.request(method, url).headers(self.auth_headers()?))
+    }
+
+    async fn client_for_url(&self, url: &Url) -> Result<reqwest::Client, ComfyError> {
+        let (url, pinned_addrs) = if self.config.mode.is_cloud() {
+            let guarded = thinclaw_tools_core::validate_outbound_url_pinned_async(
+                url.as_str(),
+                &thinclaw_tools_core::OutboundUrlGuardOptions {
+                    require_https: true,
+                    upgrade_http_to_https: false,
+                    allowlist: Vec::new(),
+                },
+            )
+            .await
+            .map_err(|error| ComfyError::Api(format!("unsafe ComfyUI URL: {error}")))?;
+            (guarded.url, guarded.pinned_addrs)
+        } else {
+            (url.clone(), resolve_configured_host(url).await?)
+        };
+        let host = url
+            .host_str()
+            .ok_or_else(|| ComfyError::Api("ComfyUI URL has no host".to_string()))?;
+        let mut builder = reqwest::Client::builder()
+            .timeout(self.config.request_timeout)
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if !pinned_addrs.is_empty() {
+            builder = builder.resolve_to_addrs(host, &pinned_addrs);
+        }
+        builder
+            .build()
+            .map_err(|error| ComfyError::Api(format!("failed to build ComfyUI client: {error}")))
     }
 
     fn auth_headers(&self) -> Result<HeaderMap, ComfyError> {
@@ -604,25 +719,159 @@ impl ComfyUiClient {
         };
         Ok(Url::parse(&format!("{base}{normalized}"))?)
     }
+}
 
-    fn ws_url(&self, client_id: &str) -> Result<Url, ComfyError> {
-        let mut url = self.url("/ws")?;
-        let scheme = match url.scheme() {
-            "https" => "wss",
-            "http" => "ws",
-            other => other,
-        }
-        .to_string();
-        url.set_scheme(&scheme)
-            .map_err(|_| ComfyError::Api(format!("unsupported websocket scheme {scheme}")))?;
-        url.query_pairs_mut().append_pair("clientId", client_id);
-        if self.config.mode.is_cloud()
-            && let Some(api_key) = self.config.api_key.as_deref()
-        {
-            url.query_pairs_mut().append_pair("token", api_key);
-        }
-        Ok(url)
+async fn resolve_configured_host(url: &Url) -> Result<Vec<SocketAddr>, ComfyError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| ComfyError::Api("ComfyUI URL has no host".to_string()))?;
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(Vec::new());
     }
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| ComfyError::Api("ComfyUI URL has no usable port".to_string()))?;
+    let resolved = tokio::time::timeout(COMFY_DNS_TIMEOUT, tokio::net::lookup_host((host, port)))
+        .await
+        .map_err(|_| ComfyError::Api("ComfyUI hostname resolution timed out".to_string()))?
+        .map_err(|error| ComfyError::Api(format!("failed to resolve ComfyUI hostname: {error}")))?;
+    let mut addresses = Vec::new();
+    for address in resolved {
+        if addresses.len() >= MAX_COMFY_DNS_ADDRESSES {
+            return Err(ComfyError::Api(format!(
+                "ComfyUI hostname resolved to more than {MAX_COMFY_DNS_ADDRESSES} addresses"
+            )));
+        }
+        addresses.push(address);
+    }
+    if addresses.is_empty() {
+        return Err(ComfyError::Api(
+            "ComfyUI hostname resolved to no addresses".to_string(),
+        ));
+    }
+    addresses.sort_unstable();
+    addresses.dedup();
+    Ok(addresses)
+}
+
+async fn ensure_real_output_directory(path: &Path) -> Result<PathBuf, ComfyError> {
+    tokio::fs::create_dir_all(path).await?;
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ComfyError::UnsafeOutput(
+            "ComfyUI output directory is not a real directory".to_string(),
+        ));
+    }
+    let canonical = tokio::fs::canonicalize(path).await?;
+    let canonical_metadata = tokio::fs::symlink_metadata(&canonical).await?;
+    if canonical_metadata.file_type().is_symlink() || !canonical_metadata.is_dir() {
+        return Err(ComfyError::UnsafeOutput(
+            "ComfyUI output directory did not resolve to a real directory".to_string(),
+        ));
+    }
+    Ok(canonical)
+}
+
+async fn write_new_output_file(path: PathBuf, bytes: Vec<u8>) -> Result<(), ComfyError> {
+    tokio::task::spawn_blocking(move || {
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("ComfyUI output has no parent directory"))?;
+        let parent_metadata = std::fs::symlink_metadata(parent)?;
+        if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+            return Err(std::io::Error::other(
+                "ComfyUI output parent is not a real directory",
+            ));
+        }
+        let expected_len = u64::try_from(bytes.len())
+            .map_err(|_| std::io::Error::other("ComfyUI output is too large"))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let result = (|| -> std::io::Result<()> {
+            let mut file = options.open(&path)?;
+            if !file.metadata()?.is_file() {
+                return Err(std::io::Error::other(
+                    "ComfyUI output target is not a regular file",
+                ));
+            }
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            if file.metadata()?.len() != expected_len {
+                return Err(std::io::Error::other(
+                    "ComfyUI output changed while it was written",
+                ));
+            }
+            #[cfg(unix)]
+            std::fs::File::open(parent)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&path);
+        }
+        result
+    })
+    .await
+    .map_err(|error| {
+        ComfyError::Io(std::io::Error::other(format!(
+            "ComfyUI output writer panicked: {error}"
+        )))
+    })??;
+    Ok(())
+}
+
+fn validate_generate_request(request: &ComfyGenerateRequest) -> Result<(), ComfyError> {
+    let (default_width, default_height) = request.aspect_ratio.dimensions();
+    let width = request.width.unwrap_or(default_width);
+    let height = request.height.unwrap_or(default_height);
+    if !(64..=8_192).contains(&width)
+        || !(64..=8_192).contains(&height)
+        || u64::from(width).saturating_mul(u64::from(height)) > 64 * 1024 * 1024
+    {
+        return Err(ComfyError::InvalidWorkflow(
+            "generation dimensions are outside the supported bounds".to_string(),
+        ));
+    }
+    if request.prompt.is_empty()
+        || request.prompt.len() > 100_000
+        || request
+            .negative_prompt
+            .as_ref()
+            .is_some_and(|value| value.len() > 100_000)
+        || request.workflow_name.is_empty()
+        || request.workflow_name.len() > 256
+        || request.workflow_name.chars().any(char::is_control)
+        || request.model.as_ref().is_some_and(|value| {
+            value.is_empty() || value.len() > 1_024 || value.chars().any(char::is_control)
+        })
+        || request
+            .steps
+            .is_some_and(|steps| !(1..=1_000).contains(&steps))
+        || request
+            .cfg
+            .is_some_and(|cfg| !cfg.is_finite() || !(0.0..=100.0).contains(&cfg))
+    {
+        return Err(ComfyError::InvalidWorkflow(
+            "generation parameters are empty, oversized, or outside supported bounds".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_identifier(label: &str, value: &str) -> Result<(), ComfyError> {
+    if value.is_empty()
+        || value.len() > 256
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ComfyError::Api(format!("ComfyUI {label} is malformed")));
+    }
+    Ok(())
 }
 
 fn ensure_leading_slash(path: &str) -> String {
@@ -649,6 +898,7 @@ pub fn bundled_workflow_names() -> &'static [&'static str] {
 }
 
 pub fn validate_api_workflow(workflow: &Value) -> Result<(), ComfyError> {
+    validate_json_complexity(workflow)?;
     let object = workflow.as_object().ok_or_else(|| {
         ComfyError::InvalidWorkflow(
             "workflow must be a JSON object of ComfyUI API nodes".to_string(),
@@ -665,16 +915,61 @@ pub fn validate_api_workflow(workflow: &Value) -> Result<(), ComfyError> {
             "workflow has no nodes".to_string(),
         ));
     }
+    if object.len() > MAX_COMFY_WORKFLOW_NODES {
+        return Err(ComfyError::InvalidWorkflow(format!(
+            "workflow contains more than {MAX_COMFY_WORKFLOW_NODES} nodes"
+        )));
+    }
     for (node_id, node) in object {
+        if node_id.is_empty() || node_id.len() > 128 || node_id.chars().any(char::is_control) {
+            return Err(ComfyError::InvalidWorkflow(
+                "workflow contains a malformed node identifier".to_string(),
+            ));
+        }
         let class_type = node.get("class_type").and_then(Value::as_str);
-        if class_type.is_none() {
+        if class_type.is_none_or(|value| {
+            value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+        }) {
             return Err(ComfyError::InvalidWorkflow(format!(
-                "node {node_id} is missing class_type"
+                "node {node_id} has a missing or malformed class_type"
             )));
         }
         if !node.get("inputs").is_some_and(Value::is_object) {
             return Err(ComfyError::InvalidWorkflow(format!(
                 "node {node_id} is missing object inputs"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_json_complexity(value: &Value) -> Result<(), ComfyError> {
+    let mut stack = vec![(value, 0_usize)];
+    let mut values = 0_usize;
+    let mut text_bytes = 0_usize;
+    while let Some((current, depth)) = stack.pop() {
+        values = values.saturating_add(1);
+        if values > MAX_COMFY_JSON_VALUES || depth > MAX_COMFY_JSON_DEPTH {
+            return Err(ComfyError::InvalidWorkflow(
+                "workflow JSON is too deep or complex".to_string(),
+            ));
+        }
+        match current {
+            Value::String(text) => text_bytes = text_bytes.saturating_add(text.len()),
+            Value::Array(items) => {
+                stack.extend(items.iter().map(|item| (item, depth.saturating_add(1))));
+            }
+            Value::Object(object) => {
+                for (key, child) in object {
+                    text_bytes = text_bytes.saturating_add(key.len());
+                    stack.push((child, depth.saturating_add(1)));
+                }
+            }
+            _ => {}
+        }
+        if text_bytes > MAX_COMFY_JSON_BYTES {
+            return Err(ComfyError::InvalidWorkflow(format!(
+                "workflow JSON exceeds the {MAX_COMFY_JSON_BYTES}-byte text limit"
             )));
         }
     }
@@ -948,7 +1243,9 @@ fn model_name_matches(available: &[String], wanted: &str) -> bool {
 fn random_seed() -> i64 {
     let uuid = uuid::Uuid::new_v4();
     let bytes = uuid.as_u128().to_le_bytes();
-    i64::from_le_bytes(bytes[..8].try_into().unwrap()).abs()
+    let mut seed_bytes = [0_u8; 8];
+    seed_bytes.copy_from_slice(&bytes[..8]);
+    i64::from_le_bytes(seed_bytes) & i64::MAX
 }
 
 fn history_contains_prompt(history: &Value, prompt_id: &str) -> bool {
@@ -961,26 +1258,6 @@ fn history_contains_prompt(history: &Value, prompt_id: &str) -> bool {
         .is_some_and(|id| id == prompt_id)
 }
 
-fn ws_message_marks_complete(text: &str, prompt_id: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return false;
-    };
-    let msg_type = value
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if msg_type != "executing" && msg_type != "execution_success" {
-        return false;
-    }
-    let data = value.get("data").unwrap_or(&value);
-    let matches_prompt = data
-        .get("prompt_id")
-        .and_then(Value::as_str)
-        .is_some_and(|id| id == prompt_id);
-    let no_node = data.get("node").is_none_or(Value::is_null);
-    matches_prompt && (no_node || msg_type == "execution_success")
-}
-
 #[derive(Debug, Clone)]
 struct ComfyOutputEntry {
     filename: String,
@@ -989,12 +1266,15 @@ struct ComfyOutputEntry {
     media_type: String,
 }
 
-fn collect_output_entries(prompt_id: &str, history: &Value) -> Vec<ComfyOutputEntry> {
+fn collect_output_entries(
+    prompt_id: &str,
+    history: &Value,
+) -> Result<Vec<ComfyOutputEntry>, ComfyError> {
     let prompt_history = history.get(prompt_id).unwrap_or(history);
     let outputs = prompt_history.get("outputs").unwrap_or(prompt_history);
     let mut entries = Vec::new();
     let Some(outputs) = outputs.as_object() else {
-        return entries;
+        return Ok(entries);
     };
 
     for node_output in outputs.values() {
@@ -1008,18 +1288,21 @@ fn collect_output_entries(prompt_id: &str, history: &Value) -> Vec<ComfyOutputEn
             if let Some(list) = node_output.get(key).and_then(Value::as_array) {
                 for item in list {
                     if let Some(filename) = item.get("filename").and_then(Value::as_str) {
+                        if entries.len() >= MAX_COMFY_OUTPUTS {
+                            return Err(ComfyError::UnsafeOutput(format!(
+                                "ComfyUI returned more than {MAX_COMFY_OUTPUTS} outputs"
+                            )));
+                        }
+                        let subfolder = item.get("subfolder").and_then(Value::as_str).unwrap_or("");
+                        let output_type =
+                            item.get("type").and_then(Value::as_str).unwrap_or("output");
+                        validate_output_parameter("filename", filename, 1_024)?;
+                        validate_output_parameter("subfolder", subfolder, 4_096)?;
+                        validate_output_parameter("type", output_type, 128)?;
                         entries.push(ComfyOutputEntry {
                             filename: filename.to_string(),
-                            subfolder: item
-                                .get("subfolder")
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .to_string(),
-                            output_type: item
-                                .get("type")
-                                .and_then(Value::as_str)
-                                .unwrap_or("output")
-                                .to_string(),
+                            subfolder: subfolder.to_string(),
+                            output_type: output_type.to_string(),
                             media_type: media_type.to_string(),
                         });
                     }
@@ -1027,7 +1310,16 @@ fn collect_output_entries(prompt_id: &str, history: &Value) -> Vec<ComfyOutputEn
             }
         }
     }
-    entries
+    Ok(entries)
+}
+
+fn validate_output_parameter(label: &str, value: &str, max_bytes: usize) -> Result<(), ComfyError> {
+    if value.len() > max_bytes || value.chars().any(char::is_control) {
+        return Err(ComfyError::UnsafeOutput(format!(
+            "ComfyUI returned a malformed output {label}"
+        )));
+    }
+    Ok(())
 }
 
 fn safe_output_filename(filename: &str) -> Result<String, ComfyError> {
@@ -1035,12 +1327,31 @@ fn safe_output_filename(filename: &str) -> Result<String, ComfyError> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| ComfyError::UnsafeOutput(format!("invalid output filename {filename}")))?;
-    if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.len() > 255
+        || name.contains('/')
+        || name.contains('\\')
+        || name.chars().any(char::is_control)
+        || name != filename
+    {
         return Err(ComfyError::UnsafeOutput(format!(
             "unsafe output filename {filename}"
         )));
     }
-    Ok(format!("comfyui_{}_{}", uuid::Uuid::new_v4(), name))
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 16
+                && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        });
+    Ok(match extension {
+        Some(extension) => format!("comfyui_{}.{}", uuid::Uuid::new_v4(), extension),
+        None => format!("comfyui_{}", uuid::Uuid::new_v4()),
+    })
 }
 
 fn unique_output_path(output_dir: &Path, filename: &str) -> PathBuf {
@@ -1131,5 +1442,34 @@ mod tests {
         let workflow = bundled_workflow("sdxl_txt2img").unwrap();
         let refs = collect_model_references(&workflow).unwrap();
         assert!(refs.iter().any(|r| r.folder == "checkpoints"));
+    }
+
+    #[test]
+    fn cloud_mode_requires_https_without_credentials() {
+        let config = ComfyUiConfig {
+            mode: ComfyUiMode::Cloud,
+            host: "http://user:password@example.com".to_string(),
+            ..ComfyUiConfig::default()
+        };
+        assert!(ComfyUiClient::new(config).is_err());
+    }
+
+    #[test]
+    fn workflow_depth_is_bounded() {
+        let mut nested = Value::Null;
+        for _ in 0..=MAX_COMFY_JSON_DEPTH {
+            nested = json!([nested]);
+        }
+        let workflow = json!({
+            "1": {"class_type": "Node", "inputs": {"nested": nested}}
+        });
+        assert!(validate_api_workflow(&workflow).is_err());
+    }
+
+    #[test]
+    fn output_filename_cannot_contain_a_path() {
+        assert!(safe_output_filename("../escape.png").is_err());
+        assert!(safe_output_filename("nested/escape.png").is_err());
+        assert!(safe_output_filename("image.png").is_ok());
     }
 }

@@ -102,8 +102,20 @@ impl SecureStoreProbe {
 }
 
 pub async fn probe_availability() -> SecureStoreProbe {
-    if std::env::var_os("SECRETS_MASTER_KEY").is_some() {
+    if let Some(raw_key) = std::env::var_os("SECRETS_MASTER_KEY") {
         if crate::platform::env_flag_enabled("THINCLAW_ALLOW_ENV_MASTER_KEY") {
+            let Ok(key) = raw_key.into_string() else {
+                return SecureStoreProbe::unavailable(
+                    "SECRETS_MASTER_KEY is not valid UTF-8.",
+                    "Configure a UTF-8 master key containing 32-4096 bytes, or use the OS secure store.",
+                );
+            };
+            if !(32..=4096).contains(&key.len()) {
+                return SecureStoreProbe::unavailable(
+                    "SECRETS_MASTER_KEY does not satisfy the required 32-4096 byte length.",
+                    "Configure a high-entropy master key containing 32-4096 bytes, or use the OS secure store.",
+                );
+            }
             return SecureStoreProbe::env_fallback(
                 "SECRETS_MASTER_KEY is configured and explicitly allowed; encrypted secrets can use the environment fallback.",
             );
@@ -274,7 +286,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn env_master_key_requires_explicit_allow_flag() {
         let _lock = ENV_LOCK.lock().await;
-        let _key = ScopedEnvVar::set("SECRETS_MASTER_KEY", "test-master-key");
+        let _key = ScopedEnvVar::set("SECRETS_MASTER_KEY", "0123456789abcdef0123456789abcdef");
         let _allow = ScopedEnvVar::remove("THINCLAW_ALLOW_ENV_MASTER_KEY");
 
         let probe = probe_availability().await;
@@ -286,12 +298,24 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn env_master_key_can_be_allowed_deliberately() {
         let _lock = ENV_LOCK.lock().await;
-        let _key = ScopedEnvVar::set("SECRETS_MASTER_KEY", "test-master-key");
+        let _key = ScopedEnvVar::set("SECRETS_MASTER_KEY", "0123456789abcdef0123456789abcdef");
         let _allow = ScopedEnvVar::set("THINCLAW_ALLOW_ENV_MASTER_KEY", "1");
 
         let probe = probe_availability().await;
         assert!(probe.available);
         assert!(probe.env_fallback);
         assert!(probe.detail.contains("explicitly allowed"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_env_master_key_is_not_reported_available() {
+        let _lock = ENV_LOCK.lock().await;
+        let _key = ScopedEnvVar::set("SECRETS_MASTER_KEY", "too-short");
+        let _allow = ScopedEnvVar::set("THINCLAW_ALLOW_ENV_MASTER_KEY", "1");
+
+        let probe = probe_availability().await;
+        assert!(!probe.available);
+        assert!(!probe.env_fallback);
+        assert!(probe.detail.contains("32-4096"));
     }
 }

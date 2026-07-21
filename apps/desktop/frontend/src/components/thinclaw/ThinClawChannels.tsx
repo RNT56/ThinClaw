@@ -200,6 +200,10 @@ export function ThinClawChannels() {
     const { status: runtimeStatus, isRemote } = useThinClawStatusSnapshot(15000);
     const [appleAllowFrom, setAppleAllowFrom] = useState('');
     const [applePollInterval, setApplePollInterval] = useState('10');
+    const [gmailEnabled, setGmailEnabled] = useState(false);
+    const [gmailProjectId, setGmailProjectId] = useState('');
+    const [gmailSubscriptionId, setGmailSubscriptionId] = useState('');
+    const [gmailTopicId, setGmailTopicId] = useState('');
     const [gmailAllowedSenders, setGmailAllowedSenders] = useState('');
 
     const fetchChannels = useCallback(async () => {
@@ -246,26 +250,29 @@ export function ThinClawChannels() {
 
     // ── Gmail OAuth + Status ────────────────────────────────────────────
     const [gmailConnecting, setGmailConnecting] = useState(false);
+    const [gmailSaving, setGmailSaving] = useState(false);
     const [gmailConnected, setGmailConnected] = useState(false);
     const [gmailLabelFilter, setGmailLabelFilter] = useState('');
     const [gmailStatus, setGmailStatus] = useState<thinclaw.GmailStatusResponse | null>(null);
 
-    // Load real Gmail status on mount
-    useEffect(() => {
-        (async () => {
-            try {
-                const status = await thinclaw.getGmailStatus();
-                setGmailStatus(status);
-                setGmailConnected(status.oauth_configured);
-                setGmailAllowedSenders(status.allowed_senders.join(', '));
-                if (status.label_filters.length > 0) {
-                    setGmailLabelFilter(status.label_filters.join(', '));
-                }
-            } catch {
-                // Gmail status not available — leave defaults
-            }
-        })();
+    const refreshGmailStatus = useCallback(async () => {
+        const status = await thinclaw.getGmailStatus();
+        setGmailStatus(status);
+        setGmailConnected(status.oauth_configured);
+        setGmailEnabled(status.enabled);
+        setGmailProjectId(status.project_id);
+        setGmailSubscriptionId(status.subscription_id);
+        setGmailTopicId(status.topic_id);
+        setGmailAllowedSenders(status.allowed_senders.join(', '));
+        setGmailLabelFilter(status.label_filters.join(', '));
     }, []);
+
+    // Load real Gmail status on mount.
+    useEffect(() => {
+        refreshGmailStatus().catch(() => {
+            // Gmail status not available — leave editable defaults.
+        });
+    }, [refreshGmailStatus]);
 
     useEffect(() => {
         const allow = settingsMap['channels.apple_mail_allow_from'];
@@ -273,8 +280,30 @@ export function ThinClawChannels() {
         const poll = settingsMap['channels.apple_mail_poll_interval'];
         setApplePollInterval(poll == null ? '10' : String(poll));
         const gmailSenders = settingsMap['channels.gmail_allowed_senders'];
-        if (typeof gmailSenders === 'string' && gmailSenders.length > 0) {
+        if (typeof gmailSenders === 'string') {
             setGmailAllowedSenders(gmailSenders);
+        }
+        const gmailLabels = settingsMap['channels.gmail_label_filters'];
+        if (typeof gmailLabels === 'string') {
+            setGmailLabelFilter(gmailLabels);
+        }
+        const gmailProject = settingsMap['channels.gmail_project_id'];
+        if (typeof gmailProject === 'string') {
+            setGmailProjectId(gmailProject);
+        }
+        const gmailSubscription = settingsMap['channels.gmail_subscription_id'];
+        if (typeof gmailSubscription === 'string') {
+            setGmailSubscriptionId(gmailSubscription);
+        }
+        const gmailTopic = settingsMap['channels.gmail_topic_id'];
+        if (typeof gmailTopic === 'string') {
+            setGmailTopicId(gmailTopic);
+        }
+        const gmailEnabledValue = settingsMap['channels.gmail_enabled'];
+        if (typeof gmailEnabledValue === 'boolean') {
+            setGmailEnabled(gmailEnabledValue);
+        } else if (typeof gmailEnabledValue === 'string') {
+            setGmailEnabled(gmailEnabledValue === 'true');
         }
     }, [settingsMap]);
 
@@ -305,8 +334,8 @@ export function ThinClawChannels() {
                 setGmailConnected(true);
                 // Refresh status after successful connection
                 try {
-                    const status = await thinclaw.getGmailStatus();
-                    setGmailStatus(status);
+                    await refreshGmailStatus();
+                    await fetchChannels();
                 } catch { /* ignore */ }
                 toast.success('Gmail connected successfully!');
             } else {
@@ -316,6 +345,36 @@ export function ThinClawChannels() {
             toast.error(`Gmail sign-in failed: ${String(e)}`);
         } finally {
             setGmailConnecting(false);
+        }
+    };
+
+    const handleGmailSave = async () => {
+        const projectId = gmailProjectId.trim();
+        const subscriptionId = gmailSubscriptionId.trim();
+        const topicId = gmailTopicId.trim();
+        if (gmailEnabled && (!projectId || !subscriptionId || !topicId)) {
+            toast.error('Project ID, subscription ID, and topic ID are required before enabling Gmail.');
+            return;
+        }
+
+        const patch = {
+            'channels.gmail_enabled': gmailEnabled,
+            'channels.gmail_project_id': projectId,
+            'channels.gmail_subscription_id': subscriptionId,
+            'channels.gmail_topic_id': topicId,
+            'channels.gmail_allowed_senders': gmailAllowedSenders.trim(),
+            'channels.gmail_label_filters': gmailLabelFilter.trim(),
+        };
+        setGmailSaving(true);
+        try {
+            await thinclaw.patchSettings(patch);
+            setSettingsMap(previous => ({ ...previous, ...patch }));
+            await Promise.all([fetchChannels(), fetchSettings(), refreshGmailStatus()]);
+            toast.success('Gmail settings applied');
+        } catch (error) {
+            toast.error(`Failed to apply Gmail settings: ${String(error)}`);
+        } finally {
+            setGmailSaving(false);
         }
     };
 
@@ -337,6 +396,7 @@ export function ThinClawChannels() {
     const streamChannels = ['discord', 'telegram'];
     const activeChannels = channels.filter(ch => ch.enabled);
     const inactiveChannels = channels.filter(ch => !ch.enabled);
+    const gmailRuntimeActive = channels.some(ch => ch.id === 'gmail' && ch.enabled);
 
     if (isLoading) {
         return (
@@ -445,7 +505,7 @@ export function ThinClawChannels() {
                         <div className="flex items-start gap-4">
                             <div className={cn(
                                 "p-3 rounded-xl border transition-colors",
-                                gmailConnected
+                                gmailRuntimeActive
                                     ? "bg-red-500/10 border-red-500/20 text-red-400"
                                     : "bg-white/5 border-border/40 text-muted-foreground"
                             )}>
@@ -456,14 +516,16 @@ export function ThinClawChannels() {
                                     <h3 className="font-semibold text-sm">Gmail</h3>
                                     <span className={cn(
                                         "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border",
-                                        gmailConnected
+                                        gmailRuntimeActive
                                             ? "text-primary bg-emerald-500/10 border-emerald-500/20"
                                             : "text-muted-foreground bg-zinc-500/10 border-zinc-500/20"
                                     )}>
-                                        {gmailConnected ? (
-                                            <><CheckCircle2 className="w-3 h-3" /> Connected</>
+                                        {gmailRuntimeActive ? (
+                                            <><CheckCircle2 className="w-3 h-3" /> Active</>
+                                        ) : gmailConnected ? (
+                                            <><CheckCircle2 className="w-3 h-3" /> Authorized</>
                                         ) : (
-                                            'Not configured'
+                                            'Not authorized'
                                         )}
                                     </span>
                                 </div>
@@ -471,86 +533,131 @@ export function ThinClawChannels() {
                                     {CHANNEL_DESCRIPTIONS['gmail']}
                                 </p>
 
-                                {gmailConnected ? (
-                                    <div className="mt-3 space-y-3">
-                                        {/* Status indicator */}
-                                        {gmailStatus && (
-                                            <div className="flex items-center gap-2">
-                                                <span className={cn(
-                                                    "inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium",
-                                                    gmailStatus.status.startsWith('ready')
-                                                        ? "bg-emerald-500/10 text-primary"
-                                                        : "bg-amber-500/10 text-muted-foreground"
-                                                )}>
-                                                    {gmailStatus.status}
+                                <div className="mt-3 space-y-4">
+                                    {gmailStatus && (
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <span className={cn(
+                                                "inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium",
+                                                gmailRuntimeActive
+                                                    ? "bg-emerald-500/10 text-primary"
+                                                    : "bg-amber-500/10 text-muted-foreground"
+                                            )}>
+                                                {gmailRuntimeActive ? 'Runtime active' : gmailStatus.status}
+                                            </span>
+                                            {gmailConnected && !gmailRuntimeActive && (
+                                                <span className="text-[10px] text-muted-foreground">
+                                                    OAuth is authorized, but the channel is not running.
                                                 </span>
-                                            </div>
-                                        )}
-                                        <div>
-                                            <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
-                                                Allowed Senders
-                                            </label>
-                                            <div className="mt-1 flex gap-2">
-                                                <input
-                                                    type="text"
-                                                    value={gmailAllowedSenders}
-                                                    onChange={e => setGmailAllowedSenders(e.target.value)}
-                                                    placeholder="name@example.com, team@example.com"
-                                                    className="h-8 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/3 px-3 text-xs font-mono outline-hidden transition-all focus:ring-1 focus:ring-primary/30"
-                                                />
-                                                <button
-                                                    onClick={() => saveSetting('channels.gmail_allowed_senders', gmailAllowedSenders.trim() || null, 'Gmail senders')}
-                                                    className="flex h-8 items-center gap-1.5 rounded-lg border border-red-500/20 bg-red-500/10 px-3 text-[10px] font-bold uppercase tracking-wider text-red-400 hover:bg-red-500/20"
-                                                >
-                                                    <Save className="h-3.5 w-3.5" />
-                                                    Save
-                                                </button>
-                                            </div>
+                                            )}
                                         </div>
-                                        {/* Label filter */}
-                                        <div>
-                                            <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
-                                                Label Filter
-                                            </label>
-                                            <div className="mt-1 flex items-center gap-2">
-                                                <input
-                                                    type="text"
-                                                    value={gmailLabelFilter}
-                                                    onChange={e => setGmailLabelFilter(e.target.value)}
-                                                    placeholder="INBOX, Category:Primary"
-                                                    className="h-8 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/3 px-3 text-xs font-mono focus:ring-1 focus:ring-primary/30 outline-hidden transition-all"
-                                                />
-                                                <button
-                                                    onClick={() => saveSetting('channels.gmail_label_filters', gmailLabelFilter.trim() || null, 'Gmail label filter')}
-                                                    className="flex h-8 items-center gap-1.5 rounded-lg border border-red-500/20 bg-red-500/10 px-3 text-[10px] font-bold uppercase tracking-wider text-red-400 hover:bg-red-500/20"
-                                                >
-                                                    <Save className="h-3.5 w-3.5" />
-                                                    Save
-                                                </button>
-                                            </div>
-                                            <p className="text-[10px] text-muted-foreground/50 mt-0.5">
-                                                Comma-separated Gmail labels to watch. Leave empty to watch INBOX.
-                                            </p>
-                                        </div>
-                                    </div>
-                                ) : (
+                                    )}
+
                                     <button
-                                        onClick={handleGmailConnect}
-                                        disabled={gmailConnecting}
-                                        className={cn(
-                                            "mt-3 flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider",
-                                            "bg-red-500/10 text-red-400 border border-red-500/20",
-                                            "hover:bg-red-500/20 transition-all",
-                                            gmailConnecting && "opacity-50 cursor-wait"
-                                        )}
+                                        type="button"
+                                        onClick={() => setGmailEnabled(value => !value)}
+                                        className="flex w-full items-center justify-between rounded-xl border border-border/40 bg-white/3 px-3 py-2 text-left"
                                     >
-                                        {gmailConnecting ? (
-                                            <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Connecting…</>
-                                        ) : (
-                                            <><ExternalLink className="w-3.5 h-3.5" /> Connect Gmail</>
-                                        )}
+                                        <span>
+                                            <span className="block text-xs font-medium">Enable Gmail channel</span>
+                                            <span className="block text-[10px] text-muted-foreground">
+                                                Starts the Pub/Sub subscriber after settings are applied.
+                                            </span>
+                                        </span>
+                                        {gmailEnabled
+                                            ? <ToggleRight className="h-6 w-6 text-red-400" />
+                                            : <ToggleLeft className="h-6 w-6 text-muted-foreground" />}
                                     </button>
-                                )}
+
+                                    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                                        {[
+                                            ['Google Cloud Project ID', gmailProjectId, setGmailProjectId, 'my-project'],
+                                            ['Pub/Sub Subscription ID', gmailSubscriptionId, setGmailSubscriptionId, 'gmail-events-sub'],
+                                            ['Pub/Sub Topic ID', gmailTopicId, setGmailTopicId, 'gmail-events'],
+                                        ].map(([label, value, setter, placeholder]) => (
+                                            <label key={label as string} className="space-y-1">
+                                                <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
+                                                    {label as string}
+                                                </span>
+                                                <input
+                                                    type="text"
+                                                    value={value as string}
+                                                    onChange={event => (setter as (value: string) => void)(event.target.value)}
+                                                    placeholder={placeholder as string}
+                                                    className="h-8 w-full rounded-lg border border-border/40 bg-white/3 px-3 text-xs font-mono outline-hidden transition-all focus:ring-1 focus:ring-primary/30"
+                                                />
+                                            </label>
+                                        ))}
+                                    </div>
+
+                                    <div>
+                                        <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
+                                            Allowed Senders
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={gmailAllowedSenders}
+                                            onChange={event => setGmailAllowedSenders(event.target.value)}
+                                            placeholder="name@example.com, @example.com"
+                                            className="mt-1 h-8 w-full rounded-lg border border-border/40 bg-white/3 px-3 text-xs font-mono outline-hidden transition-all focus:ring-1 focus:ring-primary/30"
+                                        />
+                                        <p className="mt-0.5 text-[10px] text-amber-500/80">
+                                            Empty means every sender is allowed. Use comma-separated addresses or @domain rules.
+                                        </p>
+                                    </div>
+
+                                    <div>
+                                        <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
+                                            Label Filters
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={gmailLabelFilter}
+                                            onChange={event => setGmailLabelFilter(event.target.value)}
+                                            placeholder="INBOX, UNREAD"
+                                            className="mt-1 h-8 w-full rounded-lg border border-border/40 bg-white/3 px-3 text-xs font-mono outline-hidden transition-all focus:ring-1 focus:ring-primary/30"
+                                        />
+                                        <p className="mt-0.5 text-[10px] text-muted-foreground/50">
+                                            Empty watches unread mail from the bounded recent-history window.
+                                        </p>
+                                    </div>
+
+                                    {isRemote && (
+                                        <p className="text-[10px] text-amber-500/80">
+                                            OAuth must be completed in a desktop session on the gateway host.
+                                        </p>
+                                    )}
+                                    <div className="flex flex-wrap gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={handleGmailConnect}
+                                            disabled={gmailConnecting || isRemote}
+                                            className={cn(
+                                                "flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-2 text-xs font-bold uppercase tracking-wider text-red-400 transition-all hover:bg-red-500/20",
+                                                (gmailConnecting || isRemote) && "cursor-not-allowed opacity-50"
+                                            )}
+                                        >
+                                            {gmailConnecting ? (
+                                                <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Connecting…</>
+                                            ) : (
+                                                <><ExternalLink className="h-3.5 w-3.5" /> {gmailConnected ? 'Reauthorize' : 'Authorize Gmail'}</>
+                                            )}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={handleGmailSave}
+                                            disabled={gmailSaving}
+                                            className={cn(
+                                                "flex items-center gap-2 rounded-xl border border-primary/20 bg-primary/10 px-4 py-2 text-xs font-bold uppercase tracking-wider text-primary transition-all hover:bg-primary/20",
+                                                gmailSaving && "cursor-wait opacity-50"
+                                            )}
+                                        >
+                                            {gmailSaving
+                                                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                : <Save className="h-3.5 w-3.5" />}
+                                            Apply Gmail Settings
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>

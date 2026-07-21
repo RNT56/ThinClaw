@@ -113,6 +113,9 @@ async fn remote_gmail_status(
     let subscription_id = remote_setting_string(proxy, "channels.gmail_subscription_id")
         .await
         .unwrap_or_default();
+    let topic_id = remote_setting_string(proxy, "channels.gmail_topic_id")
+        .await
+        .unwrap_or_default();
     let allowed_senders = remote_setting_string(proxy, "channels.gmail_allowed_senders")
         .await
         .map(|raw| {
@@ -150,6 +153,7 @@ async fn remote_gmail_status(
         status,
         project_id,
         subscription_id,
+        topic_id,
         label_filters: Vec::new(),
         allowed_senders,
         missing_fields,
@@ -227,8 +231,8 @@ pub async fn thinclaw_channel_status_list(
 /// Start the Gmail OAuth PKCE flow via ThinClaw.
 ///
 /// This opens the user's browser for Google consent, waits for the
-/// callback, exchanges the auth code for tokens, and returns them.
-/// On success, the tokens are also stored in the Keychain.
+/// callback, exchanges the auth code, and commits the resulting credentials
+/// directly to the Keychain. Credential values are never returned over IPC.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_gmail_oauth_start(
@@ -237,8 +241,6 @@ pub async fn thinclaw_gmail_oauth_start(
     if ironclaw.remote_proxy().await.is_some() {
         return Ok(GmailOAuthResult {
             success: false,
-            access_token: None,
-            refresh_token: None,
             expires_in: None,
             scope: None,
             error: Some(
@@ -253,26 +255,33 @@ pub async fn thinclaw_gmail_oauth_start(
     // 3. Opens browser
     // 4. Binds localhost callback listener
     // 5. Exchanges code for tokens
-    let ic_result = thinclaw_core::tauri_commands::gmail_oauth_start()
-        .await
-        .map_err(|e| format!("Gmail OAuth failed: {}", e))?;
+    let agent = ironclaw.agent().await?;
+    let secrets = agent
+        .secrets_store()
+        .cloned()
+        .ok_or_else(|| "Secure credential storage is unavailable".to_string())?;
+    let database = agent.store().cloned();
+    let ic_result =
+        thinclaw_core::tauri_commands::gmail_oauth_start(secrets.as_ref(), "local_user")
+            .await
+            .map_err(|e| format!("Gmail OAuth failed: {}", e))?;
 
-    // If successful, persist refresh token in Keychain for future use
     if ic_result.success {
-        if let Some(ref refresh_token) = ic_result.refresh_token {
-            // Store via ThinClaw's agent secrets store if available
-            if let Ok(agent) = ironclaw.agent().await {
-                if let Some(store) = agent.store() {
-                    let _ = store
-                        .set_setting(
-                            "local_user",
-                            "gmail_refresh_token",
-                            &serde_json::json!(refresh_token),
-                        )
-                        .await;
-                }
+        // Remove the legacy plaintext database row only after the complete
+        // OAuth exchange has been committed to the OS Keychain.
+        if let Some(store) = database {
+            if let Err(error) = store
+                .delete_setting("local_user", "gmail_refresh_token")
+                .await
+            {
+                warn!(error = %error, "Failed to remove legacy Gmail credential setting");
             }
         }
+        drop(agent);
+        ironclaw
+            .restart_local(Some(secrets))
+            .await
+            .map_err(|error| format!("Gmail authorized but runtime restart failed: {error}"))?;
         info!("[thinclaw-runtime] Gmail OAuth completed successfully");
     } else {
         let err_msg = ic_result.error.as_deref().unwrap_or("unknown error");
@@ -281,8 +290,6 @@ pub async fn thinclaw_gmail_oauth_start(
 
     Ok(GmailOAuthResult {
         success: ic_result.success,
-        access_token: ic_result.access_token,
-        refresh_token: ic_result.refresh_token,
         expires_in: ic_result.expires_in.map(|e| e as u32),
         scope: ic_result.scope,
         error: ic_result.error,
@@ -303,6 +310,7 @@ pub async fn thinclaw_gmail_status(
     let mut enabled = false;
     let mut project_id = String::new();
     let mut subscription_id = String::new();
+    let mut topic_id = String::new();
     let mut label_filters: Vec<String> = Vec::new();
     let mut allowed_senders: Vec<String> = Vec::new();
     let mut oauth_configured = false;
@@ -321,6 +329,11 @@ pub async fn thinclaw_gmail_status(
         subscription_id = val;
     } else {
         missing_fields.push("GMAIL_SUBSCRIPTION_ID".to_string());
+    }
+    if let Ok(val) = std::env::var("GMAIL_TOPIC_ID") {
+        topic_id = val;
+    } else {
+        missing_fields.push("GMAIL_TOPIC_ID".to_string());
     }
     if let Ok(val) = std::env::var("GMAIL_LABEL_FILTERS") {
         label_filters = val
@@ -366,6 +379,15 @@ pub async fn thinclaw_gmail_status(
                     missing_fields.retain(|field| field != "GMAIL_SUBSCRIPTION_ID");
                 }
             }
+            if topic_id.is_empty() {
+                if let Ok(Some(value)) = store
+                    .get_setting("local_user", "channels.gmail_topic_id")
+                    .await
+                {
+                    topic_id = value.as_str().unwrap_or_default().to_string();
+                    missing_fields.retain(|field| field != "GMAIL_TOPIC_ID");
+                }
+            }
             if allowed_senders.is_empty() {
                 if let Ok(Some(value)) = store
                     .get_setting("local_user", "channels.gmail_allowed_senders")
@@ -394,13 +416,25 @@ pub async fn thinclaw_gmail_status(
                     }
                 }
             }
-            if let Ok(Some(_)) = store.get_setting("local_user", "gmail_refresh_token").await {
-                oauth_configured = true;
-            }
+        }
+        if let Some(secrets) = agent.secrets_store() {
+            let has_access = secrets
+                .exists("local_user", "google_oauth_token")
+                .await
+                .unwrap_or(false);
+            let has_refresh = secrets
+                .exists("local_user", "google_oauth_token_refresh_token")
+                .await
+                .unwrap_or(false);
+            let has_client = secrets
+                .exists("local_user", "google_oauth_token_client_id")
+                .await
+                .unwrap_or(false);
+            oauth_configured = has_access || (has_refresh && has_client);
         }
     }
 
-    let configured = !project_id.is_empty() && !subscription_id.is_empty();
+    let configured = !project_id.is_empty() && !subscription_id.is_empty() && !topic_id.is_empty();
     let status = if !enabled {
         "disabled".to_string()
     } else if !configured {
@@ -417,6 +451,7 @@ pub async fn thinclaw_gmail_status(
         status,
         project_id,
         subscription_id,
+        topic_id,
         label_filters,
         allowed_senders,
         missing_fields,

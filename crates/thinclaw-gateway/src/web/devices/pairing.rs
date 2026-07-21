@@ -1,7 +1,7 @@
 //! Pending device-pairing store: `~/.thinclaw/device-pairing.json`.
 //!
-//! Mirrors `crates/thinclaw-channels/src/pairing.rs` mechanics (fs4 locking,
-//! versioned JSON, tmp+rename atomic writes, `with_base_dir` for tests) but
+//! Uses stable sidecar lock files, versioned JSON, durable atomic writes, and
+//! `with_base_dir` for tests, but
 //! authorizes *API clients* rather than chat senders (D-P4) — hence a
 //! separate store file.
 //!
@@ -36,7 +36,7 @@
 //! single-use across both steps.
 
 use std::fs;
-use std::io::{Read as _, Seek, SeekFrom, Write};
+use std::io::{Read as _, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -50,6 +50,9 @@ use uuid::Uuid;
 const PENDING_FILE_NAME: &str = "device-pairing.json";
 const ATTEMPTS_FILE_NAME: &str = "device-pairing-attempts.json";
 const FILE_VERSION: u8 = 1;
+const MAX_PAIRING_FILE_BYTES: usize = 1024 * 1024;
+const MAX_ATTEMPT_RECORDS: usize = 1024;
+const MAX_PAIRING_CREDENTIAL_BYTES: usize = 128;
 
 /// TTL for pending device-pairing requests (D-P1 / mirrors pairing.rs).
 pub const PAIRING_PENDING_TTL_SECS: u64 = 15 * 60;
@@ -78,6 +81,12 @@ pub enum DevicePairingError {
 
     #[error("rate limit: too many failed pairing attempts; try again later")]
     RateLimited,
+
+    #[error("invalid pairing input: {0}")]
+    InvalidInput(String),
+
+    #[error("invalid persisted pairing data: {0}")]
+    InvalidData(String),
 }
 
 /// A pending device-pairing record, as persisted on disk. Secret/code are
@@ -113,14 +122,28 @@ impl Default for PendingFile {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct AttemptsFile {
+    #[serde(default = "default_file_version")]
+    version: u8,
     failed_at: Vec<u64>,
+}
+
+impl Default for AttemptsFile {
+    fn default() -> Self {
+        Self {
+            version: FILE_VERSION,
+            failed_at: Vec::new(),
+        }
+    }
+}
+
+const fn default_file_version() -> u8 {
+    FILE_VERSION
 }
 
 /// Result of `create_pairing`: the raw, one-time-visible secret and code
 /// plus the record id needed for the `require_confirm` approve step.
-#[derive(Debug)]
 pub struct CreatedPairing {
     pub pairing_id: String,
     /// Raw base64url 32-byte secret. Never persisted.
@@ -129,6 +152,19 @@ pub struct CreatedPairing {
     pub code: String,
     pub created_at: u64,
     pub expires_at: u64,
+}
+
+impl std::fmt::Debug for CreatedPairing {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreatedPairing")
+            .field("pairing_id", &self.pairing_id)
+            .field("secret", &"[REDACTED]")
+            .field("code", &"[REDACTED]")
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Outcome of a `consume` call.
@@ -194,6 +230,202 @@ where
     }
 }
 
+fn validate_pending_file(data: &PendingFile) -> Result<(), DevicePairingError> {
+    use std::collections::HashSet;
+
+    if data.version != FILE_VERSION {
+        return Err(DevicePairingError::InvalidData(format!(
+            "unsupported pending-pairing version {} (expected {FILE_VERSION})",
+            data.version
+        )));
+    }
+    if data.pending.len() > PAIRING_PENDING_MAX {
+        return Err(DevicePairingError::InvalidData(format!(
+            "pending pairing count exceeds the {PAIRING_PENDING_MAX}-record limit"
+        )));
+    }
+    let mut ids = HashSet::with_capacity(data.pending.len());
+    let mut secret_hashes = HashSet::with_capacity(data.pending.len());
+    let mut code_hashes = HashSet::with_capacity(data.pending.len());
+    for record in &data.pending {
+        let valid_hash = |hash: &str| {
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        if Uuid::parse_str(&record.pairing_id).is_err()
+            || !ids.insert(&record.pairing_id)
+            || !valid_hash(&record.secret_hash)
+            || !valid_hash(&record.code_hash)
+            || !secret_hashes.insert(&record.secret_hash)
+            || !code_hashes.insert(&record.code_hash)
+            || record.name.is_empty()
+            || record.name.len() > 256
+            || record.name.chars().any(char::is_control)
+            || record.expires_at < record.created_at
+            || record.expires_at.saturating_sub(record.created_at) > 24 * 60 * 60
+            || (record.approved && !record.awaiting_confirm)
+        {
+            return Err(DevicePairingError::InvalidData(
+                "pending pairing record is malformed or duplicated".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_attempts_file(data: &AttemptsFile) -> Result<(), DevicePairingError> {
+    if data.version != FILE_VERSION {
+        return Err(DevicePairingError::InvalidData(format!(
+            "unsupported pairing-attempt version {} (expected {FILE_VERSION})",
+            data.version
+        )));
+    }
+    if data.failed_at.len() > MAX_ATTEMPT_RECORDS {
+        return Err(DevicePairingError::InvalidData(format!(
+            "pairing-attempt count exceeds the {MAX_ATTEMPT_RECORDS}-record limit"
+        )));
+    }
+    Ok(())
+}
+
+fn read_regular_file_bounded(path: &Path) -> Result<String, DevicePairingError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_PAIRING_FILE_BYTES as u64
+    {
+        return Err(DevicePairingError::InvalidData(format!(
+            "{} must be a regular file no larger than {MAX_PAIRING_FILE_BYTES} bytes",
+            path.display()
+        )));
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file() || opened_metadata.len() > MAX_PAIRING_FILE_BYTES as u64 {
+        return Err(DevicePairingError::InvalidData(
+            "pairing data changed while it was being opened".to_string(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    std::io::Read::by_ref(&mut file)
+        .take(MAX_PAIRING_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PAIRING_FILE_BYTES {
+        return Err(DevicePairingError::InvalidData(format!(
+            "pairing data exceeds the {MAX_PAIRING_FILE_BYTES}-byte limit"
+        )));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| DevicePairingError::InvalidData("pairing data is not valid UTF-8".to_string()))
+}
+
+fn write_regular_file_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if bytes.len() > MAX_PAIRING_FILE_BYTES {
+        return Err(std::io::Error::other(format!(
+            "pairing data exceeds the {MAX_PAIRING_FILE_BYTES}-byte limit"
+        )));
+    }
+    validate_existing_regular_file(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("pairing data path has no parent"))?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::other("pairing data path has no valid filename"))?;
+    let tmp_path = parent.join(format!(".{filename}.{}.tmp", Uuid::new_v4().simple()));
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let result = (|| -> std::io::Result<()> {
+        let mut file = options.open(&tmp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+    if let Err(error) = replace_data_file(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+    sync_directory(parent)
+}
+
+fn validate_existing_regular_file(path: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
+            std::io::Error::other("pairing-data target is not a regular file"),
+        ),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn replace_data_file(staged: &Path, target: &Path) -> std::io::Result<()> {
+    fs::rename(staged, target)
+}
+
+#[cfg(windows)]
+fn replace_data_file(staged: &Path, target: &Path) -> std::io::Result<()> {
+    let backup = target.with_extension(format!("json.{}.bak", Uuid::new_v4().simple()));
+    let had_target = target.exists();
+    if had_target {
+        fs::rename(target, &backup)?;
+    }
+    if let Err(error) = fs::rename(staged, target) {
+        if had_target {
+            let _ = fs::rename(&backup, target);
+        }
+        return Err(error);
+    }
+    if had_target {
+        fs::remove_file(backup)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn replace_data_file(staged: &Path, target: &Path) -> std::io::Result<()> {
+    if target.exists() {
+        fs::remove_file(target)?;
+    }
+    fs::rename(staged, target)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Store of pending device-pairing attempts.
 #[derive(Debug, Clone)]
 pub struct DevicePairingStore {
@@ -232,37 +464,49 @@ impl DevicePairingStore {
     }
 
     fn open_locked(path: &Path) -> Result<fs::File, DevicePairingError> {
-        fs::create_dir_all(path.parent().expect("path always has a parent"))?;
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("pairing path has no parent"))?;
+        fs::create_dir_all(parent)?;
+        let parent_metadata = fs::symlink_metadata(parent)?;
+        if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+            return Err(DevicePairingError::InvalidData(
+                "pairing-store base path is not a real directory".to_string(),
+            ));
+        }
+        let lock_path = path.with_extension("lock");
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(lock_path)?;
+        #[cfg(unix)]
+        file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
         file.lock_exclusive()?;
         Ok(file)
     }
 
-    fn read_pending_locked(file: &mut fs::File) -> Result<PendingFile, DevicePairingError> {
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
-        parse_json_or_default(&content)
+    fn read_pending_locked(
+        _lock_file: &mut fs::File,
+        path: &Path,
+    ) -> Result<PendingFile, DevicePairingError> {
+        let content = read_regular_file_bounded(path)?;
+        let data: PendingFile = parse_json_or_default(&content)?;
+        validate_pending_file(&data)?;
+        Ok(data)
     }
 
     fn write_pending_locked(
-        file: &mut fs::File,
+        _lock_file: &mut fs::File,
         path: &Path,
         data: &PendingFile,
     ) -> Result<(), DevicePairingError> {
+        validate_pending_file(data)?;
         let json = serde_json::to_string_pretty(data)?;
-        let tmp_path = path.with_extension("json.tmp");
-        fs::write(&tmp_path, &json)?;
-        fs::rename(&tmp_path, path)?;
-        file.set_len(0)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(json.as_bytes())?;
-        file.sync_all()?;
-        Ok(())
+        write_regular_file_atomic(path, json.as_bytes()).map_err(DevicePairingError::from)
     }
 
     fn purge_expired(data: &mut PendingFile) {
@@ -273,9 +517,15 @@ impl DevicePairingStore {
     /// Create a new pending pairing request. Purges expired entries first;
     /// enforces `PAIRING_PENDING_MAX`.
     pub fn create_pairing(&self, name: &str) -> Result<CreatedPairing, DevicePairingError> {
+        let name = name.trim();
+        if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+            return Err(DevicePairingError::InvalidInput(
+                "pairing name must contain 1-256 bytes without control characters".to_string(),
+            ));
+        }
         let path = self.pending_path();
         let mut file = Self::open_locked(&path)?;
-        let mut data = Self::read_pending_locked(&mut file)?;
+        let mut data = Self::read_pending_locked(&mut file, &path)?;
         Self::purge_expired(&mut data);
 
         if data.pending.len() >= PAIRING_PENDING_MAX {
@@ -316,7 +566,7 @@ impl DevicePairingStore {
     pub fn list_pending(&self) -> Result<Vec<PendingPairView>, DevicePairingError> {
         let path = self.pending_path();
         let mut file = Self::open_locked(&path)?;
-        let mut data = Self::read_pending_locked(&mut file)?;
+        let mut data = Self::read_pending_locked(&mut file, &path)?;
         Self::purge_expired(&mut data);
         Self::write_pending_locked(&mut file, &path, &data)?;
         FileExt::unlock(&file)?;
@@ -334,47 +584,42 @@ impl DevicePairingStore {
             .collect())
     }
 
-    fn is_rate_limited(&self) -> Result<bool, DevicePairingError> {
-        let path = self.attempts_path();
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(e.into()),
-        };
-        let mut data: AttemptsFile = parse_json_or_default(&content)?;
-        let now = now_secs();
-        let cutoff = now.saturating_sub(PAIRING_FAILED_WINDOW_SECS);
-        data.failed_at.retain(|&t| t >= cutoff);
-        Ok(data.failed_at.len() >= PAIRING_FAILED_LIMIT)
+    fn read_attempts_locked(
+        _lock_file: &mut fs::File,
+        path: &Path,
+    ) -> Result<AttemptsFile, DevicePairingError> {
+        let content = read_regular_file_bounded(path)?;
+        let data: AttemptsFile = parse_json_or_default(&content)?;
+        validate_attempts_file(&data)?;
+        Ok(data)
     }
 
-    fn record_failed_attempt(&self) -> Result<(), DevicePairingError> {
-        let path = self.attempts_path();
-        let mut file = Self::open_locked(&path)?;
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
-        let mut data: AttemptsFile = parse_json_or_default(&content)?;
-
+    fn purge_old_attempts(data: &mut AttemptsFile) {
         let now = now_secs();
-        data.failed_at.push(now);
         let cutoff = now.saturating_sub(PAIRING_FAILED_WINDOW_SECS);
         data.failed_at.retain(|&t| t >= cutoff);
+    }
 
+    fn write_attempts_locked(
+        _lock_file: &mut fs::File,
+        path: &Path,
+        data: &AttemptsFile,
+    ) -> Result<(), DevicePairingError> {
+        validate_attempts_file(data)?;
         let json = serde_json::to_string_pretty(&data)?;
-        let tmp_path = path.with_extension("json.tmp");
-        fs::write(&tmp_path, json)?;
-        fs::rename(&tmp_path, &path)?;
-        FileExt::unlock(&file)?;
-        Ok(())
+        write_regular_file_atomic(path, json.as_bytes()).map_err(DevicePairingError::from)
     }
 
     /// Admin call: mark a pending, `awaiting_confirm` record `approved`.
     /// No-op (returns `false`) if the id doesn't exist or isn't awaiting
     /// confirmation.
     pub fn approve(&self, pairing_id: &str) -> Result<bool, DevicePairingError> {
+        if Uuid::parse_str(pairing_id).is_err() {
+            return Ok(false);
+        }
         let path = self.pending_path();
         let mut file = Self::open_locked(&path)?;
-        let mut data = Self::read_pending_locked(&mut file)?;
+        let mut data = Self::read_pending_locked(&mut file, &path)?;
         Self::purge_expired(&mut data);
 
         let mut approved = false;
@@ -396,7 +641,21 @@ impl DevicePairingStore {
     /// before touching pending state; records a failed attempt on no
     /// match. See module docs for the `require_confirm` two-step flow.
     pub fn consume(&self, secret_or_code: &str) -> Result<ConsumeOutcome, DevicePairingError> {
-        if self.is_rate_limited()? {
+        if secret_or_code.is_empty() || secret_or_code.len() > MAX_PAIRING_CREDENTIAL_BYTES {
+            return Err(DevicePairingError::InvalidInput(format!(
+                "pairing credential must contain 1-{MAX_PAIRING_CREDENTIAL_BYTES} bytes"
+            )));
+        }
+
+        // Serialize the rate-limit check and update on a stable attempts lock.
+        // Hold it until the pending-state decision commits so concurrent bad
+        // attempts cannot all pass the same stale counter.
+        let attempts_path = self.attempts_path();
+        let mut attempts_lock = Self::open_locked(&attempts_path)?;
+        let mut attempts = Self::read_attempts_locked(&mut attempts_lock, &attempts_path)?;
+        Self::purge_old_attempts(&mut attempts);
+        if attempts.failed_at.len() >= PAIRING_FAILED_LIMIT {
+            FileExt::unlock(&attempts_lock)?;
             return Err(DevicePairingError::RateLimited);
         }
 
@@ -406,7 +665,7 @@ impl DevicePairingStore {
 
         let path = self.pending_path();
         let mut file = Self::open_locked(&path)?;
-        let mut data = Self::read_pending_locked(&mut file)?;
+        let mut data = Self::read_pending_locked(&mut file, &path)?;
         Self::purge_expired(&mut data);
 
         // Compare digests with ct_eq: hash-then-compare is already
@@ -421,7 +680,10 @@ impl DevicePairingStore {
         let Some(idx) = idx else {
             Self::write_pending_locked(&mut file, &path, &data)?;
             FileExt::unlock(&file)?;
-            self.record_failed_attempt()?;
+            attempts.failed_at.push(now_secs());
+            Self::purge_old_attempts(&mut attempts);
+            Self::write_attempts_locked(&mut attempts_lock, &attempts_path, &attempts)?;
+            FileExt::unlock(&attempts_lock)?;
             return Ok(ConsumeOutcome::NotFound);
         };
 
@@ -432,6 +694,7 @@ impl DevicePairingStore {
             let pairing_id = data.pending[idx].pairing_id.clone();
             Self::write_pending_locked(&mut file, &path, &data)?;
             FileExt::unlock(&file)?;
+            FileExt::unlock(&attempts_lock)?;
             return Ok(ConsumeOutcome::AwaitingConfirm { pairing_id });
         }
 
@@ -440,6 +703,7 @@ impl DevicePairingStore {
         let record = data.pending.remove(idx);
         Self::write_pending_locked(&mut file, &path, &data)?;
         FileExt::unlock(&file)?;
+        FileExt::unlock(&attempts_lock)?;
 
         Ok(ConsumeOutcome::Consumed {
             pairing_id: record.pairing_id,
@@ -549,6 +813,7 @@ mod tests {
         // Manually rewrite the file with an already-expired `expires_at`.
         let raw = fs::read_to_string(dir.path().join(PENDING_FILE_NAME)).unwrap();
         let mut file: PendingFile = serde_json::from_str(&raw).unwrap();
+        file.pending[0].created_at = now_secs().saturating_sub(PAIRING_PENDING_TTL_SECS + 2);
         file.pending[0].expires_at = now_secs().saturating_sub(1);
         fs::write(
             dir.path().join(PENDING_FILE_NAME),
@@ -582,6 +847,52 @@ mod tests {
         }
         let err = store.consume("wrong-secret").unwrap_err();
         assert!(matches!(err, DevicePairingError::RateLimited));
+    }
+
+    #[test]
+    fn concurrent_failures_share_one_rate_limit_counter() {
+        use std::sync::{Arc, Barrier};
+
+        let (store, dir) = test_store();
+        store.create_pairing("Phone").unwrap();
+        let barrier = Arc::new(Barrier::new(PAIRING_FAILED_LIMIT));
+        let mut workers = Vec::new();
+        for index in 0..PAIRING_FAILED_LIMIT {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                store.consume(&format!("wrong-secret-{index}"))
+            }));
+        }
+        for worker in workers {
+            assert_eq!(worker.join().unwrap().unwrap(), ConsumeOutcome::NotFound);
+        }
+
+        assert!(matches!(
+            store.consume("one-more-wrong-secret"),
+            Err(DevicePairingError::RateLimited)
+        ));
+        let attempts: AttemptsFile =
+            serde_json::from_str(&fs::read_to_string(dir.path().join(ATTEMPTS_FILE_NAME)).unwrap())
+                .unwrap();
+        assert_eq!(attempts.failed_at.len(), PAIRING_FAILED_LIMIT);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_pairing_data_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let (store, dir) = test_store();
+        let outside = dir.path().join("outside.json");
+        fs::write(&outside, r#"{"version":1,"pending":[]}"#).unwrap();
+        symlink(&outside, dir.path().join(PENDING_FILE_NAME)).unwrap();
+
+        assert!(matches!(
+            store.list_pending(),
+            Err(DevicePairingError::InvalidData(_))
+        ));
     }
 
     #[test]

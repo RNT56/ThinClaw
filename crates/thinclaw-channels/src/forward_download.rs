@@ -11,6 +11,11 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use thinclaw_tools_core::{OutboundUrlGuardOptions, validate_outbound_url_pinned_async};
+
+const MAX_FORWARD_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_FORWARD_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_FORWARD_DOWNLOAD_URL_BYTES: usize = 16 * 1024;
 
 /// Configuration for forwarded attachment handling.
 #[derive(Debug, Clone)]
@@ -44,8 +49,9 @@ impl ForwardDownloadConfig {
 
         if let Ok(mb) = std::env::var("FORWARD_DOWNLOAD_MAX_MB")
             && let Ok(m) = mb.parse::<u64>()
+            && let Some(bytes) = m.checked_mul(1024 * 1024)
         {
-            config.max_bytes = m * 1024 * 1024;
+            config.max_bytes = bytes.min(MAX_FORWARD_DOWNLOAD_BYTES);
         }
 
         config
@@ -152,7 +158,7 @@ pub fn extract_forwarded_attachments(metadata: &serde_json::Value) -> Vec<Forwar
 
 /// Download a forwarded attachment using the provided HTTP client.
 pub async fn download_forwarded(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     attachment: &ForwardedAttachment,
     config: &ForwardDownloadConfig,
 ) -> Result<Vec<u8>, ForwardDownloadError> {
@@ -172,21 +178,63 @@ pub async fn download_forwarded(
         .as_deref()
         .ok_or(ForwardDownloadError::NoUrl)?;
 
-    let response = tokio::time::timeout(config.timeout, client.get(url).send())
-        .await
-        .map_err(|_| ForwardDownloadError::Timeout)?
-        .map_err(|e| ForwardDownloadError::Network(e.to_string()))?;
-
-    if !response.status().is_success() {
-        return Err(ForwardDownloadError::HttpError(response.status().as_u16()));
+    if url.len() > MAX_FORWARD_DOWNLOAD_URL_BYTES {
+        return Err(ForwardDownloadError::UntrustedUrl);
     }
-
-    let bytes = response
-        .bytes()
+    let timeout = config.timeout.min(MAX_FORWARD_DOWNLOAD_TIMEOUT);
+    tokio::time::timeout(timeout, async {
+        let guarded = validate_outbound_url_pinned_async(
+            url,
+            &OutboundUrlGuardOptions {
+                require_https: true,
+                upgrade_http_to_https: false,
+                allowlist: Vec::new(),
+            },
+        )
         .await
-        .map_err(|e| ForwardDownloadError::Network(e.to_string()))?;
+        .map_err(|_| ForwardDownloadError::UntrustedUrl)?;
 
-    Ok(bytes.to_vec())
+        let effective_limit = config.max_bytes.min(MAX_FORWARD_DOWNLOAD_BYTES);
+        let effective_limit =
+            usize::try_from(effective_limit).map_err(|_| ForwardDownloadError::InvalidConfig)?;
+        let mut builder = reqwest::Client::builder()
+            .timeout(timeout)
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if !guarded.pinned_addrs.is_empty()
+            && let Some(host) = guarded.url.host_str()
+        {
+            builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+        }
+        let client = builder.build().map_err(|_| {
+            ForwardDownloadError::Network("failed to build HTTP client".to_string())
+        })?;
+
+        let response = client
+            .get(guarded.url)
+            .send()
+            .await
+            .map_err(|e| ForwardDownloadError::Network(e.without_url().to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(ForwardDownloadError::HttpError(response.status().as_u16()));
+        }
+
+        crate::response::bounded_bytes(response, effective_limit)
+            .await
+            .map_err(|error| match error {
+                crate::response::BoundedResponseError::TooLarge { .. } => {
+                    ForwardDownloadError::TooLarge {
+                        size: attachment.file_size.unwrap_or(effective_limit as u64 + 1),
+                        limit: effective_limit as u64,
+                    }
+                }
+                _ => ForwardDownloadError::Network(error.to_string()),
+            })
+    })
+    .await
+    .map_err(|_| ForwardDownloadError::Timeout)?
 }
 
 /// Errors during forwarded attachment download.
@@ -195,6 +243,8 @@ pub enum ForwardDownloadError {
     Disabled,
     TooLarge { size: u64, limit: u64 },
     NoUrl,
+    UntrustedUrl,
+    InvalidConfig,
     Timeout,
     Network(String),
     HttpError(u16),
@@ -212,6 +262,8 @@ impl std::fmt::Display for ForwardDownloadError {
                 )
             }
             Self::NoUrl => write!(f, "No download URL available"),
+            Self::UntrustedUrl => write!(f, "Attachment download URL is not trusted"),
+            Self::InvalidConfig => write!(f, "Forward download configuration is invalid"),
             Self::Timeout => write!(f, "Download timed out"),
             Self::Network(e) => write!(f, "Network error: {}", e),
             Self::HttpError(code) => write!(f, "HTTP error: {}", code),

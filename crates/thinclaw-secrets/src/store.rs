@@ -234,6 +234,7 @@ impl SecretsStore for PostgresSecretsStore {
         user_id: &str,
         params: CreateSecretParams,
     ) -> Result<Secret, SecretError> {
+        params.validate(user_id)?;
         let client = self
             .pool
             .get()
@@ -809,6 +810,7 @@ impl SecretsStore for LibSqlSecretsStore {
         user_id: &str,
         params: CreateSecretParams,
     ) -> Result<Secret, SecretError> {
+        params.validate(user_id)?;
         let id = Uuid::new_v4();
         let now = Utc::now();
         let now_str = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -1488,6 +1490,7 @@ pub mod in_memory {
             user_id: &str,
             params: CreateSecretParams,
         ) -> Result<Secret, SecretError> {
+            params.validate(user_id)?;
             let now = Utc::now();
             let mut secret = Secret {
                 id: Uuid::new_v4(),

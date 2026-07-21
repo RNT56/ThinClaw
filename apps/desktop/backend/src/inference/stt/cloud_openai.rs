@@ -1,6 +1,9 @@
 //! OpenAI Whisper STT backend.
 
-use crate::inference::stt::{SttBackend, SttRequest};
+use crate::inference::stt::{
+    audio_file_metadata, bounded_stt_json, stt_http_client, validate_stt_request,
+    validate_transcript, SttBackend, SttRequest,
+};
 use crate::inference::{BackendInfo, InferenceError, InferenceResult};
 use async_trait::async_trait;
 
@@ -27,11 +30,13 @@ impl SttBackend for OpenAiSttBackend {
     }
 
     async fn transcribe(&self, request: SttRequest) -> InferenceResult<String> {
-        let client = reqwest::Client::new();
+        validate_stt_request(&request)?;
+        let client = stt_http_client(false)?;
+        let (filename, mime_type, _) = audio_file_metadata(request.format);
 
         let part = reqwest::multipart::Part::bytes(request.audio)
-            .file_name("audio.wav")
-            .mime_str("audio/wav")
+            .file_name(filename)
+            .mime_str(mime_type)
             .map_err(|e| InferenceError::other(e.to_string()))?;
 
         let mut form = reqwest::multipart::Form::new()
@@ -56,10 +61,8 @@ impl SttBackend for OpenAiSttBackend {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
             return Err(InferenceError::provider(format!(
-                "OpenAI STT error ({}): {}",
-                status, text
+                "OpenAI STT error ({status})"
             )));
         }
 
@@ -68,12 +71,9 @@ impl SttBackend for OpenAiSttBackend {
             text: String,
         }
 
-        let result: TranscriptionResponse = response
-            .json()
-            .await
-            .map_err(|e| InferenceError::provider(format!("Parse error: {}", e)))?;
+        let result: TranscriptionResponse = bounded_stt_json(response).await?;
 
-        Ok(result.text.trim().to_string())
+        validate_transcript(result.text)
     }
 
     fn supported_languages(&self) -> Vec<String> {

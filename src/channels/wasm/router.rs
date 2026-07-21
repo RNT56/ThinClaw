@@ -26,33 +26,35 @@ async fn oauth_callback_handler(
 ) -> impl IntoResponse {
     let code = params.get("code").cloned().unwrap_or_default();
     let oauth_state = params.get("state").cloned().unwrap_or_default();
-
-    if code.is_empty() {
-        let error = params
-            .get("error")
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
+    if params.len() > 32
+        || oauth_state.is_empty()
+        || oauth_state.len() > 8 * 1024
+        || code.len() > 8 * 1024
+        || params.iter().any(|(key, value)| {
+            key.is_empty()
+                || key.len() > 128
+                || value.len() > 8 * 1024
+                || key.chars().any(char::is_control)
+                || value.chars().any(char::is_control)
+        })
+    {
         return (
             StatusCode::BAD_REQUEST,
-            axum::response::Html(format!(
-                "<!DOCTYPE html><html><body style=\"font-family: sans-serif; \
-                 display: flex; justify-content: center; align-items: center; \
-                 height: 100vh; margin: 0; background: #191919; color: white;\">\
-                 <div style=\"text-align: center;\">\
-                 <h1>Authorization Failed</h1>\
-                 <p>Error: {}</p>\
-                 </div></body></html>",
-                error
-            )),
+            axum::response::Html(crate::cli::oauth_defaults::landing_html("ThinClaw", false)),
         );
     }
 
-    if !oauth_state.is_empty()
-        && let Some(ref ext_mgr) = state.extension_manager
-    {
+    if let Some(ref ext_mgr) = state.extension_manager {
         let is_valid = ext_mgr.validate_pending_auth_nonce(&oauth_state).await;
         if !is_valid {
             tracing::warn!("OAuth callback: invalid or expired state nonce");
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::response::Html(crate::cli::oauth_defaults::landing_html("ThinClaw", false)),
+            );
+        }
+
+        if code.is_empty() || params.contains_key("error") {
             return (
                 StatusCode::BAD_REQUEST,
                 axum::response::Html(crate::cli::oauth_defaults::landing_html("ThinClaw", false)),
@@ -64,7 +66,7 @@ async fn oauth_callback_handler(
                 tracing::info!(
                     extension = %extension_name,
                     tools = activate_result.tools_loaded.len(),
-                    "OAuth callback completed and tool activated"
+                    "OAuth callback completed and extension activated"
                 );
                 return (
                     StatusCode::OK,

@@ -15,14 +15,16 @@ use axum::{Json, Router, extract::State, routing::post};
 use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use thinclaw_channels_core::IncomingMessage;
 use thinclaw_llm_core::{ProviderTokenCapture, TokenCaptureSupport};
+use thinclaw_tools::execution::{CommandExecutionRequest, LocalHostExecutionBackend};
 
 use crate::run_artifact::{AgentRunArtifact, AgentRunArtifactLogger, AgentRunStatus};
+
+const MAX_SFT_EXPORT_BYTES: usize = 256 * 1024 * 1024;
 
 #[async_trait]
 pub trait AgentEnvAgent: Send + Sync {
@@ -453,25 +455,32 @@ impl AgentEnv for TerminalBenchEnv {
             case.command.as_str()
         };
 
-        let output = tokio::time::timeout(Duration::from_secs(case.timeout_secs), async {
-            let mut command = Command::new("sh");
-            command.arg("-lc").arg(command_to_run);
-            if let Some(cwd) = &case.cwd {
-                command.current_dir(cwd);
-            }
-            command.output().await
-        })
-        .await??;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit_code = output.status.code().unwrap_or(-1);
+        let workdir = match case.cwd.as_ref() {
+            Some(cwd) => cwd.clone(),
+            None => std::env::current_dir()?,
+        };
+        let backend = LocalHostExecutionBackend::shared();
+        let output = backend
+            .run_shell(CommandExecutionRequest {
+                command: command_to_run.to_string(),
+                workdir,
+                timeout: Duration::from_secs(case.timeout_secs.max(1)),
+                extra_env: std::collections::HashMap::new(),
+                // Evaluation cases must not silently become an unrestricted
+                // network-execution surface for model-generated commands.
+                allow_network: false,
+            })
+            .await?;
+        let stdout = output.stdout;
+        let stderr = output.stderr;
+        let exit_code = output.exit_code;
         let stdout_ok = case
             .expected_stdout_contains
             .iter()
             .all(|needle| stdout.contains(needle));
         let exit_ok = case
             .expected_exit_code
-            .map_or(output.status.success(), |expected| expected == exit_code);
+            .map_or(exit_code == 0, |expected| i64::from(expected) == exit_code);
         let verified = agent_action_usable && case.is_verifiable();
         let reward = if !agent_action_usable {
             // No usable agent action: the scripted fallback ran (for log
@@ -882,16 +891,17 @@ impl<E: AgentEnv> EnvRunner<E> {
                 }]
             })
             .await?;
-        if let Some(parent) = output.parent() {
+        if let Some(parent) = output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             tokio::fs::create_dir_all(parent).await?;
+            let metadata = tokio::fs::symlink_metadata(parent).await?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                anyhow::bail!("SFT output parent is not a real directory");
+            }
         }
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(output)
-            .await?;
-        use tokio::io::AsyncWriteExt;
+        let mut export = Vec::new();
         for trajectory in trajectories {
             if trajectory.score < SFT_QUALITY_GATE_SCORE {
                 continue;
@@ -912,11 +922,21 @@ impl<E: AgentEnv> EnvRunner<E> {
                         "score": trajectory.score
                     }
                 });
-                file.write_all(serde_json::to_string(&row)?.as_bytes())
-                    .await?;
-                file.write_all(b"\n").await?;
+                let row = serde_json::to_vec(&row)?;
+                let projected = export
+                    .len()
+                    .checked_add(row.len())
+                    .and_then(|size| size.checked_add(1))
+                    .ok_or_else(|| anyhow::anyhow!("SFT export size overflow"))?;
+                if projected > MAX_SFT_EXPORT_BYTES {
+                    anyhow::bail!("SFT export exceeds the output size limit");
+                }
+                export.extend_from_slice(&row);
+                export.push(b'\n');
             }
         }
+        thinclaw_platform::write_private_file_atomic_async(output.to_path_buf(), export, true)
+            .await?;
         Ok(())
     }
 

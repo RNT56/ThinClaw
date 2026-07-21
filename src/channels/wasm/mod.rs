@@ -122,7 +122,8 @@ pub use runtime_config::{
     WasmChannelHostConfig, apply_channel_host_config, inject_channel_credentials_from_secrets,
 };
 pub use schema::{
-    ChannelCapabilitiesFile, ChannelConfig, ProductionStatus, SecretSetupSchema, SetupSchema,
+    ChannelCapabilitiesFile, ChannelConfig, CredentialLocationSchema, ProductionStatus,
+    SecretSetupSchema, SetupSchema, SetupValidationEndpointSchema, SetupValidationRequestSchema,
     WebhookSchema, WebhookSecretValidation,
 };
 #[cfg(feature = "wasm-runtime")]
@@ -172,16 +173,35 @@ mod stubs {
 
     #[derive(Debug, Clone, Default)]
     pub struct RegisteredEndpoint {
+        pub channel_name: String,
         pub path: String,
+        pub methods: Vec<String>,
+        pub require_secret: bool,
     }
 
-    #[derive(Debug, Clone, Default)]
+    #[derive(Clone, Default, PartialEq, Eq)]
     pub struct RegisteredWebhookAuth {
         pub secret_header: Option<String>,
         pub secret_validation: super::WebhookSecretValidation,
         pub signature_secret: Option<String>,
         pub verify_token_param: Option<String>,
         pub verify_token_secret: Option<String>,
+    }
+
+    impl std::fmt::Debug for RegisteredWebhookAuth {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("RegisteredWebhookAuth")
+                .field("secret_header", &self.secret_header)
+                .field("secret_validation", &self.secret_validation)
+                .field("has_signature_secret", &self.signature_secret.is_some())
+                .field("verify_token_param", &self.verify_token_param)
+                .field(
+                    "has_verify_token_secret",
+                    &self.verify_token_secret.is_some(),
+                )
+                .finish()
+        }
     }
 
     impl RegisteredWebhookAuth {
@@ -198,16 +218,92 @@ mod stubs {
             Self
         }
 
-        pub async fn register(
+        pub async fn validate_registration(
             &self,
-            _channel: Arc<WasmChannel>,
-            _endpoints: Vec<RegisteredEndpoint>,
-            _auth: RegisteredWebhookAuth,
-        ) {
+            name: &str,
+            endpoints: &[RegisteredEndpoint],
+            auth: &RegisteredWebhookAuth,
+        ) -> Result<(), String> {
+            let valid_name = (1..=64).contains(&name.len())
+                && name
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                });
+            if !valid_name || endpoints.len() > 32 {
+                return Err("channel name or endpoint count is invalid".to_string());
+            }
+            if auth.secret_header.as_deref().is_some_and(|value| {
+                value.is_empty()
+                    || value.len() > 256
+                    || axum::http::HeaderName::from_bytes(value.as_bytes()).is_err()
+            }) || auth
+                .signature_secret
+                .as_deref()
+                .is_some_and(|value| value.is_empty() || value.len() > 64 * 1024)
+                || auth
+                    .verify_token_secret
+                    .as_deref()
+                    .is_some_and(|value| value.is_empty() || value.len() > 64 * 1024)
+                || auth.verify_token_param.as_deref().is_some_and(|value| {
+                    value.is_empty()
+                        || value.len() > 128
+                        || !value.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+                        })
+                })
+            {
+                return Err(
+                    "webhook authentication configuration is malformed or oversized".to_string(),
+                );
+            }
+            let owned_prefix = format!("/webhook/{name}");
+            if endpoints.iter().any(|endpoint| {
+                endpoint.channel_name != name
+                    || (endpoint.path != owned_prefix
+                        && !endpoint
+                            .path
+                            .strip_prefix(&owned_prefix)
+                            .is_some_and(|suffix| suffix.starts_with('/')))
+                    || endpoint.path.len() > 256
+                    || endpoint.methods.len() > 8
+                    || endpoint.methods.iter().any(|method| {
+                        !matches!(
+                            method.to_ascii_uppercase().as_str(),
+                            "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"
+                        )
+                    })
+            }) {
+                return Err(
+                    "webhook endpoint is outside its channel namespace or malformed".to_string(),
+                );
+            }
+            Ok(())
         }
 
-        pub async fn update_webhook_auth(&self, _channel_name: &str, _auth: RegisteredWebhookAuth) {
+        pub async fn register(
+            &self,
+            channel: Arc<WasmChannel>,
+            endpoints: Vec<RegisteredEndpoint>,
+            auth: RegisteredWebhookAuth,
+        ) -> Result<(), String> {
+            self.validate_registration(channel.name(), &endpoints, &auth)
+                .await
         }
+
+        pub async fn update_webhook_auth(
+            &self,
+            channel_name: &str,
+            auth: RegisteredWebhookAuth,
+        ) -> Result<(), String> {
+            self.validate_registration(channel_name, &[], &auth).await
+        }
+
+        pub async fn unregister(&self, _channel_name: &str) {}
 
         pub async fn get_channel_for_path(&self, _path: &str) -> Option<Arc<WasmChannel>> {
             None
@@ -297,6 +393,10 @@ mod stubs {
     impl LoadedChannel {
         pub fn name(&self) -> &str {
             &self.name
+        }
+
+        pub fn capabilities_file(&self) -> Option<&super::ChannelCapabilitiesFile> {
+            None
         }
 
         pub fn webhook_secret_name(&self) -> String {

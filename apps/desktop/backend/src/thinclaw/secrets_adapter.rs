@@ -57,6 +57,7 @@ enum GrantFlag {
     Bedrock,
     CustomLlm,
     RemoteToken,
+    GoogleWorkspace,
     Unsupported,
 }
 
@@ -273,6 +274,70 @@ pub const SECRET_POLICIES: &[SecretPolicy] = &[
         env_vars: &["THINCLAW_REMOTE_TOKEN"],
         keychain_key: "remote_token",
         grant: GrantFlag::RemoteToken,
+    },
+    SecretPolicy {
+        thinclaw_names: &["desktop_gateway_auth_token"],
+        provider_slug: "desktop_gateway_auth",
+        env_vars: &[],
+        keychain_key: "desktop_gateway_auth_token",
+        grant: GrantFlag::Unsupported,
+    },
+    SecretPolicy {
+        thinclaw_names: &["desktop_device_private_key"],
+        provider_slug: "desktop_device_identity",
+        env_vars: &[],
+        keychain_key: "desktop_device_private_key",
+        grant: GrantFlag::Unsupported,
+    },
+    SecretPolicy {
+        thinclaw_names: &[
+            "google_oauth_token",
+            "gmail_oauth_token",
+            "GOOGLE_OAUTH_TOKEN",
+            "GMAIL_OAUTH_TOKEN",
+        ],
+        provider_slug: "google_workspace_oauth",
+        env_vars: &["GOOGLE_OAUTH_TOKEN", "GMAIL_OAUTH_TOKEN"],
+        keychain_key: "google_oauth_token",
+        grant: GrantFlag::GoogleWorkspace,
+    },
+    SecretPolicy {
+        thinclaw_names: &[
+            "google_oauth_token_refresh_token",
+            "gmail_oauth_token_refresh_token",
+            "gmail_refresh_token",
+        ],
+        provider_slug: "google_workspace_refresh",
+        env_vars: &["GMAIL_REFRESH_TOKEN"],
+        keychain_key: "google_oauth_token_refresh_token",
+        grant: GrantFlag::GoogleWorkspace,
+    },
+    SecretPolicy {
+        thinclaw_names: &["google_oauth_token_scopes", "gmail_oauth_token_scopes"],
+        provider_slug: "google_workspace_scopes",
+        env_vars: &[],
+        keychain_key: "google_oauth_token_scopes",
+        grant: GrantFlag::GoogleWorkspace,
+    },
+    SecretPolicy {
+        thinclaw_names: &[
+            "google_oauth_token_client_id",
+            "gmail_oauth_token_client_id",
+        ],
+        provider_slug: "google_workspace_client_id",
+        env_vars: &["GOOGLE_OAUTH_CLIENT_ID", "GMAIL_CLIENT_ID"],
+        keychain_key: "google_oauth_token_client_id",
+        grant: GrantFlag::GoogleWorkspace,
+    },
+    SecretPolicy {
+        thinclaw_names: &[
+            "google_oauth_token_client_secret",
+            "gmail_oauth_token_client_secret",
+        ],
+        provider_slug: "google_workspace_client_secret",
+        env_vars: &["GOOGLE_OAUTH_CLIENT_SECRET", "GMAIL_CLIENT_SECRET"],
+        keychain_key: "google_oauth_token_client_secret",
+        grant: GrantFlag::GoogleWorkspace,
     },
     SecretPolicy {
         thinclaw_names: &["deepseek"],
@@ -607,6 +672,7 @@ impl SecretGrantSnapshot {
                 GrantFlag::Bedrock => self.bedrock,
                 GrantFlag::CustomLlm => self.custom_llm,
                 GrantFlag::RemoteToken => self.remote_token,
+                GrantFlag::GoogleWorkspace => true,
                 GrantFlag::Unsupported => false,
             };
         }
@@ -631,6 +697,7 @@ impl SecretsStore for KeychainSecretsAdapter {
         _user_id: &str,
         params: CreateSecretParams,
     ) -> Result<Secret, SecretError> {
+        params.validate(_user_id)?;
         self.ensure_granted(&params.name)?;
         let thinclaw_key = self.keychain_key_for_name(&params.name).into_owned();
         let value = params.value.expose_secret();
@@ -702,8 +769,14 @@ impl SecretsStore for KeychainSecretsAdapter {
     async fn list(&self, _user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
         let mut refs = Vec::new();
         for policy in SECRET_POLICIES {
-            if matches!(policy.grant, GrantFlag::Unsupported)
-                || !self.is_granted(policy.keychain_key)
+            // OAuth records are a dedicated channel credential bundle, not
+            // generic secrets. Enumerating them here would both expose
+            // implementation metadata and cause an otherwise ungranted list
+            // operation to touch the OS credential store.
+            if matches!(
+                policy.grant,
+                GrantFlag::Unsupported | GrantFlag::GoogleWorkspace
+            ) || !self.is_granted(policy.keychain_key)
             {
                 continue;
             }
@@ -917,6 +990,29 @@ mod tests {
         assert_eq!(map_key_name("LLM_API_KEY"), "openrouter");
         assert_eq!(map_key_name("GROQ_API_KEY"), "groq");
         assert_eq!(map_key_name("xai_api_key"), "xai");
+    }
+
+    #[test]
+    fn google_workspace_oauth_metadata_uses_exact_keychain_keys() {
+        for (alias, expected) in [
+            ("GMAIL_OAUTH_TOKEN", "google_oauth_token"),
+            (
+                "gmail_oauth_token_refresh_token",
+                "google_oauth_token_refresh_token",
+            ),
+            ("gmail_oauth_token_scopes", "google_oauth_token_scopes"),
+            (
+                "gmail_oauth_token_client_id",
+                "google_oauth_token_client_id",
+            ),
+            (
+                "gmail_oauth_token_client_secret",
+                "google_oauth_token_client_secret",
+            ),
+        ] {
+            assert_eq!(map_key_name(alias), expected);
+            assert!(SecretGrantSnapshot::default().is_granted(alias));
+        }
     }
 
     #[test]

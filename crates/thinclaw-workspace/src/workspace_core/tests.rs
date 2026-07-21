@@ -79,7 +79,7 @@ Experiment freely.
     assert!(essential.contains("## Tools"));
     assert!(essential.contains("## 💓 Heartbeats - Be Proactive!"));
     assert!(!essential.contains("## Make It Yours"));
-    assert!(essential.contains("Full instructions: `memory_read AGENTS.md`"));
+    assert!(essential.contains("Full instructions are runtime-managed trusted context."));
 }
 
 #[test]

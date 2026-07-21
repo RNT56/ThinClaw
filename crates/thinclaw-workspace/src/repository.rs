@@ -18,6 +18,8 @@ use crate::search::{
     mmr_rerank, reciprocal_rank_fusion,
 };
 
+const MAX_CHUNK_BACKFILL_RESULTS: usize = 10_000;
+
 /// Database repository for workspace operations.
 #[derive(Clone)]
 pub struct Repository {
@@ -122,16 +124,28 @@ impl Repository {
         let now = Utc::now();
         let metadata = serde_json::json!({});
 
-        conn.execute(
-            r#"
-            INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, '', $5, $6, $7)
-            ON CONFLICT (user_id, agent_id, path) DO NOTHING
-            "#,
-            &[&id, &user_id, &agent_id, &path, &metadata, &now, &now],
-        )
-        .await
-        .map_err(|e| WorkspaceError::SearchFailed {
+        let insert = if agent_id.is_none() {
+            conn.execute(
+                r#"
+                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata, created_at, updated_at)
+                VALUES ($1, $2, NULL, $3, '', $4, $5, $5)
+                ON CONFLICT (user_id, path) WHERE agent_id IS NULL DO NOTHING
+                "#,
+                &[&id, &user_id, &path, &metadata, &now],
+            )
+            .await
+        } else {
+            conn.execute(
+                r#"
+                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, '', $5, $6, $6)
+                ON CONFLICT (user_id, agent_id, path) DO NOTHING
+                "#,
+                &[&id, &user_id, &agent_id, &path, &metadata, &now],
+            )
+            .await
+        };
+        insert.map_err(|e| WorkspaceError::SearchFailed {
             reason: format!("Insert failed: {}", e),
         })?;
 
@@ -144,7 +158,11 @@ impl Repository {
         let conn = self.conn().await?;
 
         conn.execute(
-            "UPDATE memory_documents SET content = $2, updated_at = NOW() WHERE id = $1",
+            r#"UPDATE memory_documents
+               SET content = $2,
+                   updated_at = NOW(),
+                   metadata = metadata || '{"index_dirty":true}'::jsonb
+               WHERE id = $1"#,
             &[&id, &content],
         )
         .await
@@ -153,6 +171,92 @@ impl Repository {
         })?;
 
         Ok(())
+    }
+
+    /// Atomically update a document when the caller's content snapshot is
+    /// still current.
+    pub async fn update_document_if_current(
+        &self,
+        id: Uuid,
+        expected_content: &str,
+        content: &str,
+    ) -> Result<bool, WorkspaceError> {
+        let conn = self.conn().await?;
+        let affected = conn
+            .execute(
+                r#"UPDATE memory_documents
+                   SET content = $3,
+                       updated_at = NOW(),
+                       metadata = metadata || '{"index_dirty":true}'::jsonb
+                   WHERE id = $1 AND content = $2"#,
+                &[&id, &expected_content, &content],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Conditional update failed: {e}"),
+            })?;
+        Ok(affected == 1)
+    }
+
+    /// Atomically append content and mark the search index dirty.
+    pub async fn append_document_by_path(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        path: &str,
+        separator: &str,
+        content: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        let conn = self.conn().await?;
+        let id = Uuid::new_v4();
+        let metadata = serde_json::json!({"index_dirty": true});
+        let row = if agent_id.is_none() {
+            conn.query_one(
+                r#"
+                INSERT INTO memory_documents
+                    (id, user_id, agent_id, path, content, metadata, created_at, updated_at)
+                VALUES ($1, $2, NULL, $3, $4, $5, NOW(), NOW())
+                ON CONFLICT (user_id, path) WHERE agent_id IS NULL
+                DO UPDATE SET
+                    content = CASE
+                        WHEN memory_documents.content = '' THEN EXCLUDED.content
+                        ELSE memory_documents.content || $6 || EXCLUDED.content
+                    END,
+                    updated_at = NOW(),
+                    metadata = memory_documents.metadata || '{"index_dirty":true}'::jsonb
+                RETURNING id, user_id, agent_id, path, content,
+                          created_at, updated_at, metadata
+                "#,
+                &[&id, &user_id, &path, &content, &metadata, &separator],
+            )
+            .await
+        } else {
+            conn.query_one(
+                r#"
+                INSERT INTO memory_documents
+                    (id, user_id, agent_id, path, content, metadata, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+                ON CONFLICT (user_id, agent_id, path)
+                DO UPDATE SET
+                    content = CASE
+                        WHEN memory_documents.content = '' THEN EXCLUDED.content
+                        ELSE memory_documents.content || $7 || EXCLUDED.content
+                    END,
+                    updated_at = NOW(),
+                    metadata = memory_documents.metadata || '{"index_dirty":true}'::jsonb
+                RETURNING id, user_id, agent_id, path, content,
+                          created_at, updated_at, metadata
+                "#,
+                &[
+                    &id, &user_id, &agent_id, &path, &content, &metadata, &separator,
+                ],
+            )
+            .await
+        }
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Atomic append failed: {e}"),
+        })?;
+        Ok(self.row_to_document(&row))
     }
 
     /// Delete a document by its path.
@@ -382,6 +486,85 @@ impl Repository {
         Ok(())
     }
 
+    /// Compare-and-swap the search index against the exact content snapshot
+    /// that was chunked. The row lock prevents a writer from interleaving
+    /// between the comparison and commit.
+    pub async fn replace_chunks_if_current(
+        &self,
+        document_id: Uuid,
+        expected_content: &str,
+        chunks: &[(i32, String, Option<Vec<f32>>)],
+    ) -> Result<bool, WorkspaceError> {
+        let mut conn = self.conn().await?;
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("BEGIN failed: {e}"),
+            })?;
+        let current = tx
+            .query_opt(
+                "SELECT content FROM memory_documents WHERE id = $1 FOR UPDATE",
+                &[&document_id],
+            )
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Document lock failed: {e}"),
+            })?;
+        let Some(current) = current else {
+            return Err(WorkspaceError::DocumentNotFound {
+                doc_type: document_id.to_string(),
+                user_id: "unknown".to_string(),
+            });
+        };
+        if current.get::<_, String>("content") != expected_content {
+            tx.rollback()
+                .await
+                .map_err(|e| WorkspaceError::ChunkingFailed {
+                    reason: format!("ROLLBACK failed: {e}"),
+                })?;
+            return Ok(false);
+        }
+
+        tx.execute(
+            "DELETE FROM memory_chunks WHERE document_id = $1",
+            &[&document_id],
+        )
+        .await
+        .map_err(|e| WorkspaceError::ChunkingFailed {
+            reason: format!("Delete failed: {e}"),
+        })?;
+        for (index, content, embedding) in chunks {
+            let chunk_id = Uuid::new_v4();
+            let embedding_vec = embedding.as_ref().map(|value| Vector::from(value.clone()));
+            tx.execute(
+                r#"INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
+                   VALUES ($1, $2, $3, $4, $5)"#,
+                &[&chunk_id, &document_id, index, &content, &embedding_vec],
+            )
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Insert failed: {e}"),
+            })?;
+        }
+        tx.execute(
+            r#"UPDATE memory_documents
+               SET metadata = metadata || '{"index_dirty":false}'::jsonb
+               WHERE id = $1"#,
+            &[&document_id],
+        )
+        .await
+        .map_err(|e| WorkspaceError::ChunkingFailed {
+            reason: format!("Index state update failed: {e}"),
+        })?;
+        tx.commit()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("COMMIT failed: {e}"),
+            })?;
+        Ok(true)
+    }
+
     /// Update a chunk's embedding.
     pub async fn update_chunk_embedding(
         &self,
@@ -422,7 +605,11 @@ impl Repository {
                   AND c.embedding IS NULL
                 LIMIT $3
                 "#,
-                &[&user_id, &agent_id, &(limit as i64)],
+                &[
+                    &user_id,
+                    &agent_id,
+                    &(limit.min(MAX_CHUNK_BACKFILL_RESULTS) as i64),
+                ],
             )
             .await
             .map_err(|e| WorkspaceError::SearchFailed {
@@ -456,21 +643,31 @@ impl Repository {
         embedding: Option<&[f32]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        let config = config
+            .clone()
+            .validate_and_normalize()
+            .map_err(|reason| WorkspaceError::SearchFailed { reason })?;
         // Expand query with morphological variants for better FTS recall.
         let expanded_query = if config.use_fts {
             let keywords = expand_query_keywords(query);
             if keywords.is_empty() {
                 query.to_string()
             } else {
-                keywords.join(" | ")
+                keywords.join(" OR ")
             }
         } else {
             query.to_string()
         };
 
         let fts_results = if config.use_fts {
-            self.fts_search(user_id, agent_id, &expanded_query, config.pre_fusion_limit)
-                .await?
+            self.fts_search(
+                user_id,
+                agent_id,
+                &expanded_query,
+                config.pre_fusion_limit,
+                &config.path_prefixes,
+            )
+            .await?
         } else {
             Vec::new()
         };
@@ -484,6 +681,7 @@ impl Repository {
                     embedding,
                     config.pre_fusion_limit,
                     need_embeddings,
+                    &config.path_prefixes,
                 )
                 .await?
             } else {
@@ -509,7 +707,7 @@ impl Repository {
             }
         }
 
-        let mut results = reciprocal_rank_fusion(fts_results, vector_results, config);
+        let mut results = reciprocal_rank_fusion(fts_results, vector_results, &config);
 
         // Apply temporal decay if configured.
         if let Some(half_life) = config.temporal_decay_half_life_days
@@ -535,6 +733,7 @@ impl Repository {
         agent_id: Option<Uuid>,
         query: &str,
         limit: usize,
+        path_prefixes: &[String],
     ) -> Result<Vec<RankedResult>, WorkspaceError> {
         let conn = self.conn().await?;
 
@@ -542,16 +741,23 @@ impl Repository {
             .query(
                 r#"
                 SELECT c.id as chunk_id, c.document_id, d.path, c.content,
-                       ts_rank_cd(c.content_tsv, plainto_tsquery('english', $3)) as rank,
-                       c.created_at
+                       ts_rank_cd(c.content_tsv, websearch_to_tsquery('english', $3)) as rank,
+                       d.updated_at AS created_at
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
                 WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
-                  AND c.content_tsv @@ plainto_tsquery('english', $3)
+                  AND c.content_tsv @@ websearch_to_tsquery('english', $3)
+                  AND (
+                      cardinality($5::text[]) = 0 OR EXISTS (
+                          SELECT 1 FROM unnest($5::text[]) AS allowed(prefix)
+                          WHERE d.path = allowed.prefix
+                             OR left(d.path, length(allowed.prefix) + 1) = allowed.prefix || '/'
+                      )
+                  )
                 ORDER BY rank DESC
                 LIMIT $4
                 "#,
-                &[&user_id, &agent_id, &query, &(limit as i64)],
+                &[&user_id, &agent_id, &query, &(limit as i64), &path_prefixes],
             )
             .await
             .map_err(|e| WorkspaceError::SearchFailed {
@@ -584,6 +790,7 @@ impl Repository {
         embedding: &[f32],
         limit: usize,
         include_embeddings: bool,
+        path_prefixes: &[String],
     ) -> Result<Vec<RankedResult>, WorkspaceError> {
         let conn = self.conn().await?;
         let embedding_vec = Vector::from(embedding.to_vec());
@@ -593,11 +800,18 @@ impl Repository {
             r#"
             SELECT c.id as chunk_id, c.document_id, d.path, c.content,
                    1 - (c.embedding <=> $3) as similarity,
-                   c.created_at, c.embedding
+                   d.updated_at AS created_at, c.embedding
             FROM memory_chunks c
             JOIN memory_documents d ON d.id = c.document_id
             WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
               AND c.embedding IS NOT NULL
+              AND (
+                  cardinality($5::text[]) = 0 OR EXISTS (
+                      SELECT 1 FROM unnest($5::text[]) AS allowed(prefix)
+                      WHERE d.path = allowed.prefix
+                         OR left(d.path, length(allowed.prefix) + 1) = allowed.prefix || '/'
+                  )
+              )
             ORDER BY c.embedding <=> $3
             LIMIT $4
             "#
@@ -605,11 +819,18 @@ impl Repository {
             r#"
             SELECT c.id as chunk_id, c.document_id, d.path, c.content,
                    1 - (c.embedding <=> $3) as similarity,
-                   c.created_at
+                   d.updated_at AS created_at
             FROM memory_chunks c
             JOIN memory_documents d ON d.id = c.document_id
             WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
               AND c.embedding IS NOT NULL
+              AND (
+                  cardinality($5::text[]) = 0 OR EXISTS (
+                      SELECT 1 FROM unnest($5::text[]) AS allowed(prefix)
+                      WHERE d.path = allowed.prefix
+                         OR left(d.path, length(allowed.prefix) + 1) = allowed.prefix || '/'
+                  )
+              )
             ORDER BY c.embedding <=> $3
             LIMIT $4
             "#
@@ -618,7 +839,13 @@ impl Repository {
         let rows = conn
             .query(
                 query_sql,
-                &[&user_id, &agent_id, &embedding_vec, &(limit as i64)],
+                &[
+                    &user_id,
+                    &agent_id,
+                    &embedding_vec,
+                    &(limit as i64),
+                    &path_prefixes,
+                ],
             )
             .await
             .map_err(|e| WorkspaceError::SearchFailed {
@@ -678,6 +905,26 @@ impl crate::WorkspaceStore for Repository {
         Repository::update_document(self, id, content).await
     }
 
+    async fn update_document_if_current(
+        &self,
+        id: Uuid,
+        expected_content: &str,
+        content: &str,
+    ) -> Result<bool, WorkspaceError> {
+        Repository::update_document_if_current(self, id, expected_content, content).await
+    }
+
+    async fn append_document_by_path(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        path: &str,
+        separator: &str,
+        content: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        Repository::append_document_by_path(self, user_id, agent_id, path, separator, content).await
+    }
+
     async fn delete_document_by_path(
         &self,
         user_id: &str,
@@ -732,6 +979,15 @@ impl crate::WorkspaceStore for Repository {
         chunks: &[(i32, String, Option<Vec<f32>>)],
     ) -> Result<(), WorkspaceError> {
         Repository::replace_chunks(self, document_id, chunks).await
+    }
+
+    async fn replace_chunks_if_current(
+        &self,
+        document_id: Uuid,
+        expected_content: &str,
+        chunks: &[(i32, String, Option<Vec<f32>>)],
+    ) -> Result<bool, WorkspaceError> {
+        Repository::replace_chunks_if_current(self, document_id, expected_content, chunks).await
     }
 
     async fn update_chunk_embedding(

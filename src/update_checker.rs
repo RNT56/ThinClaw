@@ -15,6 +15,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+const MAX_RELEASE_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RELEASES: usize = 100;
+const MAX_RELEASE_NOTES_BYTES: usize = 128 * 1024;
+
 /// GitHub release info.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseInfo {
@@ -84,9 +88,12 @@ impl UpdateChecker {
             config,
             client: Client::builder()
                 .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
                 .user_agent(format!("thinclaw/{}", env!("CARGO_PKG_VERSION")))
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
                 .build()
-                .unwrap_or_default(),
+                .expect("static update-checker HTTP client configuration"),
             status_tx,
             status_rx,
         }
@@ -104,51 +111,64 @@ impl UpdateChecker {
 
     /// Perform a single update check.
     pub async fn check_now(&self) -> Result<UpdateStatus, String> {
-        let url = format!(
-            "https://api.github.com/repos/{}/releases",
-            self.config.github_repo
-        );
+        let (owner, repo) = parse_github_repo(&self.config.github_repo)
+            .ok_or_else(|| "GitHub repository must be an owner/repo pair".to_string())?;
+        let mut url = reqwest::Url::parse("https://api.github.com/repos")
+            .map_err(|error| format!("Invalid GitHub API base URL: {error}"))?;
+        url.path_segments_mut()
+            .map_err(|_| "Invalid GitHub API base URL".to_string())?
+            .extend([owner, repo, "releases"]);
+        url.query_pairs_mut()
+            .append_pair("per_page", &MAX_RELEASES.to_string());
 
         let resp = self
             .client
-            .get(&url)
+            .get(url)
             .header("Accept", "application/vnd.github.v3+json")
             .send()
             .await
-            .map_err(|e| format!("GitHub API: {e}"))?;
+            .map_err(|e| format!("GitHub API: {}", e.without_url()))?;
 
         if !resp.status().is_success() {
             return Err(format!("GitHub API returned {}", resp.status()));
         }
 
-        let releases: Vec<ReleaseInfo> = resp
-            .json()
-            .await
-            .map_err(|e| format!("Parse releases: {e}"))?;
+        let releases: Vec<ReleaseInfo> =
+            crate::http_response::bounded_json(resp, MAX_RELEASE_RESPONSE_BYTES)
+                .await
+                .map_err(|e| format!("Parse releases: {e}"))?;
 
         // Find the latest non-draft release (optionally including pre-releases)
-        let latest = releases
-            .iter()
-            .find(|r| !r.draft && (self.config.include_prereleases || !r.prerelease));
+        let latest = releases.into_iter().take(MAX_RELEASES).find_map(|release| {
+            if release.draft
+                || (!self.config.include_prereleases && release.prerelease)
+                || release.tag_name.len() > 128
+            {
+                return None;
+            }
+            let version = semver::Version::parse(release.tag_name.trim_start_matches('v')).ok()?;
+            let release_url = valid_release_page_url(&release.html_url, owner, repo)
+                .then_some(release.html_url.clone());
+            Some((release, version, release_url))
+        });
 
         let current = env!("CARGO_PKG_VERSION");
         let now = chrono::Utc::now().to_rfc3339();
 
         let status = match latest {
-            Some(release) => {
-                let tag = release
-                    .tag_name
-                    .strip_prefix('v')
-                    .unwrap_or(&release.tag_name);
-
-                let update_available = is_newer(tag, current);
+            Some((release, version, release_url)) => {
+                let tag = version.to_string();
+                let update_available = is_newer(&tag, current);
 
                 UpdateStatus {
                     current_version: current.to_string(),
-                    latest_version: Some(tag.to_string()),
+                    latest_version: Some(tag),
                     update_available,
-                    release_url: Some(release.html_url.clone()),
-                    release_notes: release.body.clone(),
+                    release_url,
+                    release_notes: release
+                        .body
+                        .as_deref()
+                        .map(|notes| truncate_utf8(notes, MAX_RELEASE_NOTES_BYTES)),
                     last_checked: Some(now),
                 }
             }
@@ -168,7 +188,7 @@ impl UpdateChecker {
 
     /// Start the background check loop. Returns a `JoinHandle` for the task.
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
-        let interval = self.config.check_interval;
+        let interval = self.config.check_interval.max(Duration::from_secs(60));
 
         tokio::spawn(async move {
             loop {
@@ -199,25 +219,67 @@ impl UpdateChecker {
     }
 }
 
-/// Simple semver comparison: returns true if `remote` > `local`.
-fn is_newer(remote: &str, local: &str) -> bool {
-    let parse = |s: &str| -> (u64, u64, u64) {
-        let mut parts = s.split('.');
-        let major = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-        let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-        let patch = parts
-            .next()
-            .and_then(|p| {
-                // Handle pre-release suffixes like "1.2.3-beta"
-                p.split('-').next().and_then(|v| v.parse().ok())
-            })
-            .unwrap_or(0);
-        (major, minor, patch)
+fn parse_github_repo(value: &str) -> Option<(&str, &str)> {
+    let mut parts = value.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 100
+            && part != "."
+            && part != ".."
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     };
+    (parts.next().is_none() && valid(owner) && valid(repo)).then_some((owner, repo))
+}
 
-    let r = parse(remote);
-    let l = parse(local);
-    r > l
+fn valid_release_page_url(value: &str, owner: &str, repo: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    let Some(parts) = url.path_segments().map(|parts| parts.collect::<Vec<_>>()) else {
+        return false;
+    };
+    parts.len() >= 5
+        && parts[0].eq_ignore_ascii_case(owner)
+        && parts[1].eq_ignore_ascii_case(repo)
+        && parts[2] == "releases"
+        && parts[3] == "tag"
+        && !parts[4].is_empty()
+}
+
+fn truncate_utf8(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_string();
+    }
+    let mut boundary = limit;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value[..boundary].to_string()
+}
+
+/// SemVer comparison: returns true if `remote` > `local`.
+fn is_newer(remote: &str, local: &str) -> bool {
+    let Ok(remote) = semver::Version::parse(remote.trim_start_matches('v')) else {
+        return false;
+    };
+    let Ok(local) = semver::Version::parse(local.trim_start_matches('v')) else {
+        return false;
+    };
+    remote > local
 }
 
 #[cfg(test)]
@@ -244,6 +306,28 @@ mod tests {
     fn test_is_newer_with_prerelease() {
         assert!(is_newer("1.1.0-beta", "1.0.0"));
         assert!(!is_newer("1.0.0-beta", "1.0.0"));
+        assert!(is_newer("1.0.0", "1.0.0-beta.1"));
+        assert!(!is_newer("not-semver", "1.0.0"));
+    }
+
+    #[test]
+    fn github_repo_and_release_url_are_strictly_scoped() {
+        assert_eq!(
+            parse_github_repo("RNT56/ThinClaw"),
+            Some(("RNT56", "ThinClaw"))
+        );
+        assert!(parse_github_repo("RNT56/ThinClaw/../../admin").is_none());
+        assert!(parse_github_repo("RNT56/%2fadmin").is_none());
+        assert!(valid_release_page_url(
+            "https://github.com/RNT56/ThinClaw/releases/tag/v1.0.0",
+            "RNT56",
+            "ThinClaw"
+        ));
+        assert!(!valid_release_page_url(
+            "https://github.com/attacker/ThinClaw/releases/tag/v1.0.0",
+            "RNT56",
+            "ThinClaw"
+        ));
     }
 
     #[test]

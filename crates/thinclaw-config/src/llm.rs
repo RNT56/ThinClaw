@@ -103,7 +103,7 @@ pub struct OllamaConfig {
 }
 
 /// Configuration for any OpenAI-compatible endpoint.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiCompatibleConfig {
     pub base_url: String,
     pub api_key: Option<SecretString>,
@@ -113,6 +113,24 @@ pub struct OpenAiCompatibleConfig {
     /// Extra HTTP headers injected into every LLM request.
     /// Parsed from `LLM_EXTRA_HEADERS` env var (format: `Key:Value,Key2:Value2`).
     pub extra_headers: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for OpenAiCompatibleConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let header_names = self
+            .extra_headers
+            .iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        formatter
+            .debug_struct("OpenAiCompatibleConfig")
+            .field("base_url", &"[REDACTED URL]")
+            .field("api_key", &self.api_key)
+            .field("api_keys", &self.api_keys)
+            .field("model", &self.model)
+            .field("extra_header_names", &header_names)
+            .finish()
+    }
 }
 
 /// Configuration for Tinfoil private inference.

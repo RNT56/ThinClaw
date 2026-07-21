@@ -69,13 +69,18 @@ impl CloudProvider for MockProvider {
         Ok(())
     }
 
-    async fn get(&self, key: &str) -> Result<Vec<u8>, CloudError> {
-        self.storage
+    async fn get_bounded(&self, key: &str, max_bytes: usize) -> Result<Vec<u8>, CloudError> {
+        let data = self
+            .storage
             .lock()
             .unwrap()
             .get(key)
             .cloned()
-            .ok_or_else(|| CloudError::NotFound(key.to_string()))
+            .ok_or_else(|| CloudError::NotFound(key.to_string()))?;
+        if data.len() > max_bytes {
+            return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+        }
+        Ok(data)
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudError> {

@@ -30,7 +30,9 @@
         "qq_bot_token": {
           "secret_name": "qq_bot_token",
           "location": {
-            "type": "bearer"
+            "type": "header",
+            "name": "Authorization",
+            "prefix": "Bot "
           },
           "host_patterns": [
             "api.sgroup.qq.com"

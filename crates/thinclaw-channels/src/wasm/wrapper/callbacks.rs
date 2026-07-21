@@ -36,6 +36,18 @@ use super::store::{ChannelStoreData, ToolEventEntry, html_escape};
 use super::{SandboxedChannel, WasmChannel, wit_channel};
 
 impl WasmChannel {
+    fn effective_callback_timeout(
+        runtime: &WasmChannelRuntime,
+        prepared: &PreparedChannelModule,
+        capabilities: &ChannelCapabilities,
+    ) -> Duration {
+        runtime
+            .config()
+            .callback_timeout
+            .min(prepared.limits.timeout)
+            .min(capabilities.callback_timeout)
+    }
+
     /// Flush accumulated tool events as a single formatted summary message.
     ///
     /// Called at the start of `respond()` so the tool activity block appears
@@ -144,17 +156,37 @@ impl WasmChannel {
     pub(super) fn registered_endpoints_from_config(
         &self,
         config: &ChannelConfig,
-    ) -> Vec<RegisteredEndpoint> {
+    ) -> Result<Vec<RegisteredEndpoint>, WasmChannelError> {
+        if config.display_name.is_empty()
+            || config.display_name.len() > 1024
+            || config.display_name.chars().any(char::is_control)
+            || config.http_endpoints.len() > 32
+        {
+            return Err(WasmChannelError::CallbackFailed {
+                name: self.name.clone(),
+                reason: "on_start returned an invalid display name or too many endpoints"
+                    .to_string(),
+            });
+        }
         let mut endpoints = Vec::new();
 
         for endpoint in &config.http_endpoints {
-            if !self.capabilities.is_path_allowed(&endpoint.path) {
-                tracing::warn!(
-                    channel = %self.name,
-                    path = %endpoint.path,
-                    "HTTP endpoint path not allowed by capabilities"
-                );
-                continue;
+            if !self.capabilities.is_path_allowed(&endpoint.path)
+                || endpoint.path.len() > 256
+                || endpoint.methods.len() > 8
+                || endpoint.methods.iter().any(|method| {
+                    !matches!(
+                        method.to_ascii_uppercase().as_str(),
+                        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"
+                    )
+                })
+                || !endpoint.require_secret
+            {
+                return Err(WasmChannelError::CallbackFailed {
+                    name: self.name.clone(),
+                    reason: "on_start returned an unauthorized or unauthenticated webhook endpoint"
+                        .to_string(),
+                });
             }
 
             endpoints.push(RegisteredEndpoint {
@@ -165,12 +197,25 @@ impl WasmChannel {
             });
         }
 
-        endpoints
+        if let Some(poll) = &config.poll
+            && poll.enabled
+        {
+            self.capabilities
+                .validate_poll_interval(poll.interval_ms)
+                .map_err(|reason| WasmChannelError::CallbackFailed {
+                    name: self.name.clone(),
+                    reason,
+                })?;
+        }
+
+        Ok(endpoints)
     }
 
-    async fn cache_channel_config(&self, config: &ChannelConfig) {
+    async fn cache_channel_config(&self, config: &ChannelConfig) -> Result<(), WasmChannelError> {
+        let endpoints = self.registered_endpoints_from_config(config)?;
         *self.channel_config.write().await = Some(config.clone());
-        *self.endpoints.write().await = self.registered_endpoints_from_config(config);
+        *self.endpoints.write().await = endpoints;
+        Ok(())
     }
 
     pub(super) async fn ensure_on_start_config(
@@ -181,8 +226,13 @@ impl WasmChannel {
             return Ok(existing);
         }
 
+        let _on_start_guard = self.on_start_lock.lock().await;
+        if !force_refresh && let Some(existing) = self.channel_config.read().await.clone() {
+            return Ok(existing);
+        }
+
         let config = self.call_on_start().await?;
-        self.cache_channel_config(&config).await;
+        self.cache_channel_config(&config).await?;
         Ok(config)
     }
 
@@ -261,7 +311,7 @@ impl WasmChannel {
         // blocking thread, never to cut short legitimate in-budget work.
         store.epoch_deadline_trap();
         store.set_epoch_deadline(crate::wasm::runtime::epoch_deadline_ticks(
-            runtime.config().callback_timeout,
+            Self::effective_callback_timeout(runtime, prepared, capabilities),
         ));
 
         // Set up resource limiter
@@ -359,7 +409,8 @@ impl WasmChannel {
             self.config_json.read().await.clone(),
             &self.load_runtime_state(),
         );
-        let timeout = self.runtime.config().callback_timeout;
+        let timeout =
+            Self::effective_callback_timeout(&self.runtime, &self.prepared, &self.capabilities);
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
@@ -400,7 +451,12 @@ impl WasmChannel {
 
                 // Commit pending workspace writes to the persistent store
                 let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                workspace_store
+                    .commit_writes(&pending_writes)
+                    .map_err(|reason| WasmChannelError::CallbackFailed {
+                        name: prepared.name.clone(),
+                        reason: format!("failed to persist channel workspace: {reason}"),
+                    })?;
 
                 Ok((config, host_state))
             })
@@ -418,13 +474,13 @@ impl WasmChannel {
                 for entry in host_state.take_logs() {
                     match entry.level {
                         LogLevel::Error => {
-                            tracing::error!(channel = %self.name, "{}", entry.message);
+                            tracing::error!(channel = %self.name, message_bytes = entry.message.len(), "WASM guest logged an error");
                         }
                         LogLevel::Warn => {
-                            tracing::warn!(channel = %self.name, "{}", entry.message);
+                            tracing::warn!(channel = %self.name, message_bytes = entry.message.len(), "WASM guest logged a warning");
                         }
                         _ => {
-                            tracing::debug!(channel = %self.name, "{}", entry.message);
+                            tracing::debug!(channel = %self.name, level = ?entry.level, message_bytes = entry.message.len(), "WASM guest log entry");
                         }
                     }
                 }
@@ -465,16 +521,6 @@ impl WasmChannel {
             "call_on_http_request invoked (webhook received)"
         );
 
-        // Log the body for debugging (truncated at char boundary)
-        if let Ok(body_str) = std::str::from_utf8(body) {
-            let truncated = if body_str.chars().count() > 1000 {
-                format!("{}...", body_str.chars().take(1000).collect::<String>())
-            } else {
-                body_str.to_string()
-            };
-            tracing::debug!(body = %truncated, "Webhook request body");
-        }
-
         // Log credentials state (without values)
         let creds = self.get_credentials().await;
         tracing::info!(
@@ -497,7 +543,8 @@ impl WasmChannel {
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
-        let timeout = self.runtime.config().callback_timeout;
+        let timeout =
+            Self::effective_callback_timeout(&self.runtime, &self.prepared, &self.capabilities);
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
@@ -546,7 +593,12 @@ impl WasmChannel {
 
                 // Commit pending workspace writes to the persistent store
                 let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                workspace_store
+                    .commit_writes(&pending_writes)
+                    .map_err(|reason| WasmChannelError::CallbackFailed {
+                        name: prepared.name.clone(),
+                        reason: format!("failed to persist channel workspace: {reason}"),
+                    })?;
 
                 Ok((response, host_state))
             })
@@ -596,7 +648,8 @@ impl WasmChannel {
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
-        let timeout = self.runtime.config().callback_timeout;
+        let timeout =
+            Self::effective_callback_timeout(&self.runtime, &self.prepared, &self.capabilities);
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
@@ -626,7 +679,12 @@ impl WasmChannel {
 
                 // Commit pending workspace writes to the persistent store
                 let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                workspace_store
+                    .commit_writes(&pending_writes)
+                    .map_err(|reason| WasmChannelError::CallbackFailed {
+                        name: prepared.name.clone(),
+                        reason: format!("failed to persist channel workspace: {reason}"),
+                    })?;
 
                 Ok(((), host_state))
             })
@@ -698,7 +756,8 @@ impl WasmChannel {
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
-        let timeout = self.runtime.config().callback_timeout;
+        let timeout =
+            Self::effective_callback_timeout(&self.runtime, &self.prepared, &self.capabilities);
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
@@ -736,27 +795,25 @@ impl WasmChannel {
                     metadata_json,
                 };
 
-                // Truncate at char boundary for logging (avoid panic on multi-byte UTF-8)
-                let content_preview: String = content.chars().take(50).collect();
-                tracing::info!(
-                    content_preview = %content_preview,
-                    "Calling WASM on_respond"
-                );
+                tracing::info!(content_bytes = content.len(), "Calling WASM on_respond");
 
                 // Call on_respond using the generated typed interface
                 let channel_iface = instance.near_agent_channel();
                 let wasm_result = channel_iface
                     .call_on_respond(&mut store, &wit_response)
                     .map_err(|e| {
-                        tracing::error!(error = %e, "WASM on_respond call failed");
+                        tracing::error!("WASM on_respond call failed");
                         Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel)
                     })?;
 
-                tracing::info!(wasm_result = ?wasm_result, "WASM on_respond returned");
+                tracing::info!(success = wasm_result.is_ok(), "WASM on_respond returned");
 
                 // Check for WASM-level errors
                 if let Err(ref err_msg) = wasm_result {
-                    tracing::error!(error = %err_msg, "WASM on_respond returned error");
+                    tracing::error!(
+                        error_bytes = err_msg.len(),
+                        "WASM on_respond returned error"
+                    );
                     return Err(WasmChannelError::CallbackFailed {
                         name: prepared.name.clone(),
                         reason: err_msg.clone(),
@@ -768,7 +825,12 @@ impl WasmChannel {
                 // Commit pending workspace writes to the persistent store
                 // so state mutations from on_respond survive restarts.
                 let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                workspace_store
+                    .commit_writes(&pending_writes)
+                    .map_err(|reason| WasmChannelError::CallbackFailed {
+                        name: prepared.name.clone(),
+                        reason: format!("failed to persist channel workspace: {reason}"),
+                    })?;
                 tracing::info!("on_respond WASM execution completed successfully");
                 Ok(((), host_state))
             })
@@ -817,7 +879,8 @@ impl WasmChannel {
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
-        let timeout = self.runtime.config().callback_timeout;
+        let timeout =
+            Self::effective_callback_timeout(&self.runtime, &self.prepared, &self.capabilities);
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
@@ -847,7 +910,12 @@ impl WasmChannel {
                 // Commit pending workspace writes to the persistent store
                 // so state mutations from on_status survive restarts.
                 let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                workspace_store
+                    .commit_writes(&pending_writes)
+                    .map_err(|reason| WasmChannelError::CallbackFailed {
+                        name: prepared.name.clone(),
+                        reason: format!("failed to persist channel workspace: {reason}"),
+                    })?;
 
                 Ok(())
             })
@@ -924,7 +992,12 @@ impl WasmChannel {
                 // Commit pending workspace writes to the persistent store for
                 // background typing/status callbacks.
                 let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                workspace_store
+                    .commit_writes(&pending_writes)
+                    .map_err(|reason| WasmChannelError::CallbackFailed {
+                        name: prepared.name.clone(),
+                        reason: format!("failed to persist channel workspace: {reason}"),
+                    })?;
 
                 Ok(())
             })
@@ -950,6 +1023,7 @@ impl WasmChannel {
     pub(super) async fn cancel_typing_task(&self) {
         if let Some(handle) = self.typing_task.write().await.take() {
             handle.abort();
+            let _ = handle.await;
         }
     }
 
@@ -983,12 +1057,11 @@ impl WasmChannel {
                 // Cancel any existing typing task
                 self.cancel_typing_task().await;
 
-                // Diagnostic: log the metadata to verify message_thread_id propagation
-                tracing::info!(
+                tracing::debug!(
                     channel = %self.name,
-                    metadata = %metadata,
-                    thread_id = ?metadata.get("message_thread_id"),
-                    "handle_status_update: Thinking with metadata"
+                    metadata_bytes = metadata.to_string().len(),
+                    has_thread_id = metadata.get("message_thread_id").is_some(),
+                    "Handling thinking status metadata"
                 );
 
                 // Fire once immediately
@@ -1008,7 +1081,11 @@ impl WasmChannel {
                 let credentials = self.credentials.clone();
                 let workspace_store = self.workspace_store.clone();
                 let pairing_store = self.pairing_store.clone();
-                let callback_timeout = self.runtime.config().callback_timeout;
+                let callback_timeout = Self::effective_callback_timeout(
+                    &self.runtime,
+                    &self.prepared,
+                    &self.capabilities,
+                );
                 let wit_update = status_to_wit(&status, metadata);
 
                 let handle = tokio::spawn(async move {
@@ -1281,7 +1358,11 @@ impl WasmChannel {
     /// Since we can't hold `Arc<Self>` from `&self`, we pass all the components
     /// needed for polling to a spawned task. Each poll tick creates a fresh WASM
     /// instance (matching our "fresh instance per callback" pattern).
-    pub(super) fn start_polling(&self, interval: Duration, shutdown_rx: oneshot::Receiver<()>) {
+    pub(super) fn start_polling(
+        &self,
+        interval: Duration,
+        shutdown_rx: oneshot::Receiver<()>,
+    ) -> tokio::task::JoinHandle<()> {
         let channel_name = self.name.clone();
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
@@ -1290,7 +1371,8 @@ impl WasmChannel {
         let rate_limiter = self.rate_limiter.clone();
         let credentials = self.credentials.clone();
         let pairing_store = self.pairing_store.clone();
-        let callback_timeout = self.runtime.config().callback_timeout;
+        let callback_timeout =
+            Self::effective_callback_timeout(&self.runtime, &self.prepared, &self.capabilities);
         let workspace_store = self.workspace_store.clone();
 
         tokio::spawn(async move {
@@ -1352,7 +1434,7 @@ impl WasmChannel {
                     }
                 }
             }
-        });
+        })
     }
 
     /// Execute a single poll callback with a fresh WASM instance.
@@ -1411,7 +1493,12 @@ impl WasmChannel {
 
                 // Commit pending workspace writes to the persistent store
                 let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                workspace_store
+                    .commit_writes(&pending_writes)
+                    .map_err(|reason| WasmChannelError::CallbackFailed {
+                        name: prepared.name.clone(),
+                        reason: format!("failed to persist channel workspace: {reason}"),
+                    })?;
 
                 Ok(host_state)
             })

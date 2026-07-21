@@ -93,11 +93,18 @@ impl TauriChannel {
     }
 
     /// Set tray icon to active state (with dot badge) and schedule auto-reset.
-    fn set_tray_active(&self) {
+    async fn set_tray_active(&self) {
         if let Some(tray_state) = self
             .app_handle
             .try_state::<std::sync::Arc<crate::setup::tray::TrayState>>()
         {
+            // Serialize cancellation/replacement through the handle mutex. The
+            // previous fire-and-forget wrappers could run out of order, letting
+            // a stale "active" update overwrite a newer idle transition.
+            let mut reset_handle = tray_state.reset_handle.lock().await;
+            if let Some(previous) = reset_handle.take() {
+                previous.abort();
+            }
             let _ = tray_state
                 .tray
                 .set_icon(Some(tray_state.active_icon.clone()));
@@ -105,40 +112,27 @@ impl TauriChannel {
                 .tray
                 .set_tooltip(Some("ThinClaw Desktop — processing..."));
 
-            // Cancel previous reset timer and schedule a new one
-            let tray_arc = std::sync::Arc::clone(&tray_state);
-            tokio::spawn(async move {
-                // Cancel previous reset
-                if let Some(prev) = tray_arc.reset_handle.lock().await.take() {
-                    prev.abort();
-                }
-                // Schedule reset after 3 seconds of no activity
-                let tray_reset = std::sync::Arc::clone(&tray_arc);
-                let handle = tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    let _ = tray_reset.tray.set_icon(Some(tray_reset.idle_icon.clone()));
-                    let _ = tray_reset.tray.set_tooltip(Some("ThinClaw Desktop"));
-                });
-                *tray_arc.reset_handle.lock().await = Some(handle);
-            });
+            let tray_reset = std::sync::Arc::clone(&tray_state);
+            *reset_handle = Some(tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let _ = tray_reset.tray.set_icon(Some(tray_reset.idle_icon.clone()));
+                let _ = tray_reset.tray.set_tooltip(Some("ThinClaw Desktop"));
+            }));
         }
     }
 
     /// Set tray icon to idle state immediately.
-    fn set_tray_idle(&self) {
+    async fn set_tray_idle(&self) {
         if let Some(tray_state) = self
             .app_handle
             .try_state::<std::sync::Arc<crate::setup::tray::TrayState>>()
         {
-            // Cancel any pending reset timer
-            let tray_arc = std::sync::Arc::clone(&tray_state);
-            tokio::spawn(async move {
-                if let Some(prev) = tray_arc.reset_handle.lock().await.take() {
-                    prev.abort();
-                }
-                let _ = tray_arc.tray.set_icon(Some(tray_arc.idle_icon.clone()));
-                let _ = tray_arc.tray.set_tooltip(Some("ThinClaw Desktop"));
-            });
+            let mut reset_handle = tray_state.reset_handle.lock().await;
+            if let Some(previous) = reset_handle.take() {
+                previous.abort();
+            }
+            let _ = tray_state.tray.set_icon(Some(tray_state.idle_icon.clone()));
+            let _ = tray_state.tray.set_tooltip(Some("ThinClaw Desktop"));
         }
     }
 
@@ -204,7 +198,7 @@ impl Channel for TauriChannel {
         self.emit_ui_event(&event);
 
         // Reset tray icon to idle when response is sent
-        self.set_tray_idle();
+        self.set_tray_idle().await;
 
         Ok(())
     }
@@ -232,7 +226,7 @@ impl Channel for TauriChannel {
                 | StatusUpdate::SubagentSpawned { .. }
                 | StatusUpdate::SubagentProgress { .. }
         ) {
-            self.set_tray_active();
+            self.set_tray_active().await;
         }
 
         // ── Register subagent lifecycle in the sub_agent_registry ────────

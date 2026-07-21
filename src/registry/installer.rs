@@ -17,6 +17,11 @@ const ALLOWED_ARTIFACT_HOSTS: &[&str] = &[
     "github-releases.githubusercontent.com",
     "raw.githubusercontent.com",
 ];
+const MAX_ARTIFACT_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_WASM_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CAPABILITIES_BYTES: usize = 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 128;
+const MAX_ARTIFACT_URL_BYTES: usize = 16 * 1024;
 
 fn should_attempt_source_fallback(err: &RegistryError) -> bool {
     match err {
@@ -47,6 +52,13 @@ fn validate_artifact_url(
     field: &'static str,
     url: &str,
 ) -> Result<(), RegistryError> {
+    if url.is_empty() || url.len() > MAX_ARTIFACT_URL_BYTES || url.chars().any(char::is_control) {
+        return Err(RegistryError::InvalidManifest {
+            name: manifest_name.to_string(),
+            field,
+            reason: "URL is empty, malformed, or exceeds its size limit".to_string(),
+        });
+    }
     let parsed = reqwest::Url::parse(url).map_err(|e| RegistryError::InvalidManifest {
         name: manifest_name.to_string(),
         field,
@@ -61,6 +73,14 @@ fn validate_artifact_url(
         });
     }
 
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
+        return Err(RegistryError::InvalidManifest {
+            name: manifest_name.to_string(),
+            field,
+            reason: "URL cannot contain embedded credentials or a fragment".to_string(),
+        });
+    }
+
     let host = parsed
         .host_str()
         .ok_or_else(|| RegistryError::InvalidManifest {
@@ -69,7 +89,10 @@ fn validate_artifact_url(
             reason: "URL host is missing".to_string(),
         })?;
 
-    if host.parse::<IpAddr>().is_ok() || !is_allowed_artifact_host(host) {
+    if host.parse::<IpAddr>().is_ok()
+        || !is_allowed_artifact_host(host)
+        || parsed.port_or_known_default() != Some(443)
+    {
         return Err(RegistryError::InvalidManifest {
             name: manifest_name.to_string(),
             field,
@@ -80,8 +103,22 @@ fn validate_artifact_url(
     Ok(())
 }
 
-fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), RegistryError> {
+pub(crate) fn redacted_download_url(url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return "<invalid-url>".to_string();
+    };
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
+}
+
+pub(crate) fn validate_manifest_install_inputs(
+    manifest: &ExtensionManifest,
+) -> Result<(), RegistryError> {
     let is_valid_name = !manifest.name.is_empty()
+        && manifest.name.len() <= 128
         && manifest
             .name
             .chars()
@@ -94,13 +131,56 @@ fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), 
             reason: "name must contain only lowercase letters, digits, '-' or '_'".to_string(),
         });
     }
+    if manifest.kind == ManifestKind::Tool
+        && thinclaw_tools::registry::PROTECTED_TOOL_NAMES.contains(&manifest.name.as_str())
+    {
+        return Err(RegistryError::InvalidManifest {
+            name: manifest.name.clone(),
+            field: "name",
+            reason: "tool name conflicts with a protected built-in tool".to_string(),
+        });
+    }
+
+    if !valid_manifest_text(&manifest.display_name, 256, false) {
+        return Err(invalid_manifest_field(
+            manifest,
+            "display_name",
+            "must contain 1-256 bytes without control characters",
+        ));
+    }
+    if manifest.version.len() > 64 || semver::Version::parse(&manifest.version).is_err() {
+        return Err(invalid_manifest_field(
+            manifest,
+            "version",
+            "must be a semantic version no longer than 64 bytes",
+        ));
+    }
+    if !valid_manifest_text(&manifest.description, 4 * 1024, false) {
+        return Err(invalid_manifest_field(
+            manifest,
+            "description",
+            "must contain 1-4096 bytes without control characters",
+        ));
+    }
+    if !valid_manifest_string_list(&manifest.keywords, 64, 128)
+        || !valid_manifest_string_list(&manifest.tags, 64, 128)
+    {
+        return Err(invalid_manifest_field(
+            manifest,
+            "keywords/tags",
+            "lists must contain at most 64 unique bounded values",
+        ));
+    }
 
     let expected_prefix = match manifest.kind {
         ManifestKind::Tool => "tools-src/",
         ManifestKind::Channel => "channels-src/",
     };
 
-    if !manifest.source.dir.starts_with(expected_prefix) {
+    if manifest.source.dir.len() > 1024
+        || manifest.source.dir.chars().any(char::is_control)
+        || !manifest.source.dir.starts_with(expected_prefix)
+    {
         return Err(RegistryError::InvalidManifest {
             name: manifest.name.clone(),
             field: "source.dir",
@@ -136,7 +216,166 @@ fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), 
         });
     }
 
+    if manifest.source.capabilities.is_empty()
+        || manifest.source.capabilities.len() > 256
+        || !manifest.source.capabilities.ends_with(".json")
+    {
+        return Err(RegistryError::InvalidManifest {
+            name: manifest.name.clone(),
+            field: "source.capabilities",
+            reason: "must be a non-empty .json file name no longer than 256 bytes".to_string(),
+        });
+    }
+
+    if manifest.source.crate_name.is_empty()
+        || manifest.source.crate_name.len() > 128
+        || !manifest
+            .source
+            .crate_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(RegistryError::InvalidManifest {
+            name: manifest.name.clone(),
+            field: "source.crate_name",
+            reason: "must contain only ASCII letters, digits, hyphens, or underscores".to_string(),
+        });
+    }
+
+    if manifest.artifacts.len() > 16 {
+        return Err(invalid_manifest_field(
+            manifest,
+            "artifacts",
+            "must contain at most 16 target entries",
+        ));
+    }
+    for (target, artifact) in &manifest.artifacts {
+        if target.is_empty()
+            || target.len() > 128
+            || !target
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(invalid_manifest_field(
+                manifest,
+                "artifacts",
+                "target names must be bounded ASCII identifiers",
+            ));
+        }
+        if let Some(url) = artifact.url.as_deref() {
+            if url.len() > 4096 {
+                return Err(invalid_manifest_field(
+                    manifest,
+                    "artifacts.url",
+                    "URL exceeds the 4096-byte limit",
+                ));
+            }
+            validate_artifact_url(&manifest.name, "artifacts.url", url)?;
+        }
+        if let Some(url) = artifact.capabilities_url.as_deref() {
+            if url.len() > 4096 {
+                return Err(invalid_manifest_field(
+                    manifest,
+                    "artifacts.capabilities_url",
+                    "URL exceeds the 4096-byte limit",
+                ));
+            }
+            validate_artifact_url(&manifest.name, "artifacts.capabilities_url", url)?;
+        }
+        if artifact.sha256.as_deref().is_some_and(|hash| {
+            hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            return Err(invalid_manifest_field(
+                manifest,
+                "artifacts.sha256",
+                "must be a 64-character hexadecimal SHA-256 digest",
+            ));
+        }
+    }
+
+    if let Some(auth) = manifest.auth_summary.as_ref() {
+        if auth
+            .method
+            .as_deref()
+            .is_some_and(|method| !matches!(method, "oauth" | "manual" | "none"))
+            || auth
+                .provider
+                .as_deref()
+                .is_some_and(|value| !valid_manifest_text(value, 256, false))
+            || !valid_manifest_identifier_list(&auth.secrets, 64, 128)
+            || auth
+                .shared_auth
+                .as_deref()
+                .is_some_and(|value| !valid_manifest_identifier(value, 128))
+        {
+            return Err(invalid_manifest_field(
+                manifest,
+                "auth_summary",
+                "contains an invalid method, provider, or secret identifier",
+            ));
+        }
+        if let Some(setup_url) = auth.setup_url.as_deref() {
+            let parsed = reqwest::Url::parse(setup_url).ok();
+            if setup_url.len() > 4096
+                || parsed.as_ref().is_none_or(|url| {
+                    url.scheme() != "https"
+                        || url.host_str().is_none()
+                        || !url.username().is_empty()
+                        || url.password().is_some()
+                })
+            {
+                return Err(invalid_manifest_field(
+                    manifest,
+                    "auth_summary.setup_url",
+                    "must be a bounded HTTPS URL without embedded credentials",
+                ));
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn invalid_manifest_field(
+    manifest: &ExtensionManifest,
+    field: &'static str,
+    reason: impl Into<String>,
+) -> RegistryError {
+    RegistryError::InvalidManifest {
+        name: manifest.name.clone(),
+        field,
+        reason: reason.into(),
+    }
+}
+
+fn valid_manifest_text(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
+    (allow_empty || !value.trim().is_empty())
+        && value.len() <= max_bytes
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_manifest_string_list(values: &[String], max_entries: usize, max_bytes: usize) -> bool {
+    let mut unique = std::collections::HashSet::with_capacity(values.len());
+    values.len() <= max_entries
+        && values
+            .iter()
+            .all(|value| valid_manifest_text(value, max_bytes, false) && unique.insert(value))
+}
+
+fn valid_manifest_identifier(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_manifest_identifier_list(values: &[String], max_entries: usize, max_bytes: usize) -> bool {
+    let mut unique = std::collections::HashSet::with_capacity(values.len());
+    values.len() <= max_entries
+        && values
+            .iter()
+            .all(|value| valid_manifest_identifier(value, max_bytes) && unique.insert(value))
 }
 
 fn download_failure_reason(error: &reqwest::Error) -> String {
@@ -232,24 +471,6 @@ impl RegistryInstaller {
             });
         }
 
-        // Build the WASM component
-        // Check toolchain availability first to give a clear error before printing
-        // "Building..." (which confuses users when it immediately fails)
-        let cargo_component_ok = tokio::process::Command::new("cargo")
-            .args(["component", "--version"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
-
-        if !cargo_component_ok {
-            return Err(RegistryError::ToolchainMissing {
-                name: manifest.name.clone(),
-            });
-        }
-
         println!(
             "Building {} '{}' from {}...",
             manifest.kind,
@@ -260,9 +481,16 @@ impl RegistryInstaller {
         let wasm_path =
             crate::registry::artifacts::build_wasm_component(&source_dir, crate_name, true)
                 .await
-                .map_err(|e| RegistryError::ManifestRead {
-                    path: source_dir.clone(),
-                    reason: format!("build failed: {}", e),
+                .map_err(|error| match error {
+                    crate::registry::artifacts::WasmBuildError::ToolchainUnavailable => {
+                        RegistryError::ToolchainMissing {
+                            name: manifest.name.clone(),
+                        }
+                    }
+                    other => RegistryError::ManifestRead {
+                        path: source_dir.clone(),
+                        reason: format!("build failed: {other}"),
+                    },
                 })?;
 
         println!("  Installing to {}", target_wasm.display());
@@ -271,6 +499,7 @@ impl RegistryInstaller {
             &source_dir,
             &manifest.name,
             target_dir,
+            manifest.kind,
             force,
         )
         .await
@@ -423,51 +652,32 @@ impl RegistryInstaller {
             "Downloading {} '{}'...",
             manifest.kind, manifest.display_name
         );
-        let bytes = download_artifact(url).await?;
+        let bytes = download_artifact(url, MAX_ARTIFACT_DOWNLOAD_BYTES).await?;
         verify_sha256(&bytes, expected_sha, url)?;
 
         let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
 
-        // Detect format and extract
-        let has_capabilities = if is_gzip(&bytes) {
-            // tar.gz bundle: extract {name}.wasm and {name}.capabilities.json
-            let extracted =
-                extract_tar_gz(&bytes, &manifest.name, &target_wasm, &target_caps, url)?;
-            extracted.has_capabilities
+        // Decode and validate the entire payload before publishing either file.
+        // This prevents a malformed archive from leaving an executable behind
+        // after the install reports failure.
+        let (wasm_bytes, capabilities_bytes) = if is_gzip(&bytes) {
+            let extracted = extract_tar_gz(&bytes, &manifest.name, url)?;
+            (extracted.wasm, extracted.capabilities)
         } else {
-            // Bare WASM file
-            fs::write(&target_wasm, &bytes)
-                .await
-                .map_err(RegistryError::Io)?;
-
             // Try to get capabilities from:
             // 1. Separate capabilities_url in the artifact
             // 2. Source tree (legacy, requires repo)
-            if let Some(ref caps_url) = artifact.capabilities_url {
+            let capabilities = if let Some(ref caps_url) = artifact.capabilities_url {
                 validate_artifact_url(
                     &manifest.name,
                     "artifacts.wasm32-wasip2.capabilities_url",
                     caps_url,
                 )?;
-                const MAX_CAPS_SIZE: usize = 1024 * 1024; // 1 MB
-                match download_artifact(caps_url).await {
-                    Ok(caps_bytes) if caps_bytes.len() <= MAX_CAPS_SIZE => {
-                        fs::write(&target_caps, &caps_bytes)
-                            .await
-                            .map_err(RegistryError::Io)?;
-                        true
-                    }
-                    Ok(caps_bytes) => {
-                        tracing::warn!(
-                            "Capabilities file too large ({} bytes, max {}), skipping",
-                            caps_bytes.len(),
-                            MAX_CAPS_SIZE
-                        );
-                        false
-                    }
+                match download_artifact(caps_url, MAX_CAPABILITIES_BYTES).await {
+                    Ok(caps_bytes) => Some(caps_bytes.to_vec()),
                     Err(e) => {
-                        tracing::warn!("Failed to download capabilities from {}: {}", caps_url, e);
-                        false
+                        tracing::warn!(error = %e, "Failed to download artifact capabilities");
+                        None
                     }
                 }
             } else {
@@ -476,16 +686,24 @@ impl RegistryInstaller {
                     .repo_root
                     .join(&manifest.source.dir)
                     .join(&manifest.source.capabilities);
-                if caps_source.exists() {
-                    fs::copy(&caps_source, &target_caps)
-                        .await
-                        .map_err(RegistryError::Io)?;
-                    true
-                } else {
-                    false
-                }
-            }
+                read_regular_file_bounded(caps_source, MAX_CAPABILITIES_BYTES).await?
+            };
+            (bytes.to_vec(), capabilities)
         };
+
+        validate_wasm_payload(&wasm_bytes, url)?;
+        if let Some(capabilities) = capabilities_bytes.as_deref() {
+            validate_capabilities_payload(manifest.kind, &manifest.name, capabilities, url)?;
+        }
+        let has_capabilities = capabilities_bytes.is_some();
+        publish_extension_files(
+            target_wasm.clone(),
+            target_caps,
+            wasm_bytes,
+            capabilities_bytes,
+            force,
+        )
+        .await?;
 
         println!("  Installed to {}", target_wasm.display());
 
@@ -589,33 +807,294 @@ impl RegistryInstaller {
     }
 }
 
-/// Download an artifact from a URL.
-async fn download_artifact(url: &str) -> Result<bytes::Bytes, RegistryError> {
-    let response = reqwest::get(url)
-        .await
-        .map_err(|e| RegistryError::DownloadFailed {
-            url: url.to_string(),
-            reason: download_failure_reason(&e),
-        })?;
+fn payload_error(url: &str, reason: impl Into<String>) -> RegistryError {
+    RegistryError::DownloadFailed {
+        url: redacted_download_url(url),
+        reason: reason.into(),
+    }
+}
 
-    let response = response
-        .error_for_status()
-        .map_err(|e| RegistryError::DownloadFailed {
-            url: url.to_string(),
-            reason: format!(
-                "http status {}",
-                e.status()
-                    .map_or("unknown".to_string(), |status| status.as_u16().to_string())
+pub(crate) fn validate_wasm_payload(bytes: &[u8], url: &str) -> Result<(), RegistryError> {
+    if bytes.len() < 8 || bytes.len() > MAX_WASM_BYTES || !bytes.starts_with(b"\0asm") {
+        return Err(payload_error(
+            url,
+            format!(
+                "downloaded WASM must be a valid-looking module between 8 and {MAX_WASM_BYTES} bytes"
             ),
-        })?;
+        ));
+    }
+    Ok(())
+}
 
-    response
-        .bytes()
+pub(crate) fn validate_capabilities_payload(
+    kind: ManifestKind,
+    name: &str,
+    bytes: &[u8],
+    url: &str,
+) -> Result<(), RegistryError> {
+    if bytes.len() > MAX_CAPABILITIES_BYTES {
+        return Err(payload_error(
+            url,
+            format!("capabilities exceed the {MAX_CAPABILITIES_BYTES}-byte limit"),
+        ));
+    }
+    match kind {
+        ManifestKind::Tool => {
+            crate::tools::wasm::CapabilitiesFile::from_bytes(bytes).map_err(|error| {
+                payload_error(url, format!("invalid tool capabilities: {error}"))
+            })?;
+        }
+        ManifestKind::Channel => {
+            let capabilities = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(bytes)
+                .map_err(|error| {
+                    payload_error(url, format!("invalid channel capabilities: {error}"))
+                })?;
+            if capabilities.r#type != "channel" || capabilities.name != name {
+                return Err(payload_error(
+                    url,
+                    "channel capabilities type/name does not match the registry manifest",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn read_regular_file_bounded(
+    path: PathBuf,
+    limit: usize,
+) -> Result<Option<Vec<u8>>, RegistryError> {
+    tokio::task::spawn_blocking(move || read_regular_file_bounded_sync(&path, limit))
         .await
-        .map_err(|e| RegistryError::DownloadFailed {
-            url: url.to_string(),
-            reason: format!("failed to read response body: {}", e),
-        })
+        .map_err(|error| {
+            RegistryError::Io(std::io::Error::other(format!(
+                "capabilities read task failed: {error}"
+            )))
+        })?
+        .map_err(RegistryError::Io)
+}
+
+fn read_regular_file_bounded_sync(path: &Path, limit: usize) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read as _;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > limit as u64
+    {
+        return Err(std::io::Error::other(
+            "capabilities source is not a bounded regular file",
+        ));
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file() || opened_metadata.len() > limit as u64 {
+        return Err(std::io::Error::other(
+            "capabilities source changed or exceeds the size limit",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.by_ref()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(std::io::Error::other(
+            "capabilities source exceeds the size limit",
+        ));
+    }
+    Ok(Some(bytes))
+}
+
+pub(crate) async fn publish_extension_files(
+    target_wasm: PathBuf,
+    target_caps: PathBuf,
+    wasm: Vec<u8>,
+    capabilities: Option<Vec<u8>>,
+    force: bool,
+) -> Result<(), RegistryError> {
+    let existing_path = target_wasm.clone();
+    let existing_name = target_wasm
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("extension")
+        .to_owned();
+    thinclaw_platform::publish_file_pair(
+        target_wasm,
+        target_caps,
+        wasm,
+        capabilities,
+        if force {
+            thinclaw_platform::ExistingPairPolicy::Replace
+        } else {
+            thinclaw_platform::ExistingPairPolicy::Refuse
+        },
+    )
+    .await
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            RegistryError::AlreadyInstalled {
+                name: existing_name,
+                path: existing_path,
+            }
+        } else {
+            RegistryError::Io(error)
+        }
+    })
+}
+
+#[cfg(test)]
+fn publish_extension_files_sync(
+    target_wasm: &Path,
+    target_caps: &Path,
+    wasm: &[u8],
+    capabilities: Option<&[u8]>,
+) -> std::io::Result<()> {
+    thinclaw_platform::publish_file_pair_sync(
+        target_wasm,
+        target_caps,
+        wasm,
+        capabilities,
+        thinclaw_platform::ExistingPairPolicy::Replace,
+    )
+}
+
+/// Download an artifact from a URL.
+async fn download_artifact(url: &str, max_bytes: usize) -> Result<bytes::Bytes, RegistryError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        download_artifact_inner(url, max_bytes),
+    )
+    .await
+    .map_err(|_| RegistryError::DownloadFailed {
+        url: redacted_download_url(url),
+        reason: "artifact download timed out".to_string(),
+    })?
+}
+
+async fn download_artifact_inner(
+    url: &str,
+    max_bytes: usize,
+) -> Result<bytes::Bytes, RegistryError> {
+    let mut current = url.to_string();
+    let allowlist = vec![
+        "github.com".to_string(),
+        "objects.githubusercontent.com".to_string(),
+        "github-releases.githubusercontent.com".to_string(),
+        "raw.githubusercontent.com".to_string(),
+        "*.githubusercontent.com".to_string(),
+    ];
+
+    for redirect_count in 0..=5 {
+        let guarded = thinclaw_tools_core::validate_outbound_url_pinned_async(
+            &current,
+            &thinclaw_tools_core::OutboundUrlGuardOptions {
+                require_https: true,
+                upgrade_http_to_https: false,
+                allowlist: allowlist.clone(),
+            },
+        )
+        .await
+        .map_err(|_| RegistryError::DownloadFailed {
+            url: redacted_download_url(&current),
+            reason: "artifact URL failed outbound network validation".to_string(),
+        })?;
+        if guarded.url.port_or_known_default() != Some(443) {
+            return Err(RegistryError::DownloadFailed {
+                url: redacted_download_url(&current),
+                reason: "artifact URL must use the standard HTTPS port".to_string(),
+            });
+        }
+        let host = guarded
+            .url
+            .host_str()
+            .ok_or_else(|| RegistryError::DownloadFailed {
+                url: redacted_download_url(&current),
+                reason: "artifact URL has no host".to_string(),
+            })?;
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if !guarded.pinned_addrs.is_empty() {
+            builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+        }
+        let client = builder
+            .build()
+            .map_err(|error| RegistryError::DownloadFailed {
+                url: redacted_download_url(&current),
+                reason: download_failure_reason(&error),
+            })?;
+        let response = client
+            .get(guarded.url.clone())
+            .send()
+            .await
+            .map_err(|error| RegistryError::DownloadFailed {
+                url: redacted_download_url(&current),
+                reason: download_failure_reason(&error),
+            })?;
+
+        if response.status().is_redirection() {
+            if redirect_count == 5 {
+                return Err(RegistryError::DownloadFailed {
+                    url: redacted_download_url(&current),
+                    reason: "artifact download exceeded 5 redirects".to_string(),
+                });
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .ok_or_else(|| RegistryError::DownloadFailed {
+                    url: redacted_download_url(&current),
+                    reason: "artifact redirect omitted its Location header".to_string(),
+                })?
+                .to_str()
+                .map_err(|_| RegistryError::DownloadFailed {
+                    url: redacted_download_url(&current),
+                    reason: "artifact redirect Location is not valid text".to_string(),
+                })?;
+            current = guarded
+                .url
+                .join(location)
+                .map_err(|_| RegistryError::DownloadFailed {
+                    url: redacted_download_url(&current),
+                    reason: "artifact redirect Location is invalid".to_string(),
+                })?
+                .to_string();
+            continue;
+        }
+
+        if !response.status().is_success() {
+            return Err(RegistryError::DownloadFailed {
+                url: redacted_download_url(&current),
+                reason: format!("http status {}", response.status().as_u16()),
+            });
+        }
+        return crate::http_response::bounded_bytes(response, max_bytes)
+            .await
+            .map(bytes::Bytes::from)
+            .map_err(|error| RegistryError::DownloadFailed {
+                url: redacted_download_url(&current),
+                reason: format!("failed to read response body: {error}"),
+            });
+    }
+
+    Err(RegistryError::DownloadFailed {
+        url: redacted_download_url(url),
+        reason: "artifact redirect processing failed".to_string(),
+    })
 }
 
 /// Verify SHA256 of downloaded bytes.
@@ -627,7 +1106,7 @@ fn verify_sha256(bytes: &[u8], expected: &str, url: &str) -> Result<(), Registry
 
     if actual != expected {
         return Err(RegistryError::ChecksumMismatch {
-            url: url.to_string(),
+            url: redacted_download_url(url),
             expected_sha256: expected.to_string(),
             actual_sha256: actual,
         });
@@ -642,22 +1121,16 @@ fn is_gzip(bytes: &[u8]) -> bool {
 
 /// Result of extracting a tar.gz bundle.
 struct ExtractResult {
-    has_capabilities: bool,
+    wasm: Vec<u8>,
+    capabilities: Option<Vec<u8>>,
 }
 
 /// Extract a tar.gz archive, looking for `{name}.wasm` and `{name}.capabilities.json`.
-fn extract_tar_gz(
-    bytes: &[u8],
-    name: &str,
-    target_wasm: &Path,
-    target_caps: &Path,
-    url: &str,
-) -> Result<ExtractResult, RegistryError> {
+fn extract_tar_gz(bytes: &[u8], name: &str, url: &str) -> Result<ExtractResult, RegistryError> {
     use flate2::read::GzDecoder;
     use tar::Archive;
 
-    use std::io::Read as _;
-
+    let url = redacted_download_url(url);
     let decoder = GzDecoder::new(bytes);
     let mut archive = Archive::new(decoder);
     // Defense-in-depth: do not preserve permissions or extended attributes
@@ -665,13 +1138,10 @@ fn extract_tar_gz(
     #[cfg(any(unix, target_os = "redox"))]
     archive.set_unpack_xattrs(false);
 
-    // 100 MB cap on decompressed entry size to prevent decompression bombs
-    const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
-
     let wasm_filename = format!("{}.wasm", name);
     let caps_filename = format!("{}.capabilities.json", name);
-    let mut found_wasm = false;
-    let mut found_caps = false;
+    let mut wasm = None;
+    let mut capabilities = None;
 
     let entries = archive
         .entries()
@@ -680,22 +1150,17 @@ fn extract_tar_gz(
             reason: format!("failed to read tar.gz entries: {}", e),
         })?;
 
-    for entry in entries {
+    for (entry_index, entry) in entries.enumerate() {
+        if entry_index >= MAX_ARCHIVE_ENTRIES {
+            return Err(RegistryError::DownloadFailed {
+                url: url.to_string(),
+                reason: format!("archive exceeds the {MAX_ARCHIVE_ENTRIES}-entry limit"),
+            });
+        }
         let mut entry = entry.map_err(|e| RegistryError::DownloadFailed {
             url: url.to_string(),
             reason: format!("failed to read tar.gz entry: {}", e),
         })?;
-
-        if entry.size() > MAX_ENTRY_SIZE {
-            return Err(RegistryError::DownloadFailed {
-                url: url.to_string(),
-                reason: format!(
-                    "archive entry too large ({} bytes, max {} bytes)",
-                    entry.size(),
-                    MAX_ENTRY_SIZE
-                ),
-            });
-        }
 
         let entry_path = entry
             .path()
@@ -711,44 +1176,88 @@ fn extract_tar_gz(
             .and_then(|n| n.to_str())
             .unwrap_or("");
 
-        if filename == wasm_filename || (!found_wasm && filename.ends_with(".wasm")) {
-            let mut data = Vec::with_capacity(entry.size() as usize);
-            std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
-                .map_err(|e| RegistryError::DownloadFailed {
+        if filename == wasm_filename {
+            if wasm.is_some() {
+                return Err(RegistryError::DownloadFailed {
                     url: url.to_string(),
-                    reason: format!("failed to read {} from archive: {}", wasm_filename, e),
-                })?;
-            std::fs::write(target_wasm, &data).map_err(RegistryError::Io)?;
-            found_wasm = true;
-        } else if !found_caps
-            && (filename == caps_filename
-                || filename.ends_with(".capabilities.json")
-                || filename == "capabilities.json")
-        {
-            let mut data = Vec::with_capacity(entry.size() as usize);
-            std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
-                .map_err(|e| RegistryError::DownloadFailed {
+                    reason: format!("archive contains duplicate '{wasm_filename}' entries"),
+                });
+            }
+            if !entry.header().entry_type().is_file() || entry.size() > MAX_WASM_BYTES as u64 {
+                return Err(RegistryError::DownloadFailed {
                     url: url.to_string(),
-                    reason: format!("failed to read {} from archive: {}", caps_filename, e),
-                })?;
-            std::fs::write(target_caps, &data).map_err(RegistryError::Io)?;
-            found_caps = true;
+                    reason: format!(
+                        "archive WASM entry must be a regular file no larger than {MAX_WASM_BYTES} bytes"
+                    ),
+                });
+            }
+            wasm = Some(read_archive_entry(
+                &mut entry,
+                MAX_WASM_BYTES,
+                &wasm_filename,
+                &url,
+            )?);
+        } else if filename == caps_filename {
+            if capabilities.is_some() {
+                return Err(RegistryError::DownloadFailed {
+                    url: url.to_string(),
+                    reason: format!("archive contains duplicate '{caps_filename}' entries"),
+                });
+            }
+            if !entry.header().entry_type().is_file()
+                || entry.size() > MAX_CAPABILITIES_BYTES as u64
+            {
+                return Err(RegistryError::DownloadFailed {
+                    url: url.to_string(),
+                    reason: format!(
+                        "archive capabilities entry must be a regular file no larger than {MAX_CAPABILITIES_BYTES} bytes"
+                    ),
+                });
+            }
+            capabilities = Some(read_archive_entry(
+                &mut entry,
+                MAX_CAPABILITIES_BYTES,
+                &caps_filename,
+                &url,
+            )?);
         }
     }
 
-    if !found_wasm {
-        return Err(RegistryError::DownloadFailed {
+    let wasm = wasm.ok_or_else(|| RegistryError::DownloadFailed {
             url: url.to_string(),
             reason: format!(
                 "tar.gz archive does not contain a wasm binary (expected '{}'). Archive may be malformed.",
                 wasm_filename,
             ),
+        })?;
+
+    Ok(ExtractResult { wasm, capabilities })
+}
+
+fn read_archive_entry(
+    entry: &mut impl std::io::Read,
+    limit: usize,
+    filename: &str,
+    url: &str,
+) -> Result<Vec<u8>, RegistryError> {
+    use std::io::Read as _;
+
+    let url = redacted_download_url(url);
+    let mut data = Vec::new();
+    entry
+        .take(limit as u64 + 1)
+        .read_to_end(&mut data)
+        .map_err(|error| RegistryError::DownloadFailed {
+            url: url.to_string(),
+            reason: format!("failed to read {filename} from archive: {error}"),
+        })?;
+    if data.len() > limit {
+        return Err(RegistryError::DownloadFailed {
+            url: url.to_string(),
+            reason: format!("archive entry '{filename}' exceeds the {limit}-byte limit"),
         });
     }
-
-    Ok(ExtractResult {
-        has_capabilities: found_caps,
-    })
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -879,7 +1388,7 @@ mod tests {
         let result = installer.install_from_artifact(&manifest, false).await;
         match result {
             Err(RegistryError::InvalidManifest { field, .. }) => {
-                assert_eq!(field, "artifacts.wasm32-wasip2.url");
+                assert_eq!(field, "artifacts.url");
             }
             other => panic!("unexpected result: {:?}", other),
         }
@@ -904,7 +1413,7 @@ mod tests {
         let result = installer.install_from_artifact(&manifest, false).await;
         match result {
             Err(RegistryError::InvalidManifest { field, .. }) => {
-                assert_eq!(field, "artifacts.wasm32-wasip2.url");
+                assert_eq!(field, "artifacts.url");
             }
             other => panic!("unexpected result: {:?}", other),
         }
@@ -1016,16 +1525,13 @@ mod tests {
         }
         let gz_bytes = encoder.finish().unwrap();
 
-        let tmp = tempfile::tempdir().unwrap();
-        let wasm_path = tmp.path().join("test.wasm");
-        let caps_path = tmp.path().join("test.capabilities.json");
+        let result = extract_tar_gz(&gz_bytes, "test", "test://url").unwrap();
 
-        let result =
-            extract_tar_gz(&gz_bytes, "test", &wasm_path, &caps_path, "test://url").unwrap();
-
-        assert!(wasm_path.exists());
-        assert!(caps_path.exists());
-        assert!(result.has_capabilities);
+        assert_eq!(result.wasm, b"\0asm\x01\x00\x00\x00");
+        assert_eq!(
+            result.capabilities.as_deref(),
+            Some(br#"{"auth":null}"#.as_slice())
+        );
     }
 
     #[tokio::test]
@@ -1109,15 +1615,77 @@ mod tests {
         }
         let gz_bytes = encoder.finish().unwrap();
 
-        let tmp = tempfile::tempdir().unwrap();
-        let result = extract_tar_gz(
-            &gz_bytes,
-            "test",
-            &tmp.path().join("test.wasm"),
-            &tmp.path().join("test.capabilities.json"),
-            "test://url",
-        );
+        let result = extract_tar_gz(&gz_bytes, "test", "test://url");
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn publish_extension_files_replaces_both_files_and_removes_stale_capabilities() {
+        let temp = tempfile::tempdir().unwrap();
+        let wasm_path = temp.path().join("test.wasm");
+        let caps_path = temp.path().join("test.capabilities.json");
+        std::fs::write(&wasm_path, b"old wasm").unwrap();
+        std::fs::write(&caps_path, b"old caps").unwrap();
+
+        publish_extension_files_sync(&wasm_path, &caps_path, b"\0asm\x01\x00\x00\x00", None)
+            .unwrap();
+
+        assert_eq!(std::fs::read(&wasm_path).unwrap(), b"\0asm\x01\x00\x00\x00");
+        assert!(!caps_path.exists());
+        assert!(std::fs::read_dir(temp.path()).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            !name.contains(".install.tmp") && !name.contains(".install.bak")
+        }));
+    }
+
+    #[test]
+    fn concurrent_publishers_leave_one_coherent_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let wasm_path = temp.path().join("test.wasm");
+        let caps_path = temp.path().join("test.capabilities.json");
+        let mut workers = Vec::new();
+        for generation in 0..16 {
+            let wasm_path = wasm_path.clone();
+            let caps_path = caps_path.clone();
+            workers.push(std::thread::spawn(move || {
+                let wasm = format!("wasm-{generation}");
+                let caps = format!("caps-{generation}");
+                publish_extension_files_sync(
+                    &wasm_path,
+                    &caps_path,
+                    wasm.as_bytes(),
+                    Some(caps.as_bytes()),
+                )
+                .unwrap();
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let wasm = std::fs::read_to_string(wasm_path).unwrap();
+        let caps = std::fs::read_to_string(caps_path).unwrap();
+        assert_eq!(wasm.strip_prefix("wasm-"), caps.strip_prefix("caps-"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_extension_files_refuses_existing_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        let wasm_path = temp.path().join("test.wasm");
+        let caps_path = temp.path().join("test.capabilities.json");
+        std::fs::write(&outside, b"outside").unwrap();
+        symlink(&outside, &wasm_path).unwrap();
+
+        assert!(
+            publish_extension_files_sync(&wasm_path, &caps_path, b"\0asm\x01\x00\x00\x00", None,)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
     }
 }

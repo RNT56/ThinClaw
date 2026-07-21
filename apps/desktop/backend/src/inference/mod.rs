@@ -97,6 +97,8 @@ pub enum AudioFormat {
     Wav,
     /// Opus encoded.
     Opus,
+    /// WebM container (the browser MediaRecorder fallback format).
+    Webm,
 }
 
 /// Voice metadata for TTS backends.
@@ -166,6 +168,13 @@ impl InferenceError {
         Self {
             message: msg.into(),
             kind: InferenceErrorKind::NetworkError,
+        }
+    }
+
+    pub fn rate_limited(msg: impl Into<String>) -> Self {
+        Self {
+            message: msg.into(),
+            kind: InferenceErrorKind::RateLimited,
         }
     }
 
@@ -260,6 +269,8 @@ pub async fn direct_inference_update_backend(
     app: tauri::AppHandle,
     router: tauri::State<'_, InferenceRouter>,
     config_manager: tauri::State<'_, crate::config::ConfigManager>,
+    pool: tauri::State<'_, sqlx::SqlitePool>,
+    vector_manager: tauri::State<'_, crate::vector_store::VectorStoreManager>,
     modality: Modality,
     backend_id: String,
 ) -> Result<(), String> {
@@ -269,8 +280,19 @@ pub async fn direct_inference_update_backend(
         backend_id
     );
 
-    // Update the config first
-    let mut config = config_manager.get_config();
+    let selection = router
+        .available_backends_for(modality)
+        .into_iter()
+        .find(|backend| backend.id == backend_id)
+        .ok_or_else(|| format!("Unsupported {modality} backend"))?;
+    if !selection.available {
+        return Err(format!(
+            "The selected {modality} backend does not have an available credential"
+        ));
+    }
+
+    let previous_config = config_manager.get_config();
+    let mut config = previous_config.clone();
     match modality {
         Modality::Chat => config.chat_backend = Some(backend_id.clone()),
         Modality::Embedding => config.embedding_backend = Some(backend_id.clone()),
@@ -278,12 +300,53 @@ pub async fn direct_inference_update_backend(
         Modality::Stt => config.stt_backend = Some(backend_id.clone()),
         Modality::Diffusion => config.diffusion_backend = Some(backend_id.clone()),
     }
-    config_manager.save_config(&config);
-
-    // Reconfigure the entire router from the updated config.
+    // Reconfigure before persisting so a rejected embedding model cannot leave
+    // an unusable selection in the durable config.
     // This constructs cloud backends immediately (they only need an API key)
     // and clears local backends (they're set lazily when sidecars start).
     let result = router.reconfigure(&config).await;
+    if modality == Modality::Embedding && backend_id != "local" && result.new_embedding_dims == 0 {
+        router.reconfigure(&previous_config).await;
+        return Err("The configured cloud embedding model is not supported".to_string());
+    }
+    if modality == Modality::Diffusion
+        && backend_id != "local"
+        && router
+            .diffusion_backend()
+            .await
+            .is_none_or(|backend| !backend.info().available)
+    {
+        router.reconfigure(&previous_config).await;
+        return Err("The configured cloud image model is not supported".to_string());
+    }
+    if modality == Modality::Embedding {
+        let (profile, dimensions) = if let Some(backend) = router.embedding_backend().await {
+            (backend.profile_id(), backend.dimensions())
+        } else {
+            use tauri::Manager;
+            let dimensions = vector_manager.dimensions();
+            let identity = app
+                .state::<crate::sidecar::SidecarManager>()
+                .get_embedding_snapshot()
+                .map(|(_, _, identity)| identity)
+                .unwrap_or_else(|| "unselected".to_string());
+            (format!("local:{identity}:{dimensions}"), dimensions)
+        };
+        if let Err(error) = crate::rag::activate_embedding_profile(
+            pool.inner(),
+            vector_manager.inner(),
+            &profile,
+            dimensions,
+        )
+        .await
+        {
+            router.reconfigure(&previous_config).await;
+            return Err(format!("Failed to activate embedding backend: {error}"));
+        }
+        config.vector_dimensions = u32::try_from(dimensions)
+            .map_err(|_| "Embedding dimension exceeds the supported range".to_string())?;
+    }
+    config_manager.save_config(&config)?;
 
     if backend_id == "local" {
         tracing::info!(

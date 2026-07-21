@@ -64,6 +64,7 @@ use thinclaw_tools_core::{
 };
 use thinclaw_types::JobContext;
 
+use super::file::{effective_base_dir as effective_file_base_dir, validate_path};
 // Security validation — constants, blocked patterns, injection detection
 use super::shell_security::{
     DANGEROUS_PATTERNS, ExternalCommandScanner, ExternalScanVerdict, check_safe_bins,
@@ -418,8 +419,8 @@ impl ShellTool {
             .map(PathBuf::from)
     }
 
-    fn effective_base_dir(&self, ctx: &JobContext) -> Option<PathBuf> {
-        Self::metadata_path(ctx, "tool_base_dir").or_else(|| self.base_dir.clone())
+    fn effective_base_dir(&self, ctx: &JobContext) -> Result<Option<PathBuf>, ToolError> {
+        effective_file_base_dir(ctx, self.base_dir.as_deref())
     }
 
     /// Execute a command, using sandbox if available.
@@ -471,7 +472,31 @@ impl ShellTool {
         // 1. Safe bins allowlist (auto-enabled)
         // 2. Workdir validation
         // 3. Command path scanning
-        let effective_base_dir = self.effective_base_dir(ctx);
+        let effective_base_dir = self.effective_base_dir(ctx)?;
+        let requested_cwd = workdir
+            .map(PathBuf::from)
+            .or_else(|| Self::metadata_path(ctx, "tool_working_dir"))
+            .or_else(|| self.working_dir.clone());
+        let cwd = if let Some(base) = effective_base_dir.as_deref() {
+            match requested_cwd {
+                Some(requested) => {
+                    let requested = requested.to_str().ok_or_else(|| {
+                        ToolError::NotAuthorized(
+                            "Shell working directory is not valid UTF-8".to_string(),
+                        )
+                    })?;
+                    validate_path(requested, Some(base)).map_err(|_| {
+                        ToolError::NotAuthorized(
+                            "Sandboxed shell: workdir is outside the workspace".to_string(),
+                        )
+                    })?
+                }
+                None => base.canonicalize().unwrap_or_else(|_| base.to_path_buf()),
+            }
+        } else {
+            requested_cwd
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        };
         if let Some(ref base) = effective_base_dir {
             let base_canonical = base.canonicalize().unwrap_or_else(|_| base.clone());
 
@@ -483,18 +508,6 @@ impl ShellTool {
                 )));
             }
 
-            // Validate workdir parameter
-            if let Some(wd) = workdir {
-                let wd_path = PathBuf::from(wd);
-                let wd_resolved = wd_path.canonicalize().unwrap_or_else(|_| wd_path.clone());
-                if !wd_resolved.starts_with(&base_canonical) {
-                    return Err(ToolError::NotAuthorized(format!(
-                        "Sandboxed shell: workdir '{}' is outside the workspace",
-                        wd
-                    )));
-                }
-            }
-
             // Scan for obvious absolute path escapes in command
             if let Some(escaped_path) = detect_path_escape(cmd, &base_canonical) {
                 return Err(ToolError::NotAuthorized(format!(
@@ -503,13 +516,11 @@ impl ShellTool {
                 )));
             }
         }
-
-        // Determine working directory
-        let cwd = workdir
-            .map(PathBuf::from)
-            .or_else(|| Self::metadata_path(ctx, "tool_working_dir"))
-            .or_else(|| self.working_dir.clone())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        if !cwd.is_dir() {
+            return Err(ToolError::ExecutionFailed(
+                "Shell working directory is not an accessible directory".to_string(),
+            ));
+        }
 
         // Determine timeout
         let timeout_duration = timeout.map(Duration::from_secs).unwrap_or(self.timeout);
@@ -1765,6 +1776,44 @@ mod tests {
             matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("workdir")),
             "Expected workdir escape to be blocked, got: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn sandbox_rejects_contextual_base_escape() {
+        let configured = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let tool = ShellTool::new().with_base_dir(configured.path().to_path_buf());
+        let ctx = JobContext {
+            metadata: serde_json::json!({
+                "tool_base_dir": outside.path().to_string_lossy(),
+            }),
+            ..JobContext::default()
+        };
+
+        let result = tool
+            .execute(serde_json::json!({"command": "pwd"}), &ctx)
+            .await;
+
+        assert!(matches!(result, Err(ToolError::NotAuthorized(_))));
+    }
+
+    #[tokio::test]
+    async fn sandbox_rejects_contextual_workdir_escape() {
+        let configured = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let tool = ShellTool::new().with_base_dir(configured.path().to_path_buf());
+        let ctx = JobContext {
+            metadata: serde_json::json!({
+                "tool_working_dir": outside.path().to_string_lossy(),
+            }),
+            ..JobContext::default()
+        };
+
+        let result = tool
+            .execute(serde_json::json!({"command": "pwd"}), &ctx)
+            .await;
+
+        assert!(matches!(result, Err(ToolError::NotAuthorized(_))));
     }
 
     #[tokio::test]

@@ -14,6 +14,11 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
+const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_CACHE_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_CACHE_ENTRIES: usize = 100_000;
+const MAX_CACHE_TTL: Duration = Duration::from_secs(10 * 365 * 24 * 3600);
+
 /// Configuration for the media cache.
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
@@ -49,13 +54,13 @@ impl CacheConfig {
         if let Ok(hours) = std::env::var("MEDIA_CACHE_TTL_HOURS")
             && let Ok(h) = hours.parse::<u64>()
         {
-            config.ttl = Duration::from_secs(h * 3600);
+            config.ttl = Duration::from_secs(h.saturating_mul(3600)).min(MAX_CACHE_TTL);
         }
 
         if let Ok(mb) = std::env::var("MEDIA_CACHE_MAX_MB")
             && let Ok(m) = mb.parse::<u64>()
         {
-            config.max_bytes = m * 1024 * 1024;
+            config.max_bytes = m.saturating_mul(1024 * 1024).min(MAX_CACHE_BYTES);
         }
 
         config
@@ -70,7 +75,21 @@ pub struct MediaCache {
 impl MediaCache {
     /// Create a new media cache (creates the directory if needed).
     pub fn new(config: CacheConfig) -> std::io::Result<Self> {
+        if config.max_bytes == 0 || config.max_bytes > MAX_CACHE_BYTES || config.ttl > MAX_CACHE_TTL
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "media cache limits are outside the supported bounds",
+            ));
+        }
         std::fs::create_dir_all(&config.cache_dir)?;
+        let metadata = std::fs::symlink_metadata(&config.cache_dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "media cache root must be a real directory",
+            ));
+        }
         Ok(Self { config })
     }
 
@@ -91,13 +110,20 @@ impl MediaCache {
         let key = Self::cache_key(url);
         let path = self.path_for(&key);
 
-        if !path.exists() {
+        // Never return a symlink or special file as a cache hit. Callers read
+        // the returned path, so following a planted link would disclose an
+        // unrelated local file under the guise of downloaded media.
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || !metadata_has_single_link(&metadata)
+            || metadata.len() > self.max_entry_bytes()
+        {
             return None;
         }
 
-        // Check TTL
-        if let Ok(metadata) = std::fs::metadata(&path)
-            && let Ok(modified) = metadata.modified()
+        // Check TTL.
+        if let Ok(modified) = metadata.modified()
             && let Ok(age) = SystemTime::now().duration_since(modified)
             && age > self.config.ttl
         {
@@ -111,14 +137,26 @@ impl MediaCache {
 
     /// Store data in the cache for a URL. Returns the cache path.
     pub fn put(&self, url: &str, data: &[u8]) -> std::io::Result<PathBuf> {
+        let data_len = u64::try_from(data.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "media cache entry length does not fit this platform",
+            )
+        })?;
+        if data_len > self.max_entry_bytes() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "media cache entry exceeds the configured limit",
+            ));
+        }
         // Evict if necessary
-        self.evict_if_needed(data.len() as u64)?;
+        self.evict_if_needed(data_len)?;
 
         let key = Self::cache_key(url);
         let path = self.path_for(&key);
-        std::fs::write(&path, data)?;
+        thinclaw_platform::write_private_file_atomic(&path, data, true)?;
 
-        tracing::debug!(url = %url, key = %key, size = data.len(), "Cached media file");
+        tracing::debug!(size = data.len(), "Cached media file");
         Ok(path)
     }
 
@@ -128,7 +166,10 @@ impl MediaCache {
         F: FnOnce() -> std::io::Result<Vec<u8>>,
     {
         if let Some(path) = self.get(url) {
-            return std::fs::read(path);
+            return thinclaw_platform::read_regular_file_bounded_single_link(
+                &path,
+                self.max_entry_bytes(),
+            );
         }
 
         let data = fetch()?;
@@ -139,15 +180,21 @@ impl MediaCache {
     /// Evict entries if adding `new_bytes` would exceed the max cache size.
     fn evict_if_needed(&self, new_bytes: u64) -> std::io::Result<()> {
         let entries = self.list_entries()?;
-        let total: u64 = entries.values().map(|(_, size)| size).sum();
+        let total = entries
+            .values()
+            .try_fold(0_u64, |total, (_, size)| total.checked_add(*size))
+            .ok_or_else(|| std::io::Error::other("media cache size overflow"))?;
 
-        if total + new_bytes <= self.config.max_bytes {
+        let projected = total
+            .checked_add(new_bytes)
+            .ok_or_else(|| std::io::Error::other("media cache size overflow"))?;
+        if projected <= self.config.max_bytes {
             return Ok(());
         }
 
         // Evict oldest first until we have enough space
         let mut freed: u64 = 0;
-        let target = total + new_bytes - self.config.max_bytes;
+        let target = projected - self.config.max_bytes;
 
         let mut ordered_entries: Vec<_> = entries.into_iter().collect();
         ordered_entries.sort_by_key(|(_, (modified, _))| *modified);
@@ -167,12 +214,26 @@ impl MediaCache {
     fn list_entries(&self) -> std::io::Result<BTreeMap<PathBuf, (SystemTime, u64)>> {
         let mut entries = BTreeMap::new();
 
-        for entry in std::fs::read_dir(&self.config.cache_dir)? {
+        for (index, entry) in std::fs::read_dir(&self.config.cache_dir)?.enumerate() {
+            if index >= MAX_CACHE_ENTRIES {
+                return Err(std::io::Error::other(
+                    "media cache contains too many entries",
+                ));
+            }
             let entry = entry?;
-            let metadata = entry.metadata()?;
-            if metadata.is_file() {
+            let path = entry.path();
+            let valid_name = entry.file_name().to_str().is_some_and(|name| {
+                name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if valid_name
+                && !metadata.file_type().is_symlink()
+                && metadata.is_file()
+                && metadata_has_single_link(&metadata)
+                && metadata.len() <= self.max_entry_bytes()
+            {
                 let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                entries.insert(entry.path(), (modified, metadata.len()));
+                entries.insert(path, (modified, metadata.len()));
             }
         }
 
@@ -184,11 +245,22 @@ impl MediaCache {
         let mut pruned = 0;
         let now = SystemTime::now();
 
-        for entry in std::fs::read_dir(&self.config.cache_dir)? {
+        for (index, entry) in std::fs::read_dir(&self.config.cache_dir)?.enumerate() {
+            if index >= MAX_CACHE_ENTRIES {
+                return Err(std::io::Error::other(
+                    "media cache contains too many entries",
+                ));
+            }
             let entry = entry?;
-            let metadata = entry.metadata()?;
+            let valid_name = entry.file_name().to_str().is_some_and(|name| {
+                name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+            let metadata = std::fs::symlink_metadata(entry.path())?;
 
-            if metadata.is_file()
+            if valid_name
+                && !metadata.file_type().is_symlink()
+                && metadata.is_file()
+                && metadata_has_single_link(&metadata)
                 && let Ok(modified) = metadata.modified()
                 && let Ok(age) = now.duration_since(modified)
                 && age > self.config.ttl
@@ -204,7 +276,10 @@ impl MediaCache {
     /// Get cache statistics.
     pub fn stats(&self) -> std::io::Result<CacheStats> {
         let entries = self.list_entries()?;
-        let total_bytes: u64 = entries.values().map(|(_, size)| size).sum();
+        let total_bytes = entries
+            .values()
+            .try_fold(0_u64, |total, (_, size)| total.checked_add(*size))
+            .ok_or_else(|| std::io::Error::other("media cache size overflow"))?;
 
         Ok(CacheStats {
             entry_count: entries.len(),
@@ -213,6 +288,27 @@ impl MediaCache {
             cache_dir: self.config.cache_dir.clone(),
         })
     }
+
+    fn max_entry_bytes(&self) -> u64 {
+        self.config.max_bytes.min(MAX_CACHE_ENTRY_BYTES)
+    }
+}
+
+#[cfg(unix)]
+fn metadata_has_single_link(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    metadata.nlink() == 1
+}
+
+#[cfg(windows)]
+fn metadata_has_single_link(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    metadata.number_of_links() == Some(1)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_has_single_link(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 /// Cache statistics.
@@ -292,6 +388,26 @@ mod tests {
         let config = test_config("miss");
         let cache = MediaCache::new(config.clone()).unwrap();
         assert!(cache.get("https://example.com/nonexistent.png").is_none());
+        let _ = std::fs::remove_dir_all(&config.cache_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_rejects_planted_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let config = test_config("symlink");
+        let cache = MediaCache::new(config.clone()).unwrap();
+        let target = config.cache_dir.join("unrelated-secret");
+        std::fs::write(&target, b"do not disclose").unwrap();
+        let url = "https://example.com/signed.png?token=secret";
+        let cache_path = config.cache_dir.join(MediaCache::cache_key(url));
+        symlink(&target, &cache_path).unwrap();
+
+        assert!(cache.get(url).is_none());
+        assert!(cache.put(url, b"replacement").is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"do not disclose");
+
         let _ = std::fs::remove_dir_all(&config.cache_dir);
     }
 

@@ -13,7 +13,9 @@ use thinclaw_types::{
     sandbox::{CredentialGrant, JobMode, SandboxJobSpec},
 };
 use tokio::io::AsyncReadExt;
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
+
+pub use thinclaw_platform::process::{BoundedProcessOutput, OwnedChild};
 
 pub const MAX_CAPTURED_OUTPUT_SIZE: usize = 64 * 1024;
 pub const WASM_TOOL_INVOKE_DEPTH_KEY: &str = "wasm_tool_invoke_depth";
@@ -135,6 +137,7 @@ pub fn build_sandbox_job_spec(
         allowed_tools: request.allowed_tools.clone(),
         allowed_skills: request.allowed_skills.clone(),
         tool_profile: request.tool_profile.clone(),
+        runtime_scope: None,
     }
 }
 
@@ -550,7 +553,7 @@ pub struct ProcessStartRequest {
 
 #[derive(Debug)]
 pub struct StartedProcess {
-    pub child: Child,
+    pub child: OwnedChild,
     pub stdin: Option<ChildStdin>,
     pub stdout: Option<ChildStdout>,
     pub stderr: Option<ChildStderr>,
@@ -877,8 +880,7 @@ impl LocalExecutionBackend for LocalHostExecutionBackend {
             request.allow_network,
         );
 
-        let mut child = command
-            .spawn()
+        let mut child = OwnedChild::spawn(&mut command)
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to spawn command: {}", e)))?;
 
         let start = Instant::now();
@@ -907,6 +909,12 @@ impl LocalExecutionBackend for LocalHostExecutionBackend {
         &self,
         request: ProcessStartRequest,
     ) -> Result<StartedProcess, ToolError> {
+        if !request.kill_on_drop {
+            return Err(ToolError::ExecutionFailed(
+                "detached local processes are not supported; process ownership is required"
+                    .to_string(),
+            ));
+        }
         let mut command = shell_command(&request.command);
         if let Some(workdir) = request.workdir.as_ref() {
             command.current_dir(workdir);
@@ -919,14 +927,13 @@ impl LocalExecutionBackend for LocalHostExecutionBackend {
             request.kill_on_drop,
         );
 
-        let mut child = command
-            .spawn()
+        let mut child = OwnedChild::spawn(&mut command)
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to spawn process: {}", e)))?;
 
         Ok(StartedProcess {
-            stdin: child.stdin.take(),
-            stdout: child.stdout.take(),
-            stderr: child.stderr.take(),
+            stdin: child.take_stdin(),
+            stdout: child.take_stdout(),
+            stderr: child.take_stderr(),
             child,
             backend: self.kind(),
             runtime: RuntimeDescriptor::execution_surface(
@@ -961,7 +968,7 @@ impl LocalExecutionBackend for LocalHostExecutionBackend {
             request.allow_network,
         );
 
-        let mut child = command.spawn().map_err(|e| {
+        let mut child = OwnedChild::spawn(&mut command).map_err(|e| {
             ToolError::ExecutionFailed(format!("Failed to spawn {}: {}", request.program, e))
         })?;
 
@@ -1289,11 +1296,11 @@ fn executable_in_path(binary: &str) -> bool {
 }
 
 async fn collect_child_output(
-    child: &mut Child,
+    child: &mut OwnedChild,
     timeout: Duration,
 ) -> Result<CollectedOutput, ToolError> {
-    let stdout_handle = child.stdout.take();
-    let stderr_handle = child.stderr.take();
+    let stdout_handle = child.take_stdout();
+    let stderr_handle = child.take_stderr();
     let result = tokio::time::timeout(timeout, async {
         let stdout_fut = async {
             if let Some(mut out) = stdout_handle {
@@ -1358,6 +1365,44 @@ async fn collect_child_output(
     }
 }
 
+/// Run a trusted argv-constructed local utility with descendant ownership, a
+/// hard deadline, and strict stdout/stderr retention limits. Unlike
+/// `Command::output`, this cannot accumulate attacker-controlled output without
+/// bound or leave grandchildren behind after timeout.
+pub async fn bounded_command_output(
+    command: &mut Command,
+    timeout: Duration,
+    stdout_limit: usize,
+    stderr_limit: usize,
+    context: &str,
+) -> Result<BoundedProcessOutput, ToolError> {
+    match thinclaw_platform::process::bounded_command_output(
+        command,
+        timeout,
+        stdout_limit,
+        stderr_limit,
+    )
+    .await
+    {
+        Ok(output) => Ok(output),
+        Err(thinclaw_platform::BoundedProcessError::Timeout(_)) => Err(ToolError::Timeout(timeout)),
+        Err(thinclaw_platform::BoundedProcessError::OutputLimit { stdout, stderr }) => {
+            let stream = match (stdout, stderr) {
+                (true, true) => "stdout and stderr",
+                (true, false) => "stdout",
+                (false, true) => "stderr",
+                (false, false) => unreachable!(),
+            };
+            Err(ToolError::ExecutionFailed(format!(
+                "{context} {stream} exceeded the capture limit"
+            )))
+        }
+        Err(error) => Err(ToolError::ExecutionFailed(format!(
+            "failed while running {context}: {error}"
+        ))),
+    }
+}
+
 pub fn truncate_output(output: &str) -> String {
     if output.len() <= MAX_CAPTURED_OUTPUT_SIZE {
         output.to_string()
@@ -1383,6 +1428,48 @@ fn floor_char_boundary(value: &str, index: usize) -> usize {
         index = index.saturating_sub(1);
     }
     index
+}
+
+#[cfg(all(test, unix))]
+mod owned_child_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shell_timeout_kills_descendant_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("descendant.pid");
+        let mut extra_env = HashMap::new();
+        extra_env.insert(
+            "THINCLAW_DESCENDANT_PID_FILE".to_string(),
+            marker.display().to_string(),
+        );
+        let backend = LocalHostExecutionBackend;
+        let result = backend
+            .run_shell(CommandExecutionRequest {
+                command: "sleep 30 & child=$!; printf '%s' \"$child\" > \"$THINCLAW_DESCENDANT_PID_FILE\"; wait".to_string(),
+                workdir: temp.path().to_path_buf(),
+                timeout: Duration::from_millis(150),
+                extra_env,
+                allow_network: true,
+            })
+            .await;
+        assert!(matches!(result, Err(ToolError::Timeout(_))));
+
+        let pid: libc::pid_t = std::fs::read_to_string(marker).unwrap().parse().unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            // SAFETY: signal zero checks existence without changing the process.
+            let exists = unsafe { libc::kill(pid, 0) } == 0;
+            if !exists {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "descendant survived local execution timeout"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

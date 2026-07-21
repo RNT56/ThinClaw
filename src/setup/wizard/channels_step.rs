@@ -303,7 +303,7 @@ impl SetupWizard {
         self.maybe_prepare_quick_channel_tunnel(&caps, Some(&secrets))
             .await?;
 
-        let setup_result = setup_wasm_channel(&secrets, channel_name, &caps.setup).await?;
+        let setup_result = setup_wasm_channel(&secrets, channel_name, &caps).await?;
         if !setup_result.enabled {
             self.quick_channel_install_failure(
                 display_name,
@@ -1361,7 +1361,7 @@ impl SetupWizard {
             if let Some(ref ctx) = secrets {
                 let result = if let Some(cap_file) = discovered_by_name.get(&channel_name) {
                     if !cap_file.setup.required_secrets.is_empty() {
-                        setup_wasm_channel(ctx, &channel_name, &cap_file.setup).await?
+                        setup_wasm_channel(ctx, &channel_name, cap_file).await?
                     } else if channel_name == "telegram" {
                         let telegram_result = setup_telegram(ctx, &self.settings).await?;
                         if let Some(owner_id) = telegram_result.owner_id {

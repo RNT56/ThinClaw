@@ -5,7 +5,7 @@ use super::types::*;
 use std::collections::HashMap;
 
 pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
-    let client = reqwest::Client::new();
+    let client = super::http_client(api_key)?;
 
     let response = client
         .get("https://api.mistral.ai/v1/models")
@@ -13,12 +13,6 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
         .send()
         .await
         .map_err(|e| format!("Mistral API request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("Mistral API error ({}): {}", status, body));
-    }
 
     #[derive(serde::Deserialize)]
     struct ModelsResponse {
@@ -31,10 +25,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
         max_context_length: Option<u32>,
     }
 
-    let resp: ModelsResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse Mistral models: {}", e))?;
+    let resp: ModelsResponse = super::bounded_json(response, "Mistral").await?;
 
     let models: Vec<CloudModelEntry> = resp
         .data

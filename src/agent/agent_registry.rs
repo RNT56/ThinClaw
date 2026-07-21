@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use thinclaw_agent::agent_registry::AgentRegistryError;
-use thinclaw_agent::agent_registry::{AgentRegistryStorePort, AgentWorkspaceSeeder};
+use thinclaw_agent::agent_registry::AgentRegistryStorePort;
 use thinclaw_types::{AgentWorkspaceRecord, ToolProfile};
 
 use crate::agent::agent_router::{AgentRouter, AgentWorkspace};
@@ -27,12 +27,7 @@ impl AgentRegistry {
             Arc::new(RootAgentRegistryStore { db: Arc::clone(db) })
                 as Arc<dyn AgentRegistryStorePort>
         });
-        let seeder = db.as_ref().map(|db| {
-            Arc::new(RootAgentWorkspaceSeeder { db: Arc::clone(db) })
-                as Arc<dyn AgentWorkspaceSeeder>
-        });
-        let inner =
-            thinclaw_agent::agent_registry::AgentRegistry::new(router, store).with_seeder(seeder);
+        let inner = thinclaw_agent::agent_registry::AgentRegistry::new(router, store);
         Self { inner, db }
     }
 
@@ -50,6 +45,7 @@ impl AgentRegistry {
     #[allow(clippy::too_many_arguments)]
     pub async fn create_agent(
         &self,
+        principal_id: &str,
         agent_id: &str,
         display_name: &str,
         system_prompt: Option<&str>,
@@ -61,7 +57,8 @@ impl AgentRegistry {
         allowed_skills: Option<Vec<String>>,
         tool_profile: Option<ToolProfile>,
     ) -> Result<AgentWorkspaceRecord, AgentRegistryError> {
-        self.inner
+        let record = self
+            .inner
             .create_agent(
                 agent_id,
                 display_name,
@@ -74,7 +71,29 @@ impl AgentRegistry {
                 allowed_skills,
                 tool_profile,
             )
-            .await
+            .await?;
+        if let Some(db) = self.db.as_ref() {
+            let workspace =
+                Workspace::new_with_db(principal_id, Arc::clone(db)).with_agent(record.id);
+            let identity_content = format!(
+                "# {}\n\n{}\n\n_Created: {}_\n",
+                record.display_name,
+                record
+                    .system_prompt
+                    .as_deref()
+                    .unwrap_or("A specialized agent workspace."),
+                record.created_at.format("%Y-%m-%d %H:%M UTC"),
+            );
+            if let Err(error) = workspace.write("IDENTITY.md", &identity_content).await {
+                tracing::warn!(
+                    principal = %principal_id,
+                    agent = %record.agent_id,
+                    %error,
+                    "Created agent but could not seed its principal-scoped identity document"
+                );
+            }
+        }
+        Ok(record)
     }
 
     /// Remove an agent workspace.
@@ -195,31 +214,5 @@ impl AgentRegistryStorePort for RootAgentRegistryStore {
             .update_agent_workspace(ws)
             .await
             .map_err(|error| AgentRegistryError::Store(error.to_string()))
-    }
-}
-
-struct RootAgentWorkspaceSeeder {
-    db: Arc<dyn Database>,
-}
-
-#[async_trait]
-impl AgentWorkspaceSeeder for RootAgentWorkspaceSeeder {
-    async fn seed_workspace(&self, record: &AgentWorkspaceRecord) -> Result<(), String> {
-        let ws = Workspace::new_with_db("default", Arc::clone(&self.db)).with_agent(record.id);
-
-        let identity_content = format!(
-            "# {}\n\n{}\n\n_Created: {}_\n",
-            record.display_name,
-            record
-                .system_prompt
-                .as_deref()
-                .unwrap_or("A specialized agent workspace."),
-            record.created_at.format("%Y-%m-%d %H:%M UTC"),
-        );
-
-        ws.write("IDENTITY.md", &identity_content)
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
     }
 }

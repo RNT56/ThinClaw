@@ -27,3 +27,5 @@ mod hydration;
 mod input;
 mod lifecycle;
 mod persistence;
+
+pub(in crate::agent) use persistence::sanitized_injected_context_metadata;

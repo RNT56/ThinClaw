@@ -1,18 +1,24 @@
-//! OpenAI DALL·E 3 diffusion backend.
+//! OpenAI GPT Image diffusion backend.
 
-use crate::inference::diffusion::{DiffusionBackend, DiffusionRequest, DiffusionResult};
+use crate::inference::diffusion::{
+    bounded_json, checked_response, decode_bounded_base64, full_prompt, http_client,
+    reject_source_images, save_generated_image, validate_api_key, validate_request,
+    DiffusionBackend, DiffusionRequest, DiffusionResult,
+};
 use crate::inference::{BackendInfo, InferenceError, InferenceResult};
 use async_trait::async_trait;
-use uuid::Uuid;
+use serde::Deserialize;
+use std::path::PathBuf;
+
+const OPENAI_IMAGE_MODEL: &str = "gpt-image-2";
 
 pub struct DalleDiffusionBackend {
-    pub api_key: String,
-    pub images_dir: std::path::PathBuf,
+    api_key: String,
+    images_dir: PathBuf,
 }
 
 impl DalleDiffusionBackend {
-    pub fn new(api_key: String) -> Self {
-        let images_dir = std::env::temp_dir().join("scrappy").join("imagine");
+    pub fn new(api_key: String, images_dir: PathBuf) -> Self {
         Self {
             api_key,
             images_dir,
@@ -20,103 +26,102 @@ impl DalleDiffusionBackend {
     }
 }
 
+#[derive(Deserialize)]
+struct OpenAiImageResponse {
+    data: Vec<OpenAiImageData>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiImageData {
+    b64_json: Option<String>,
+}
+
 #[async_trait]
 impl DiffusionBackend for DalleDiffusionBackend {
     fn info(&self) -> BackendInfo {
         BackendInfo {
             id: "openai".to_string(),
-            display_name: "DALL·E 3".to_string(),
+            display_name: "OpenAI GPT Image 2".to_string(),
             is_local: false,
-            model_id: Some("dall-e-3".to_string()),
+            model_id: Some(OPENAI_IMAGE_MODEL.to_string()),
             available: true,
         }
     }
 
     async fn generate(&self, request: DiffusionRequest) -> InferenceResult<DiffusionResult> {
-        let client = reqwest::Client::new();
-
-        // Map to DALL-E size options: 1024x1024, 1024x1792, 1792x1024
-        let size = if request.width > request.height {
-            "1792x1024"
-        } else if request.height > request.width {
-            "1024x1792"
-        } else {
-            "1024x1024"
-        };
-
-        let full_prompt = if let Some(style) = &request.style_prompt {
-            format!("{}\n\nStyle: {}", request.prompt, style)
-        } else {
-            request.prompt.clone()
-        };
-
-        let response = client
-            .post("https://api.openai.com/v1/images/generations")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&serde_json::json!({
-                "model": "dall-e-3",
-                "prompt": full_prompt,
-                "n": 1,
-                "size": size,
-                "response_format": "b64_json"
-            }))
-            .send()
-            .await
-            .map_err(|e| InferenceError::network(format!("DALL-E request failed: {}", e)))?;
-
-        if response.status() == 401 {
-            return Err(InferenceError::auth("Invalid OpenAI API key"));
-        }
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(InferenceError::provider(format!(
-                "DALL-E error ({}): {}",
-                status, text
+        validate_api_key(&self.api_key, "OpenAI")?;
+        validate_request(&request)?;
+        reject_source_images(&request, "OpenAI GPT Image")?;
+        if request
+            .model
+            .as_deref()
+            .is_some_and(|model| model != OPENAI_IMAGE_MODEL)
+        {
+            return Err(InferenceError::config(format!(
+                "This OpenAI image backend is pinned to {OPENAI_IMAGE_MODEL}"
             )));
         }
 
-        let result: serde_json::Value = response
-            .json()
+        // GPT Image 2 supports arbitrary constrained sizes. These popular
+        // sizes also upgrade the UI's legacy 512-pixel cloud default to a
+        // provider-supported resolution.
+        let size = if request.width > request.height {
+            "1536x1024"
+        } else if request.height > request.width {
+            "1024x1536"
+        } else {
+            "1024x1024"
+        };
+        let client = http_client()?;
+        let response = client
+            .post("https://api.openai.com/v1/images/generations")
+            .bearer_auth(&self.api_key)
+            .json(&serde_json::json!({
+                "model": OPENAI_IMAGE_MODEL,
+                "prompt": full_prompt(&request),
+                "n": 1,
+                "size": size
+            }))
+            .send()
             .await
-            .map_err(|e| InferenceError::provider(format!("Parse error: {}", e)))?;
-
-        let b64 = result
-            .get("data")
-            .and_then(|d| d.get(0))
-            .and_then(|d| d.get("b64_json"))
-            .and_then(|b| b.as_str())
-            .ok_or_else(|| InferenceError::provider("No image in DALL-E response"))?;
-
-        use base64::{engine::general_purpose, Engine as _};
-        let image_bytes = general_purpose::STANDARD
-            .decode(b64)
-            .map_err(|e| InferenceError::provider(format!("Base64 decode failed: {}", e)))?;
-
-        let id = Uuid::new_v4().to_string();
-        let file_path = self.images_dir.join(format!("{}.png", id));
-        if !self.images_dir.exists() {
-            std::fs::create_dir_all(&self.images_dir)
-                .map_err(|e| InferenceError::other(format!("Failed to create dir: {}", e)))?;
+            .map_err(|error| {
+                InferenceError::network(format!("OpenAI image request failed: {error}"))
+            })?;
+        let response = checked_response(response, "OpenAI").await?;
+        let result: OpenAiImageResponse = bounded_json(response, "OpenAI").await?;
+        if result.data.len() != 1 {
+            return Err(InferenceError::provider(
+                "OpenAI returned an unexpected number of images",
+            ));
         }
-        std::fs::write(&file_path, &image_bytes)
-            .map_err(|e| InferenceError::other(format!("Failed to save image: {}", e)))?;
-
-        Ok(DiffusionResult {
-            id,
-            path: file_path.to_string_lossy().to_string(),
-            width: request.width,
-            height: request.height,
-            seed: None,
-        })
+        let encoded = result
+            .data
+            .into_iter()
+            .next()
+            .and_then(|image| image.b64_json)
+            .ok_or_else(|| InferenceError::provider("OpenAI returned no encoded image"))?;
+        let image = decode_bounded_base64(&encoded, "OpenAI")?;
+        save_generated_image(&self.images_dir, image, None).await
     }
 
     fn supported_aspect_ratios(&self) -> Vec<String> {
-        vec!["1:1".into(), "16:9".into(), "9:16".into()]
+        vec!["1:1".into(), "3:2".into(), "2:3".into()]
     }
 
     fn max_resolution(&self) -> u32 {
-        1792
+        3_840
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_requires_exactly_one_image() {
+        let parsed: OpenAiImageResponse =
+            serde_json::from_str(r#"{"data":[{"b64_json":"aGVsbG8="}]}"#).unwrap();
+        assert_eq!(parsed.data.len(), 1);
+        assert_eq!(parsed.data[0].b64_json.as_deref(), Some("aGVsbG8="));
     }
 }

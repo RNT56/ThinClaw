@@ -80,13 +80,41 @@ pub fn instance_id_path() -> PathBuf {
 /// is empty/unreadable. Callers that must create the id use the gateway devices
 /// handler's `resolve_or_create_instance_id`; readers on other surfaces use this.
 pub fn read_instance_id() -> Option<String> {
-    let contents = std::fs::read_to_string(instance_id_path()).ok()?;
-    let trimmed = contents.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
+    use std::io::Read as _;
+
+    const MAX_INSTANCE_ID_BYTES: usize = 128;
+    let path = instance_id_path();
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_INSTANCE_ID_BYTES as u64
+    {
+        return None;
     }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path).ok()?;
+    let opened_metadata = file.metadata().ok()?;
+    if !opened_metadata.is_file() || opened_metadata.len() > MAX_INSTANCE_ID_BYTES as u64 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.by_ref()
+        .take(MAX_INSTANCE_ID_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_INSTANCE_ID_BYTES {
+        return None;
+    }
+    let contents = String::from_utf8(bytes).ok()?;
+    let trimmed = contents.trim();
+    let parsed = uuid::Uuid::parse_str(trimmed).ok()?;
+    Some(parsed.to_string())
 }
 
 pub fn resolve_temp_path(relative: impl AsRef<Path>) -> PathBuf {

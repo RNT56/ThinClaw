@@ -379,12 +379,14 @@ fn check_workspace_dir() -> CheckResult {
 }
 
 fn check_binary(name: &str, args: &[&str]) -> CheckResult {
-    match std::process::Command::new(name)
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-    {
+    let mut command = std::process::Command::new(name);
+    command.args(args);
+    match thinclaw_platform::bounded_std_command_output(
+        &mut command,
+        std::time::Duration::from_secs(10),
+        64 * 1024,
+        64 * 1024,
+    ) {
         Ok(output) => {
             let version = String::from_utf8_lossy(&output.stdout);
             let version = version.trim();

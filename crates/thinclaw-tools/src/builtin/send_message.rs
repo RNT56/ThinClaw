@@ -196,30 +196,16 @@ async fn parse_attachments(params: &serde_json::Value) -> Result<Vec<MediaConten
                 ToolError::InvalidParameters("attachments[].file_path is required".to_string())
             })?;
         let canonical = canonical_generated_media_path(path).await?;
-        let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
-            ToolError::InvalidParameters(format!(
-                "cannot stat attachment {}: {e}",
-                canonical.display()
-            ))
-        })?;
-        if !metadata.is_file() {
-            return Err(ToolError::InvalidParameters(format!(
-                "attachment path is not a file: {}",
-                canonical.display()
-            )));
-        }
-        if metadata.len() > max_bytes {
-            return Err(ToolError::InvalidParameters(format!(
-                "attachment {} exceeds {} bytes",
-                canonical.display(),
-                max_bytes
-            )));
-        }
-        let data = tokio::fs::read(&canonical).await.map_err(|e| {
-            ToolError::InvalidParameters(format!(
-                "cannot read attachment {}: {e}",
-                canonical.display()
-            ))
+        let data = thinclaw_platform::read_regular_file_bounded_single_link_async(
+            canonical.clone(),
+            max_bytes,
+        )
+        .await
+        .map_err(|_| {
+            ToolError::InvalidParameters(
+                "attachment must be a bounded regular file under an approved media directory"
+                    .to_string(),
+            )
         })?;
         let filename = item
             .get("filename")
@@ -229,7 +215,7 @@ async fn parse_attachments(params: &serde_json::Value) -> Result<Vec<MediaConten
                 canonical
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .map(str::to_string)
+                    .and_then(safe_basename)
             })
             .unwrap_or_else(|| "attachment".to_string());
         let mime_type = item
@@ -244,16 +230,14 @@ async fn parse_attachments(params: &serde_json::Value) -> Result<Vec<MediaConten
                     .to_string()
             });
         if MediaType::from_mime(&mime_type) == MediaType::Unknown {
-            return Err(ToolError::InvalidParameters(format!(
-                "unsupported attachment MIME type '{}'",
-                mime_type
-            )));
+            return Err(ToolError::InvalidParameters(
+                "unsupported attachment MIME type".to_string(),
+            ));
         }
-        attachments.push(
-            MediaContent::new(data, mime_type)
-                .with_filename(filename)
-                .with_source_url(canonical.to_string_lossy().to_string()),
-        );
+        // The file bytes are embedded in the attachment. Publishing the
+        // canonical host path as a source URL leaks local directory names to
+        // channel adapters that include this field in recipient-visible text.
+        attachments.push(MediaContent::new(data, mime_type).with_filename(filename));
     }
     Ok(attachments)
 }
@@ -276,11 +260,18 @@ async fn canonical_generated_media_path(path: &str) -> Result<PathBuf, ToolError
 }
 
 fn safe_basename(value: &str) -> Option<String> {
-    Path::new(value)
+    let name = Path::new(value)
         .file_name()
         .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
-        .map(str::to_string)
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")?;
+    let sanitized = name
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        })
+        .take(255)
+        .collect::<String>();
+    (!sanitized.is_empty() && sanitized != "." && sanitized != "..").then_some(sanitized)
 }
 
 fn approved_generated_roots() -> Vec<PathBuf> {

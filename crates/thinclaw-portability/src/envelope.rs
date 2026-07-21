@@ -33,6 +33,8 @@ const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const TAG_LEN: usize = 16;
 const HEADER_LEN: usize = 8 + 1 + 1 + 4 + 4 + SALT_LEN + NONCE_LEN; // 58
+const MAX_ENVELOPE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_PASSPHRASE_BYTES: usize = 4 * 1024;
 
 /// scrypt cost parameters. `log_n = 15` ⇒ N = 32768 (~32 MiB), a sensible
 /// interactive default for a backup passphrase.
@@ -48,6 +50,13 @@ const MAX_KDF_MEM_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Seal `plaintext` under `passphrase`, returning `header || ciphertext`.
 pub fn seal(passphrase: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
+    if passphrase.len() > MAX_PASSPHRASE_BYTES
+        || plaintext.len() > MAX_ENVELOPE_BYTES.saturating_sub(HEADER_LEN + TAG_LEN)
+    {
+        return Err(PortabilityError::BadFormat(
+            "passphrase or bundle payload exceeds the supported size".to_string(),
+        ));
+    }
     let mut salt = [0u8; SALT_LEN];
     let mut nonce = [0u8; NONCE_LEN];
     rand::Rng::fill_bytes(&mut rand::rng(), &mut salt);
@@ -72,6 +81,11 @@ pub fn seal(passphrase: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
 /// [`PortabilityError::Decryption`] for a wrong passphrase or any tampering
 /// (the two are deliberately indistinguishable).
 pub fn open(passphrase: &str, sealed: &[u8]) -> Result<Vec<u8>> {
+    if passphrase.len() > MAX_PASSPHRASE_BYTES || sealed.len() > MAX_ENVELOPE_BYTES {
+        return Err(PortabilityError::BadFormat(
+            "passphrase or sealed bundle exceeds the supported size".to_string(),
+        ));
+    }
     if sealed.len() < HEADER_LEN + TAG_LEN {
         return Err(PortabilityError::BadFormat(
             "input too short to be a bundle".to_string(),
@@ -130,12 +144,13 @@ fn build_header(salt: &[u8], nonce: &[u8], log_n: u8, r: u32, p: u32) -> Vec<u8>
 /// `1 << log_n` shift, requires sane iteration/parallelism, and caps the
 /// working set at [`MAX_KDF_MEM_BYTES`].
 fn kdf_params_within_limits(log_n: u8, r: u32, p: u32) -> bool {
-    if log_n >= 40 || r == 0 || p == 0 || p > 16 {
+    if log_n > 18 || r == 0 || r > 16 || p == 0 || p > 4 {
         return false;
     }
     let n = 1u64 << log_n;
     let mem = 128u64.saturating_mul(n).saturating_mul(u64::from(r));
-    mem <= MAX_KDF_MEM_BYTES
+    let work = n.saturating_mul(u64::from(r)).saturating_mul(u64::from(p));
+    mem <= MAX_KDF_MEM_BYTES && work <= 8 * 1024 * 1024
 }
 
 fn derive_key(passphrase: &str, salt: &[u8], log_n: u8, r: u32, p: u32) -> Result<[u8; KEY_LEN]> {

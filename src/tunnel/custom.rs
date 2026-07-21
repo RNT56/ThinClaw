@@ -1,13 +1,13 @@
 //! Custom tunnel via an arbitrary shell command.
 
 use anyhow::{Result, bail};
-use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
 use crate::tunnel::{
-    SharedProcess, SharedUrl, Tunnel, TunnelProcess, kill_shared, new_shared_process,
-    new_shared_url,
+    SharedProcess, SharedUrl, Tunnel, TunnelProcess, drain_tunnel_output, kill_shared,
+    new_shared_process, new_shared_url,
 };
+use crate::worker::bridge_common::read_bounded_line;
 
 /// Bring-your-own tunnel binary.
 ///
@@ -15,8 +15,8 @@ use crate::tunnel::{
 /// If `url_pattern` is set, stdout is scanned for a URL matching that
 /// substring. If `health_url` is set, health checks poll that endpoint.
 ///
-/// **Note:** The command is split on whitespace, so quoted arguments like
-/// `--arg "hello world"` won't work. Each token must be a single word.
+/// The command is parsed as a shell-style argument string, but is executed
+/// directly without invoking a shell.
 ///
 /// Examples:
 /// - `bore local {port} --to bore.pub`
@@ -57,57 +57,86 @@ impl Tunnel for CustomTunnel {
             .replace("{port}", &local_port.to_string())
             .replace("{host}", local_host);
 
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let parts = shlex::split(&cmd).ok_or_else(|| {
+            anyhow::anyhow!("Custom tunnel start_command contains invalid quoting")
+        })?;
         if parts.is_empty() {
             bail!("Custom tunnel start_command is empty");
         }
 
-        let mut child = Command::new(parts[0])
+        let mut command = Command::new(&parts[0]);
+        command
             .args(&parts[1..])
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .stderr(std::process::Stdio::piped());
+        let mut child = thinclaw_platform::OwnedChild::spawn(&mut command)?;
+        let stdout = child
+            .take_stdout()
+            .ok_or_else(|| anyhow::anyhow!("Failed to capture custom tunnel stdout"))?;
+        let stderr = child
+            .take_stderr()
+            .ok_or_else(|| anyhow::anyhow!("Failed to capture custom tunnel stderr"))?;
+        let stderr_task = drain_tunnel_output(stderr);
 
-        let mut public_url = format!("http://{local_host}:{local_port}");
+        let mut public_url = None;
+        let mut reader = tokio::io::BufReader::new(stdout);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
 
-        if self.url_pattern.is_some()
-            && let Some(stdout) = child.stdout.take()
-        {
-            let mut reader = tokio::io::BufReader::new(stdout).lines();
-            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+        while tokio::time::Instant::now() < deadline {
+            let line = tokio::time::timeout(
+                tokio::time::Duration::from_secs(3),
+                read_bounded_line(&mut reader, 64 * 1024),
+            )
+            .await;
 
-            while tokio::time::Instant::now() < deadline {
-                let line =
-                    tokio::time::timeout(tokio::time::Duration::from_secs(3), reader.next_line())
-                        .await;
-
-                match line {
-                    Ok(Ok(Some(l))) => {
-                        tracing::debug!("custom-tunnel: {l}");
-                        if let Some(url) = extract_url(&l) {
-                            let matches_pattern = self
-                                .url_pattern
-                                .as_ref()
-                                .is_none_or(|pat| url.contains(pat.as_str()));
-                            if matches_pattern {
-                                public_url = url;
-                                break;
-                            }
+            match line {
+                Ok(Ok(Some(line))) => {
+                    let line = line.text;
+                    tracing::debug!(bytes = line.len(), "custom tunnel produced an output line");
+                    if let Some(url) = extract_url(&line) {
+                        let matches_pattern = self
+                            .url_pattern
+                            .as_ref()
+                            .is_none_or(|pattern| url.contains(pattern.as_str()));
+                        if matches_pattern {
+                            public_url = Some(url);
+                            break;
                         }
                     }
-                    Ok(Ok(None) | Err(_)) => break,
-                    Err(_) => {}
                 }
+                Ok(Ok(None) | Err(_)) => break,
+                Err(_) => {}
             }
         }
+        let Some(public_url) = public_url else {
+            child.kill().await.ok();
+            bail!("custom tunnel did not produce a public URL within 15s");
+        };
+        let parsed = url::Url::parse(&public_url)?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+        {
+            child.kill().await.ok();
+            bail!("custom tunnel produced an invalid public URL");
+        }
+        if !matches!(child.try_wait(), Ok(None)) {
+            child.kill().await.ok();
+            bail!("custom tunnel exited during startup");
+        }
+        let stdout_task = drain_tunnel_output(reader);
 
         if let Ok(mut guard) = self.url.write() {
             *guard = Some(public_url.clone());
         }
 
         let mut guard = self.proc.lock().await;
-        *guard = Some(TunnelProcess { child });
+        *guard = Some(TunnelProcess {
+            child,
+            _output_tasks: vec![stdout_task, stderr_task],
+        });
 
         Ok(public_url)
     }
@@ -121,16 +150,35 @@ impl Tunnel for CustomTunnel {
 
     async fn health_check(&self) -> bool {
         if let Some(ref url) = self.health_url {
-            return reqwest::Client::new()
-                .get(url)
+            let Ok(parsed) = url::Url::parse(url) else {
+                return false;
+            };
+            if !matches!(parsed.scheme(), "http" | "https")
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+            {
+                return false;
+            }
+            let Ok(client) = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+            else {
+                return false;
+            };
+            return client
+                .get(url)
                 .send()
                 .await
-                .is_ok();
+                .is_ok_and(|response| response.status().is_success());
         }
 
-        let guard = self.proc.lock().await;
-        guard.as_ref().is_some_and(|tp| tp.child.id().is_some())
+        let mut guard = self.proc.lock().await;
+        guard
+            .as_mut()
+            .is_some_and(|tp| matches!(tp.child.try_wait(), Ok(None)))
     }
 
     fn public_url(&self) -> Option<String> {
@@ -165,18 +213,24 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn start_without_pattern_returns_local() {
-        let tunnel = CustomTunnel::new("sleep 1".into(), None, None);
+    async fn start_without_pattern_extracts_public_url() {
+        let tunnel = CustomTunnel::new(
+            "sh -c 'printf \"https://public.example\\n\"; sleep 2'".into(),
+            None,
+            None,
+        );
         let url = tunnel.start("127.0.0.1", 4455).await.unwrap();
-        assert_eq!(url, "http://127.0.0.1:4455");
+        assert_eq!(url, "https://public.example");
         tunnel.stop().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn start_with_pattern_extracts_url() {
         let tunnel = CustomTunnel::new(
-            "echo https://public.example".into(),
+            "sh -c 'printf \"https://public.example\\n\"; sleep 2'".into(),
             None,
             Some("public.example".into()),
         );
@@ -185,13 +239,15 @@ mod tests {
         tunnel.stop().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn pattern_filters_non_matching_urls() {
         // The command outputs two lines: first a non-matching URL, then a matching one.
         // The pattern filter should skip the first and grab the second.
         // No shell quoting needed; Command passes args directly to the binary.
         let tunnel = CustomTunnel::new(
-            r"printf http://internal:1234\nhttps://real.tunnel.io/abc\n".into(),
+            "sh -c 'printf \"http://internal:1234\\nhttps://real.tunnel.io/abc\\n\"; sleep 2'"
+                .into(),
             None,
             Some("tunnel.io".into()),
         );
@@ -200,10 +256,11 @@ mod tests {
         tunnel.stop().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn replaces_host_and_port_placeholders() {
         let tunnel = CustomTunnel::new(
-            "echo http://{host}:{port}".into(),
+            "sh -c 'printf \"http://{host}:{port}\\n\"; sleep 2'".into(),
             None,
             Some("http://".into()),
         );

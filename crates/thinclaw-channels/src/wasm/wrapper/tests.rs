@@ -228,7 +228,7 @@ async fn test_dispatch_emitted_messages_sends_to_channel() {
 fn test_wasm_emitted_whatsapp_message_uses_incoming_event_session_key() {
     use super::conversions::emitted_message_to_incoming_message;
     use crate::wasm::host::EmittedMessage;
-    use thinclaw_identity::ConversationKind;
+    use thinclaw_identity::{ConversationKind, external_principal_id};
 
     let metadata = serde_json::json!({
         "sender_phone": "+15551234567",
@@ -252,14 +252,16 @@ fn test_wasm_emitted_whatsapp_message_uses_incoming_event_session_key() {
 
     let identity = msg.resolved_identity();
     assert_eq!(identity.conversation_kind, ConversationKind::Direct);
-    assert_eq!(identity.principal_id, "+15551234567");
+    let external_principal = external_principal_id("whatsapp", "+15551234567");
+    assert_eq!(identity.principal_id, external_principal);
+    assert_eq!(identity.actor_id, identity.principal_id);
 }
 
 #[test]
 fn test_wasm_emitted_telegram_group_topic_keeps_legacy_alias_and_slash_parse() {
     use super::conversions::emitted_message_to_incoming_message;
     use crate::wasm::host::EmittedMessage;
-    use thinclaw_identity::ConversationKind;
+    use thinclaw_identity::{ConversationKind, external_principal_id};
 
     let metadata = serde_json::json!({
         "chat_id": -100123,
@@ -296,9 +298,14 @@ fn test_wasm_emitted_telegram_group_topic_keeps_legacy_alias_and_slash_parse() {
 
     let identity = msg.resolved_identity();
     assert_eq!(identity.conversation_kind, ConversationKind::Group);
+    let external_principal = external_principal_id("telegram", "42");
     assert_eq!(
         identity.stable_external_conversation_key,
-        "telegram://group/-100123/topic/99"
+        format!(
+            "group:principal:{}:{}:channel:8:telegram:conversation:33:telegram://group/-100123/topic/99",
+            external_principal.len(),
+            external_principal
+        )
     );
 }
 
@@ -1243,10 +1250,8 @@ fn test_redact_credentials_replaces_values() {
         !redacted.contains("8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis"),
         "credential value should be redacted"
     );
-    assert!(
-        redacted.contains("[REDACTED:TELEGRAM_BOT_TOKEN]"),
-        "redacted text should contain placeholder name"
-    );
+    assert!(redacted.contains("[REDACTED]"));
+    assert!(!redacted.contains("TELEGRAM_BOT_TOKEN"));
     assert!(
         !redacted.contains("s3cret"),
         "other credentials should also be redacted"
@@ -1288,6 +1293,179 @@ fn test_redact_credentials_skips_empty_values() {
 
     let input = "should not match anything";
     assert_eq!(store.redact_credentials(input), input);
+}
+
+fn credential_policy_store(
+    mappings: Vec<crate::wasm::capabilities::CredentialMapping>,
+    credentials: &[(&str, &str)],
+) -> super::store::ChannelStoreData {
+    use crate::wasm::capabilities::HttpCapability;
+
+    let mut http = HttpCapability::default();
+    for (index, mapping) in mappings.into_iter().enumerate() {
+        http.credentials
+            .insert(format!("credential_{index}"), mapping);
+    }
+    let mut capabilities = ChannelCapabilities::for_channel("test");
+    capabilities.tool_capabilities.http = Some(http);
+    super::store::ChannelStoreData::new(
+        1024 * 1024,
+        "test",
+        capabilities,
+        credentials
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect(),
+        Arc::new(PairingStore::new()),
+        Arc::new(ChannelWorkspaceStore::new()),
+    )
+}
+
+#[test]
+fn credential_policy_allows_only_declared_bearer_header_and_host() {
+    use crate::wasm::capabilities::{CredentialLocation, CredentialMapping};
+
+    let store = credential_policy_store(
+        vec![CredentialMapping {
+            secret_name: "service_token".to_string(),
+            location: CredentialLocation::Bearer,
+            host_patterns: vec!["api.example.com".to_string()],
+        }],
+        &[("SERVICE_TOKEN", "token-value")],
+    );
+    let headers = std::collections::HashMap::from([(
+        "Authorization".to_string(),
+        "Bearer {SERVICE_TOKEN}".to_string(),
+    )]);
+    let (_, injected, _) = store
+        .prepare_credential_request("https://api.example.com/v1/messages", headers.clone(), None)
+        .unwrap();
+    assert_eq!(
+        injected.get("Authorization").map(String::as_str),
+        Some("Bearer token-value")
+    );
+
+    assert!(
+        store
+            .prepare_credential_request("https://evil.example/v1/messages", headers.clone(), None)
+            .is_err()
+    );
+    assert!(
+        store
+            .prepare_credential_request(
+                "https://api.example.com/v1/messages",
+                std::collections::HashMap::new(),
+                Some(b"{SERVICE_TOKEN}".to_vec()),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn wildcard_bearer_is_bound_to_declared_base_url() {
+    use crate::wasm::capabilities::{CredentialLocation, CredentialMapping};
+
+    let store = credential_policy_store(
+        vec![
+            CredentialMapping {
+                secret_name: "matrix_base".to_string(),
+                location: CredentialLocation::UrlBase {
+                    placeholder: "{MATRIX_BASE}".to_string(),
+                },
+                host_patterns: vec!["*".to_string()],
+            },
+            CredentialMapping {
+                secret_name: "matrix_token".to_string(),
+                location: CredentialLocation::Bearer,
+                host_patterns: vec!["*".to_string()],
+            },
+        ],
+        &[
+            ("MATRIX_BASE", "https://matrix.example/base"),
+            ("MATRIX_TOKEN", "matrix-token"),
+        ],
+    );
+    let headers = std::collections::HashMap::from([(
+        "authorization".to_string(),
+        "Bearer {MATRIX_TOKEN}".to_string(),
+    )]);
+    let (url, _, _) = store
+        .prepare_credential_request("{MATRIX_BASE}/_matrix/client", headers.clone(), None)
+        .unwrap();
+    assert_eq!(url, "https://matrix.example/base/_matrix/client");
+
+    assert!(
+        store
+            .prepare_credential_request("https://evil.example/steal", headers, None)
+            .is_err()
+    );
+}
+
+#[test]
+fn basic_path_and_body_credentials_use_only_their_declared_locations() {
+    use crate::wasm::capabilities::{CredentialLocation, CredentialMapping};
+
+    let store = credential_policy_store(
+        vec![
+            CredentialMapping {
+                secret_name: "account_sid".to_string(),
+                location: CredentialLocation::UrlPath {
+                    placeholder: "{ACCOUNT_SID}".to_string(),
+                },
+                host_patterns: vec!["api.example.com".to_string()],
+            },
+            CredentialMapping {
+                secret_name: "auth_token".to_string(),
+                location: CredentialLocation::Basic {
+                    username: "{ACCOUNT_SID}".to_string(),
+                },
+                host_patterns: vec!["api.example.com".to_string()],
+            },
+            CredentialMapping {
+                secret_name: "from_number".to_string(),
+                location: CredentialLocation::Body {
+                    placeholder: "{FROM_NUMBER}".to_string(),
+                },
+                host_patterns: vec!["api.example.com".to_string()],
+            },
+        ],
+        &[
+            ("ACCOUNT_SID", "AC123"),
+            ("AUTH_TOKEN", "auth:token"),
+            ("FROM_NUMBER", "+491234"),
+        ],
+    );
+    let (url, _, body) = store
+        .prepare_credential_request(
+            "https://{ACCOUNT_SID}:{AUTH_TOKEN}@api.example.com/Accounts/{ACCOUNT_SID}/Messages",
+            std::collections::HashMap::new(),
+            Some(b"From={FROM_NUMBER}&Body=hello".to_vec()),
+        )
+        .unwrap();
+    let parsed = url::Url::parse(&url).unwrap();
+    assert_eq!(parsed.username(), "AC123");
+    assert_eq!(
+        parsed
+            .password()
+            .and_then(|value| urlencoding::decode(value).ok())
+            .map(|value| value.into_owned()),
+        Some("auth:token".to_string())
+    );
+    assert_eq!(body.unwrap(), b"From=+491234&Body=hello");
+}
+
+#[test]
+fn undeclared_credential_placeholders_are_rejected() {
+    let store = credential_policy_store(Vec::new(), &[]);
+    assert!(
+        store
+            .prepare_credential_request(
+                "https://api.example.com/{UNDECLARED_TOKEN}",
+                std::collections::HashMap::new(),
+                None,
+            )
+            .is_err()
+    );
 }
 
 #[test]

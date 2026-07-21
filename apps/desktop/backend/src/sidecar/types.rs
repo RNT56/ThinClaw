@@ -4,14 +4,25 @@
 use anyhow::{anyhow, Result};
 use specta::Type;
 use tauri_plugin_shell::process::CommandChild;
+use thinclaw_platform::OwnedChild;
+
+/// Process ownership used by sidecar services while native launchers are
+/// incrementally migrated away from the Tauri shell wrapper.
+pub enum SidecarChild {
+    Plugin(CommandChild),
+    /// Owns and kills the full descendant process tree on every platform.
+    Owned(OwnedChild),
+}
 
 /// A handle to a single spawned sidecar process (chat/embedding/summarizer/stt).
 pub struct SidecarProcess {
-    pub child: Option<CommandChild>,
+    pub child: Option<SidecarChild>,
     pub port: u16,
     pub token: String,
     pub context_size: u32,
     pub model_family: String,
+    /// Opaque model artifact fingerprint; never contains the source path.
+    pub model_identity: Option<String>,
 }
 
 /// Launch options for the chat server.
@@ -27,11 +38,32 @@ pub struct ChatServerOptions {
 }
 
 impl SidecarProcess {
+    pub(crate) fn is_running(&mut self) -> bool {
+        match self.child.as_mut() {
+            // The plugin process is cleared by its event monitor. It does not
+            // expose a non-blocking wait API here.
+            Some(SidecarChild::Plugin(_)) => true,
+            Some(SidecarChild::Owned(child)) => {
+                child.try_wait().is_ok_and(|status| status.is_none())
+            }
+            None => false,
+        }
+    }
+
     pub fn kill(mut self) -> Result<()> {
         if let Some(child) = self.child.take() {
-            child
-                .kill()
-                .map_err(|e| anyhow!("Failed to kill sidecar: {}", e))
+            match child {
+                SidecarChild::Plugin(child) => child
+                    .kill()
+                    .map_err(|e| anyhow!("Failed to kill sidecar: {}", e)),
+                // `OwnedChild` has kill-on-drop descendant ownership. A sync
+                // sidecar API cannot await reap, but dropping it still kills
+                // the complete process group/job rather than only its parent.
+                SidecarChild::Owned(child) => {
+                    drop(child);
+                    Ok(())
+                }
+            }
         } else {
             Ok(())
         }
@@ -41,7 +73,12 @@ impl SidecarProcess {
 impl Drop for SidecarProcess {
     fn drop(&mut self) {
         if let Some(child) = self.child.take() {
-            let _ = child.kill();
+            match child {
+                SidecarChild::Plugin(child) => {
+                    let _ = child.kill();
+                }
+                SidecarChild::Owned(child) => drop(child),
+            }
         }
     }
 }

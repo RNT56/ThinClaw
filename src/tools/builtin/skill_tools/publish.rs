@@ -77,6 +77,41 @@ struct PublishPlan {
     source: serde_json::Value,
 }
 
+fn validate_publish_git_ref(value: &str) -> Result<(), ToolError> {
+    let components_are_safe = value.split('/').all(|component| {
+        !component.is_empty()
+            && !component.starts_with('.')
+            && !component.ends_with('.')
+            && !component.ends_with(".lock")
+    });
+    let valid = !value.is_empty()
+        && value.len() <= 255
+        && value != "@"
+        && !value.eq_ignore_ascii_case("HEAD")
+        && !value
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| matches!(byte, b'-' | b'/' | b'.'))
+        && !value
+            .as_bytes()
+            .last()
+            .is_some_and(|byte| matches!(byte, b'/' | b'.'))
+        && !value.contains("..")
+        && !value.contains("//")
+        && !value.contains("@{")
+        && !value.ends_with(".lock")
+        && components_are_safe
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'));
+    if !valid {
+        return Err(ToolError::InvalidParameters(
+            "skill tap branch is not a safe Git ref".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn publish_projection_from_plan(
     plan: &PublishPlan,
     status: &str,
@@ -151,6 +186,9 @@ async fn build_publish_plan(
                 target_repo
             ))
         })?;
+    if let Some(branch) = tap.branch.as_deref() {
+        validate_publish_git_ref(branch)?;
+    }
 
     let files = collect_skill_package_files(&source_path)?;
     SkillRegistry::validate_skill_file(&source_path, skill.trust, skill.source.clone())
@@ -173,13 +211,14 @@ async fn build_publish_plan(
     };
     skill_policy::validate_repo_relative_path(&package_path, "package_path")?;
     let branch = format!("codex/skill-publish/{}-{}", skill.manifest.name, hash8);
-    let package_files = package_scan_files(&files);
+    validate_publish_git_ref(&branch)?;
+    let package_files = package_scan_files(&files)?;
     let scan_report = scan_report_for_content(
         quarantine,
         &skill.manifest.name,
         source_path,
         SkillContent {
-            raw_content: package_scan_content(&files),
+            raw_content: package_scan_content(&files)?,
             source_kind: "publish".to_string(),
             source_adapter: "publish".to_string(),
             source_ref: skill.manifest.name.clone(),
@@ -214,16 +253,48 @@ async fn build_publish_plan(
     })
 }
 
-async fn run_skill_publish_cmd(mut command: Command) -> Result<String, ToolError> {
-    let output = command
-        .output()
-        .await
-        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+const SKILL_PUBLISH_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const SKILL_PUBLISH_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
+const SKILL_PUBLISH_ERROR_PREVIEW_BYTES: usize = 16 * 1024;
+
+fn skill_publish_output_preview(bytes: &[u8]) -> String {
+    let retained = bytes
+        .get(..SKILL_PUBLISH_ERROR_PREVIEW_BYTES)
+        .unwrap_or(bytes);
+    let mut preview = String::from_utf8_lossy(retained).trim().to_string();
+    if bytes.len() > retained.len() {
+        preview.push_str("\n[output truncated]");
+    }
+    preview
+}
+
+async fn capture_skill_publish_cmd(
+    mut command: Command,
+) -> Result<thinclaw_platform::BoundedProcessOutput, ToolError> {
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never");
+    thinclaw_platform::bounded_command_output(
+        &mut command,
+        SKILL_PUBLISH_COMMAND_TIMEOUT,
+        SKILL_PUBLISH_COMMAND_OUTPUT_BYTES,
+        SKILL_PUBLISH_COMMAND_OUTPUT_BYTES,
+    )
+    .await
+    .map_err(|error| ToolError::ExecutionFailed(error.to_string()))
+}
+
+async fn run_skill_publish_cmd(command: Command) -> Result<String, ToolError> {
+    let output = capture_skill_publish_cmd(command).await?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(ToolError::ExecutionFailed(stderr.trim().to_string()))
+    let stderr = skill_publish_output_preview(&output.stderr);
+    Err(ToolError::ExecutionFailed(if stderr.is_empty() {
+        format!("publish subprocess exited with {}", output.status)
+    } else {
+        stderr
+    }))
 }
 
 async fn write_publish_package(
@@ -231,15 +302,15 @@ async fn write_publish_package(
     package_path: &str,
     files: &[SkillPackageFile],
 ) -> Result<PathBuf, ToolError> {
-    let destination = scratch_dir.join(package_path);
-    if tokio::fs::try_exists(&destination).await.unwrap_or(false) {
-        tokio::fs::remove_dir_all(&destination)
+    let root = scratch_dir.to_path_buf();
+    let package_path = package_path.to_string();
+    let destination =
+        tokio::task::spawn_blocking(move || prepare_publish_destination(&root, &package_path))
             .await
-            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
-    }
-    tokio::fs::create_dir_all(&destination)
-        .await
-        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+            .map_err(|error| {
+                ToolError::ExecutionFailed(format!("publish staging task panicked: {error}"))
+            })?
+            .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
 
     for file in files {
         let target = destination.join(&file.relative_path);
@@ -248,7 +319,8 @@ async fn write_publish_package(
                 .await
                 .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
         }
-        tokio::fs::copy(&file.source_path, &target)
+        let bytes = read_skill_package_file(file)?;
+        tokio::fs::write(&target, bytes)
             .await
             .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
     }
@@ -256,22 +328,54 @@ async fn write_publish_package(
     Ok(destination)
 }
 
-async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, ToolError> {
-    let scratch_dir = std::env::temp_dir().join(format!(
-        "thinclaw-skill-publish-{}-{}",
-        plan.skill_name,
-        plan.package_hash
-            .strip_prefix("sha256:")
-            .unwrap_or(&plan.package_hash)
-            .chars()
-            .take(8)
-            .collect::<String>()
-    ));
-    if tokio::fs::try_exists(&scratch_dir).await.unwrap_or(false) {
-        tokio::fs::remove_dir_all(&scratch_dir)
-            .await
-            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+fn prepare_publish_destination(
+    scratch_dir: &Path,
+    package_path: &str,
+) -> Result<PathBuf, std::io::Error> {
+    let canonical_root = scratch_dir.canonicalize()?;
+    let mut destination = canonical_root.clone();
+    let components = Path::new(package_path).components().collect::<Vec<_>>();
+    if components.is_empty()
+        || !components
+            .iter()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "publish package path is invalid",
+        ));
     }
+    for (index, component) in components.iter().enumerate() {
+        destination.push(component.as_os_str());
+        let is_destination = index + 1 == components.len();
+        match std::fs::symlink_metadata(&destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(std::io::Error::other(
+                    "publish package path traverses a non-directory or symlink",
+                ));
+            }
+            Ok(_) if is_destination => std::fs::remove_dir_all(&destination)?,
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        std::fs::create_dir(&destination)?;
+    }
+    let canonical_destination = destination.canonicalize()?;
+    if !canonical_destination.starts_with(&canonical_root) {
+        return Err(std::io::Error::other(
+            "publish package path escaped the scratch repository",
+        ));
+    }
+    Ok(canonical_destination)
+}
+
+async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, ToolError> {
+    let scratch = tempfile::Builder::new()
+        .prefix("thinclaw-skill-publish-")
+        .tempdir()
+        .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+    let scratch_dir = scratch.path().to_path_buf();
 
     let repo_url = format!("https://github.com/{}.git", plan.target_repo);
     run_skill_publish_cmd({
@@ -292,13 +396,14 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
                 .arg("-C")
                 .arg(&scratch_dir)
                 .arg("checkout")
-                .arg(base_branch);
+                .arg(base_branch)
+                .arg("--");
             command
         })
         .await?;
         base_branch.clone()
     } else {
-        run_skill_publish_cmd({
+        let detected = run_skill_publish_cmd({
             let mut command = Command::new("git");
             command
                 .arg("-C")
@@ -308,7 +413,9 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
                 .arg("HEAD");
             command
         })
-        .await?
+        .await?;
+        validate_publish_git_ref(&detected)?;
+        detected
     };
 
     run_skill_publish_cmd({
@@ -318,7 +425,8 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
             .arg(&scratch_dir)
             .arg("checkout")
             .arg("-B")
-            .arg(&plan.branch);
+            .arg(&plan.branch)
+            .arg("--");
         command
     })
     .await?;
@@ -331,25 +439,35 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
             .arg("-C")
             .arg(&scratch_dir)
             .arg("add")
+            .arg("--")
             .arg(&plan.package_path);
         command
     })
     .await?;
 
-    let diff_status = Command::new("git")
-        .arg("-C")
-        .arg(&scratch_dir)
-        .arg("diff")
-        .arg("--cached")
-        .arg("--quiet")
-        .output()
-        .await
-        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?
-        .status;
-    if diff_status.success() {
+    let diff_output = capture_skill_publish_cmd({
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&scratch_dir)
+            .arg("diff")
+            .arg("--cached")
+            .arg("--quiet");
+        command
+    })
+    .await?;
+    if diff_output.status.success() {
         return Err(ToolError::ExecutionFailed(
             "No package changes to publish".to_string(),
         ));
+    }
+    if diff_output.status.code() != Some(1) {
+        let stderr = skill_publish_output_preview(&diff_output.stderr);
+        return Err(ToolError::ExecutionFailed(if stderr.is_empty() {
+            format!("git diff exited with {}", diff_output.status)
+        } else {
+            stderr
+        }));
     }
 
     run_skill_publish_cmd({
@@ -405,6 +523,7 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
     })
     .await?;
 
+    let scratch_dir = scratch.keep();
     let mut output = publish_output_from_plan(plan, "published");
     output["scratch_dir"] = serde_json::Value::String(scratch_dir.display().to_string());
     output["package_dir"] = serde_json::Value::String(package_dir.display().to_string());
@@ -618,6 +737,51 @@ impl Tool for SkillPublishTool {
         } else {
             ApprovalRequirement::Never
         }
+    }
+}
+
+#[cfg(test)]
+mod publish_security_tests {
+    use super::*;
+
+    #[test]
+    fn publish_git_refs_reject_option_and_ambiguous_components() {
+        for invalid in [
+            "",
+            "-branch",
+            "../main",
+            "foo..bar",
+            "foo//bar",
+            "foo/.bar",
+            "foo/bar.lock",
+            "foo/@{bar",
+            "foo bar",
+            "@",
+            "HEAD",
+        ] {
+            assert!(
+                validate_publish_git_ref(invalid).is_err(),
+                "unexpected valid ref: {invalid}"
+            );
+        }
+        for valid in ["main", "feature/foo", "release-1.2_3"] {
+            assert!(
+                validate_publish_git_ref(valid).is_ok(),
+                "unexpected invalid ref: {valid}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_destination_rejects_symlink_components() {
+        let scratch = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), scratch.path().join("skills")).unwrap();
+
+        let error = prepare_publish_destination(scratch.path(), "skills/demo").unwrap_err();
+        assert!(error.to_string().contains("symlink"));
+        assert!(!outside.path().join("demo").exists());
     }
 }
 

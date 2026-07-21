@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::agent::learning::{LearningOrchestrator, ProviderHealthStatus};
 use crate::settings::LearningProviderSettings;
+use thinclaw_types::JobContext;
 
 pub use thinclaw_tools::builtin::external_memory::{
     ExternalMemoryExportTool, ExternalMemoryOffTool, ExternalMemoryPort,
@@ -52,21 +53,27 @@ impl ExternalMemoryPort for LearningOrchestrator {
             .collect()
     }
 
-    async fn provider_tool_extensions(&self, user_id: &str) -> Vec<String> {
-        LearningOrchestrator::provider_tool_extensions(self, user_id).await
+    async fn provider_tool_extensions(&self, ctx: &JobContext) -> Vec<String> {
+        let Ok(access) = crate::agent::learning::provider_access_context_from_job(ctx) else {
+            return Vec::new();
+        };
+        LearningOrchestrator::provider_tool_extensions(self, &access).await
     }
 
     async fn provider_recall(
         &self,
-        user_id: &str,
+        ctx: &JobContext,
         query: &str,
         limit: usize,
-    ) -> Vec<serde_json::Value> {
-        LearningOrchestrator::provider_recall(self, user_id, query, limit)
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let access = crate::agent::learning::provider_access_context_from_job(ctx)?;
+        LearningOrchestrator::provider_recall(self, &access, query, limit)
             .await
-            .into_iter()
-            .filter_map(|hit| serde_json::to_value(hit).ok())
-            .collect()
+            .map(|hits| {
+                hits.into_iter()
+                    .filter_map(|hit| serde_json::to_value(hit).ok())
+                    .collect()
+            })
     }
 
     async fn configure_memory_provider(
@@ -94,10 +101,11 @@ impl ExternalMemoryPort for LearningOrchestrator {
 
     async fn export_provider_payload(
         &self,
-        user_id: &str,
+        ctx: &JobContext,
         payload: &serde_json::Value,
     ) -> Result<String, String> {
-        LearningOrchestrator::export_provider_payload(self, user_id, payload).await
+        let access = crate::agent::learning::provider_access_context_from_job(ctx)?;
+        LearningOrchestrator::export_provider_payload(self, &access, payload).await
     }
 
     async fn disable_active_memory_provider(

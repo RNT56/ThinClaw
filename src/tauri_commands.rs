@@ -26,8 +26,9 @@ use crate::llm::LlmRuntimeManager;
 use crate::llm::cost_tracker::{CostSummary, CostTracker};
 use crate::llm::response_cache_ext::{CacheStats, CachedResponseStore};
 use crate::llm::routing_policy::{RoutingPolicy, RoutingRule, RoutingRuleSummary};
-use crate::secrets::InMemorySecretsStore;
+use crate::secrets::SecretsStore;
 use crate::tools::wasm::{AuthCapabilitySchema, CapabilitiesFile, WasmToolOAuthFlow};
+use std::io::Read as _;
 use std::sync::{Arc, OnceLock};
 
 struct RoutingPersistenceContext {
@@ -164,6 +165,9 @@ pub fn clawhub_prepare_install(
     cache: &CatalogCache,
     plugin_id: &str,
 ) -> Result<InstallResult, String> {
+    if !crate::extensions::clawhub::is_safe_catalog_entry_name(plugin_id) {
+        return Err("Plugin identifier is invalid".to_string());
+    }
     // Look up in cache
     let entry = cache
         .entries()
@@ -546,8 +550,6 @@ pub fn gmail_status(config: &GmailConfig) -> Result<GmailStatusResponse, String>
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GmailOAuthResult {
     pub success: bool,
-    pub access_token: Option<String>,
-    pub refresh_token: Option<String>,
     pub expires_in: Option<u64>,
     pub scope: Option<String>,
     pub error: Option<String>,
@@ -560,27 +562,41 @@ pub struct GmailOAuthResult {
 ///
 /// Maps to: `openclaw_gmail_oauth_start`
 /// Response: `GmailOAuthResult`
-pub async fn gmail_oauth_start() -> Result<GmailOAuthResult, String> {
-    wasm_tool_oauth_start("gmail".to_string()).await
+pub async fn gmail_oauth_start(
+    secrets: &(dyn SecretsStore + Send + Sync),
+    user_id: &str,
+) -> Result<GmailOAuthResult, String> {
+    wasm_tool_oauth_start("gmail".to_string(), secrets, user_id).await
 }
 
 /// Start the OAuth flow for an installed or bundled WASM tool.
 ///
 /// This is the generic desktop helper used by Google Workspace tools.
-pub async fn wasm_tool_oauth_start(tool_name: String) -> Result<GmailOAuthResult, String> {
-    use secrecy::SecretString;
-
+pub async fn wasm_tool_oauth_start(
+    tool_name: String,
+    secrets: &(dyn SecretsStore + Send + Sync),
+    user_id: &str,
+) -> Result<GmailOAuthResult, String> {
+    if tool_name.is_empty()
+        || tool_name.len() > 64
+        || !tool_name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+        || user_id.is_empty()
+        || user_id.len() > 256
+        || user_id.chars().any(char::is_control)
+    {
+        return Err("OAuth request contains an invalid tool or user namespace".to_string());
+    }
+    static OAUTH_FLOW_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let _flow_guard = OAUTH_FLOW_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     let auth = load_wasm_tool_auth(&tool_name)?;
     let redirect_uri = format!("http://localhost:{}/callback", OAUTH_CALLBACK_PORT);
-    let crypto = Arc::new(
-        crate::secrets::SecretsCrypto::new(SecretString::from(
-            "tauri-oauth-temporary-master-key".to_string(),
-        ))
-        .map_err(|e| e.to_string())?,
-    );
-    let store = InMemorySecretsStore::new(crypto);
     let tools_dir = crate::platform::state_paths().tools_dir;
-    let flow = WasmToolOAuthFlow::new(&store, "tauri", &tools_dir);
+    let flow = WasmToolOAuthFlow::new(secrets, user_id, &tools_dir);
     // CSRF defense: generate a state nonce, send it on the authorization request,
     // and require the loopback callback to echo it back unchanged.
     let oauth_state = oauth_defaults::generate_oauth_state();
@@ -589,17 +605,17 @@ pub async fn wasm_tool_oauth_start(tool_name: String) -> Result<GmailOAuthResult
         .await
         .map_err(|e| e.to_string())?;
 
-    if let Err(error) = open::that(&auth_request.auth_url) {
-        tracing::warn!(error = %error, tool = %tool_name, "Could not open browser for WASM tool OAuth");
-        return Err(format!(
-            "Could not open browser. Please open this URL manually: {}",
-            auth_request.auth_url
-        ));
-    }
-
+    // Bind before opening the browser. Fast provider redirects must not race a
+    // listener that does not exist yet.
     let listener = oauth_defaults::bind_callback_listener()
         .await
         .map_err(|e| format!("Failed to bind OAuth callback listener: {}", e))?;
+
+    if let Err(error) = open::that(&auth_request.auth_url) {
+        tracing::warn!(error = %error, tool = %tool_name, "Could not open browser for WASM tool OAuth");
+        return Err("Could not open the system browser for OAuth authorization".to_string());
+    }
+
     let code = oauth_defaults::wait_for_callback_with_state(
         listener,
         "/callback",
@@ -619,6 +635,9 @@ pub async fn wasm_tool_oauth_start(tool_name: String) -> Result<GmailOAuthResult
         )
         .await
         .map_err(|e| e.to_string())?;
+    flow.store_token_exchange(&auth, &token)
+        .await
+        .map_err(|error| format!("Failed to store OAuth credentials securely: {error}"))?;
 
     let scope = if token.granted_scopes.is_empty() {
         None
@@ -631,8 +650,6 @@ pub async fn wasm_tool_oauth_start(tool_name: String) -> Result<GmailOAuthResult
 
     Ok(GmailOAuthResult {
         success: true,
-        access_token: Some(token.access_token),
-        refresh_token: token.refresh_token,
         expires_in,
         scope,
         error: None,
@@ -653,13 +670,42 @@ fn load_wasm_tool_auth(tool_name: &str) -> Result<AuthCapabilitySchema, String> 
     candidates.push(bundled);
 
     for path in candidates {
-        if !path.exists() {
+        let Ok(path_metadata) = std::fs::symlink_metadata(&path) else {
             continue;
+        };
+        if !path_metadata.file_type().is_file()
+            || path_metadata.file_type().is_symlink()
+            || path_metadata.len() > 2 * 1024 * 1024
+        {
+            return Err("OAuth capabilities file is not a bounded regular file".to_string());
         }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|error| format!("Failed to read {}: {}", path.display(), error))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options
+            .open(&path)
+            .map_err(|_| "Failed to open OAuth capabilities file safely".to_string())?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| "Failed to inspect OAuth capabilities file".to_string())?;
+        if !metadata.is_file() || metadata.len() > 2 * 1024 * 1024 {
+            return Err("OAuth capabilities file changed or exceeds the size limit".to_string());
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(2 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Failed to read OAuth capabilities file".to_string())?;
+        if bytes.len() > 2 * 1024 * 1024 {
+            return Err("OAuth capabilities file exceeds the size limit".to_string());
+        }
+        let content = String::from_utf8(bytes)
+            .map_err(|_| "OAuth capabilities file is not valid UTF-8".to_string())?;
         let caps = CapabilitiesFile::from_json(&content)
-            .map_err(|error| format!("Invalid capabilities file {}: {}", path.display(), error))?;
+            .map_err(|error| format!("Invalid OAuth capabilities file: {error}"))?;
         if let Some(auth) = caps.auth {
             return Ok(auth);
         }
@@ -812,7 +858,7 @@ pub fn routine_create(params: RoutineCreateParams) -> Result<Routine, String> {
     let path = dir.join(format!("{}.json", routine.id));
     let json = serde_json::to_string_pretty(&routine)
         .map_err(|e| format!("Failed to serialize routine: {}", e))?;
-    std::fs::write(&path, json)
+    thinclaw_platform::write_private_file_atomic(&path, json.as_bytes(), false)
         .map_err(|e| format!("Failed to write routine file {:?}: {}", path, e))?;
 
     tracing::info!(
@@ -1014,6 +1060,13 @@ mod tests {
         let cache = CatalogCache::new(3600);
         let result = clawhub_prepare_install(&cache, "unknown");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_clawhub_prepare_install_rejects_path_traversal() {
+        let cache = CatalogCache::new(3600);
+        let result = clawhub_prepare_install(&cache, "../../outside");
+        assert_eq!(result.unwrap_err(), "Plugin identifier is invalid");
     }
 
     // NOTE: test_routine_audit_list removed — the function now queries

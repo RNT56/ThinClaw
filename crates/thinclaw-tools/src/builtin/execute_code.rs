@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 #[cfg(windows)]
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::ServerOptions;
 
@@ -23,6 +23,10 @@ use thinclaw_types::JobContext;
 
 /// Maximum code length (100KB).
 const MAX_CODE_LENGTH: usize = 100 * 1024;
+const MAX_TOOL_RPC_REQUEST_BYTES: usize = 64 * 1024;
+const MAX_TOOL_RPC_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TOOL_RPC_DIRECTORY_ENTRIES_PER_POLL: usize = 1_024;
+const MAX_TOOL_RPC_REQUESTS_PER_POLL: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InterpreterConfig {
@@ -839,7 +843,7 @@ impl Tool for ExecuteCodeTool {
                 tool_rpc_adapter(language)?.canonical_language()
             ),
         };
-        let runtime_capabilities = match mode {
+        let mut runtime_capabilities = match mode {
             ExecuteCodeMode::Subprocess => vec![
                 "captured_output".to_string(),
                 "language_runtime".to_string(),
@@ -857,14 +861,11 @@ impl Tool for ExecuteCodeTool {
             ],
         };
         let network_allowed = matches!(mode, ExecuteCodeMode::Subprocess) && self.allow_network;
+        if self.backend.kind() == ExecutionBackendKind::DockerSandbox && network_allowed {
+            runtime_capabilities.push("allowlisted_proxy_egress".to_string());
+        }
         let network_isolation = match self.backend.kind() {
-            ExecutionBackendKind::DockerSandbox => {
-                if network_allowed {
-                    NetworkIsolationKind::None
-                } else {
-                    NetworkIsolationKind::Hard
-                }
-            }
+            ExecutionBackendKind::DockerSandbox => NetworkIsolationKind::Hard,
             ExecutionBackendKind::LocalHost => host_local_network_isolation(network_allowed),
             ExecutionBackendKind::RemoteRunnerAdapter => {
                 if network_allowed {
@@ -964,26 +965,54 @@ async fn serve_tool_rpc(
                         e
                     ))
                 })?;
+                let mut scanned_entries = 0_usize;
+                let mut handled_requests = 0_usize;
                 while let Some(entry) = entries.next_entry().await.map_err(|e| {
                     ToolError::ExecutionFailed(format!("tool_rpc directory scan failed: {}", e))
                 })? {
+                    scanned_entries = scanned_entries.saturating_add(1);
+                    if scanned_entries > MAX_TOOL_RPC_DIRECTORY_ENTRIES_PER_POLL
+                        || handled_requests >= MAX_TOOL_RPC_REQUESTS_PER_POLL
+                    {
+                        break;
+                    }
                     let path = entry.path();
                     let Some(request_id) = tool_rpc_request_id_from_path(&path) else {
                         continue;
                     };
+                    let metadata = match tokio::fs::symlink_metadata(&path).await {
+                        Ok(metadata)
+                            if metadata.is_file()
+                                && !metadata.file_type().is_symlink()
+                                && metadata.len() <= MAX_TOOL_RPC_REQUEST_BYTES as u64 => metadata,
+                        _ => {
+                            let _ = tokio::fs::remove_file(&path).await;
+                            continue;
+                        }
+                    };
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt as _;
+                        if metadata.nlink() != 1 {
+                            let _ = tokio::fs::remove_file(&path).await;
+                            continue;
+                        }
+                    }
                     let processing_path = rpc_dir.join(format!("request-{}.processing", request_id));
                     if tokio::fs::rename(&path, &processing_path).await.is_err() {
                         continue;
                     }
-                    if let Err(err) = handle_tool_rpc_request_file(
+                    handled_requests = handled_requests.saturating_add(1);
+                    let result = handle_tool_rpc_request_file(
                         &processing_path,
                         &rpc_dir,
                         &request_id,
                         &tool_rpc_host,
                         &ctx,
                     )
-                    .await
-                    {
+                    .await;
+                    let _ = tokio::fs::remove_file(&processing_path).await;
+                    if let Err(err) = result {
                         tracing::warn!("tool_rpc request failed: {}", err);
                     }
                 }
@@ -1001,9 +1030,15 @@ async fn handle_tool_rpc_request_file(
     tool_rpc_host: &Arc<dyn ToolRpcHost>,
     ctx: &JobContext,
 ) -> Result<(), ToolError> {
-    let request_raw = tokio::fs::read_to_string(request_path)
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("tool_rpc read failed: {}", e)))?;
+    let request_bytes = thinclaw_platform::read_regular_file_bounded_single_link_async(
+        request_path.to_path_buf(),
+        MAX_TOOL_RPC_REQUEST_BYTES as u64,
+    )
+    .await
+    .map_err(|e| ToolError::ExecutionFailed(format!("tool_rpc read failed: {}", e)))?;
+    let request_raw = std::str::from_utf8(&request_bytes).map_err(|_| {
+        ToolError::InvalidParameters("tool_rpc request is not valid UTF-8".to_string())
+    })?;
     let request: Result<ToolRpcRequest, ToolError> = serde_json::from_str(request_raw.trim())
         .map_err(|e| {
             ToolError::InvalidParameters(format!("tool_rpc request is not valid JSON: {}", e))
@@ -1032,15 +1067,15 @@ async fn handle_tool_rpc_request_file(
     let payload = serde_json::to_vec(&response).map_err(|e| {
         ToolError::ExecutionFailed(format!("tool_rpc response serialization failed: {}", e))
     })?;
-    let response_tmp = rpc_dir.join(format!("response-{}.tmp", request_id));
+    if payload.len() > MAX_TOOL_RPC_RESPONSE_BYTES {
+        return Err(ToolError::ExecutionFailed(
+            "tool_rpc response exceeds the size limit".to_string(),
+        ));
+    }
     let response_path = rpc_dir.join(format!("response-{}.json", request_id));
-    tokio::fs::write(&response_tmp, &payload)
+    thinclaw_platform::write_private_file_atomic_async(response_path, payload, true)
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("tool_rpc write failed: {}", e)))?;
-    tokio::fs::rename(&response_tmp, &response_path)
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("tool_rpc publish failed: {}", e)))?;
-    let _ = tokio::fs::remove_file(request_path).await;
     Ok(())
 }
 
@@ -1049,6 +1084,7 @@ fn tool_rpc_request_id_from_path(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     name.strip_prefix("request-")
         .and_then(|rest| rest.strip_suffix(".json"))
+        .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .map(|id| id.to_string())
 }
 
@@ -1072,17 +1108,26 @@ fn tool_rpc_script_error(result: &ExecutionResult) -> ToolError {
 
 #[cfg(windows)]
 async fn handle_tool_rpc_stream_windows(
-    stream: tokio::net::windows::named_pipe::NamedPipeServer,
+    stream: &mut tokio::net::windows::named_pipe::NamedPipeServer,
     tool_rpc_host: Arc<dyn ToolRpcHost>,
     ctx: JobContext,
 ) -> Result<(), ToolError> {
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
-    let mut line = String::new();
+    let mut line = Vec::with_capacity(MAX_TOOL_RPC_REQUEST_BYTES.min(8 * 1024));
     reader
-        .read_line(&mut line)
+        .take((MAX_TOOL_RPC_REQUEST_BYTES + 1) as u64)
+        .read_until(b'\n', &mut line)
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("tool_rpc read failed: {}", e)))?;
+    if line.len() > MAX_TOOL_RPC_REQUEST_BYTES {
+        return Err(ToolError::InvalidParameters(
+            "tool_rpc request exceeds the size limit".to_string(),
+        ));
+    }
+    let line = std::str::from_utf8(&line).map_err(|_| {
+        ToolError::InvalidParameters("tool_rpc request is not valid UTF-8".to_string())
+    })?;
     let request: ToolRpcRequest = serde_json::from_str(line.trim()).map_err(|e| {
         ToolError::InvalidParameters(format!("tool_rpc request is not valid JSON: {}", e))
     })?;
@@ -1103,6 +1148,11 @@ async fn handle_tool_rpc_stream_windows(
     let payload = serde_json::to_vec(&response).map_err(|e| {
         ToolError::ExecutionFailed(format!("tool_rpc response serialization failed: {}", e))
     })?;
+    if payload.len() > MAX_TOOL_RPC_RESPONSE_BYTES {
+        return Err(ToolError::ExecutionFailed(
+            "tool_rpc response exceeds the size limit".to_string(),
+        ));
+    }
     write_half
         .write_all(&payload)
         .await
@@ -1112,7 +1162,7 @@ async fn handle_tool_rpc_stream_windows(
 
 #[cfg(windows)]
 async fn serve_tool_rpc_windows(
-    listener: tokio::net::windows::named_pipe::NamedPipeServer,
+    mut listener: tokio::net::windows::named_pipe::NamedPipeServer,
     tool_rpc_host: Arc<dyn ToolRpcHost>,
     ctx: JobContext,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -1122,15 +1172,18 @@ async fn serve_tool_rpc_windows(
             _ = &mut shutdown_rx => break,
             connected = listener.connect() => {
                 connected.map_err(|e| ToolError::ExecutionFailed(format!("tool_rpc named pipe connect failed: {}", e)))?;
-                let stream = listener;
-                let tool_rpc_host = Arc::clone(&tool_rpc_host);
-                let ctx = ctx.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = handle_tool_rpc_stream_windows(stream, tool_rpc_host, ctx).await {
-                        tracing::warn!("tool_rpc named pipe stream failed: {}", err);
-                    }
-                });
-                break;
+                let result = handle_tool_rpc_stream_windows(
+                    &mut listener,
+                    Arc::clone(&tool_rpc_host),
+                    ctx.clone(),
+                )
+                .await;
+                listener.disconnect().map_err(|e| {
+                    ToolError::ExecutionFailed(format!("tool_rpc named pipe disconnect failed: {}", e))
+                })?;
+                if let Err(err) = result {
+                    tracing::warn!("tool_rpc named pipe stream failed: {}", err);
+                }
             }
         }
     }
@@ -1149,9 +1202,19 @@ async fn execute_inner_tool_rpc(
         )));
     }
 
+    use sha2::{Digest, Sha256};
+    let encoded_params = serde_json::to_vec(&request.params).unwrap_or_default();
+    let mut parameter_keys = request
+        .params
+        .as_object()
+        .map(|values| values.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    parameter_keys.sort();
     tracing::info!(
         tool = %request.name,
-        params = %request.params,
+        parameter_keys = ?parameter_keys,
+        parameter_bytes = encoded_params.len(),
+        parameter_sha256 = %hex::encode(Sha256::digest(&encoded_params)),
         "tool_rpc inner tool started"
     );
 

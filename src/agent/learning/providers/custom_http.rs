@@ -1,8 +1,56 @@
 use super::*;
+
+fn apply_configured_headers(
+    mut request: reqwest::RequestBuilder,
+    config: &std::collections::HashMap<String, String>,
+) -> Result<reqwest::RequestBuilder, String> {
+    let Some(raw) = config.get("headers_json") else {
+        return Ok(request);
+    };
+    if raw.len() > 64 * 1024 {
+        return Err("headers_json exceeds the 64 KiB limit".to_string());
+    }
+    let parsed: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(raw).map_err(|error| format!("invalid headers_json: {error}"))?;
+    if parsed.len() > 64 {
+        return Err("headers_json exceeds the 64-header limit".to_string());
+    }
+    for (key, value) in parsed {
+        let value = value
+            .as_str()
+            .ok_or_else(|| format!("header '{key}' must be a string"))?;
+        if value.len() > 8 * 1024 {
+            return Err(format!("header '{key}' exceeds the 8 KiB limit"));
+        }
+        let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+            .map_err(|_| format!("header name '{key}' is invalid"))?;
+        if matches!(
+            name.as_str(),
+            "host"
+                | "content-length"
+                | "transfer-encoding"
+                | "connection"
+                | "proxy-authorization"
+                | "proxy-authenticate"
+                | "upgrade"
+        ) {
+            return Err(format!("header '{key}' is not allowed"));
+        }
+        let value = reqwest::header::HeaderValue::from_str(value)
+            .map_err(|_| format!("header '{key}' has an invalid value"))?;
+        request = request.header(name, value);
+    }
+    Ok(request)
+}
+
 #[async_trait]
 impl MemoryProvider for CustomHttpProvider {
     fn name(&self) -> &'static str {
         "custom_http"
+    }
+
+    fn supports_strict_subject_scoping(&self) -> bool {
+        true
     }
 
     async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus {
@@ -98,35 +146,23 @@ pub(super) async fn provider_json_request(
     url: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
+    let url = validated_provider_request_url(url)?;
     let mut request = apply_provider_auth(
-        shared_http_client()
+        shared_http_client()?
             .request(method, url)
             .timeout(std::time::Duration::from_secs(15)),
         config,
         default_auth_scheme,
     );
-    if let Some(headers) = config.get("headers_json") {
-        let parsed: serde_json::Map<String, serde_json::Value> = serde_json::from_str(headers)
-            .map_err(|error| format!("invalid headers_json: {error}"))?;
-        for (key, value) in parsed {
-            if let Some(value) = value.as_str() {
-                request = request.header(key, value);
-            }
-        }
-    }
+    request = apply_configured_headers(request, config)?;
     if let Some(body) = body {
         request = request.json(&body);
     }
-    let response = request.send().await.map_err(|error| error.to_string())?;
-    let status = response.status();
-    let text = response.text().await.map_err(|error| error.to_string())?;
-    if !status.is_success() {
-        return Err(format!("HTTP {status}: {text}"));
-    }
-    if text.trim().is_empty() {
-        return Ok(serde_json::Value::Null);
-    }
-    serde_json::from_str(&text).map_err(|error| error.to_string())
+    let response = request
+        .send()
+        .await
+        .map_err(|error| error.without_url().to_string())?;
+    provider_json_response(response).await
 }
 
 pub(super) async fn embedding_from_config(
@@ -174,31 +210,20 @@ pub(super) async fn custom_http_request(
     url: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    let mut request = shared_http_client()
+    let url = validated_provider_request_url(url)?;
+    let mut request = shared_http_client()?
         .request(method, url)
         .timeout(std::time::Duration::from_secs(15));
     if let Some(token) = provider_token(config) {
         request = request.bearer_auth(token);
     }
-    if let Some(headers) = config.get("headers_json") {
-        let parsed: serde_json::Map<String, serde_json::Value> = serde_json::from_str(headers)
-            .map_err(|error| format!("invalid headers_json: {error}"))?;
-        for (key, value) in parsed {
-            if let Some(value) = value.as_str() {
-                request = request.header(key, value);
-            }
-        }
-    }
+    request = apply_configured_headers(request, config)?;
     if let Some(body) = body {
         request = request.json(&body);
     }
-    request
+    let response = request
         .send()
         .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.without_url().to_string())?;
+    provider_json_response(response).await
 }

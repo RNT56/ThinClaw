@@ -322,6 +322,10 @@ impl RepoProjectExecutor {
             "source": "repo_project_supervisor",
             "task_packet": task_packet.metadata,
         });
+        job_manager.stamp_job_spec(&mut spec);
+        job_manager
+            .validate_job_spec(job_id, &spec)
+            .map_err(|error| error.to_string())?;
 
         let credential_grants = repo_project_credential_grants(project.policy.write_mode);
         let credential_grants_json =
@@ -580,6 +584,10 @@ impl RepoProjectExecutor {
             "source": "repo_project_supervisor",
             "task_packet": packet.metadata,
         });
+        job_manager.stamp_job_spec(&mut spec);
+        job_manager
+            .validate_job_spec(job_id, &spec)
+            .map_err(|error| error.to_string())?;
 
         let credential_grants = repo_project_credential_grants(project.policy.write_mode);
         let credential_grants_json =

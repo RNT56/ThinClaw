@@ -83,6 +83,12 @@ pub use conversions::HttpResponse;
 /// additive contract changes such as new `status-type` variants. Must stay in
 /// sync with the `@x.y.z` version on the WIT package declaration.
 pub const CHANNEL_WIT_VERSION: &str = "0.2.0";
+const MAX_CHANNEL_CONFIG_KEYS: usize = 256;
+const MAX_CHANNEL_CONFIG_KEY_BYTES: usize = 128;
+const MAX_CHANNEL_CONFIG_BYTES: usize = 1024 * 1024;
+const MAX_CHANNEL_CREDENTIALS: usize = 64;
+const MAX_CHANNEL_CREDENTIAL_VALUE_BYTES: usize = 64 * 1024;
+const MAX_CHANNEL_CREDENTIAL_TOTAL_BYTES: usize = 1024 * 1024;
 
 // Generate component model bindings from the WIT file
 wasmtime::component::bindgen!({
@@ -132,11 +138,19 @@ pub struct WasmChannel {
     /// Wrapped in Arc for sharing with the polling task.
     rate_limiter: Arc<RwLock<ChannelEmitRateLimiter>>,
 
-    /// Shutdown signal sender.
-    shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
-
     /// Polling shutdown signal sender (keeps polling alive while held).
     poll_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
+
+    /// Owned polling task; shutdown signals and drains/aborts it explicitly.
+    polling_task: RwLock<Option<tokio::task::JoinHandle<()>>>,
+
+    /// Serializes start/shutdown so repeated lifecycle calls cannot orphan
+    /// streams, polling loops, or message senders.
+    lifecycle_lock: tokio::sync::Mutex<()>,
+
+    /// Ensures concurrent priming/start/credential refresh calls execute the
+    /// guest's on_start callback at most once per requested refresh.
+    on_start_lock: tokio::sync::Mutex<()>,
 
     /// Registered HTTP endpoints.
     endpoints: RwLock<Vec<RegisteredEndpoint>>,
@@ -156,6 +170,10 @@ pub struct WasmChannel {
     /// In-memory workspace store persisting writes across callback invocations.
     /// Ensures WASM channels can maintain state (e.g., polling offsets) between ticks.
     workspace_store: Arc<ChannelWorkspaceStore>,
+
+    /// Serializes runtime-state read/modify/write operations and protects the
+    /// atomic persistence snapshot from concurrent health checks and resets.
+    runtime_state_lock: std::sync::Mutex<()>,
 
     /// Stream mode for progressive message rendering via sendMessageDraft.
     /// Configured via TELEGRAM_STREAM_MODE env var or DB setting. Default: None.
@@ -203,9 +221,10 @@ impl WasmChannel {
 
         // Use disk-backed workspace store so WASM channel state (e.g.,
         // Telegram managed topic registry) survives process restarts.
+        let storage_key = crate::wasm::capabilities::channel_storage_key(&name);
         let workspace_persist_path = thinclaw_platform::state_paths()
             .channels_dir
-            .join(format!("{}.workspace.json", &name));
+            .join(format!("{storage_key}.workspace.json"));
         let workspace_store = Arc::new(ChannelWorkspaceStore::with_persistence(
             workspace_persist_path,
         ));
@@ -221,13 +240,16 @@ impl WasmChannel {
             message_tx: Arc::new(RwLock::new(None)),
             pending_responses: RwLock::new(HashMap::new()),
             rate_limiter: Arc::new(RwLock::new(rate_limiter)),
-            shutdown_tx: RwLock::new(None),
             poll_shutdown_tx: RwLock::new(None),
+            polling_task: RwLock::new(None),
+            lifecycle_lock: tokio::sync::Mutex::new(()),
+            on_start_lock: tokio::sync::Mutex::new(()),
             endpoints: RwLock::new(Vec::new()),
             credentials: Arc::new(RwLock::new(HashMap::new())),
             typing_task: RwLock::new(None),
             pairing_store,
             workspace_store,
+            runtime_state_lock: std::sync::Mutex::new(()),
             stream_mode: std::sync::RwLock::new(stream_mode),
             debug_mode: std::sync::RwLock::new(false),
             pending_tool_events: tokio::sync::RwLock::new(Vec::new()),
@@ -239,40 +261,151 @@ impl WasmChannel {
     /// Merges the provided values into the existing config JSON.
     /// Call this before `start()` to inject runtime values like tunnel_url.
     pub async fn update_config(&self, updates: HashMap<String, serde_json::Value>) {
-        if let Some(mode) = updates.get("stream_mode").and_then(|v| v.as_str()) {
-            let parsed = StreamMode::from_str_value(mode);
-            if let Ok(mut g) = self.stream_mode.write() {
-                *g = parsed;
-            }
+        if updates.len() > MAX_CHANNEL_CONFIG_KEYS
+            || updates.keys().any(|key| {
+                key.is_empty()
+                    || key.len() > MAX_CHANNEL_CONFIG_KEY_BYTES
+                    || !key.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+                    })
+            })
+            || serde_json::to_vec(&updates)
+                .map_or(true, |encoded| encoded.len() > MAX_CHANNEL_CONFIG_BYTES)
+        {
+            tracing::warn!(channel = %self.name, "Rejected malformed or oversized channel config update");
+            return;
         }
+        let stream_mode = updates
+            .get("stream_mode")
+            .and_then(serde_json::Value::as_str)
+            .map(StreamMode::from_str_value);
 
         let mut config_guard = self.config_json.write().await;
+        if config_guard.len() > MAX_CHANNEL_CONFIG_BYTES {
+            tracing::warn!(channel = %self.name, "Rejected update to oversized channel config");
+            return;
+        }
+        let Ok(mut config) =
+            serde_json::from_str::<HashMap<String, serde_json::Value>>(&config_guard)
+        else {
+            tracing::warn!(channel = %self.name, "Rejected update to malformed channel config");
+            return;
+        };
 
-        // Parse existing config
-        let mut config: HashMap<String, serde_json::Value> =
-            serde_json::from_str(&config_guard).unwrap_or_default();
-
-        // Merge updates
         for (key, value) in updates {
             config.insert(key, value);
         }
+        if config.len() > MAX_CHANNEL_CONFIG_KEYS {
+            tracing::warn!(channel = %self.name, "Rejected channel config with too many keys");
+            return;
+        }
+        let Ok(encoded) = serde_json::to_string(&config) else {
+            tracing::warn!(channel = %self.name, "Failed to encode channel config update");
+            return;
+        };
+        if encoded.len() > MAX_CHANNEL_CONFIG_BYTES {
+            tracing::warn!(channel = %self.name, "Rejected oversized channel config");
+            return;
+        }
+        *config_guard = encoded;
+        drop(config_guard);
 
-        // Serialize back
-        *config_guard = serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string());
+        if let Some(mode) = stream_mode
+            && let Ok(mut guard) = self.stream_mode.write()
+        {
+            *guard = mode;
+        }
 
         tracing::debug!(
             channel = %self.name,
-            config = %*config_guard,
+            config_keys = config.len(),
             "Updated channel config"
         );
     }
 
-    /// Set a credential for URL injection.
-    pub async fn set_credential(&self, name: &str, value: String) {
-        self.credentials
-            .write()
-            .await
-            .insert(name.to_string(), value);
+    /// Replace the complete manifest-declared credential snapshot.
+    pub async fn replace_credentials(
+        &self,
+        credentials: HashMap<String, String>,
+    ) -> Result<usize, String> {
+        if credentials.len() > MAX_CHANNEL_CREDENTIALS
+            || credentials.iter().any(|(name, value)| {
+                name.is_empty()
+                    || name.len() > 128
+                    || !name.bytes().all(|byte| {
+                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+                    || value.is_empty()
+                    || value.len() > MAX_CHANNEL_CREDENTIAL_VALUE_BYTES
+                    || value.chars().any(char::is_control)
+            })
+            || credentials.iter().fold(0usize, |total, (name, value)| {
+                total.saturating_add(name.len()).saturating_add(value.len())
+            }) > MAX_CHANNEL_CREDENTIAL_TOTAL_BYTES
+        {
+            return Err("Channel credential snapshot is malformed or oversized".to_string());
+        }
+
+        let declared = self
+            .capabilities
+            .tool_capabilities
+            .http
+            .as_ref()
+            .map(|http| {
+                http.credentials
+                    .values()
+                    .filter_map(|mapping| {
+                        crate::wasm::capabilities::credential_placeholder_name(&mapping.secret_name)
+                    })
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let supplied = credentials
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        if supplied != declared {
+            return Err("Channel credential snapshot does not match its manifest".to_string());
+        }
+
+        if let Some(http) = self.capabilities.tool_capabilities.http.as_ref() {
+            for mapping in http.credentials.values() {
+                if matches!(
+                    mapping.location,
+                    crate::wasm::capabilities::CredentialLocation::UrlBase { .. }
+                ) {
+                    let placeholder = crate::wasm::capabilities::credential_placeholder_name(
+                        &mapping.secret_name,
+                    )
+                    .ok_or_else(|| "Channel manifest contains an invalid credential".to_string())?;
+                    let base = credentials
+                        .get(&placeholder)
+                        .ok_or_else(|| "Channel base URL credential is missing".to_string())?;
+                    let parsed = url::Url::parse(base)
+                        .map_err(|_| "Channel base URL credential is invalid".to_string())?;
+                    if parsed.scheme() != "https"
+                        || parsed.host_str().is_none()
+                        || !parsed.username().is_empty()
+                        || parsed.password().is_some()
+                        || parsed.query().is_some()
+                        || parsed.fragment().is_some()
+                    {
+                        return Err(
+                            "Channel base URL credential is not a safe HTTPS base".to_string()
+                        );
+                    }
+                }
+            }
+        }
+
+        let count = credentials.len();
+        *self.credentials.write().await = credentials;
+        Ok(count)
+    }
+
+    /// Clear all cached credentials, including on refresh failure or revocation.
+    pub async fn clear_credentials(&self) {
+        self.credentials.write().await.clear();
     }
 
     /// Get a snapshot of credentials for use in callbacks.
@@ -295,6 +428,52 @@ impl WasmChannel {
         self.endpoints.read().await.clone()
     }
 
+    async fn stop_polling_task(&self) {
+        if let Some(tx) = self.poll_shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
+        if let Some(mut handle) = self.polling_task.write().await.take() {
+            tokio::select! {
+                _ = &mut handle => {}
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                    handle.abort();
+                    let _ = handle.await;
+                    tracing::warn!(channel = %self.name, "Polling task exceeded shutdown deadline and was aborted");
+                }
+            }
+        }
+    }
+
+    async fn reconfigure_polling(&self, config: &ChannelConfig) -> Result<(), WasmChannelError> {
+        let interval = if let Some(poll) = &config.poll
+            && poll.enabled
+        {
+            Some(
+                self.capabilities
+                    .validate_poll_interval(poll.interval_ms)
+                    .map_err(|reason| WasmChannelError::CallbackFailed {
+                        name: self.name.clone(),
+                        reason,
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        if self.message_tx.read().await.is_none() {
+            return Ok(());
+        }
+        self.stop_polling_task().await;
+        if let Some(interval) = interval {
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            *self.poll_shutdown_tx.write().await = Some(shutdown_tx);
+            *self.polling_task.write().await =
+                Some(self.start_polling(Duration::from_millis(u64::from(interval)), shutdown_rx));
+        }
+        Ok(())
+    }
+
     /// Prime and cache the on_start configuration without starting the channel.
     ///
     /// This lets the host register the actual webhook endpoints before the
@@ -305,7 +484,9 @@ impl WasmChannel {
 
     /// Force a fresh on_start call and replace the cached config/endpoints.
     pub async fn refresh_on_start_config(&self) -> Result<ChannelConfig, WasmChannelError> {
-        self.ensure_on_start_config(true).await
+        let config = self.ensure_on_start_config(true).await?;
+        self.reconfigure_polling(&config).await?;
+        Ok(config)
     }
 }
 
@@ -320,13 +501,13 @@ impl Channel for WasmChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
-        // Create message channel
-        let (tx, rx) = mpsc::channel(256);
-        *self.message_tx.write().await = Some(tx);
-
-        // Create shutdown channel
-        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
-        *self.shutdown_tx.write().await = Some(shutdown_tx);
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        if self.message_tx.read().await.is_some() {
+            return Err(ChannelError::StartupFailed {
+                name: self.name.clone(),
+                reason: "channel is already started".to_string(),
+            });
+        }
 
         // Call on_start to get configuration, unless we already primed it.
         let config =
@@ -337,23 +518,32 @@ impl Channel for WasmChannel {
                     reason: e.to_string(),
                 })?;
 
-        // Start polling if configured
-        if let Some(poll_config) = &config.poll
+        // Validate every fallible polling property before publishing the new
+        // message sender, so a failed start leaves no half-started state.
+        let poll_interval = if let Some(poll_config) = &config.poll
             && poll_config.enabled
         {
-            let interval = self
-                .capabilities
-                .validate_poll_interval(poll_config.interval_ms)
-                .map_err(|e| ChannelError::StartupFailed {
-                    name: self.name.clone(),
-                    reason: e,
-                })?;
+            Some(
+                self.capabilities
+                    .validate_poll_interval(poll_config.interval_ms)
+                    .map_err(|e| ChannelError::StartupFailed {
+                        name: self.name.clone(),
+                        reason: e,
+                    })?,
+            )
+        } else {
+            None
+        };
 
+        let (tx, rx) = mpsc::channel(256);
+        *self.message_tx.write().await = Some(tx);
+
+        if let Some(interval) = poll_interval {
             // Create shutdown channel for polling and store the sender to keep it alive
             let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
             *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
-
-            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
+            *self.polling_task.write().await =
+                Some(self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx));
         }
 
         tracing::info!(
@@ -393,7 +583,7 @@ impl Channel for WasmChannel {
                 .and_then(|v| v.as_i64());
             if let Some(chat_id) = chat_id {
                 self.transport_send_attachments(chat_id, message_thread_id, &response.attachments)
-                    .await;
+                    .await?;
             }
         }
 
@@ -480,19 +670,15 @@ impl Channel for WasmChannel {
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
         // Cancel typing indicator
         self.cancel_typing_task().await;
 
-        // Send shutdown signal
-        if let Some(tx) = self.shutdown_tx.write().await.take() {
-            let _ = tx.send(());
-        }
-
-        // Stop polling by dropping the sender (receiver will complete)
-        let _ = self.poll_shutdown_tx.write().await.take();
-
-        // Clear the message sender
+        // Prevent an in-flight poll from dispatching into the channel while it
+        // drains, then signal the owned task and wait a bounded interval.
         *self.message_tx.write().await = None;
+
+        self.stop_polling_task().await;
 
         tracing::info!(
             channel = %self.name,
@@ -535,7 +721,7 @@ impl Channel for WasmChannel {
         // Send outbound media attachments directly via Telegram API
         if !response.attachments.is_empty() {
             self.transport_send_attachments(chat_id, None, &response.attachments)
-                .await;
+                .await?;
         }
 
         // Build minimal metadata that on_respond can parse.

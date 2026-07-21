@@ -12,6 +12,7 @@ use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use thinclaw_channels::setup as channel_setup;
+use thinclaw_tools_core::{OutboundUrlGuardOptions, validate_outbound_url_pinned_async};
 
 use crate::pairing::PairingStore;
 use crate::settings::{Settings, TunnelSettings};
@@ -21,6 +22,68 @@ use crate::setup::prompts::{
 };
 
 use super::{ChannelSetupError, SecretsContext};
+
+const MAX_TELEGRAM_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TELEGRAM_TOKEN_BYTES: usize = 256;
+const TELEGRAM_API_ORIGIN: &str = "https://api.telegram.org/";
+
+fn telegram_bot_token(token: &SecretString) -> Result<&str, ChannelSetupError> {
+    let token = token.expose_secret().trim();
+    let mut segments = token.split(':');
+    let bot_id = segments.next().unwrap_or_default();
+    let secret = segments.next().unwrap_or_default();
+    if token.is_empty()
+        || token.len() > MAX_TELEGRAM_TOKEN_BYTES
+        || segments.next().is_some()
+        || bot_id.is_empty()
+        || !bot_id.bytes().all(|byte| byte.is_ascii_digit())
+        || secret.is_empty()
+        || !secret
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(ChannelSetupError::Validation(
+            "Telegram bot token is malformed".to_string(),
+        ));
+    }
+    Ok(token)
+}
+
+fn telegram_api_url(token: &SecretString, method: &str) -> Result<reqwest::Url, ChannelSetupError> {
+    let token = telegram_bot_token(token)?;
+    let mut url = reqwest::Url::parse(TELEGRAM_API_ORIGIN)
+        .map_err(|_| ChannelSetupError::Network("Telegram API endpoint is invalid".to_string()))?;
+    url.set_path(&format!("bot{token}/{method}"));
+    Ok(url)
+}
+
+async fn telegram_client(timeout: Duration) -> Result<Client, ChannelSetupError> {
+    let guarded = validate_outbound_url_pinned_async(
+        TELEGRAM_API_ORIGIN,
+        &OutboundUrlGuardOptions {
+            require_https: true,
+            upgrade_http_to_https: false,
+            allowlist: vec!["api.telegram.org".to_string()],
+        },
+    )
+    .await
+    .map_err(|error| ChannelSetupError::Network(error.to_string()))?;
+    let host = guarded
+        .url
+        .host_str()
+        .ok_or_else(|| ChannelSetupError::Network("Telegram API has no host".to_string()))?;
+    let mut builder = Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout.min(Duration::from_secs(10)))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if !guarded.pinned_addrs.is_empty() {
+        builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+    }
+    builder
+        .build()
+        .map_err(|error| ChannelSetupError::Network(format!("HTTP client: {error}")))
+}
 
 /// Result of Telegram setup.
 #[derive(Debug, Clone)]
@@ -485,10 +548,7 @@ async fn fetch_telegram_updates(
     timeout_secs: u64,
     offset: Option<i64>,
 ) -> Result<Vec<TelegramUpdate>, ChannelSetupError> {
-    let updates_url = format!(
-        "https://api.telegram.org/bot{}/getUpdates",
-        token.expose_secret()
-    );
+    let updates_url = telegram_api_url(token, "getUpdates")?;
     let mut query = vec![
         ("timeout".to_string(), timeout_secs.to_string()),
         ("allowed_updates".to_string(), "[\"message\"]".to_string()),
@@ -498,11 +558,13 @@ async fn fetch_telegram_updates(
     }
 
     let response = client
-        .get(&updates_url)
+        .get(updates_url)
         .query(&query)
         .send()
         .await
-        .map_err(|e| ChannelSetupError::Network(format!("getUpdates request failed: {}", e)))?;
+        .map_err(|e| {
+            ChannelSetupError::Network(format!("getUpdates request failed: {}", e.without_url()))
+        })?;
 
     if !response.status().is_success() {
         return Err(ChannelSetupError::Network(format!(
@@ -511,9 +573,12 @@ async fn fetch_telegram_updates(
         )));
     }
 
-    let body: TelegramGetUpdatesResponse = response.json().await.map_err(|e| {
-        ChannelSetupError::Network(format!("Failed to parse getUpdates response: {}", e))
-    })?;
+    let body: TelegramGetUpdatesResponse =
+        crate::http_response::bounded_json(response, MAX_TELEGRAM_RESPONSE_BYTES)
+            .await
+            .map_err(|e| {
+                ChannelSetupError::Network(format!("Failed to parse getUpdates response: {}", e))
+            })?;
 
     if !body.ok {
         return Err(ChannelSetupError::Network(
@@ -527,17 +592,14 @@ async fn fetch_telegram_updates(
 async fn capture_telegram_owner_candidate(
     token: &SecretString,
 ) -> Result<Option<channel_setup::TelegramOwnerCandidate>, ChannelSetupError> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(35))
-        .build()
-        .map_err(|e| ChannelSetupError::Network(format!("Failed to create HTTP client: {}", e)))?;
+    let client = telegram_client(Duration::from_secs(35)).await?;
 
-    let delete_url = format!(
-        "https://api.telegram.org/bot{}/deleteWebhook",
-        token.expose_secret()
-    );
-    if let Err(error) = client.post(&delete_url).send().await {
-        tracing::warn!("Failed to delete webhook (getUpdates may not work): {error}");
+    let delete_url = telegram_api_url(token, "deleteWebhook")?;
+    if let Err(error) = client.post(delete_url).send().await {
+        tracing::warn!(
+            error = %error.without_url(),
+            "Failed to delete webhook (getUpdates may not work)"
+        );
     }
 
     let baseline_updates = fetch_telegram_updates(&client, token, 0, None).await?;
@@ -610,17 +672,14 @@ fn persist_telegram_runtime_offset_from_next_offset(next_offset: Option<i64>) {
 async fn persist_telegram_runtime_polling_snapshot(
     token: &SecretString,
 ) -> Result<(), ChannelSetupError> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| ChannelSetupError::Network(format!("Failed to create HTTP client: {}", e)))?;
+    let client = telegram_client(Duration::from_secs(15)).await?;
 
-    let delete_url = format!(
-        "https://api.telegram.org/bot{}/deleteWebhook",
-        token.expose_secret()
-    );
-    if let Err(error) = client.post(&delete_url).send().await {
-        tracing::warn!("Failed to delete webhook while persisting Telegram snapshot: {error}");
+    let delete_url = telegram_api_url(token, "deleteWebhook")?;
+    if let Err(error) = client.post(delete_url).send().await {
+        tracing::warn!(
+            error = %error.without_url(),
+            "Failed to delete webhook while persisting Telegram snapshot"
+        );
     }
 
     let mut next_offset = None;
@@ -715,7 +774,7 @@ fn ensure_parent_dir(path: &Path) -> Result<(), ChannelSetupError> {
 }
 
 fn read_telegram_workspace_state(path: &Path) -> HashMap<String, String> {
-    let raw = match std::fs::read_to_string(path) {
+    let raw = match thinclaw_platform::read_regular_file_bounded(path, 1024 * 1024) {
         Ok(content) => content,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return HashMap::new(),
         Err(error) => {
@@ -728,7 +787,7 @@ fn read_telegram_workspace_state(path: &Path) -> HashMap<String, String> {
         }
     };
 
-    serde_json::from_str::<HashMap<String, String>>(&raw).unwrap_or_else(|error| {
+    serde_json::from_slice::<HashMap<String, String>>(&raw).unwrap_or_else(|error| {
         tracing::warn!(
             path = %path.display(),
             %error,
@@ -750,9 +809,7 @@ fn write_telegram_workspace_state(
         )))
     })?;
 
-    let tmp_path = path.with_extension("tmp");
-    std::fs::write(&tmp_path, serialized)?;
-    std::fs::rename(&tmp_path, path)?;
+    thinclaw_platform::write_private_file_atomic(path, &serialized, true)?;
     Ok(())
 }
 
@@ -992,21 +1049,14 @@ async fn setup_telegram_webhook_secret(
 pub async fn validate_telegram_token(
     token: &SecretString,
 ) -> Result<Option<String>, ChannelSetupError> {
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| ChannelSetupError::Network(format!("Failed to create HTTP client: {}", e)))?;
+    let client = telegram_client(std::time::Duration::from_secs(10)).await?;
 
-    let url = format!(
-        "https://api.telegram.org/bot{}/getMe",
-        token.expose_secret()
-    );
+    let url = telegram_api_url(token, "getMe")?;
 
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| ChannelSetupError::Network(format!("Request failed: {}", e)))?;
+    let response =
+        client.get(url).send().await.map_err(|e| {
+            ChannelSetupError::Network(format!("Request failed: {}", e.without_url()))
+        })?;
 
     if !response.status().is_success() {
         return Err(ChannelSetupError::Network(format!(
@@ -1015,10 +1065,10 @@ pub async fn validate_telegram_token(
         )));
     }
 
-    let body: TelegramGetMeResponse = response
-        .json()
-        .await
-        .map_err(|e| ChannelSetupError::Network(format!("Failed to parse response: {}", e)))?;
+    let body: TelegramGetMeResponse =
+        crate::http_response::bounded_json(response, MAX_TELEGRAM_RESPONSE_BYTES)
+            .await
+            .map_err(|e| ChannelSetupError::Network(format!("Failed to parse response: {}", e)))?;
 
     if body.ok {
         Ok(body.result.and_then(|u| u.username))

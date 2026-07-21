@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Gmail channel configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GmailConfig {
     pub enabled: bool,
     pub project_id: String,
@@ -27,13 +27,41 @@ pub struct GmailConfig {
     pub max_message_size_bytes: usize,
 }
 
+impl std::fmt::Debug for GmailConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GmailConfig")
+            .field("enabled", &self.enabled)
+            .field("project_id", &self.project_id)
+            .field("subscription_id", &self.subscription_id)
+            .field("topic_id", &self.topic_id)
+            .field("webhook_path", &self.webhook_path)
+            .field(
+                "oauth_token",
+                &self.oauth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("label_filters", &self.label_filters)
+            .field("allowed_senders", &self.allowed_senders)
+            .field("max_message_size_bytes", &self.max_message_size_bytes)
+            .finish()
+    }
+}
+
 impl GmailConfig {
     /// True when the channel has everything needed to refresh its own access
     /// token without operator intervention.
     pub fn can_refresh_token(&self) -> bool {
         self.refresh_token.as_deref().is_some_and(|t| !t.is_empty())
             && self.client_id.as_deref().is_some_and(|t| !t.is_empty())
-            && self.client_secret.as_deref().is_some_and(|t| !t.is_empty())
     }
 }
 
@@ -72,18 +100,45 @@ impl GmailConfig {
         if let Ok(path) = std::env::var("GMAIL_WEBHOOK_PATH") {
             config.webhook_path = path;
         }
+        config.oauth_token = std::env::var("GMAIL_OAUTH_TOKEN")
+            .ok()
+            .filter(|value| !value.is_empty());
+        config.refresh_token = std::env::var("GMAIL_REFRESH_TOKEN")
+            .ok()
+            .filter(|value| !value.is_empty());
+        config.client_id = std::env::var("GMAIL_CLIENT_ID")
+            .ok()
+            .filter(|value| !value.is_empty());
+        config.client_secret = std::env::var("GMAIL_CLIENT_SECRET")
+            .ok()
+            .filter(|value| !value.is_empty());
         if let Ok(senders) = std::env::var("GMAIL_ALLOWED_SENDERS") {
             config.allowed_senders = senders.split(',').map(|s| s.trim().to_string()).collect();
         }
-        if std::env::var("GMAIL_ENABLED").is_ok() {
-            config.enabled = true;
+        if let Ok(labels) = std::env::var("GMAIL_LABEL_FILTERS") {
+            config.label_filters = labels
+                .split(',')
+                .map(|label| label.trim().to_string())
+                .filter(|label| !label.is_empty())
+                .collect();
+        }
+        if let Ok(value) = std::env::var("GMAIL_MAX_MESSAGE_SIZE_BYTES")
+            && let Ok(value) = value.parse::<usize>()
+        {
+            config.max_message_size_bytes = value;
+        }
+        if let Ok(value) = std::env::var("GMAIL_ENABLED") {
+            config.enabled = matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
         }
         config
     }
 
     /// Check if Gmail is fully configured.
     pub fn is_configured(&self) -> bool {
-        self.enabled && !self.project_id.is_empty() && !self.subscription_id.is_empty()
+        self.enabled && self.validate().is_empty()
     }
 
     /// Validate config and return list of missing fields.

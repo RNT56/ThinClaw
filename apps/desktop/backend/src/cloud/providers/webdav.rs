@@ -15,14 +15,18 @@
 //! - `root`: Path prefix within WebDAV (default: `thinclaw-desktop/`)
 
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use opendal::services::Webdav;
 use opendal::Operator;
 use std::collections::HashSet;
 use tracing::{debug, info};
 
+const MAX_LIST_ENTRIES: usize = 100_000;
+
 use super::super::provider::{
-    opendal_timestamp_millis, primary_object_root, should_read_legacy_object_root, CloudEntry,
-    CloudError, CloudProvider, CloudProviderConfig, CloudStatus, LEGACY_OBJECT_ROOT,
+    opendal_timestamp_millis, primary_object_root, should_read_legacy_object_root,
+    validate_object_key, validate_object_prefix, validate_provider_config, CloudEntry, CloudError,
+    CloudProvider, CloudProviderConfig, CloudStatus, LEGACY_OBJECT_ROOT,
 };
 
 /// WebDAV storage provider.
@@ -35,6 +39,7 @@ pub struct WebDavProvider {
 impl WebDavProvider {
     /// Create a new WebDAV provider from user configuration.
     pub fn from_config(config: &CloudProviderConfig) -> Result<Self, CloudError> {
+        validate_provider_config(config)?;
         let endpoint = config
             .endpoint
             .as_deref()
@@ -59,9 +64,12 @@ impl WebDavProvider {
         };
 
         info!(
-            "[cloud/webdav] Created {} provider: endpoint={}, root={}, legacy_read_fallback={}",
+            "[cloud/webdav] Created {} provider: host={}, root={}, legacy_read_fallback={}",
             display_name,
-            endpoint,
+            reqwest::Url::parse(endpoint)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_string))
+                .unwrap_or_else(|| "configured host".to_string()),
             root,
             legacy_operator.is_some()
         );
@@ -96,14 +104,35 @@ impl WebDavProvider {
             .finish())
     }
 
-    async fn read_key(operator: &Operator, key: &str) -> Result<Vec<u8>, CloudError> {
-        let data = operator.read(key).await.map_err(|e| {
+    async fn read_key(
+        operator: &Operator,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CloudError> {
+        let metadata = operator.stat(key).await.map_err(|e| {
             if e.kind() == opendal::ErrorKind::NotFound {
                 CloudError::NotFound(format!("'{}' not found", key))
             } else {
                 CloudError::DownloadFailed(format!("read '{}': {}", key, e))
             }
         })?;
+        if metadata.content_length() > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+            return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+        }
+        if metadata.content_length() == 0 {
+            return Ok(Vec::new());
+        }
+        let reader = operator
+            .reader(key)
+            .await
+            .map_err(|e| CloudError::DownloadFailed(format!("read '{}': {}", key, e)))?;
+        let data = reader
+            .read(0..metadata.content_length())
+            .await
+            .map_err(|e| CloudError::DownloadFailed(format!("read '{}': {}", key, e)))?;
+        if data.len() > max_bytes {
+            return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+        }
 
         Ok(data.to_vec())
     }
@@ -111,34 +140,58 @@ impl WebDavProvider {
     async fn list_from(operator: &Operator, prefix: &str) -> Result<Vec<CloudEntry>, CloudError> {
         let path = if prefix.is_empty() { "/" } else { prefix };
 
-        let entries_stream = operator.list(path).await.map_err(|e| {
-            if e.kind() == opendal::ErrorKind::NotFound {
-                CloudError::NotFound(format!("'{}' not found", path))
-            } else {
-                CloudError::Provider(format!("list '{}': {}", path, e))
-            }
-        })?;
+        let mut entries_stream = operator
+            .lister_with(path)
+            .recursive(true)
+            .await
+            .map_err(|e| {
+                if e.kind() == opendal::ErrorKind::NotFound {
+                    CloudError::NotFound(format!("'{}' not found", path))
+                } else {
+                    CloudError::Provider(format!("list '{}': {}", path, e))
+                }
+            })?;
 
         let mut results = Vec::new();
+        let mut entries_seen = 0_usize;
 
-        for entry in entries_stream {
+        while let Some(entry) = entries_stream
+            .try_next()
+            .await
+            .map_err(|error| CloudError::Provider(format!("list '{}': {}", path, error)))?
+        {
+            entries_seen += 1;
+            if entries_seen > MAX_LIST_ENTRIES {
+                return Err(CloudError::Provider(
+                    "WebDAV listing exceeds its safety limit".to_string(),
+                ));
+            }
             // Skip directories
             if entry.path().ends_with('/') {
                 continue;
             }
-            let meta = operator.stat(entry.path()).await;
-
-            match meta {
-                Ok(m) if m.is_file() => {
-                    results.push(CloudEntry {
-                        key: entry.path().to_string(),
-                        size: m.content_length(),
-                        last_modified: m.last_modified().map(opendal_timestamp_millis).unwrap_or(0),
-                        checksum: m.etag().map(|e| e.to_string()),
-                    });
+            validate_object_key(entry.path())?;
+            let meta = match operator.stat(entry.path()).await {
+                Ok(metadata) if metadata.is_file() => metadata,
+                Ok(_) => continue,
+                Err(error) if error.kind() == opendal::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(CloudError::Provider(format!(
+                        "stat '{}': {}",
+                        entry.path(),
+                        error
+                    )))
                 }
-                _ => continue,
-            }
+            };
+            results.push(CloudEntry {
+                key: entry.path().to_string(),
+                size: meta.content_length(),
+                last_modified: meta
+                    .last_modified()
+                    .map(opendal_timestamp_millis)
+                    .unwrap_or(0),
+                checksum: meta.etag().map(|e| e.to_string()),
+            });
         }
 
         Ok(results)
@@ -152,13 +205,22 @@ impl WebDavProvider {
         }
     }
 
-    fn merge_legacy_entries(primary: &mut Vec<CloudEntry>, legacy: Vec<CloudEntry>) {
+    fn merge_legacy_entries(
+        primary: &mut Vec<CloudEntry>,
+        legacy: Vec<CloudEntry>,
+    ) -> Result<(), CloudError> {
         let mut seen: HashSet<String> = primary.iter().map(|entry| entry.key.clone()).collect();
         for entry in legacy {
             if seen.insert(entry.key.clone()) {
                 primary.push(entry);
+                if primary.len() > MAX_LIST_ENTRIES {
+                    return Err(CloudError::Provider(
+                        "WebDAV listing exceeds its safety limit".to_string(),
+                    ));
+                }
             }
         }
+        Ok(())
     }
 }
 
@@ -175,11 +237,12 @@ impl CloudProvider for WebDavProvider {
         })?;
 
         // Calculate usage by listing all files
-        let mut total_size = 0u64;
-        let entries = self.list("").await.unwrap_or_default();
-        for entry in &entries {
-            total_size += entry.size;
-        }
+        let entries = self.list("").await.map_err(|error| {
+            CloudError::ConnectionFailed(format!("WebDAV listing failed: {error}"))
+        })?;
+        let total_size = entries
+            .iter()
+            .fold(0_u64, |total, entry| total.saturating_add(entry.size));
 
         Ok(CloudStatus {
             connected: true,
@@ -190,6 +253,7 @@ impl CloudProvider for WebDavProvider {
     }
 
     async fn put(&self, key: &str, data: &[u8]) -> Result<(), CloudError> {
+        validate_object_key(key)?;
         debug!("[cloud/webdav] PUT {} ({} bytes)", key, data.len());
 
         // Ensure parent directory exists
@@ -199,7 +263,12 @@ impl CloudProvider for WebDavProvider {
                 self.operator
                     .create_dir(&format!("{}/", parent_str))
                     .await
-                    .ok(); // Ignore error if dir already exists
+                    .map_err(|error| {
+                        CloudError::UploadFailed(format!(
+                            "create parent directory '{}': {}",
+                            parent_str, error
+                        ))
+                    })?;
             }
         }
 
@@ -210,15 +279,16 @@ impl CloudProvider for WebDavProvider {
             .map_err(|e| CloudError::UploadFailed(format!("write '{}': {}", key, e)))
     }
 
-    async fn get(&self, key: &str) -> Result<Vec<u8>, CloudError> {
+    async fn get_bounded(&self, key: &str, max_bytes: usize) -> Result<Vec<u8>, CloudError> {
+        validate_object_key(key)?;
         debug!("[cloud/webdav] GET {}", key);
 
-        match Self::read_key(&self.operator, key).await {
+        match Self::read_key(&self.operator, key, max_bytes).await {
             Ok(data) => Ok(data),
             Err(CloudError::NotFound(_)) => {
                 if let Some(legacy_operator) = &self.legacy_operator {
                     debug!("[cloud/webdav] GET {} falling back to legacy root", key);
-                    Self::read_key(legacy_operator, key).await
+                    Self::read_key(legacy_operator, key, max_bytes).await
                 } else {
                     Err(CloudError::NotFound(format!("'{}' not found", key)))
                 }
@@ -228,6 +298,7 @@ impl CloudProvider for WebDavProvider {
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudError> {
+        validate_object_key(key)?;
         debug!("[cloud/webdav] DELETE {}", key);
 
         self.operator
@@ -237,6 +308,7 @@ impl CloudProvider for WebDavProvider {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<CloudEntry>, CloudError> {
+        validate_object_prefix(prefix)?;
         let path = if prefix.is_empty() { "/" } else { prefix };
 
         debug!("[cloud/webdav] LIST prefix={}", path);
@@ -254,13 +326,14 @@ impl CloudProvider for WebDavProvider {
                 Err(CloudError::NotFound(_)) => Vec::new(),
                 Err(e) => return Err(e),
             };
-            Self::merge_legacy_entries(&mut results, legacy_entries);
+            Self::merge_legacy_entries(&mut results, legacy_entries)?;
         }
 
         Ok(results)
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudError> {
+        validate_object_key(key)?;
         if Self::exists_in(&self.operator, key).await? {
             return Ok(true);
         }

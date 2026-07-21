@@ -119,8 +119,53 @@ impl ConversationStore for LibSqlBackend {
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        self.touch_conversation(conversation_id).await?;
+        // The row is already committed at this point. A secondary activity
+        // timestamp failure must not turn a successful append into an
+        // ambiguous error that makes the caller roll back only its in-memory
+        // turn while the durable row remains present.
+        if let Err(error) = self.touch_conversation(conversation_id).await {
+            tracing::warn!(
+                conversation = %conversation_id,
+                %error,
+                "Conversation message persisted but activity timestamp update failed"
+            );
+        }
         Ok(id)
+    }
+
+    async fn set_effective_user_instruction(
+        &self,
+        conversation_id: Uuid,
+        message_id: Uuid,
+        effective_instruction: &str,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let changed = conn
+            .execute(
+                r#"
+                UPDATE conversation_messages
+                SET metadata = json_set(
+                    CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                    '$._thinclaw_effective_user_instruction_version', 1,
+                    '$._thinclaw_effective_user_instruction', ?3
+                )
+                WHERE conversation_id = ?1 AND id = ?2 AND role = 'user'
+                "#,
+                params![
+                    conversation_id.to_string(),
+                    message_id.to_string(),
+                    effective_instruction,
+                ],
+            )
+            .await
+            .map_err(|error| DatabaseError::Query(error.to_string()))?;
+        if changed != 1 {
+            return Err(DatabaseError::NotFound {
+                entity: "conversation user message".to_string(),
+                id: message_id.to_string(),
+            });
+        }
+        Ok(())
     }
 
     async fn ensure_conversation(
@@ -332,7 +377,10 @@ impl ConversationStore for LibSqlBackend {
             r#"
             UPDATE conversations
             SET user_id = COALESCE(?2, user_id),
-                actor_id = ?3,
+                actor_id = CASE
+                    WHEN ?5 = 'group' THEN COALESCE(NULLIF(trim(actor_id), ''), ?3)
+                    ELSE ?3
+                END,
                 conversation_scope_id = COALESCE(?4, conversation_scope_id),
                 conversation_kind = ?5,
                 stable_external_conversation_key = COALESCE(?6, stable_external_conversation_key)
@@ -350,6 +398,59 @@ impl ConversationStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn find_latest_conversation_for_ingress(
+        &self,
+        principal_id: &str,
+        actor_id: &str,
+        conversation_scope_id: Uuid,
+        conversation_kind: ConversationKind,
+        channel: &str,
+        external_thread_id: Option<&str>,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT c.id
+                FROM conversations c
+                WHERE c.user_id = ?1
+                  AND c.conversation_kind = ?4
+                  AND (
+                    (?4 = 'direct'
+                      AND (
+                        c.actor_id = ?2
+                        OR ((c.actor_id IS NULL OR trim(c.actor_id) = '') AND ?2 = ?1)
+                      )
+                      AND (?6 IS NULL OR (c.channel = ?5 AND c.thread_id = ?6)))
+                    OR
+                    (?4 = 'group' AND c.conversation_scope_id = ?3)
+                  )
+                ORDER BY c.last_activity DESC, c.started_at DESC, c.id DESC
+                LIMIT 1
+                "#,
+                params![
+                    principal_id,
+                    actor_id,
+                    conversation_scope_id.to_string(),
+                    conversation_kind.as_str(),
+                    channel,
+                    opt_text(external_thread_id),
+                ],
+            )
+            .await
+            .map_err(|error| DatabaseError::Query(error.to_string()))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| DatabaseError::Query(error.to_string()))?;
+        row.map(|row| {
+            get_text(&row, 0).parse().map_err(|error| {
+                DatabaseError::Serialization(format!("invalid conversation id: {error}"))
+            })
+        })
+        .transpose()
     }
 
     async fn set_conversation_handoff_metadata(
@@ -407,8 +508,18 @@ impl ConversationStore for LibSqlBackend {
                     FROM conversations c
                     WHERE c.user_id = ?1
                       AND (
-                        c.actor_id = ?2
-                        OR ((c.actor_id IS NULL OR trim(c.actor_id) = '') AND ?2 = ?1)
+                        (c.conversation_kind = 'direct' AND (
+                          c.actor_id = ?2
+                          OR ((c.actor_id IS NULL OR trim(c.actor_id) = '') AND ?2 = ?1)
+                        ))
+                        OR (c.conversation_kind = 'group' AND (
+                          c.actor_id = ?2
+                          OR EXISTS (
+                            SELECT 1 FROM conversation_messages membership
+                            WHERE membership.conversation_id = c.id
+                              AND membership.actor_id = ?2
+                          )
+                        ))
                       )
                       AND {kind_predicate}
                     ORDER BY c.last_activity DESC
@@ -551,6 +662,64 @@ impl ConversationStore for LibSqlBackend {
             messages.push(message_from_row(&row));
         }
         Ok(messages)
+    }
+
+    async fn list_conversation_messages_window(
+        &self,
+        conversation_id: Uuid,
+        start_row: i64,
+        limit: i64,
+    ) -> Result<Vec<ConversationMessage>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, role, content, actor_id, actor_display_name, raw_sender_id, metadata, created_at
+                FROM conversation_messages
+                WHERE conversation_id = ?1
+                ORDER BY created_at ASC, rowid ASC
+                LIMIT ?2 OFFSET ?3
+                "#,
+                params![conversation_id.to_string(), limit, start_row.max(0)],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut messages = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            messages.push(message_from_row(&row));
+        }
+        Ok(messages)
+    }
+
+    async fn count_conversation_messages(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?1",
+                params![conversation_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        else {
+            return Ok(0);
+        };
+        Ok(row.get::<i64>(0).unwrap_or(0).max(0))
     }
 
     async fn search_conversation_messages(
@@ -1906,15 +2075,71 @@ impl ConversationStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT 1
-                FROM conversations
-                WHERE id = ?1
-                  AND user_id = ?2
+                FROM conversations c
+                WHERE c.id = ?1
+                  AND c.user_id = ?2
                   AND (
-                    actor_id = ?3
-                    OR ((actor_id IS NULL OR trim(actor_id) = '') AND ?3 = ?2)
+                    (c.conversation_kind = 'direct' AND (
+                      c.actor_id = ?3
+                      OR ((c.actor_id IS NULL OR trim(c.actor_id) = '') AND ?3 = ?2)
+                    ))
+                    OR (c.conversation_kind = 'group' AND (
+                      c.actor_id = ?3
+                      OR EXISTS (
+                        SELECT 1 FROM conversation_messages membership
+                        WHERE membership.conversation_id = c.id
+                          AND membership.actor_id = ?3
+                      )
+                    ))
                   )
                 "#,
                 params![conversation_id.to_string(), principal_id, actor_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let found = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(found.is_some())
+    }
+
+    async fn conversation_belongs_to_identity(
+        &self,
+        conversation_id: Uuid,
+        principal_id: &str,
+        actor_id: &str,
+        conversation_scope_id: Uuid,
+        conversation_kind: ConversationKind,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT 1
+                FROM conversations c
+                WHERE c.id = ?1
+                  AND c.user_id = ?2
+                  AND (
+                    (?5 = 'direct'
+                      AND c.conversation_kind = 'direct'
+                      AND (
+                        c.actor_id = ?3
+                        OR ((c.actor_id IS NULL OR trim(c.actor_id) = '') AND ?3 = ?2)
+                      ))
+                    OR
+                    (?5 = 'group'
+                      AND c.conversation_kind = 'group'
+                      AND c.conversation_scope_id = ?4)
+                  )
+                "#,
+                params![
+                    conversation_id.to_string(),
+                    principal_id,
+                    actor_id,
+                    conversation_scope_id.to_string(),
+                    conversation_kind.as_str(),
+                ],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -1958,3 +2183,354 @@ mod outcomes;
 mod rows;
 
 pub(crate) use rows::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Database;
+
+    async fn database() -> (tempfile::TempDir, LibSqlBackend) {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = LibSqlBackend::new_local(&directory.path().join("conversations.db"))
+            .await
+            .unwrap();
+        backend.run_migrations().await.unwrap();
+        (directory, backend)
+    }
+
+    #[tokio::test]
+    async fn direct_conversation_acl_is_actor_scoped() {
+        let (_directory, backend) = database().await;
+        let id = backend
+            .create_conversation("test", "owner", Some("thread"))
+            .await
+            .unwrap();
+        let scope = Uuid::new_v4();
+        backend
+            .update_conversation_identity(
+                id,
+                Some("owner"),
+                Some("alice"),
+                Some(scope),
+                ConversationKind::Direct,
+                Some("test:thread"),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            backend
+                .conversation_belongs_to_identity(
+                    id,
+                    "owner",
+                    "alice",
+                    scope,
+                    ConversationKind::Direct,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !backend
+                .conversation_belongs_to_identity(
+                    id,
+                    "owner",
+                    "bob",
+                    scope,
+                    ConversationKind::Direct,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !backend
+                .conversation_belongs_to_identity(
+                    id,
+                    "other-owner",
+                    "alice",
+                    scope,
+                    ConversationKind::Direct,
+                )
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn group_acl_uses_exact_scope_and_preserves_first_speaker() {
+        let (_directory, backend) = database().await;
+        let id = backend
+            .create_conversation("test", "owner", Some("group-thread"))
+            .await
+            .unwrap();
+        let scope = Uuid::new_v4();
+        backend
+            .update_conversation_identity(
+                id,
+                Some("owner"),
+                Some("alice"),
+                Some(scope),
+                ConversationKind::Group,
+                Some("test:group-thread"),
+            )
+            .await
+            .unwrap();
+        backend
+            .update_conversation_identity(
+                id,
+                Some("owner"),
+                Some("bob"),
+                Some(scope),
+                ConversationKind::Group,
+                Some("test:group-thread"),
+            )
+            .await
+            .unwrap();
+
+        let conn = backend.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT actor_id FROM conversations WHERE id = ?1",
+                params![id.to_string()],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "alice");
+
+        assert!(
+            backend
+                .conversation_belongs_to_identity(
+                    id,
+                    "owner",
+                    "bob",
+                    scope,
+                    ConversationKind::Group,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !backend
+                .conversation_belongs_to_identity(
+                    id,
+                    "owner",
+                    "bob",
+                    Uuid::new_v4(),
+                    ConversationKind::Group,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !backend
+                .conversation_belongs_to_identity(
+                    id,
+                    "owner",
+                    "bob",
+                    scope,
+                    ConversationKind::Direct,
+                )
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_ingress_lookup_restores_only_the_exact_identity_scope() {
+        let (_directory, backend) = database().await;
+        let group_id = backend
+            .create_conversation("matrix", "owner", Some("room:non-uuid"))
+            .await
+            .unwrap();
+        let group_scope = Uuid::new_v4();
+        backend
+            .update_conversation_identity(
+                group_id,
+                Some("owner"),
+                Some("alice"),
+                Some(group_scope),
+                ConversationKind::Group,
+                Some("matrix:group:room:non-uuid"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            backend
+                .find_latest_conversation_for_ingress(
+                    "owner",
+                    "bob",
+                    group_scope,
+                    ConversationKind::Group,
+                    "matrix",
+                    Some("room:non-uuid"),
+                )
+                .await
+                .unwrap(),
+            Some(group_id)
+        );
+        assert!(
+            backend
+                .find_latest_conversation_for_ingress(
+                    "owner",
+                    "bob",
+                    Uuid::new_v4(),
+                    ConversationKind::Group,
+                    "matrix",
+                    Some("room:non-uuid"),
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let direct_id = backend
+            .create_conversation("signal", "owner", Some("side-thread"))
+            .await
+            .unwrap();
+        let direct_scope = Uuid::new_v4();
+        backend
+            .update_conversation_identity(
+                direct_id,
+                Some("owner"),
+                Some("alice"),
+                Some(direct_scope),
+                ConversationKind::Direct,
+                Some("direct:owner:alice"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .find_latest_conversation_for_ingress(
+                    "owner",
+                    "alice",
+                    direct_scope,
+                    ConversationKind::Direct,
+                    "signal",
+                    Some("side-thread"),
+                )
+                .await
+                .unwrap(),
+            Some(direct_id)
+        );
+        assert!(
+            backend
+                .find_latest_conversation_for_ingress(
+                    "owner",
+                    "bob",
+                    direct_scope,
+                    ConversationKind::Direct,
+                    "signal",
+                    Some("side-thread"),
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_message_window_is_bounded_and_chronological() {
+        let (_directory, backend) = database().await;
+        let id = backend
+            .create_conversation("test", "owner", Some("window-thread"))
+            .await
+            .unwrap();
+        for index in 0..5 {
+            backend
+                .add_conversation_message(id, "user", &format!("message-{index}"))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(backend.count_conversation_messages(id).await.unwrap(), 5);
+        let window = backend
+            .list_conversation_messages_window(id, 2, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            window
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message-2", "message-3"]
+        );
+        let first = backend
+            .list_conversation_messages_window(id, -10, 1)
+            .await
+            .unwrap();
+        assert_eq!(first[0].content, "message-0");
+        assert!(
+            backend
+                .list_conversation_messages_window(id, 0, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_user_instruction_updates_exact_row_without_replacing_raw_content() {
+        let (_directory, backend) = database().await;
+        let conversation_id = backend
+            .create_conversation("test", "owner", Some("hook-thread"))
+            .await
+            .unwrap();
+        let user_message_id = backend
+            .add_conversation_message_with_attribution(
+                conversation_id,
+                "user",
+                "raw transcript",
+                None,
+                None,
+                None,
+                Some(&serde_json::json!({"source": "channel"})),
+            )
+            .await
+            .unwrap();
+        let other_message_id = backend
+            .add_conversation_message(conversation_id, "assistant", "unchanged")
+            .await
+            .unwrap();
+
+        backend
+            .set_effective_user_instruction(
+                conversation_id,
+                user_message_id,
+                "model-visible rewrite",
+            )
+            .await
+            .unwrap();
+
+        let messages = backend
+            .list_conversation_messages(conversation_id)
+            .await
+            .unwrap();
+        let user = messages
+            .iter()
+            .find(|message| message.id == user_message_id)
+            .unwrap();
+        assert_eq!(user.content, "raw transcript");
+        assert_eq!(user.metadata["source"], "channel");
+        assert_eq!(
+            user.metadata["_thinclaw_effective_user_instruction_version"],
+            1
+        );
+        assert_eq!(
+            user.metadata["_thinclaw_effective_user_instruction"],
+            "model-visible rewrite"
+        );
+        assert!(
+            backend
+                .set_effective_user_instruction(
+                    conversation_id,
+                    other_message_id,
+                    "must not update assistant rows",
+                )
+                .await
+                .is_err()
+        );
+    }
+}

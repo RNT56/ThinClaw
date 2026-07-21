@@ -21,12 +21,12 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use thinclaw_llm_core::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamSupport,
+    CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata, StreamSupport,
     TokenCaptureSupport, ToolCompletionRequest, ToolCompletionResponse,
+    completion_request_cache_key,
 };
 use thinclaw_types::error::LlmError;
 
@@ -96,81 +96,6 @@ impl CachedProvider {
     }
 }
 
-/// Build a deterministic cache key from a completion request.
-///
-/// Hashes the model name, messages, and response-affecting parameters
-/// (max_tokens, temperature, stop_sequences) via SHA-256. Two requests
-/// with identical content and parameters produce the same key.
-///
-/// Note: The system prompt is included implicitly — it is prepended to
-/// `messages` as a system-role `ChatMessage` before the request is built,
-/// so it is captured by the `serde_json::to_string(&request.messages)` hash.
-fn cache_key(model: &str, request: &CompletionRequest) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(model.as_bytes());
-    hasher.update(b"|");
-
-    // Messages are Serialize, so we can deterministically hash them.
-    // serde_json produces stable output for the same input structure.
-    if let Ok(json) = serde_json::to_string(&request.messages) {
-        hasher.update(json.as_bytes());
-    }
-    if !request.context_documents.is_empty() {
-        hasher.update(b"|docs:");
-        if let Ok(json) = serde_json::to_string(&request.context_documents) {
-            hasher.update(json.as_bytes());
-        }
-    }
-
-    // Include response-affecting parameters so different temperatures,
-    // max_tokens, or stop sequences produce distinct cache keys.
-    hasher.update(b"|");
-    if let Some(max_tokens) = request.max_tokens {
-        hasher.update(max_tokens.to_le_bytes());
-    }
-    hasher.update(b"|");
-    if let Some(temp) = request.temperature {
-        hasher.update(temp.to_le_bytes());
-    }
-    hasher.update(b"|");
-    if let Some(ref stops) = request.stop_sequences {
-        for s in stops {
-            hasher.update(s.as_bytes());
-            hasher.update(b"\x00");
-        }
-    }
-
-    // Include thinking config so requests with different reasoning budgets
-    // (or enabled vs disabled) produce distinct cache keys.
-    hasher.update(b"|thinking:");
-    match request.thinking {
-        thinclaw_llm_core::ThinkingConfig::Disabled => hasher.update(b"off"),
-        thinclaw_llm_core::ThinkingConfig::Enabled { budget_tokens } => {
-            hasher.update(b"on:");
-            hasher.update(budget_tokens.to_le_bytes());
-        }
-    }
-
-    // Include metadata so requests with different thread/context IDs
-    // don't collide.
-    if !request.metadata.is_empty() {
-        hasher.update(b"|meta:");
-        // Sort keys for deterministic ordering.
-        let mut keys: Vec<&String> = request.metadata.keys().collect();
-        keys.sort();
-        for key in keys {
-            if let Some(val) = request.metadata.get(key) {
-                hasher.update(key.as_bytes());
-                hasher.update(b"=");
-                hasher.update(val.as_bytes());
-                hasher.update(b"\x00");
-            }
-        }
-    }
-
-    hex::encode(hasher.finalize())
-}
-
 #[async_trait]
 impl LlmProvider for CachedProvider {
     fn model_name(&self) -> &str {
@@ -183,7 +108,7 @@ impl LlmProvider for CachedProvider {
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let effective_model = self.inner.effective_model_name(request.model.as_deref());
-        let key = cache_key(&effective_model, &request);
+        let key = completion_request_cache_key(&effective_model, &request);
         let now = Instant::now();
 
         // Check cache
@@ -194,7 +119,15 @@ impl LlmProvider for CachedProvider {
                     entry.last_accessed = now;
                     entry.hit_count += 1;
                     tracing::debug!(hits = entry.hit_count, "response cache hit");
-                    return Ok(entry.response.clone());
+                    let mut response = entry.response.clone();
+                    // A cache hit performs no provider inference. Returning the
+                    // original usage/cost would make downstream accounting bill
+                    // the same completion again on every hit.
+                    response.input_tokens = 0;
+                    response.output_tokens = 0;
+                    response.cost_usd = Some(0.0);
+                    response.token_capture = None;
+                    return Ok(response);
                 }
                 // Expired, remove it
                 guard.remove(&key);
@@ -203,6 +136,16 @@ impl LlmProvider for CachedProvider {
 
         // Cache miss, call the real provider
         let response = self.inner.complete(request).await?;
+
+        // Only complete, normally terminated responses are reusable. Caching a
+        // length-truncated or filtered answer makes a transient partial result
+        // look authoritative on every subsequent request.
+        if response.finish_reason != FinishReason::Stop
+            || self.config.max_entries == 0
+            || response.provider_model.as_deref() != Some(effective_model.as_str())
+        {
+            return Ok(response);
+        }
 
         // Store in cache
         {
@@ -304,5 +247,145 @@ impl LlmProvider for CachedProvider {
         requested_model: Option<&str>,
     ) -> TokenCaptureSupport {
         self.inner.token_capture_support_for_model(requested_model)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use thinclaw_llm_core::ChatMessage;
+
+    struct CountingProvider {
+        calls: AtomicUsize,
+        finish_reason: FinishReason,
+        reported_model: Option<&'static str>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingProvider {
+        fn model_name(&self) -> &str {
+            "counting"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(CompletionResponse {
+                content: format!("response-{call}"),
+                provider_model: self.reported_model.map(str::to_string),
+                cost_usd: None,
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: self.finish_reason,
+                token_capture: None,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("tools".to_string()),
+                provider_model: self.reported_model.map(str::to_string),
+                cost_usd: None,
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: self.finish_reason,
+                token_capture: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn normally_finished_responses_are_reused() {
+        let inner = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+            finish_reason: FinishReason::Stop,
+            reported_model: Some("counting"),
+        });
+        let cached = CachedProvider::new(inner.clone(), ResponseCacheConfig::default());
+        let request = CompletionRequest::new(vec![ChatMessage::user("same")]);
+
+        let first = cached.complete(request.clone()).await.unwrap();
+        let second = cached.complete(request).await.unwrap();
+
+        assert_eq!(first.content, second.content);
+        assert_eq!(first.input_tokens, 1);
+        assert_eq!(second.input_tokens, 0);
+        assert_eq!(second.output_tokens, 0);
+        assert_eq!(second.cost_usd, Some(0.0));
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cached.total_hits().await, 1);
+    }
+
+    #[tokio::test]
+    async fn truncated_responses_are_never_reused() {
+        let inner = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+            finish_reason: FinishReason::Length,
+            reported_model: Some("counting"),
+        });
+        let cached = CachedProvider::new(inner.clone(), ResponseCacheConfig::default());
+        let request = CompletionRequest::new(vec![ChatMessage::user("same")]);
+
+        let first = cached.complete(request.clone()).await.unwrap();
+        let second = cached.complete(request).await.unwrap();
+
+        assert_ne!(first.content, second.content);
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+        assert!(cached.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn zero_capacity_disables_storage() {
+        let inner = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+            finish_reason: FinishReason::Stop,
+            reported_model: Some("counting"),
+        });
+        let cached = CachedProvider::new(
+            inner.clone(),
+            ResponseCacheConfig {
+                max_entries: 0,
+                ..ResponseCacheConfig::default()
+            },
+        );
+        let request = CompletionRequest::new(vec![ChatMessage::user("same")]);
+
+        cached.complete(request.clone()).await.unwrap();
+        cached.complete(request).await.unwrap();
+
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+        assert!(cached.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn unknown_servicing_model_is_never_reused() {
+        let inner = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+            finish_reason: FinishReason::Stop,
+            reported_model: None,
+        });
+        let cached = CachedProvider::new(inner.clone(), ResponseCacheConfig::default());
+        let request = CompletionRequest::new(vec![ChatMessage::user("same")]);
+
+        let first = cached.complete(request.clone()).await.unwrap();
+        let second = cached.complete(request).await.unwrap();
+
+        assert_ne!(first.content, second.content);
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+        assert!(cached.is_empty().await);
     }
 }

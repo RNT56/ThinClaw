@@ -9,18 +9,21 @@ pub async fn search_all_tools(
     query: &str,
     mcp_client: Option<&McpClient>,
     skill_manager: Option<&SkillManager>,
-    include_host: bool,
+    allowed_host_tools: &[String],
 ) -> SearchResult {
     let mut all_tools = Vec::new();
     let query_lower = query.to_lowercase();
 
     // 1. Host Tools
-    if include_host {
+    if !allowed_host_tools.is_empty() {
         let host_tools = get_host_tools_definitions();
         for tool in host_tools {
-            if query_lower.is_empty()
-                || tool.name.to_lowercase().contains(&query_lower)
-                || tool.description.to_lowercase().contains(&query_lower)
+            if allowed_host_tools
+                .iter()
+                .any(|allowed| allowed == &tool.name)
+                && (query_lower.is_empty()
+                    || tool.name.to_lowercase().contains(&query_lower)
+                    || tool.description.to_lowercase().contains(&query_lower))
             {
                 all_tools.push(tool);
             }
@@ -117,11 +120,11 @@ pub fn get_host_tools_definitions() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: "read_file".into(),
-            description: "Read file contents (sandbox restricted, read-only)".into(),
+            description: "Read UTF-8 text from managed document storage (read-only)".into(),
             input_schema: Some(json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path to file" }
+                    "path": { "type": "string", "description": "Path relative to managed document storage" }
                 },
                 "required": ["path"]
             })),
@@ -140,6 +143,17 @@ pub fn get_host_tools_definitions() -> Vec<ToolInfo> {
                     }
                 },
                 "required": ["expression"]
+            })),
+        },
+        ToolInfo {
+            name: "generate_image".into(),
+            description: "Generate an image from a bounded text prompt".into(),
+            input_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "Image description" }
+                },
+                "required": ["prompt"]
             })),
         },
     ]

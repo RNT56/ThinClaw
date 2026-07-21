@@ -8,4 +8,5 @@ pub struct DesktopAutonomyManager {
     pub(super) state_root: PathBuf,
     pub(super) sidecar_script_path: PathBuf,
     pub(super) runtime_state: RwLock<RuntimeState>,
+    pub(super) rollout_lock: Mutex<()>,
 }

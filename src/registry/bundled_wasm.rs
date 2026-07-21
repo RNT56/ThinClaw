@@ -85,21 +85,38 @@ pub async fn extract_bundled(name: &str, target_dir: &std::path::Path) -> Result
         .find(|(n, _, _, _)| *n == name)
         .ok_or_else(|| format!("No bundled WASM for '{}' in this build", name))?;
 
-    tokio::fs::create_dir_all(target_dir)
-        .await
-        .map_err(|e| format!("Failed to create directory {}: {}", target_dir.display(), e))?;
+    if name.is_empty()
+        || name.len() > 128
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
+    {
+        return Err("Bundled extension has an invalid install name".to_string());
+    }
+    let kind = match bundle.1 {
+        "tool" => super::manifest::ManifestKind::Tool,
+        "channel" => super::manifest::ManifestKind::Channel,
+        other => return Err(format!("Bundled extension has invalid kind '{other}'")),
+    };
+    let source = format!("bundled://{name}");
+    super::installer::validate_wasm_payload(bundle.2, &source)
+        .map_err(|error| error.to_string())?;
+    if let Some(capabilities) = bundle.3 {
+        super::installer::validate_capabilities_payload(kind, name, capabilities, &source)
+            .map_err(|error| error.to_string())?;
+    }
 
     let wasm_path = target_dir.join(format!("{}.wasm", name));
-    tokio::fs::write(&wasm_path, bundle.2)
-        .await
-        .map_err(|e| format!("Failed to write {}: {}", wasm_path.display(), e))?;
-
-    if let Some(caps) = bundle.3 {
-        let caps_path = target_dir.join(format!("{}.capabilities.json", name));
-        tokio::fs::write(&caps_path, caps)
-            .await
-            .map_err(|e| format!("Failed to write {}: {}", caps_path.display(), e))?;
-    }
+    let caps_path = target_dir.join(format!("{}.capabilities.json", name));
+    super::installer::publish_extension_files(
+        wasm_path,
+        caps_path,
+        bundle.2.to_vec(),
+        bundle.3.map(|capabilities| capabilities.to_vec()),
+        true,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
 
     tracing::info!(
         "Extracted bundled WASM '{}' ({} bytes) to {}",

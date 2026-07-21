@@ -1,13 +1,15 @@
 //! Top-level lifecycle dispatchers that fan an operation out by
 //! [`ExtensionKind`]: search, install, auth, activate, list, and remove.
 
+use std::sync::Arc;
+
 use crate::extensions::{
     ActivateResult, AuthResult, ExtensionError, ExtensionKind, InstallResult, InstalledExtension,
     ResultSource, SearchResult,
 };
 use crate::tools::mcp::McpClient;
 use crate::tools::mcp::auth::is_authenticated;
-use crate::tools::wasm::{WasmToolAuthCheck, WasmToolAuthMode, WasmToolAuthStatus, discover_tools};
+use crate::tools::wasm::{WasmToolAuthMode, WasmToolAuthStatus, discover_tools};
 use thinclaw_tools::builtin::extension_tools as extension_tool_policy;
 
 use super::ExtensionManager;
@@ -51,8 +53,10 @@ impl ExtensionManager {
         url: Option<&str>,
         kind_hint: Option<ExtensionKind>,
     ) -> Result<InstallResult, ExtensionError> {
-        tracing::info!(extension = %name, url = ?url, kind = ?kind_hint, "Installing extension");
+        let redacted_url = url.map(crate::registry::installer::redacted_download_url);
+        tracing::info!(extension = %name, url = ?redacted_url, kind = ?kind_hint, "Installing extension");
         Self::validate_extension_name(name)?;
+        let _wasm_operation = self.wasm_operation_lock.lock().await;
 
         let kind_label = kind_hint
             .map(|k| format!("{:?}", k))
@@ -116,7 +120,12 @@ impl ExtensionManager {
                 )),
             }
             .map_err(|e| {
-                tracing::error!(extension = %name, url = %url, error = %e, "Extension install from URL failed");
+                tracing::error!(
+                    extension = %name,
+                    url = %crate::registry::installer::redacted_download_url(url),
+                    error = %e,
+                    "Extension install from URL failed"
+                );
                 e
             });
             match &result {
@@ -174,7 +183,7 @@ impl ExtensionManager {
         let kind = self.determine_installed_kind(name).await?;
 
         match kind {
-            ExtensionKind::McpServer => self.auth_mcp(name, token).await,
+            ExtensionKind::McpServer => self.auth_mcp(name, token, context).await,
             ExtensionKind::WasmTool => self.auth_wasm_tool(name, token, context).await,
             ExtensionKind::WasmChannel => self.auth_wasm_channel(name, token).await,
             // Native plugins authenticate via manifest signature verification at
@@ -309,30 +318,55 @@ impl ExtensionManager {
                 Ok(tools) => {
                     for (name, _discovered) in tools {
                         let active = self.tool_registry.has(&name).await;
-                        let auth_state = self
-                            .check_wasm_tool_auth_status(&name)
-                            .await
-                            .unwrap_or_else(|_| WasmToolAuthCheck::no_auth_required());
+                        let auth_state = self.check_wasm_tool_auth_status(&name).await;
+                        let (
+                            authenticated,
+                            auth_mode,
+                            auth_status,
+                            needs_setup,
+                            shared_auth_provider,
+                            missing_scopes,
+                            activation_error,
+                        ) = match auth_state {
+                            Ok(auth_state) => (
+                                matches!(
+                                    auth_state.auth_status,
+                                    WasmToolAuthStatus::Authenticated
+                                        | WasmToolAuthStatus::NoAuthRequired
+                                ),
+                                auth_state.auth_mode.as_str().to_string(),
+                                auth_state.auth_status.as_str().to_string(),
+                                auth_state.auth_mode == WasmToolAuthMode::ManualToken,
+                                auth_state.shared_auth_provider,
+                                auth_state.missing_scopes,
+                                None,
+                            ),
+                            Err(error) => (
+                                false,
+                                "unknown".to_string(),
+                                "error".to_string(),
+                                true,
+                                None,
+                                Vec::new(),
+                                Some(format!("Authentication metadata error: {error}")),
+                            ),
+                        };
 
                         extensions.push(InstalledExtension {
                             name: name.clone(),
                             kind: ExtensionKind::WasmTool,
                             description: None,
                             url: None,
-                            authenticated: matches!(
-                                auth_state.auth_status,
-                                WasmToolAuthStatus::Authenticated
-                                    | WasmToolAuthStatus::NoAuthRequired
-                            ),
-                            auth_mode: auth_state.auth_mode.as_str().to_string(),
-                            auth_status: auth_state.auth_status.as_str().to_string(),
+                            authenticated,
+                            auth_mode,
+                            auth_status,
                             active,
                             tools: if active { vec![name] } else { Vec::new() },
-                            needs_setup: auth_state.auth_mode == WasmToolAuthMode::ManualToken,
-                            shared_auth_provider: auth_state.shared_auth_provider,
-                            missing_scopes: auth_state.missing_scopes,
+                            needs_setup,
+                            shared_auth_provider,
+                            missing_scopes,
                             installed: true,
-                            activation_error: None,
+                            activation_error,
                         });
                     }
                 }
@@ -348,13 +382,30 @@ impl ExtensionManager {
         {
             match crate::channels::wasm::discover_channels(&self.wasm_channels_dir).await {
                 Ok(channels) => {
-                    let active_names = self.active_channel_names.read().await;
-                    let errors = self.activation_errors.read().await;
+                    let active_names = self.active_channel_names.read().await.clone();
+                    let errors = self.activation_errors.read().await.clone();
                     for (name, _discovered) in channels {
                         let active = active_names.contains(&name);
-                        let (authenticated, needs_setup) =
-                            self.check_channel_auth_status(&name).await;
-                        let activation_error = errors.get(&name).cloned();
+                        let (authenticated, needs_setup, auth_status, auth_error) =
+                            match self.check_channel_auth_status(&name).await {
+                                Ok((authenticated, needs_setup)) => (
+                                    authenticated,
+                                    needs_setup,
+                                    if authenticated {
+                                        "authenticated".to_string()
+                                    } else {
+                                        "awaiting_token".to_string()
+                                    },
+                                    None,
+                                ),
+                                Err(error) => (
+                                    false,
+                                    true,
+                                    "error".to_string(),
+                                    Some(format!("Authentication metadata error: {error}")),
+                                ),
+                            };
+                        let activation_error = auth_error.or_else(|| errors.get(&name).cloned());
                         extensions.push(InstalledExtension {
                             name,
                             kind: ExtensionKind::WasmChannel,
@@ -362,11 +413,7 @@ impl ExtensionManager {
                             url: None,
                             authenticated,
                             auth_mode: "secrets".to_string(),
-                            auth_status: if authenticated {
-                                "authenticated".to_string()
-                            } else {
-                                "awaiting_token".to_string()
-                            },
+                            auth_status,
                             active,
                             tools: Vec::new(),
                             needs_setup,
@@ -465,23 +512,9 @@ impl ExtensionManager {
 
         let result: Result<String, ExtensionError> = match kind {
             ExtensionKind::McpServer => {
-                // Unregister tools with this server's prefix
-                let prefix = McpClient::registered_tool_prefix(name);
-                let tool_names: Vec<String> = self
-                    .tool_registry
-                    .list()
-                    .await
-                    .into_iter()
-                    .filter(|t| t.starts_with(&prefix))
-                    .collect();
-
-                for tool_name in &tool_names {
-                    self.tool_registry.unregister(tool_name).await;
-                }
-
-                // Remove MCP client
-                self.mcp_clients.write().await.remove(name);
-                self.stop_mcp_watcher(name).await;
+                let _operation = self.mcp_operation_lock.lock().await;
+                let tool_names = self.unregister_mcp_tools_unlocked(name).await;
+                self.discard_mcp_client_unlocked(name).await;
 
                 // Remove from config
                 self.remove_mcp_server(name)
@@ -495,6 +528,15 @@ impl ExtensionManager {
                 ))
             }
             ExtensionKind::WasmTool => {
+                let _operation = self.wasm_operation_lock.lock().await;
+                let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
+                let cap_path = self
+                    .wasm_tools_dir
+                    .join(format!("{}.capabilities.json", name));
+                thinclaw_platform::remove_file_pair(wasm_path, cap_path)
+                    .await
+                    .map_err(|error| ExtensionError::Other(error.to_string()))?;
+
                 // Unregister from tool registry
                 self.tool_registry.unregister(name).await;
 
@@ -513,43 +555,36 @@ impl ExtensionManager {
                     );
                 }
 
-                // Delete files
-                let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
-                let cap_path = self
-                    .wasm_tools_dir
-                    .join(format!("{}.capabilities.json", name));
-
-                if wasm_path.exists() {
-                    tokio::fs::remove_file(&wasm_path)
-                        .await
-                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
-                }
-                if cap_path.exists() {
-                    let _ = tokio::fs::remove_file(&cap_path).await;
-                }
-
                 Ok(format!("Removed WASM tool '{}'", name))
             }
             ExtensionKind::WasmChannel => {
-                // Delete channel files
+                let _operation = self.wasm_operation_lock.lock().await;
                 let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
                 let cap_path = self
                     .wasm_channels_dir
                     .join(format!("{}.capabilities.json", name));
+                thinclaw_platform::remove_file_pair(wasm_path, cap_path)
+                    .await
+                    .map_err(|error| ExtensionError::Other(error.to_string()))?;
 
-                if wasm_path.exists() {
-                    tokio::fs::remove_file(&wasm_path)
+                let runtime = self.channel_runtime.read().await.as_ref().map(|runtime| {
+                    (
+                        Arc::clone(&runtime.channel_manager),
+                        Arc::clone(&runtime.wasm_channel_router),
+                    )
+                });
+                if let Some((channel_manager, router)) = runtime {
+                    channel_manager
+                        .hot_remove(name)
                         .await
-                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                        .map_err(|error| ExtensionError::Other(error.to_string()))?;
+                    router.unregister(name).await;
                 }
-                if cap_path.exists() {
-                    let _ = tokio::fs::remove_file(&cap_path).await;
-                }
+                self.active_channel_names.write().await.remove(name);
+                self.activation_errors.write().await.remove(name);
+                self.persist_active_channels().await;
 
-                Ok(format!(
-                    "Removed channel '{}'. The hot-reload watcher will unload it automatically.",
-                    name
-                ))
+                Ok(format!("Removed and stopped channel '{}'", name))
             }
             ExtensionKind::NativePlugin => {
                 // Unload the in-process runtime if loaded. We intentionally do

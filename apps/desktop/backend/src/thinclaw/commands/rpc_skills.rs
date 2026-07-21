@@ -5,7 +5,7 @@
 use tauri::State;
 use tracing::info;
 
-use super::ThinClawManager;
+use super::skill_repo::install_skill_repository;
 use crate::thinclaw::bridge::{gated, BridgeError, RouteMode};
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 use thinclaw_core::tools::Tool;
@@ -158,7 +158,8 @@ pub async fn thinclaw_skill_install(
     } else {
         let catalog = agent.skill_catalog().ok_or("Skill catalog not available")?;
         let download_url =
-            thinclaw_core::skills::catalog::skill_download_url(catalog.registry_url(), &name);
+            thinclaw_core::skills::catalog::skill_download_url(catalog.registry_url(), &name)
+                .map_err(|e| format!("Invalid skill download request: {e}"))?;
         thinclaw_core::tools::builtin::skill_tools::fetch_skill_content(&download_url)
             .await
             .map_err(|e| format!("Failed to fetch skill '{}': {}", name, e))?
@@ -432,7 +433,8 @@ pub async fn thinclaw_install_skill_deps(
 
     // Fetch skill content from ClawHub
     let download_url =
-        thinclaw_core::skills::catalog::skill_download_url(catalog.registry_url(), &name);
+        thinclaw_core::skills::catalog::skill_download_url(catalog.registry_url(), &name)
+            .map_err(|e| format!("Invalid skill download request: {e}"))?;
     let content = thinclaw_core::tools::builtin::skill_tools::fetch_skill_content(&download_url)
         .await
         .map_err(|e| format!("Failed to fetch skill '{}': {}", name, e))?;
@@ -483,9 +485,9 @@ pub async fn thinclaw_install_skill_deps(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_install_skill_repo(
-    state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     repo_url: String,
+    approved_digest: Option<String>,
 ) -> Result<String, BridgeError> {
     if ironclaw.remote_proxy().await.is_some() {
         return Err(gated(
@@ -496,40 +498,12 @@ pub async fn thinclaw_install_skill_repo(
         ));
     }
 
-    let cfg_guard = state.config.read().await;
-    let cfg = cfg_guard
-        .as_ref()
-        .ok_or("ThinClaw config not initialized")?;
-
-    let skills_dir = cfg.workspace_dir().join("skills");
-    std::fs::create_dir_all(&skills_dir).map_err(|e| e.to_string())?;
-
-    let repo_name = repo_url
-        .split('/')
-        .next_back()
-        .unwrap_or("unknown-repo")
-        .trim_end_matches(".git");
-
-    let target_dir = skills_dir.join(repo_name);
-    if target_dir.exists() {
-        return Err(format!("Skill repository already installed at {:?}", target_dir).into());
-    }
-
-    info!("Cloning skill repo {} into {:?}", repo_url, target_dir);
-
-    let output = std::process::Command::new("git")
-        .arg("clone")
-        .arg("--depth")
-        .arg("1")
-        .arg(&repo_url)
-        .arg(&target_dir)
-        .output()
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Git clone failed: {}", stderr).into());
-    }
-
-    Ok(format!("Successfully installed skills from {}", repo_name))
+    let agent = ironclaw.agent().await?;
+    let registry = agent
+        .skill_registry()
+        .ok_or("Skill registry not available")?;
+    let outcome = install_skill_repository(registry, &repo_url, approved_digest.as_deref())
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(outcome.message())
 }

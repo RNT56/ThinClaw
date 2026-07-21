@@ -73,6 +73,7 @@ export interface ThinClawStatus {
     /** Whether the first-run identity bootstrap ritual has been completed. */
     bootstrap_completed: boolean;
     custom_llm_url: string | null;
+    has_custom_llm_key: boolean;
     custom_llm_key: string | null;
     custom_llm_model: string | null;
     custom_llm_enabled: boolean;
@@ -582,8 +583,11 @@ export async function selectThinClawModel(model: string | null): Promise<void> {
     return invoke('thinclaw_save_selected_cloud_model', { model });
 }
 
-export async function installThinClawSkillRepo(repoUrl: string): Promise<string> {
-    return invoke('thinclaw_install_skill_repo', { repoUrl });
+export async function installThinClawSkillRepo(
+    repoUrl: string,
+    approvedDigest: string | null = null,
+): Promise<string> {
+    return invoke('thinclaw_install_skill_repo', { repoUrl, approvedDigest });
 }
 
 export async function installThinClawSkillDeps(name: string, installId?: string): Promise<void> {
@@ -772,6 +776,10 @@ export async function verifyConnection(url: string, token: string | null): Promi
     return invoke('thinclaw_test_connection', { url, token });
 }
 
+export async function copyGatewayToken(): Promise<void> {
+    return invoke('thinclaw_copy_gateway_token');
+}
+
 export interface AgentStatusSummary {
     id: string;
     name: string;
@@ -927,12 +935,11 @@ export type CanvasAction = CanvasActionShow | CanvasActionUpdate | CanvasActionD
 
 /** Dispatch a canvas action event (button click, form submit) back to the agent. */
 export async function canvasDispatchAction(
-    sessionKey: string,
-    eventType: string,
-    payload: any,
-    runId?: string
+    panelId: string,
+    action: string,
+    values: Record<string, unknown> = {},
 ): Promise<ThinClawRpcResponse> {
-    return invoke('thinclaw_canvas_dispatch_event', { sessionKey, runId: runId ?? null, eventType, payload });
+    return invoke('thinclaw_canvas_panel_action', { panelId, action, values });
 }
 
 export async function abortSession(sessionKey: string, runId?: string): Promise<void> {
@@ -1600,8 +1607,6 @@ export async function saveRoutingRules(rules: RoutingRule[]): Promise<void> {
 
 export interface GmailOAuthResult {
     success: boolean;
-    access_token: string | null;
-    refresh_token: string | null;
     expires_in: number | null;
     scope: string | null;
     error: string | null;
@@ -1723,6 +1728,7 @@ export interface GmailStatusResponse {
     status: string;
     project_id: string;
     subscription_id: string;
+    topic_id: string;
     label_filters: string[];
     allowed_senders: string[];
     missing_fields: string[];

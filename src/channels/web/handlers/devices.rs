@@ -23,11 +23,11 @@
 //!   requires the `DeviceContext` request extension the auth middleware
 //!   attaches for device-authenticated requests.
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::StatusCode,
 };
 use serde::Serialize;
@@ -35,11 +35,11 @@ use serde::Serialize;
 use crate::channels::web::server::GatewayState;
 use thinclaw_gateway::web::devices::{
     CompanionListResponse, ConsumeOutcome, CreateCompanionRequest, CreateCompanionResponse,
-    DeviceAuditEvent, DeviceAuditLog, DeviceInfo, DeviceListResponse, DevicePairingStore,
-    DevicePlatform, DeviceScope, DeviceStore, PairCompleteRequest, PairCompleteResponse,
-    PairStartResponse, PendingPairInfo, PendingPairListResponse, QrPairingPayload,
-    RegisterLiveActivityRequest, RegisterLiveActivityStartTokenRequest, RegisterPushRequest,
-    RenameDeviceRequest, RotateTokenResponse,
+    DeviceAuditEvent, DeviceAuditLog, DeviceInfo, DeviceListResponse, DeviceLiveActivityKind,
+    DevicePairingStore, DevicePlatform, DeviceScope, DeviceStore, PairCompleteRequest,
+    PairCompleteResponse, PairStartResponse, PendingPairInfo, PendingPairListResponse,
+    QrPairingPayload, RegisterLiveActivityRequest, RegisterLiveActivityStartTokenRequest,
+    RegisterPushRequest, RenameDeviceRequest, RotateTokenResponse,
 };
 use thinclaw_gateway::web::identity::DeviceContext;
 
@@ -98,8 +98,86 @@ fn pairing_error(
             StatusCode::TOO_MANY_REQUESTS,
             "too many failed pairing attempts; try again later".to_string(),
         ),
+        DevicePairingError::InvalidInput(message) => (StatusCode::BAD_REQUEST, message),
         other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
     }
+}
+
+const MAX_DEVICE_NAME_BYTES: usize = 256;
+const MAX_DEVICE_PLATFORM_BYTES: usize = 64;
+const MAX_DEVICE_PUBKEY_BYTES: usize = 3 * 1024;
+const MAX_DEVICE_IDENTIFIER_BYTES: usize = 256;
+
+fn validate_device_name(name: &str) -> Result<String, (StatusCode, String)> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > MAX_DEVICE_NAME_BYTES || name.chars().any(char::is_control) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "device name must contain 1-{MAX_DEVICE_NAME_BYTES} bytes without control characters"
+            ),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn validate_device_platform(platform: &str) -> Result<String, (StatusCode, String)> {
+    let platform = platform.trim();
+    if platform.is_empty()
+        || platform.len() > MAX_DEVICE_PLATFORM_BYTES
+        || platform.chars().any(char::is_control)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("platform must contain 1-{MAX_DEVICE_PLATFORM_BYTES} printable bytes"),
+        ));
+    }
+    Ok(platform.to_string())
+}
+
+fn validate_device_pubkey(pubkey: Option<&str>) -> Result<Option<String>, (StatusCode, String)> {
+    use base64::Engine as _;
+
+    let Some(pubkey) = pubkey else {
+        return Ok(None);
+    };
+    if pubkey.is_empty() || pubkey.len() > MAX_DEVICE_PUBKEY_BYTES {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("pubkey must contain 1-{MAX_DEVICE_PUBKEY_BYTES} base64 bytes"),
+        ));
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(pubkey)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(pubkey))
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "pubkey must be valid base64-encoded SPKI DER".to_string(),
+            )
+        })?;
+    if decoded.is_empty() || decoded.len() > 2048 || decoded.first() != Some(&0x30) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "pubkey must be a bounded DER SubjectPublicKeyInfo sequence".to_string(),
+        ));
+    }
+    Ok(Some(pubkey.to_string()))
+}
+
+fn validate_device_identifier(value: &str, field: &str) -> Result<(), (StatusCode, String)> {
+    if value.trim().is_empty()
+        || value.len() > MAX_DEVICE_IDENTIFIER_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{field} must contain 1-{MAX_DEVICE_IDENTIFIER_BYTES} bytes without control characters"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Read (or create) the stable gateway instance id persisted at
@@ -109,23 +187,75 @@ fn pairing_error(
 /// authenticator; the instance id is part of what must match before a
 /// credential is sent).
 fn resolve_or_create_instance_id() -> std::io::Result<String> {
+    use std::io::Write as _;
+
     let path = thinclaw_platform::instance_id_path();
     if let Some(existing) = thinclaw_platform::read_instance_id() {
         return Ok(existing);
     }
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {
+            return Err(std::io::Error::other(
+                "existing gateway instance-id file is invalid",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
 
     let instance_id = uuid::Uuid::new_v4().to_string();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("instance-id path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let parent_metadata = std::fs::symlink_metadata(parent)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(std::io::Error::other(
+            "instance-id parent is not a real directory",
+        ));
     }
-    // Single-writer-at-creation-time: no fs4 lock needed here (unlike the
-    // devices/pairing stores, which are read-modify-written on every
-    // request). A tmp+rename keeps a concurrent first-boot race from ever
-    // observing a half-written file.
-    let tmp_path = path.with_extension("tmp");
-    std::fs::write(&tmp_path, &instance_id)?;
-    std::fs::rename(&tmp_path, &path)?;
-    Ok(instance_id)
+
+    // Publish with an atomic hard-link create. Exactly one concurrent creator
+    // wins; losers read and return the winner's durable UUID.
+    let tmp_path = parent.join(format!(
+        ".instance-id.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut tmp = options.open(&tmp_path)?;
+    if let Err(error) = tmp
+        .write_all(instance_id.as_bytes())
+        .and_then(|()| tmp.sync_all())
+    {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+    drop(tmp);
+
+    match std::fs::hard_link(&tmp_path, &path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            #[cfg(unix)]
+            std::fs::File::open(parent)?.sync_all()?;
+            Ok(instance_id)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(&tmp_path);
+            thinclaw_platform::read_instance_id().ok_or_else(|| {
+                std::io::Error::other("concurrently created gateway instance-id is invalid")
+            })
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            Err(error)
+        }
+    }
 }
 
 /// Resolve `device_pairing.require_confirm`: settings store (when a database
@@ -299,11 +429,16 @@ pub(crate) struct PairPendingConfirmResponse {
 )]
 pub(crate) async fn devices_pair_complete_handler(
     State(state): State<Arc<GatewayState>>,
+    remote: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     Json(req): Json<PairCompleteRequest>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
     use axum::response::IntoResponse;
 
-    if !state.pair_complete_rate_limiter.check() {
+    let rate_limit_key = remote
+        .as_ref()
+        .map(|info| format!("ip:{}", info.0.0.ip()))
+        .unwrap_or_else(|| "ip:unknown".to_string());
+    if !state.pair_complete_rate_limiter.check_for(&rate_limit_key) {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             "too many pairing attempts; try again later".to_string(),
@@ -320,6 +455,26 @@ pub(crate) async fn devices_pair_complete_handler(
                 "one of `secret` or `code` is required".to_string(),
             )
         })?;
+    if credential.trim().is_empty()
+        || credential.len() > 128
+        || credential.chars().any(char::is_control)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "pairing credential is malformed".to_string(),
+        ));
+    }
+    let requested_name = if req.name.trim().is_empty() {
+        None
+    } else {
+        Some(validate_device_name(&req.name)?)
+    };
+    let platform = validate_device_platform(&req.platform)?;
+    let pubkey = validate_device_pubkey(req.pubkey.as_deref())?;
+    // Resolve durable response metadata before consuming the one-time pairing
+    // credential, so an instance-id storage failure cannot burn the credential.
+    let instance_id = resolve_or_create_instance_id()
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
 
     let require_confirm = resolve_require_confirm(state.as_ref()).await;
     let outcome = pairing_store(require_confirm)
@@ -350,24 +505,20 @@ pub(crate) async fn devices_pair_complete_handler(
         }
         ConsumeOutcome::Consumed { name, .. } => {
             let _ = audit_log().record(DeviceAuditEvent::PairingConsumed, None, None, None);
-            let device_name = if req.name.trim().is_empty() {
-                name
+            let device_name = if let Some(requested_name) = requested_name {
+                requested_name
             } else {
-                req.name.clone()
+                validate_device_name(&name)?
             };
             let (record, token) = device_store()
                 .insert(
                     device_name,
-                    DevicePlatform::parse(&req.platform),
+                    DevicePlatform::parse(&platform),
                     DeviceScope::default_grant(),
-                    req.pubkey.clone(),
+                    pubkey,
                 )
                 .map_err(device_store_error)?;
-            state
-                .device_registry
-                .refresh(&record.device_id)
-                .await
-                .map_err(device_store_error)?;
+            state.device_registry.upsert_record(record.clone()).await;
 
             let _ = audit_log().record(
                 DeviceAuditEvent::DevicePaired,
@@ -375,9 +526,6 @@ pub(crate) async fn devices_pair_complete_handler(
                 Some(&record.token_prefix),
                 None,
             );
-
-            let instance_id = resolve_or_create_instance_id()
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
             Ok((
                 StatusCode::OK,
@@ -468,14 +616,11 @@ pub(crate) async fn devices_rename_handler(
     Path(device_id): Path<String>,
     Json(req): Json<RenameDeviceRequest>,
 ) -> Result<Json<DeviceInfo>, (StatusCode, String)> {
+    let name = validate_device_name(&req.name)?;
     let record = device_store()
-        .rename(&device_id, &req.name)
+        .rename(&device_id, &name)
         .map_err(device_store_error)?;
-    state
-        .device_registry
-        .refresh(&device_id)
-        .await
-        .map_err(device_store_error)?;
+    state.device_registry.upsert_record(record.clone()).await;
     Ok(Json(DeviceInfo::from(&record)))
 }
 
@@ -539,11 +684,7 @@ pub(crate) async fn devices_rotate_handler(
     let (record, token) = device_store()
         .rotate(&device_id)
         .map_err(device_store_error)?;
-    state
-        .device_registry
-        .refresh(&device_id)
-        .await
-        .map_err(device_store_error)?;
+    state.device_registry.upsert_record(record.clone()).await;
 
     let _ = audit_log().record(
         DeviceAuditEvent::DeviceTokenRotated,
@@ -634,27 +775,17 @@ pub(crate) async fn devices_me_companions_create_handler(
 ) -> Result<Json<CreateCompanionResponse>, (StatusCode, String)> {
     let ctx = require_device_ctx(device_ctx)?;
 
-    let name = req.name.trim();
-    if name.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "companion name must not be empty".to_string(),
-        ));
-    }
+    let name = validate_device_name(&req.name)?;
 
     let (record, token) = device_store()
         .insert_companion(
             &ctx.device_id,
-            name.to_string(),
+            name,
             req.resolved_platform(),
             DeviceScope::companion_grant(),
         )
         .map_err(device_store_error)?;
-    state
-        .device_registry
-        .refresh(&record.device_id)
-        .await
-        .map_err(device_store_error)?;
+    state.device_registry.upsert_record(record.clone()).await;
 
     let _ = audit_log().record(
         DeviceAuditEvent::CompanionCreated,
@@ -846,11 +977,7 @@ pub(crate) async fn devices_me_push_register_handler(
     let record = device_store()
         .set_push(&ctx.device_id, req.apns_token, req.environment)
         .map_err(device_store_error)?;
-    state
-        .device_registry
-        .refresh(&ctx.device_id)
-        .await
-        .map_err(device_store_error)?;
+    state.device_registry.upsert_record(record.clone()).await;
 
     let _ = audit_log().record(
         DeviceAuditEvent::DevicePushTokenRegistered,
@@ -885,11 +1012,7 @@ pub(crate) async fn devices_me_push_remove_handler(
     let record = device_store()
         .clear_push(&ctx.device_id)
         .map_err(device_store_error)?;
-    state
-        .device_registry
-        .refresh(&ctx.device_id)
-        .await
-        .map_err(device_store_error)?;
+    state.device_registry.upsert_record(record.clone()).await;
 
     let _ = audit_log().record(
         DeviceAuditEvent::DevicePushTokenRemoved,
@@ -929,6 +1052,28 @@ pub(crate) async fn devices_me_live_activity_register_handler(
 ) -> Result<PushMutationResponse, (StatusCode, String)> {
     let ctx = require_device_ctx(device_ctx)?;
     validate_push_token(&req.push_token, "push_token")?;
+    validate_device_identifier(&activity_id, "activity_id")?;
+    if let Some(thread_id) = req.thread_id.as_deref() {
+        validate_device_identifier(thread_id, "thread_id")?;
+    }
+    if let Some(job_id) = req.job_id.as_deref() {
+        validate_device_identifier(job_id, "job_id")?;
+    }
+    match req.kind {
+        DeviceLiveActivityKind::AgentRun if req.job_id.is_some() => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "agent-run Live Activities cannot include job_id".to_string(),
+            ));
+        }
+        DeviceLiveActivityKind::Job if req.thread_id.is_some() => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "job Live Activities cannot include thread_id".to_string(),
+            ));
+        }
+        _ => {}
+    }
 
     let record = device_store()
         .set_live_activity(
@@ -940,11 +1085,7 @@ pub(crate) async fn devices_me_live_activity_register_handler(
             req.job_id.clone(),
         )
         .map_err(device_store_error)?;
-    state
-        .device_registry
-        .refresh(&ctx.device_id)
-        .await
-        .map_err(device_store_error)?;
+    state.device_registry.upsert_record(record.clone()).await;
 
     // Audit carries only the run association ids (never token material), so the
     // notifier's run-routing decision is auditable.
@@ -986,15 +1127,12 @@ pub(crate) async fn devices_me_live_activity_remove_handler(
     Path(activity_id): Path<String>,
 ) -> Result<PushMutationResponse, (StatusCode, String)> {
     let ctx = require_device_ctx(device_ctx)?;
+    validate_device_identifier(&activity_id, "activity_id")?;
 
     let record = device_store()
         .clear_live_activity(&ctx.device_id, &activity_id)
         .map_err(device_store_error)?;
-    state
-        .device_registry
-        .refresh(&ctx.device_id)
-        .await
-        .map_err(device_store_error)?;
+    state.device_registry.upsert_record(record.clone()).await;
 
     let _ = audit_log().record(
         DeviceAuditEvent::DevicePushTokenRemoved,
@@ -1033,11 +1171,7 @@ pub(crate) async fn devices_me_live_activity_start_token_register_handler(
     let record = device_store()
         .set_live_activity_start_token(&ctx.device_id, req.push_token)
         .map_err(device_store_error)?;
-    state
-        .device_registry
-        .refresh(&ctx.device_id)
-        .await
-        .map_err(device_store_error)?;
+    state.device_registry.upsert_record(record.clone()).await;
 
     let _ = audit_log().record(
         DeviceAuditEvent::DevicePushTokenRegistered,
@@ -1072,11 +1206,7 @@ pub(crate) async fn devices_me_live_activity_start_token_remove_handler(
     let record = device_store()
         .clear_live_activity_start_token(&ctx.device_id)
         .map_err(device_store_error)?;
-    state
-        .device_registry
-        .refresh(&ctx.device_id)
-        .await
-        .map_err(device_store_error)?;
+    state.device_registry.upsert_record(record.clone()).await;
 
     let _ = audit_log().record(
         DeviceAuditEvent::DevicePushTokenRemoved,
@@ -1095,22 +1225,12 @@ mod tests {
     #[test]
     fn resolve_or_create_instance_id_is_stable_across_calls() {
         let dir = tempfile::TempDir::new().unwrap();
-        // SAFETY (test-only): scoped to this process; no other test reads
-        // THINCLAW_HOME concurrently in a way that would race with this one,
-        // matching the pattern used by other `#[cfg(test)]` env-var tests in
-        // this codebase (e.g. `tls.rs`'s `tls_policy_defaults_to_auto`).
-        unsafe {
-            std::env::set_var("THINCLAW_HOME", dir.path());
-        }
+        let _home = crate::testing::ScopedEnvVar::set("THINCLAW_HOME", dir.path());
 
         let first = resolve_or_create_instance_id().unwrap();
         let second = resolve_or_create_instance_id().unwrap();
         assert_eq!(first, second);
         assert!(!first.is_empty());
-
-        unsafe {
-            std::env::remove_var("THINCLAW_HOME");
-        }
     }
 
     #[test]

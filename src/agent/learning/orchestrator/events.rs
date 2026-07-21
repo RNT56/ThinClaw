@@ -89,7 +89,7 @@ impl LearningOrchestrator {
                     .unwrap_or("Auto-distilled learning candidate")
                     .to_string(),
             ),
-            proposal: event.payload.clone(),
+            proposal: proposal_with_event_identity(event),
             created_at: Utc::now(),
         };
 
@@ -117,6 +117,11 @@ impl LearningOrchestrator {
         );
 
         if let LearningRouteAction::CodeProposal { auto_approve } = route {
+            let auto_approve = auto_approve
+                && self
+                    .authorized_candidate_identity(&candidate)
+                    .await
+                    .is_ok_and(|identity| identity.is_principal_owner());
             match self.create_code_proposal(event, &candidate).await {
                 Ok(proposal_id) => {
                     outcome.code_proposal_id = Some(proposal_id);
@@ -236,6 +241,11 @@ impl LearningOrchestrator {
         );
 
         if let LearningRouteAction::CodeProposal { auto_approve } = route {
+            let auto_approve = auto_approve
+                && self
+                    .authorized_candidate_identity(candidate)
+                    .await
+                    .is_ok_and(|identity| identity.is_principal_owner());
             match self.create_code_proposal_from_candidate(candidate).await {
                 Ok(proposal_id) => {
                     outcome.code_proposal_id = Some(proposal_id);

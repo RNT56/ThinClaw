@@ -66,7 +66,7 @@ pub struct HttpConfig {
 }
 
 /// Web gateway configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GatewayConfig {
     pub host: String,
     pub port: u16,
@@ -77,6 +77,23 @@ pub struct GatewayConfig {
     /// Extra RBAC principals (token + role) layered on the primary `auth_token`,
     /// which always has admin rights. Empty by default (RBAC inactive).
     pub principals: Vec<GatewayPrincipalConfig>,
+}
+
+impl std::fmt::Debug for GatewayConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewayConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("user_id", &self.user_id)
+            .field("actor_id", &self.actor_id)
+            .field("principals", &self.principals)
+            .finish()
+    }
 }
 
 /// Signal channel configuration (signal-cli daemon HTTP/JSON-RPC).
@@ -568,7 +585,7 @@ pub struct AppleMailChannelConfig {
 }
 
 /// Gmail channel configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GmailChannelConfig {
     /// GCP project ID.
     pub project_id: String,
@@ -590,6 +607,33 @@ pub struct GmailChannelConfig {
     pub label_filters: Vec<String>,
     /// Maximum message body size in bytes.
     pub max_message_size_bytes: usize,
+}
+
+impl std::fmt::Debug for GmailChannelConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GmailChannelConfig")
+            .field("project_id", &self.project_id)
+            .field("subscription_id", &self.subscription_id)
+            .field("topic_id", &self.topic_id)
+            .field(
+                "oauth_token",
+                &self.oauth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("client_id", &self.client_id.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("allowed_sender_count", &self.allowed_senders.len())
+            .field("label_filters", &self.label_filters)
+            .field("max_message_size_bytes", &self.max_message_size_bytes)
+            .finish()
+    }
 }
 
 /// BlueBubbles iMessage bridge configuration (cross-platform).

@@ -3,7 +3,7 @@
 //! lifecycle/install/mcp/wasm/native/setup submodules.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::{RwLock, oneshot};
@@ -33,11 +33,119 @@ use thinclaw_tools::builtin::extension_tools::{
 pub(super) type McpWatcherHandle = (JoinHandle<()>, oneshot::Sender<()>);
 use thinclaw_types::SetupAuthMode;
 
+const MAX_EXTENSION_CAPABILITIES_BYTES: usize = 2 * 1024 * 1024;
+
+/// A package snapshot protected against concurrent replacement.
+///
+/// Keep this value alive while making authorization decisions and loading the
+/// corresponding WASM module. The publisher lock ensures both operations see
+/// the same artifact generation.
+pub(super) struct LockedWasmPackage {
+    pub(super) capabilities_path: PathBuf,
+    pub(super) capabilities_bytes: Option<Vec<u8>>,
+    _publication_guard: thinclaw_platform::ArtifactReadGuard,
+}
+
+pub(super) async fn lock_wasm_package(
+    directory: &Path,
+    name: &str,
+) -> Result<LockedWasmPackage, ExtensionError> {
+    ExtensionManager::validate_extension_name(name)?;
+
+    let directory_metadata = tokio::fs::symlink_metadata(directory)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ExtensionError::NotInstalled(format!(
+                    "WASM package directory '{}' does not exist",
+                    directory.display()
+                ))
+            } else {
+                ExtensionError::Other(format!(
+                    "failed to inspect WASM package directory '{}': {error}",
+                    directory.display()
+                ))
+            }
+        })?;
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        return Err(ExtensionError::Other(format!(
+            "WASM package directory '{}' is not a real directory",
+            directory.display()
+        )));
+    }
+
+    let wasm_path = directory.join(format!("{name}.wasm"));
+    let publication_guard = thinclaw_platform::acquire_artifact_read_lock(wasm_path.clone())
+        .await
+        .map_err(|error| {
+            ExtensionError::Other(format!(
+                "failed to lock WASM package '{}': {error}",
+                wasm_path.display()
+            ))
+        })?;
+
+    let marker_path = directory.join(format!(".{name}.wasm.installing.json"));
+    match tokio::fs::symlink_metadata(&marker_path).await {
+        Ok(_) => {
+            return Err(ExtensionError::Other(format!(
+                "WASM package '{}' has an incomplete publication journal",
+                name
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ExtensionError::Other(format!(
+                "failed to inspect publication state for '{}': {error}",
+                name
+            )));
+        }
+    }
+
+    let wasm_metadata = tokio::fs::symlink_metadata(&wasm_path)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ExtensionError::NotInstalled(format!("WASM package '{}' is not installed", name))
+            } else {
+                ExtensionError::Other(format!(
+                    "failed to inspect WASM package '{}': {error}",
+                    wasm_path.display()
+                ))
+            }
+        })?;
+    if wasm_metadata.file_type().is_symlink() || !wasm_metadata.is_file() {
+        return Err(ExtensionError::Other(format!(
+            "WASM package '{}' is not a regular file",
+            wasm_path.display()
+        )));
+    }
+
+    let capabilities_path = directory.join(format!("{name}.capabilities.json"));
+    let capabilities_bytes = crate::registry::installer::read_regular_file_bounded(
+        capabilities_path.clone(),
+        MAX_EXTENSION_CAPABILITIES_BYTES,
+    )
+    .await
+    .map_err(|error| {
+        ExtensionError::Other(format!(
+            "failed to read capabilities for '{}': {error}",
+            name
+        ))
+    })?;
+
+    Ok(LockedWasmPackage {
+        capabilities_path,
+        capabilities_bytes,
+        _publication_guard: publication_guard,
+    })
+}
+
 /// Pending OAuth authorization state.
 pub(super) struct PendingAuth {
     pub(super) name: String,
     pub(super) kind: ExtensionKind,
     pub(super) code_verifier: Option<String>,
+    pub(super) mcp_authorization: Option<crate::tools::mcp::auth::PreparedMcpAuthorization>,
     pub(super) redirect_uri: Option<String>,
     pub(super) thread_id: Option<String>,
     pub(super) created_at: std::time::Instant,
@@ -118,6 +226,10 @@ pub struct ExtensionManager {
     pub(super) mcp_session_manager: Arc<McpSessionManager>,
     /// Active MCP clients keyed by server name.
     pub(super) mcp_clients: RwLock<HashMap<String, Arc<McpClient>>>,
+    /// Serializes MCP config/client/tool-registry lifecycle transitions. MCP
+    /// administration is rare, while allowing remove/auth/reconnect to race can
+    /// resurrect a stale transport or leak its subprocess.
+    pub(super) mcp_operation_lock: tokio::sync::Mutex<()>,
     /// Background config sync tasks keyed by server name.
     pub(super) mcp_watchers: RwLock<HashMap<String, McpWatcherHandle>>,
     /// Handle to the background MCP health monitor (probe + auto-reconnect).
@@ -129,6 +241,9 @@ pub struct ExtensionManager {
     pub(super) wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
     pub(super) wasm_tools_dir: PathBuf,
     pub(super) wasm_channels_dir: PathBuf,
+    /// Serializes in-process WASM activation/removal so an extension cannot be
+    /// resurrected in the runtime while its package is being uninstalled.
+    pub(super) wasm_operation_lock: tokio::sync::Mutex<()>,
 
     // WASM channel hot-activation infrastructure (set post-construction)
     pub(super) channel_runtime: RwLock<Option<ChannelRuntimeState>>,
@@ -186,12 +301,14 @@ impl ExtensionManager {
             discovery: OnlineDiscovery::new(),
             mcp_session_manager,
             mcp_clients: RwLock::new(HashMap::new()),
+            mcp_operation_lock: tokio::sync::Mutex::new(()),
             mcp_watchers: RwLock::new(HashMap::new()),
             mcp_health_monitor: RwLock::new(None),
             mcp_health_monitor_shutdown: RwLock::new(None),
             wasm_tool_runtime,
             wasm_tools_dir,
             wasm_channels_dir,
+            wasm_operation_lock: tokio::sync::Mutex::new(()),
             channel_runtime: RwLock::new(None),
             secrets,
             tool_registry,
@@ -446,21 +563,25 @@ impl ExtensionManager {
         &self,
         name: &str,
     ) -> Result<ExtensionKind, ExtensionError> {
-        // Check MCP servers first
-        if self.get_mcp_server(name).await.is_ok() {
-            return Ok(ExtensionKind::McpServer);
+        let mut matches = Vec::new();
+        match self.get_mcp_server(name).await {
+            Ok(_) => matches.push(ExtensionKind::McpServer),
+            Err(crate::tools::mcp::config::ConfigError::ServerNotFound { .. }) => {}
+            Err(error) => {
+                return Err(ExtensionError::Config(format!(
+                    "failed to inspect MCP extension configuration: {error}"
+                )));
+            }
         }
 
-        // Check WASM tools
         let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
-        if wasm_path.exists() {
-            return Ok(ExtensionKind::WasmTool);
+        if is_real_extension_file(&wasm_path).await? {
+            matches.push(ExtensionKind::WasmTool);
         }
 
-        // Check WASM channels
         let channel_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
-        if channel_path.exists() {
-            return Ok(ExtensionKind::WasmChannel);
+        if is_real_extension_file(&channel_path).await? {
+            matches.push(ExtensionKind::WasmChannel);
         }
 
         // Check native plugins. A native plugin is "installed" once its signed
@@ -468,20 +589,39 @@ impl ExtensionManager {
         // operator has opted in via allow_native_plugins). Registration loads no
         // code; activation is still a separate, gated step.
         if self.native_plugins.read().await.is_registered(name) {
-            return Ok(ExtensionKind::NativePlugin);
+            matches.push(ExtensionKind::NativePlugin);
         }
 
-        Err(ExtensionError::NotInstalled(format!(
-            "'{}' is not installed as an MCP server, WASM tool, WASM channel, or native plugin",
-            name
-        )))
+        match matches.as_slice() {
+            [kind] => Ok(*kind),
+            [] => Err(ExtensionError::NotInstalled(format!(
+                "'{}' is not installed as an MCP server, WASM tool, WASM channel, or native plugin",
+                name
+            ))),
+            _ => Err(ExtensionError::Config(format!(
+                "Extension name '{}' is ambiguous across installed kinds: {}",
+                name,
+                matches
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
     }
 
     /// Reject names containing path separators or traversal sequences.
     pub(super) fn validate_extension_name(name: &str) -> Result<(), ExtensionError> {
-        if name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
+        if name.is_empty()
+            || name.len() > 128
+            || matches!(name, "." | "..")
+            || name.contains("..")
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
             return Err(ExtensionError::InstallFailed(format!(
-                "Invalid extension name '{}': contains path separator or traversal characters",
+                "Invalid extension name '{}': use 1-128 ASCII letters, digits, dots, hyphens, or underscores without traversal sequences",
                 name
             )));
         }
@@ -491,6 +631,24 @@ impl ExtensionManager {
     pub(super) async fn cleanup_expired_auths(&self) {
         let mut pending = self.pending_auth.write().await;
         pending.retain(|_, auth| auth.created_at.elapsed() < std::time::Duration::from_secs(300));
+    }
+
+    pub(super) async fn insert_pending_auth(&self, nonce: String, auth: PendingAuth) {
+        const MAX_PENDING_AUTHS: usize = 256;
+        let mut pending = self.pending_auth.write().await;
+        pending.retain(|_, existing| {
+            existing.created_at.elapsed() < std::time::Duration::from_secs(300)
+                && (existing.kind != auth.kind || existing.name != auth.name)
+        });
+        if pending.len() >= MAX_PENDING_AUTHS
+            && let Some(oldest) = pending
+                .iter()
+                .min_by_key(|(_, existing)| existing.created_at)
+                .map(|(nonce, _)| nonce.clone())
+        {
+            pending.remove(&oldest);
+        }
+        pending.insert(nonce, auth);
     }
 
     /// Validate an OAuth state nonce against pending authentications.
@@ -521,6 +679,21 @@ impl ExtensionManager {
             }
         }
         removed
+    }
+}
+
+async fn is_real_extension_file(path: &Path) -> Result<bool, ExtensionError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => Err(ExtensionError::Config(format!(
+            "Installed extension path '{}' is not a regular file",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(ExtensionError::Config(format!(
+            "failed to inspect installed extension '{}': {error}",
+            path.display()
+        ))),
     }
 }
 

@@ -32,6 +32,8 @@ use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::{ModelInfo, SseEvent, WsClientMessage, WsServerMessage};
 use thinclaw_gateway::web::devices::DeviceScope;
 use thinclaw_gateway::web::identity::DeviceContext;
+use thinclaw_gateway::web::rbac::{GatewayCapability, role_grants};
+use thinclaw_gateway::web::settings::{is_sensitive_settings_key, validate_setting_entry};
 use thinclaw_gateway::web::submission::{build_gateway_message, submit_gateway_message};
 
 /// Tracks active WebSocket connections.
@@ -233,6 +235,21 @@ async fn handle_client_message(
     direct_tx: &mpsc::Sender<WsServerMessage>,
     browser_origin: Option<&str>,
 ) {
+    // The HTTP RBAC middleware can only authorize the WebSocket upgrade (a
+    // GET).  It cannot see later bidirectional frames, so enforce the same
+    // role boundary again for every frame.  Without this check a read-only
+    // principal could upgrade successfully and then send chat, approvals,
+    // settings, or secrets over the socket.
+    let required_capability = websocket_message_capability(&msg);
+    if !role_grants(request_identity.role, required_capability) {
+        let _ = direct_tx
+            .send(WsServerMessage::Error {
+                message: "Forbidden: gateway role lacks the required capability".to_string(),
+            })
+            .await;
+        return;
+    }
+
     // Enforce device scopes at the WS-frame level: opening `/api/chat/ws`
     // only requires the `chat` scope, but individual frames map to distinct
     // surfaces. A device may chat and (with the `approvals` scope) approve;
@@ -257,6 +274,28 @@ async fn handle_client_message(
 
     match msg {
         WsClientMessage::Message { content, thread_id } => {
+            if let Err((_, message)) =
+                thinclaw_gateway::web::chat::validate_gateway_chat_content(&content)
+            {
+                let _ = direct_tx.send(WsServerMessage::Error { message }).await;
+                return;
+            }
+            if let Some(thread_id) = thread_id.as_deref()
+                && !valid_websocket_thread_id(thread_id)
+            {
+                let _ = direct_tx
+                    .send(WsServerMessage::Error {
+                        message: "Invalid thread_id".to_string(),
+                    })
+                    .await;
+                return;
+            }
+            let rate_limit_key = request_identity.rate_limit_key(device_ctx);
+            if !state.chat_rate_limiter.check_for(&rate_limit_key) {
+                let (_, message) = thinclaw_gateway::web::chat::chat_rate_limit_error();
+                let _ = direct_tx.send(WsServerMessage::Error { message }).await;
+                return;
+            }
             let incoming = build_gateway_message(
                 "gateway",
                 request_identity,
@@ -274,6 +313,16 @@ async fn handle_client_message(
             action,
             thread_id,
         } => {
+            if let Some(thread_id) = thread_id.as_deref()
+                && !valid_websocket_thread_id(thread_id)
+            {
+                let _ = direct_tx
+                    .send(WsServerMessage::Error {
+                        message: "Invalid thread_id".to_string(),
+                    })
+                    .await;
+                return;
+            }
             let (approved, always) = match action.as_str() {
                 "approve" => (true, false),
                 "always" => (true, true),
@@ -281,7 +330,10 @@ async fn handle_client_message(
                 other => {
                     let _ = direct_tx
                         .send(WsServerMessage::Error {
-                            message: format!("Unknown approval action: {}", other),
+                            message: format!(
+                                "Unknown approval action: {}",
+                                other.chars().take(32).collect::<String>()
+                            ),
                         })
                         .await;
                     return;
@@ -365,6 +417,21 @@ async fn handle_client_message(
             extension_name,
             token,
         } => {
+            if extension_name.trim().is_empty()
+                || extension_name.len() > 128
+                || extension_name.chars().any(char::is_control)
+                || token.trim().is_empty()
+                || token.len() > 1024 * 1024
+                || token.contains('\0')
+            {
+                let _ = direct_tx
+                    .send(WsServerMessage::Error {
+                        message: "Extension authentication input is malformed or oversized"
+                            .to_string(),
+                    })
+                    .await;
+                return;
+            }
             if let Some(ref ext_mgr) = state.extension_manager {
                 let thread_id = active_thread_id_for_identity(state, request_identity).await;
                 match ext_mgr.auth(&extension_name, Some(&token)).await {
@@ -438,6 +505,19 @@ async fn handle_client_message(
             protocol_version,
             client_name,
         } => {
+            if protocol_version.len() > 64
+                || protocol_version.chars().any(char::is_control)
+                || client_name
+                    .as_ref()
+                    .is_some_and(|name| name.len() > 128 || name.chars().any(char::is_control))
+            {
+                let _ = direct_tx
+                    .send(WsServerMessage::Error {
+                        message: "Version handshake is malformed or oversized".to_string(),
+                    })
+                    .await;
+                return;
+            }
             let server_version = env!("CARGO_PKG_VERSION").to_string();
             // Simple compatibility: major version must match
             let client_major = protocol_version
@@ -464,6 +544,19 @@ async fn handle_client_message(
                 .await;
         }
         WsClientMessage::ConfigSet { key, value } => {
+            if is_sensitive_settings_key(&key) || validate_setting_entry(&key, &value).is_err() {
+                let _ = direct_tx
+                    .send(WsServerMessage::ConfigResult {
+                        key,
+                        success: false,
+                        error: Some(
+                            "Sensitive, malformed, or oversized settings cannot be written over WebSocket"
+                                .to_string(),
+                        ),
+                    })
+                    .await;
+                return;
+            }
             // Write the setting to the DB-backed settings store
             if let Some(ref store) = state.store {
                 match crate::api::config::set_setting(
@@ -505,22 +598,64 @@ async fn handle_client_message(
             }
         }
         WsClientMessage::SecretSet { key, value } => {
-            // Store the API key as a setting in the DB, prefixed with "secret."
-            // In Remote Mode, the thin client transmits API keys to the orchestrator
-            // which stores them in its local DB for use by the agent.
-            if let Some(ref store) = state.store {
-                let setting_key = format!("secret.{}", key);
-                let setting_value = serde_json::Value::String(value);
-                match crate::api::config::set_setting(
-                    store,
-                    &request_identity.principal_id,
-                    &setting_key,
-                    &setting_value,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        tracing::info!("WS secret.set: key={} stored", key);
+            // Remote clients must use the same encrypted store and runtime
+            // refresh path as the HTTP provider vault. Ordinary settings are
+            // exportable configuration and must never contain plaintext keys.
+            if key.trim().is_empty()
+                || key.len() > 256
+                || key.trim() != key
+                || key.chars().any(char::is_control)
+                || value.is_empty()
+                || value.len() > 1024 * 1024
+                || value.contains('\0')
+            {
+                let _ = direct_tx
+                    .send(WsServerMessage::SecretResult {
+                        key,
+                        success: false,
+                        error: Some("Secret name is malformed or oversized".to_string()),
+                    })
+                    .await;
+                return;
+            }
+            if let Some(ref secrets) = state.secrets_store {
+                let params = crate::secrets::CreateSecretParams::new(key.clone(), value)
+                    .with_created_by("gateway.websocket");
+                match secrets.create(&request_identity.principal_id, params).await {
+                    Ok(_) => {
+                        let refreshed = crate::config::refresh_secrets(
+                            secrets.as_ref(),
+                            &request_identity.principal_id,
+                        )
+                        .await;
+                        // Remove the plaintext location used by older builds
+                        // after the encrypted upsert is known to have succeeded.
+                        if let Some(store) = state.store.as_ref()
+                            && let Err(error) = store
+                                .delete_setting(
+                                    &request_identity.principal_id,
+                                    &format!("secret.{key}"),
+                                )
+                                .await
+                        {
+                            tracing::error!(
+                                secret_name = %key,
+                                %error,
+                                "Encrypted secret saved but legacy plaintext setting cleanup failed"
+                            );
+                            let _ = direct_tx
+                                .send(WsServerMessage::SecretResult {
+                                    key,
+                                    success: false,
+                                    error: Some(
+                                        "Secret was encrypted, but legacy plaintext cleanup failed"
+                                            .to_string(),
+                                    ),
+                                })
+                                .await;
+                            return;
+                        }
+                        tracing::info!(secret_name = %key, refreshed, "WS secret stored securely");
                         let _ = direct_tx
                             .send(WsServerMessage::SecretResult {
                                 key,
@@ -534,7 +669,7 @@ async fn handle_client_message(
                             .send(WsServerMessage::SecretResult {
                                 key,
                                 success: false,
-                                error: Some(e.to_string()),
+                                error: Some(format!("Failed to store secret securely: {e}")),
                             })
                             .await;
                     }
@@ -544,7 +679,7 @@ async fn handle_client_message(
                     .send(WsServerMessage::SecretResult {
                         key,
                         success: false,
-                        error: Some("No database configured for secret storage".to_string()),
+                        error: Some("Encrypted secrets store is unavailable".to_string()),
                     })
                     .await;
             }
@@ -576,6 +711,26 @@ async fn handle_client_message(
     }
 }
 
+fn websocket_message_capability(message: &WsClientMessage) -> GatewayCapability {
+    match message {
+        WsClientMessage::Ping | WsClientMessage::Version { .. } => GatewayCapability::ReadState,
+        WsClientMessage::Message { .. } | WsClientMessage::Approval { .. } => {
+            GatewayCapability::Chat
+        }
+        WsClientMessage::AuthToken { .. }
+        | WsClientMessage::AuthCancel { .. }
+        | WsClientMessage::ConfigSet { .. }
+        | WsClientMessage::SecretSet { .. }
+        | WsClientMessage::ModelList => GatewayCapability::ManageConfig,
+    }
+}
+
+fn valid_websocket_thread_id(thread_id: &str) -> bool {
+    !thread_id.trim().is_empty()
+        && thread_id.len() <= 512
+        && !thread_id.chars().any(char::is_control)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,6 +742,7 @@ mod tests {
             crate::channels::web::identity_helpers::GatewayAuthSource::BearerHeader,
             false,
         )
+        .with_role(thinclaw_gateway::web::rbac::GatewayRole::Admin)
     }
 
     #[test]
@@ -611,6 +767,66 @@ mod tests {
     fn test_ws_connection_tracker_default() {
         let tracker = WsConnectionTracker::default();
         assert_eq!(tracker.connection_count(), 0);
+    }
+
+    #[test]
+    fn websocket_frames_have_fail_closed_role_capabilities() {
+        assert_eq!(
+            websocket_message_capability(&WsClientMessage::Ping),
+            GatewayCapability::ReadState
+        );
+        assert_eq!(
+            websocket_message_capability(&WsClientMessage::Message {
+                content: "hello".to_string(),
+                thread_id: None,
+            }),
+            GatewayCapability::Chat
+        );
+        assert_eq!(
+            websocket_message_capability(&WsClientMessage::SecretSet {
+                key: "TOKEN".to_string(),
+                value: "secret".to_string(),
+            }),
+            GatewayCapability::ManageConfig
+        );
+        assert_eq!(
+            websocket_message_capability(&WsClientMessage::ModelList),
+            GatewayCapability::ManageConfig
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_websocket_principal_cannot_send_chat_frames() {
+        let (agent_tx, mut agent_rx) = mpsc::channel(16);
+        let state = make_test_state(Some(agent_tx)).await;
+        let (direct_tx, mut direct_rx) = mpsc::channel(16);
+        let identity = GatewayRequestIdentity::new(
+            "reader",
+            "reader",
+            crate::channels::web::identity_helpers::GatewayAuthSource::BearerHeader,
+            false,
+        )
+        .with_role(thinclaw_gateway::web::rbac::GatewayRole::ReadOnly);
+
+        handle_client_message(
+            WsClientMessage::Message {
+                content: "must not run".to_string(),
+                thread_id: None,
+            },
+            &state,
+            &identity,
+            None,
+            &direct_tx,
+            None,
+        )
+        .await;
+
+        assert!(agent_rx.try_recv().is_err());
+        assert!(matches!(
+            direct_rx.recv().await,
+            Some(WsServerMessage::Error { message })
+                if message.contains("gateway role")
+        ));
     }
 
     #[tokio::test]
@@ -667,6 +883,39 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("https://chat.example.com")
         );
+    }
+
+    #[tokio::test]
+    async fn websocket_chat_frames_share_the_authenticated_rate_limit() {
+        let (agent_tx, mut agent_rx) = mpsc::channel(64);
+        let state = make_test_state(Some(agent_tx)).await;
+        let (direct_tx, mut direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("rate-limited-user");
+
+        for index in 0..31 {
+            handle_client_message(
+                WsClientMessage::Message {
+                    content: format!("message {index}"),
+                    thread_id: None,
+                },
+                &state,
+                &identity,
+                None,
+                &direct_tx,
+                None,
+            )
+            .await;
+        }
+
+        let mut accepted = 0;
+        while agent_rx.try_recv().is_ok() {
+            accepted += 1;
+        }
+        assert_eq!(accepted, 30);
+        assert!(matches!(
+            direct_rx.recv().await,
+            Some(WsServerMessage::Error { message }) if message.to_ascii_lowercase().contains("rate limit")
+        ));
     }
 
     #[tokio::test]
@@ -927,6 +1176,47 @@ mod tests {
             }
             _ => panic!("Expected Error variant"),
         }
+    }
+
+    #[tokio::test]
+    async fn websocket_secret_set_uses_encrypted_store() {
+        let crypto = crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+            "test-master-key-material-32-bytes!!".to_string(),
+        ))
+        .unwrap();
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> = Arc::new(
+            thinclaw_secrets::InMemorySecretsStore::new(Arc::new(crypto)),
+        );
+        let mut state = make_test_state(None).await;
+        state.secrets_store = Some(Arc::clone(&secrets));
+        let (direct_tx, mut direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
+
+        handle_client_message(
+            WsClientMessage::SecretSet {
+                key: "openai_api_key".to_string(),
+                value: "sk-private-value".to_string(),
+            },
+            &state,
+            &identity,
+            None,
+            &direct_tx,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            direct_rx.recv().await,
+            Some(WsServerMessage::SecretResult { success: true, .. })
+        ));
+        assert_eq!(
+            secrets
+                .get_decrypted("user1", "openai_api_key")
+                .await
+                .unwrap()
+                .expose(),
+            "sk-private-value"
+        );
     }
 
     /// Helper to create a GatewayState for testing.

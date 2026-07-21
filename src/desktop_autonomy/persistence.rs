@@ -83,7 +83,7 @@ impl DesktopAutonomyManager {
         self.ensure_dirs().await?;
         let raw = serde_json::to_string_pretty(state)
             .map_err(|e| format!("failed to serialize runtime state: {e}"))?;
-        tokio::fs::write(self.runtime_state_path(), raw)
+        write_autonomy_file(self.runtime_state_path(), raw.into_bytes())
             .await
             .map_err(|e| format!("failed to write runtime state: {e}"))
     }
@@ -95,7 +95,7 @@ impl DesktopAutonomyManager {
         self.ensure_dirs().await?;
         let raw = serde_json::to_string_pretty(report)
             .map_err(|e| format!("failed to serialize bootstrap report: {e}"))?;
-        tokio::fs::write(self.bootstrap_report_path(), raw)
+        write_autonomy_file(self.bootstrap_report_path(), raw.into_bytes())
             .await
             .map_err(|e| format!("failed to write bootstrap report: {e}"))
     }
@@ -108,6 +108,13 @@ impl DesktopAutonomyManager {
 
     pub(super) async fn latest_canary_report(&self) -> Result<Option<DesktopCanaryReport>, String> {
         let manifests = self.list_build_manifests().await?;
+        if manifests.is_empty() {
+            return Ok(None);
+        }
+        let canaries_root = self
+            .canaries_dir()
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve autonomy canaries directory: {error}"))?;
         for manifest in manifests {
             let Some(path) = manifest
                 .metadata
@@ -116,8 +123,24 @@ impl DesktopAutonomyManager {
             else {
                 continue;
             };
+            let path = PathBuf::from(path);
+            let expected_path = self
+                .canaries_dir()
+                .join(&manifest.build_id)
+                .join("canary-report.json");
+            if path != expected_path {
+                return Err("build manifest references the wrong canary report".to_string());
+            }
+            let canonical_path = path
+                .canonicalize()
+                .map_err(|error| format!("failed to resolve canary report path: {error}"))?;
+            if !canonical_path.starts_with(&canaries_root) {
+                return Err(
+                    "canary report path escapes the autonomy canaries directory".to_string()
+                );
+            }
             if let Some(report) =
-                load_json_file_async::<DesktopCanaryReport>(PathBuf::from(path)).await?
+                load_json_file_async::<DesktopCanaryReport>(canonical_path).await?
             {
                 return Ok(Some(report));
             }
@@ -127,6 +150,10 @@ impl DesktopAutonomyManager {
 
     pub(super) fn builds_dir(&self) -> PathBuf {
         self.state_root.join("builds")
+    }
+
+    pub(super) fn canaries_dir(&self) -> PathBuf {
+        self.state_root.join("canaries")
     }
 
     pub(super) fn runtime_state_path(&self) -> PathBuf {
@@ -145,11 +172,44 @@ impl DesktopAutonomyManager {
         self.state_root.join("current")
     }
 
-    pub fn current_build_id(&self) -> Option<String> {
+    pub(super) fn current_build_id_checked(&self) -> Result<Option<String>, String> {
         let link = self.current_build_link();
-        std::fs::read_link(link).ok().and_then(|path| {
-            path.file_name()
-                .map(|value| value.to_string_lossy().to_string())
-        })
+        match std::fs::symlink_metadata(&link) {
+            Ok(metadata) if !metadata.file_type().is_symlink() => {
+                return Err("autonomy current-build path is not a symlink".to_string());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect autonomy current-build link: {error}"
+                ));
+            }
+        }
+        let canonical_build = link
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve autonomy current-build link: {error}"))?;
+        let binary = self.shadow_binary_path(&canonical_build);
+        let canonical_build = super::rollout_helpers::validate_promotable_build_sync(
+            &self.builds_dir(),
+            &canonical_build,
+            &binary,
+        )?;
+        let build_id = canonical_build
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "autonomy current build has no valid identifier".to_string())?;
+        Ok(Some(build_id.to_string()))
+    }
+
+    pub fn current_build_id(&self) -> Option<String> {
+        match self.current_build_id_checked() {
+            Ok(build_id) => build_id,
+            Err(error) => {
+                tracing::error!(%error, "autonomy current-build link is invalid");
+                None
+            }
+        }
     }
 }

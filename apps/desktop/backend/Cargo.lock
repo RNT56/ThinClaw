@@ -154,6 +154,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "ambient-authority"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9d4ee0d472d1cd2e28c97dfa124b3d8d992e10eb0a035f33f5d12e3a177ba3b"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1120,6 +1126,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629a66d692cb9ff1a1c664e41771b3dcaf961985a9774c0eb0bd1b51cf60a48"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "cap-fs-ext"
+version = "3.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5528f85b1e134ae811704e41ef80930f56e795923f866813255bc342cc20654"
+dependencies = [
+ "cap-primitives",
+ "cap-std",
+ "io-lifetimes",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "cap-primitives"
+version = "3.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6cf3aea8a5081171859ef57bc1606b1df6999df4f1110f8eef68b30098d1d3a"
+dependencies = [
+ "ambient-authority",
+ "fs-set-times",
+ "io-extras",
+ "io-lifetimes",
+ "ipnet",
+ "maybe-owned",
+ "rustix 1.1.4",
+ "rustix-linux-procfs",
+ "windows-sys 0.59.0",
+ "winx",
+]
+
+[[package]]
+name = "cap-std"
+version = "3.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6dc3090992a735d23219de5c204927163d922f42f575a0189b005c62d37549a"
+dependencies = [
+ "cap-primitives",
+ "io-extras",
+ "io-lifetimes",
+ "rustix 1.1.4",
 ]
 
 [[package]]
@@ -3113,6 +3161,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-set-times"
+version = "0.20.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
+dependencies = [
+ "io-lifetimes",
+ "rustix 1.1.4",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "fs4"
 version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4462,6 +4521,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-extras"
+version = "0.18.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2285ddfe3054097ef4b2fe909ef8c3bcd1ea52a8f0d274416caebeef39f04a65"
+dependencies = [
+ "io-lifetimes",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "io-lifetimes"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06432fb54d3be7964ecd3649233cddf80db2832f47fec34c01f65b3d9d774983"
+
+[[package]]
 name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5252,6 +5327,12 @@ dependencies = [
  "autocfg",
  "rawpointer",
 ]
+
+[[package]]
+name = "maybe-owned"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "maybe-rayon"
@@ -8192,6 +8273,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustix-linux-procfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fc84bf7e9aa16c4f2c758f27412dc9841341e16aa682d9c7ac308fe3ee12056"
+dependencies = [
+ "once_cell",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "rustls"
 version = "0.23.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10247,6 +10338,7 @@ dependencies = [
  "iana-time-zone",
  "jsonschema",
  "jsonwebtoken",
+ "libc",
  "libloading 0.8.9",
  "libsql",
  "lru 0.18.0",
@@ -10271,10 +10363,12 @@ dependencies = [
  "secrecy",
  "secret-service",
  "security-framework 3.6.0",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.11.0",
+ "shlex",
  "subtle",
  "sysinfo",
  "tar",
@@ -10363,6 +10457,7 @@ dependencies = [
  "thinclaw-platform",
  "thinclaw-safety",
  "thinclaw-soul",
+ "thinclaw-tools",
  "thinclaw-tools-core",
  "thinclaw-types",
  "thinclaw-workspace",
@@ -10413,6 +10508,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "jsonwebtoken",
+ "libc",
  "lru 0.18.0",
  "rand 0.10.1",
  "regex",
@@ -10424,6 +10520,7 @@ dependencies = [
  "sha2 0.11.0",
  "subtle",
  "thinclaw-channels-core",
+ "thinclaw-identity",
  "thinclaw-media",
  "thinclaw-platform",
  "thinclaw-safety",
@@ -10434,6 +10531,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.29.0",
+ "tower 0.5.3",
  "tracing",
  "url",
  "urlencoding",
@@ -10479,6 +10577,7 @@ dependencies = [
  "thinclaw-workspace",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -10486,6 +10585,7 @@ name = "thinclaw-context"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "thinclaw-platform",
  "thinclaw-types",
 ]
 
@@ -10526,6 +10626,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chromiumoxide",
  "chrono",
  "clawscan",
@@ -10538,6 +10639,7 @@ dependencies = [
  "hkdf 0.13.0",
  "html2text",
  "image",
+ "libc",
  "ndarray",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
@@ -10573,7 +10675,11 @@ dependencies = [
  "thinclaw",
  "thinclaw-config",
  "thinclaw-desktop-tools",
+ "thinclaw-platform",
  "thinclaw-runtime-contracts",
+ "thinclaw-secrets",
+ "thinclaw-tools",
+ "thinclaw-tools-core",
  "thiserror 2.0.17",
  "tokenizers",
  "tokio",
@@ -10604,6 +10710,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thinclaw-platform",
+ "thinclaw-tools-core",
  "thiserror 2.0.17",
  "tokio",
  "toml 0.8.23",
@@ -10636,6 +10744,7 @@ dependencies = [
  "futures",
  "hex",
  "ipnet",
+ "libc",
  "rand 0.10.1",
  "serde",
  "serde_json",
@@ -10690,9 +10799,9 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "bytes",
  "chrono",
  "futures",
- "hex",
  "rand 0.10.1",
  "regex",
  "reqwest 0.12.28",
@@ -10702,11 +10811,11 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "thinclaw-config",
  "thinclaw-experiments",
  "thinclaw-llm-core",
  "thinclaw-settings",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "tokio",
  "tracing",
@@ -10736,6 +10845,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "hex",
+ "libc",
  "mime_guess",
  "pdf-extract",
  "regex",
@@ -10743,11 +10853,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "thinclaw-platform",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "thiserror 2.0.17",
  "tokio",
- "tokio-tungstenite 0.29.0",
  "tracing",
  "url",
  "uuid",
@@ -10761,9 +10872,16 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dirs",
+ "fs4",
  "iana-time-zone",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10771,6 +10889,8 @@ name = "thinclaw-portability"
 version = "0.1.0"
 dependencies = [
  "aead 0.5.2",
+ "cap-fs-ext",
+ "cap-std",
  "chacha20poly1305",
  "flate2",
  "rand 0.10.1",
@@ -10780,6 +10900,7 @@ dependencies = [
  "sha2 0.11.0",
  "tar",
  "thiserror 2.0.17",
+ "uuid",
 ]
 
 [[package]]
@@ -10816,6 +10937,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "thiserror 2.0.17",
  "tokio",
@@ -10887,6 +11009,7 @@ dependencies = [
  "futures",
  "hex",
  "html-to-markdown-rs",
+ "libc",
  "libsql",
  "mime_guess",
  "rand 0.10.1",
@@ -10976,6 +11099,7 @@ dependencies = [
  "thinclaw-platform",
  "thinclaw-safety",
  "thinclaw-soul",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "thiserror 2.0.17",
  "tokio-postgres",
@@ -11578,6 +11702,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper 1.0.2",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -13401,6 +13526,16 @@ name = "winsafe"
 version = "0.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
+
+[[package]]
+name = "winx"
+version = "0.36.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
+dependencies = [
+ "bitflags 2.13.0",
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "wit-bindgen"

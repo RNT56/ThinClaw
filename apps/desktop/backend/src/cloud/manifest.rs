@@ -6,6 +6,18 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+
+use super::encryption::encrypted_size_limit;
+use super::provider::validate_object_key;
+
+/// Maximum decrypted size supported by the current in-memory migration
+/// format. Larger archives require a future streaming format.
+pub const MAX_ARCHIVE_FILE_BYTES: usize = 512 * 1024 * 1024;
+/// Prevent a small manifest from driving unbounded per-entry work.
+pub const MAX_MANIFEST_FILES: usize = 50_000;
+/// Maximum decrypted JSON size accepted for an archive manifest.
+pub const MAX_MANIFEST_JSON_BYTES: usize = 8 * 1024 * 1024;
 
 /// Top-level archive manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +98,7 @@ impl FileType {
 
     /// Determine file type from its relative path.
     pub fn from_path(path: &str) -> Self {
-        if path.starts_with("thinclaw.db") || path.ends_with(".db") {
+        if matches!(path, "thinclaw.db" | "thinclaw-runtime.db" | "ironclaw.db") {
             FileType::Database
         } else if path.starts_with("documents/") {
             FileType::Document
@@ -156,11 +168,42 @@ impl ArchiveManifest {
             file_type,
         });
 
-        // Update statistics
-        self.statistics.total_files = self.files.len() as u32;
-        self.statistics.total_size_bytes = self.files.iter().map(|f| f.size_bytes).sum();
-        self.statistics.encrypted_size_bytes =
-            self.files.iter().map(|f| f.encrypted_size_bytes).sum();
+        self.recalculate_statistics();
+    }
+
+    /// Replace the manifest entry for a local path, or append it if new.
+    pub fn upsert_file(
+        &mut self,
+        key: String,
+        original_path: String,
+        original_data: &[u8],
+        encrypted_size: u64,
+    ) {
+        self.files
+            .retain(|file| file.original_path != original_path);
+        self.add_file(key, original_path, original_data, encrypted_size);
+    }
+
+    /// Remove a local path and return its previous cloud object key.
+    pub fn remove_file(&mut self, original_path: &str) -> Option<String> {
+        let index = self
+            .files
+            .iter()
+            .position(|file| file.original_path == original_path)?;
+        let removed = self.files.remove(index);
+        self.recalculate_statistics();
+        Some(removed.key)
+    }
+
+    fn recalculate_statistics(&mut self) {
+        self.statistics.total_files = u32::try_from(self.files.len()).unwrap_or(u32::MAX);
+        self.statistics.total_size_bytes = self
+            .files
+            .iter()
+            .fold(0_u64, |total, file| total.saturating_add(file.size_bytes));
+        self.statistics.encrypted_size_bytes = self.files.iter().fold(0_u64, |total, file| {
+            total.saturating_add(file.encrypted_size_bytes)
+        });
     }
 
     /// Serialize the manifest to JSON.
@@ -171,6 +214,123 @@ impl ArchiveManifest {
     /// Deserialize a manifest from JSON.
     pub fn from_json(data: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice(data)
+    }
+
+    /// Validate all attacker-controlled manifest metadata before any object is
+    /// fetched or destination path is created.
+    pub fn validate_structure(&self) -> Result<(), String> {
+        if self.version != 1 {
+            return Err(format!("unsupported manifest version {}", self.version));
+        }
+        if self.encryption.algorithm != "AES-256-GCM"
+            || self.encryption.key_derivation != "HKDF-SHA256"
+        {
+            return Err("manifest declares unsupported encryption metadata".to_string());
+        }
+        if self.app_version.is_empty()
+            || self.app_version.len() > 256
+            || self.encryption.key_id.is_empty()
+            || self.encryption.key_id.len() > 512
+        {
+            return Err("manifest metadata is empty or exceeds its size limit".to_string());
+        }
+        if self.files.len() > MAX_MANIFEST_FILES {
+            return Err(format!(
+                "manifest contains more than {MAX_MANIFEST_FILES} files"
+            ));
+        }
+
+        let mut keys = HashSet::with_capacity(self.files.len());
+        let mut paths = HashSet::with_capacity(self.files.len());
+        let mut total_plaintext = 0_u64;
+        let mut total_encrypted = 0_u64;
+        let mut has_primary_database = false;
+        for file in &self.files {
+            validate_object_key(&file.key).map_err(|error| error.to_string())?;
+            validate_manifest_path(&file.original_path)?;
+            let expected_key = match file.original_path.as_str() {
+                "thinclaw.db" => "db/thinclaw.db.enc".to_string(),
+                "thinclaw-runtime.db" | "ironclaw.db" => "db/thinclaw-runtime.db.enc".to_string(),
+                path if supported_data_path(path) => format!("{path}.enc"),
+                _ => {
+                    return Err(format!(
+                        "manifest destination '{}' is outside supported data roots",
+                        file.original_path
+                    ));
+                }
+            };
+            if file.key != expected_key && !is_versioned_object_key(file) {
+                return Err(format!(
+                    "manifest object key '{}' does not match destination '{}'",
+                    file.key, file.original_path
+                ));
+            }
+            if !file.key.ends_with(".enc") {
+                return Err(format!(
+                    "manifest object key '{}' is not an encrypted object",
+                    file.key
+                ));
+            }
+            if !keys.insert(file.key.clone()) {
+                return Err(format!("duplicate manifest object key '{}'", file.key));
+            }
+            if !paths.insert(file.original_path.clone()) {
+                return Err(format!(
+                    "duplicate manifest destination '{}'",
+                    file.original_path
+                ));
+            }
+            if file.original_path == "thinclaw.db" {
+                has_primary_database = true;
+            }
+            if file.size_bytes > MAX_ARCHIVE_FILE_BYTES as u64 {
+                return Err(format!(
+                    "manifest file '{}' exceeds the {}-byte restore limit",
+                    file.original_path, MAX_ARCHIVE_FILE_BYTES
+                ));
+            }
+            let encrypted_limit = encrypted_size_limit(file.size_bytes as usize) as u64;
+            if file.encrypted_size_bytes == 0 || file.encrypted_size_bytes > encrypted_limit {
+                return Err(format!(
+                    "encrypted size for '{}' is empty or exceeds its declared plaintext bound",
+                    file.original_path
+                ));
+            }
+            if file.sha256.len() != 64
+                || !file
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(format!(
+                    "manifest file '{}' has an invalid SHA-256 digest",
+                    file.original_path
+                ));
+            }
+            if file.file_type != FileType::from_path(&file.original_path) {
+                return Err(format!(
+                    "manifest file '{}' has an inconsistent type",
+                    file.original_path
+                ));
+            }
+            total_plaintext = total_plaintext
+                .checked_add(file.size_bytes)
+                .ok_or_else(|| "manifest plaintext size total overflows".to_string())?;
+            total_encrypted = total_encrypted
+                .checked_add(file.encrypted_size_bytes)
+                .ok_or_else(|| "manifest encrypted size total overflows".to_string())?;
+        }
+
+        if self.statistics.total_files as usize != self.files.len()
+            || self.statistics.total_size_bytes != total_plaintext
+            || self.statistics.encrypted_size_bytes != total_encrypted
+        {
+            return Err("manifest statistics do not match its file entries".to_string());
+        }
+        if !has_primary_database {
+            return Err("manifest does not contain the primary database".to_string());
+        }
+        Ok(())
     }
 
     /// Check if the schema version is compatible with the current app.
@@ -190,6 +350,75 @@ impl ArchiveManifest {
         }
         groups
     }
+}
+
+/// Generate a fresh immutable object key bound to both its logical path and
+/// plaintext digest. The random suffix prevents an upload from overwriting an
+/// object referenced by the currently committed manifest.
+pub fn new_versioned_object_key(original_path: &str, sha256: &str) -> String {
+    format!(
+        "objects/v1/{}/{}/{}.enc",
+        compute_sha256(original_path.as_bytes()),
+        sha256,
+        uuid::Uuid::new_v4()
+    )
+}
+
+fn is_versioned_object_key(file: &ManifestFile) -> bool {
+    let segments = file.key.split('/').collect::<Vec<_>>();
+    if segments.len() != 5
+        || segments[0] != "objects"
+        || segments[1] != "v1"
+        || segments[2] != compute_sha256(file.original_path.as_bytes())
+        || segments[3] != file.sha256
+    {
+        return false;
+    }
+    let Some(uuid) = segments[4].strip_suffix(".enc") else {
+        return false;
+    };
+    uuid::Uuid::parse_str(uuid).is_ok()
+}
+
+fn validate_manifest_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || path.len() > 4_096 || path.contains('\0') {
+        return Err("manifest destination is empty, too long, or contains NUL".to_string());
+    }
+    if path.starts_with('/') || path.starts_with('\\') {
+        return Err(format!("manifest destination '{path}' must be relative"));
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Err(format!(
+            "manifest destination '{path}' cannot contain a drive prefix"
+        ));
+    }
+    if path.chars().any(char::is_control) {
+        return Err(format!(
+            "manifest destination '{path}' contains control characters"
+        ));
+    }
+    for segment in path.split(['/', '\\']) {
+        if segment.is_empty() || segment == "." || segment == ".." || segment.len() > 255 {
+            return Err(format!(
+                "manifest destination '{path}' is not a normalized relative path"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn supported_data_path(path: &str) -> bool {
+    [
+        "documents/",
+        "images/",
+        "generated/",
+        "vectors/",
+        "previews/",
+        "thinclaw/",
+    ]
+    .iter()
+    .any(|prefix| path.starts_with(prefix))
 }
 
 /// Compute SHA-256 hash of data, returning hex string.

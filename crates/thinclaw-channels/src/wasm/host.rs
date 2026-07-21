@@ -44,6 +44,13 @@ fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
     end
 }
 
+fn workspace_prefix_matches(value: &str, prefix: &str) -> bool {
+    value == prefix
+        || value
+            .strip_prefix(prefix)
+            .is_some_and(|remainder| prefix.ends_with('/') || remainder.starts_with('/'))
+}
+
 /// Maximum emitted messages per callback execution.
 const MAX_EMITS_PER_EXECUTION: usize = 100;
 
@@ -53,11 +60,22 @@ const MAX_MESSAGE_CONTENT_SIZE: usize = 64 * 1024;
 /// Maximum single attachment size (20 MB).
 const MAX_ATTACHMENT_SIZE: usize = 20 * 1024 * 1024;
 
-/// Maximum total attachment payload per message (50 MB).
-const MAX_TOTAL_ATTACHMENT_SIZE: usize = 50 * 1024 * 1024;
+/// Maximum total attachment payload per message (40 MB).
+const MAX_TOTAL_ATTACHMENT_SIZE: usize = 40 * 1024 * 1024;
+const MAX_ATTACHMENTS_PER_MESSAGE: usize = 10;
+const MAX_MESSAGE_IDENTIFIER_SIZE: usize = 4096;
+const MAX_MESSAGE_USER_NAME_SIZE: usize = 1024;
+const MAX_MESSAGE_METADATA_SIZE: usize = 256 * 1024;
+const MAX_WORKSPACE_PATH_SIZE: usize = 1024;
+const MAX_WORKSPACE_WRITE_SIZE: usize = 1024 * 1024;
+const MAX_WORKSPACE_WRITES_PER_EXECUTION: usize = 64;
+const MAX_WORKSPACE_WRITE_TOTAL: usize = 4 * 1024 * 1024;
+const MAX_WORKSPACE_STORE_ENTRIES: usize = 4096;
+const MAX_WORKSPACE_STORE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_WORKSPACE_STORE_FILE_BYTES: usize = 12 * 1024 * 1024;
 
 /// A message emitted by a WASM channel to be sent to the agent.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EmittedMessage {
     /// User identifier within the channel.
     pub user_id: String,
@@ -81,8 +99,23 @@ pub struct EmittedMessage {
     pub attachments: Vec<MediaAttachment>,
 }
 
+impl std::fmt::Debug for EmittedMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EmittedMessage")
+            .field("user_id", &self.user_id)
+            .field("user_name", &self.user_name)
+            .field("content_bytes", &self.content.len())
+            .field("thread_id", &self.thread_id)
+            .field("metadata_bytes", &self.metadata_json.len())
+            .field("emitted_at_millis", &self.emitted_at_millis)
+            .field("attachment_count", &self.attachments.len())
+            .finish()
+    }
+}
+
 /// A binary media attachment from a WASM channel.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MediaAttachment {
     /// MIME type (e.g., "image/jpeg").
     pub mime_type: String,
@@ -90,6 +123,17 @@ pub struct MediaAttachment {
     pub data: Vec<u8>,
     /// Optional filename.
     pub filename: Option<String>,
+}
+
+impl std::fmt::Debug for MediaAttachment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MediaAttachment")
+            .field("mime_type", &self.mime_type)
+            .field("data_bytes", &self.data.len())
+            .field("filename", &self.filename)
+            .finish()
+    }
 }
 
 impl MediaAttachment {
@@ -141,13 +185,23 @@ impl EmittedMessage {
 }
 
 /// A pending workspace write operation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PendingWorkspaceWrite {
     /// Full path (already prefixed with channel namespace).
     pub path: String,
 
     /// Content to write.
     pub content: String,
+}
+
+impl std::fmt::Debug for PendingWorkspaceWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingWorkspaceWrite")
+            .field("path", &self.path)
+            .field("content_bytes", &self.content.len())
+            .finish()
+    }
 }
 
 /// Host state for WASM channel callbacks.
@@ -176,6 +230,8 @@ pub struct ChannelHostState {
 
     /// Pending workspace writes.
     pending_writes: Vec<PendingWorkspaceWrite>,
+
+    pending_write_bytes: usize,
 
     /// Emit count for rate limiting within this execution.
     emit_count: u32,
@@ -221,6 +277,7 @@ impl ChannelHostState {
             http_request_count: 0,
             emitted_messages: Vec::new(),
             pending_writes: Vec::new(),
+            pending_write_bytes: 0,
             emit_count: 0,
             emit_enabled: true,
             emits_dropped: 0,
@@ -241,7 +298,7 @@ impl ChannelHostState {
     ///
     /// Messages are queued and delivered after callback execution completes.
     /// Rate limiting is enforced per-execution and globally.
-    pub fn emit_message(&mut self, mut msg: EmittedMessage) -> Result<(), WasmChannelError> {
+    pub fn emit_message(&mut self, msg: EmittedMessage) -> Result<(), WasmChannelError> {
         // Check per-execution limit
         if !self.emit_enabled {
             self.emits_dropped += 1;
@@ -259,60 +316,48 @@ impl ChannelHostState {
             return Ok(());
         }
 
-        // Validate attachment sizes — drop oversized attachments individually
-        let original_count = msg.attachments.len();
-        let mut total_size: usize = 0;
-        msg.attachments.retain(|att| {
-            if att.data.len() > MAX_ATTACHMENT_SIZE {
-                tracing::warn!(
-                    channel = %self.channel_name,
-                    size = att.data.len(),
-                    max = MAX_ATTACHMENT_SIZE,
-                    mime = %att.mime_type,
-                    "Dropping oversized attachment"
-                );
-                return false;
-            }
-            total_size += att.data.len();
-            if total_size > MAX_TOTAL_ATTACHMENT_SIZE {
-                tracing::warn!(
-                    channel = %self.channel_name,
-                    total = total_size,
-                    max = MAX_TOTAL_ATTACHMENT_SIZE,
-                    "Dropping attachment: total payload exceeds limit"
-                );
-                return false;
-            }
-            true
-        });
-        if msg.attachments.len() < original_count {
-            tracing::info!(
-                channel = %self.channel_name,
-                kept = msg.attachments.len(),
-                dropped = original_count - msg.attachments.len(),
-                "Some attachments dropped due to size limits"
-            );
+        let total_attachment_size = msg
+            .attachments
+            .iter()
+            .try_fold(0usize, |total, attachment| {
+                total.checked_add(attachment.data.len())
+            });
+        let max_content_size = self
+            .capabilities
+            .max_message_size
+            .min(MAX_MESSAGE_CONTENT_SIZE);
+        let valid_identifier = |value: &str, max: usize| {
+            !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+        };
+        if !valid_identifier(&msg.user_id, MAX_MESSAGE_IDENTIFIER_SIZE)
+            || msg
+                .user_name
+                .as_deref()
+                .is_some_and(|value| !valid_identifier(value, MAX_MESSAGE_USER_NAME_SIZE))
+            || msg
+                .thread_id
+                .as_deref()
+                .is_some_and(|value| !valid_identifier(value, MAX_MESSAGE_IDENTIFIER_SIZE))
+            || msg.metadata_json.len() > MAX_MESSAGE_METADATA_SIZE
+            || serde_json::from_str::<serde_json::Value>(&msg.metadata_json).is_err()
+            || msg.content.len() > max_content_size
+            || msg.attachments.len() > MAX_ATTACHMENTS_PER_MESSAGE
+            || total_attachment_size.is_none_or(|total| total > MAX_TOTAL_ATTACHMENT_SIZE)
+            || msg.attachments.iter().any(|attachment| {
+                attachment.data.len() > MAX_ATTACHMENT_SIZE
+                    || !valid_identifier(&attachment.mime_type, 256)
+                    || attachment.filename.as_deref().is_some_and(|value| {
+                        !valid_identifier(value, 255) || value.contains(['/', '\\'])
+                    })
+            })
+        {
+            return Err(WasmChannelError::CallbackFailed {
+                name: self.channel_name.clone(),
+                reason: "emitted message is malformed or oversized".to_string(),
+            });
         }
 
-        // Validate message content size
-        if msg.content.len() > MAX_MESSAGE_CONTENT_SIZE {
-            tracing::warn!(
-                channel = %self.channel_name,
-                size = msg.content.len(),
-                max = MAX_MESSAGE_CONTENT_SIZE,
-                "Message content too large, truncating"
-            );
-            let safe_end = floor_char_boundary(&msg.content, MAX_MESSAGE_CONTENT_SIZE);
-            let mut truncated = msg.content[..safe_end].to_string();
-            truncated.push_str("... (truncated)");
-            let msg = EmittedMessage {
-                content: truncated,
-                ..msg
-            };
-            self.emitted_messages.push(msg);
-        } else {
-            self.emitted_messages.push(msg);
-        }
+        self.emitted_messages.push(msg);
 
         self.emit_count += 1;
         Ok(())
@@ -346,6 +391,19 @@ impl ChannelHostState {
                 path: reason,
             })?;
 
+        if full_path.len() > MAX_WORKSPACE_PATH_SIZE
+            || content.len() > MAX_WORKSPACE_WRITE_SIZE
+            || self.pending_writes.len() >= MAX_WORKSPACE_WRITES_PER_EXECUTION
+            || self.pending_write_bytes.saturating_add(content.len()) > MAX_WORKSPACE_WRITE_TOTAL
+        {
+            return Err(WasmChannelError::CallbackFailed {
+                name: self.channel_name.clone(),
+                reason: "workspace write is oversized or exceeds the per-execution limit"
+                    .to_string(),
+            });
+        }
+        self.pending_write_bytes += content.len();
+
         self.pending_writes.push(PendingWorkspaceWrite {
             path: full_path,
             content,
@@ -356,6 +414,7 @@ impl ChannelHostState {
 
     /// Take all pending workspace writes (clears the queue).
     pub fn take_pending_writes(&mut self) -> Vec<PendingWorkspaceWrite> {
+        self.pending_write_bytes = 0;
         std::mem::take(&mut self.pending_writes)
     }
 
@@ -402,13 +461,16 @@ impl ChannelHostState {
     }
 
     pub fn workspace_read(&self, path: &str) -> Result<Option<String>, String> {
-        let full_path = self.capabilities.prefix_workspace_path(path);
+        let full_path = self.capabilities.validate_workspace_path(path)?;
+        if full_path.len() > MAX_WORKSPACE_PATH_SIZE {
+            return Err("workspace path is oversized".to_string());
+        }
         if let Some(workspace) = &self.capabilities.tool_capabilities.workspace_read
             && !workspace.allowed_prefixes.is_empty()
-            && !workspace
-                .allowed_prefixes
-                .iter()
-                .any(|prefix| full_path.starts_with(prefix) || path.starts_with(prefix))
+            && !workspace.allowed_prefixes.iter().any(|prefix| {
+                workspace_prefix_matches(&full_path, prefix)
+                    || workspace_prefix_matches(path, prefix)
+            })
         {
             return Ok(None);
         }
@@ -420,6 +482,14 @@ impl ChannelHostState {
     }
 
     pub fn secret_exists(&self, name: &str) -> bool {
+        if name.is_empty()
+            || name.len() > 256
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            return false;
+        }
         self.capabilities
             .tool_capabilities
             .secrets
@@ -435,6 +505,13 @@ impl ChannelHostState {
             .as_ref()
             .ok_or_else(|| "HTTP capability not granted".to_string())?;
         let parsed = url::Url::parse(url).map_err(|error| format!("invalid URL: {error}"))?;
+        if parsed.scheme() != "https"
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err("HTTP request requires a credential-free HTTPS URL".to_string());
+        }
         let host = parsed
             .host_str()
             .ok_or_else(|| "URL has no host".to_string())?;
@@ -444,16 +521,17 @@ impl ChannelHostState {
             .iter()
             .any(|pattern| pattern.matches(host, path, method))
         {
-            return Err(format!("HTTP request not allowed: {method} {url}"));
+            return Err(format!(
+                "HTTP {method} request is not allowed by channel capability"
+            ));
         }
 
-        // SSRF guard: even a wildcard host allowlist must not let a guest reach
-        // private, loopback, link-local, or cloud-metadata addresses. A literal
-        // IP host is checked here; hostnames that resolve to private IPs (DNS
-        // rebinding) are a residual not covered by this synchronous check.
+        // Reject special-use literal addresses here. The transport performs a
+        // second DNS-resolving guard and pins the resulting public addresses so
+        // hostnames cannot rebind between authorization and connection.
         let ip_literal = host.trim_start_matches('[').trim_end_matches(']');
         if let Ok(ip) = ip_literal.parse::<std::net::IpAddr>()
-            && is_blocked_http_ip(ip)
+            && !thinclaw_tools_core::is_public_outbound_ip(ip)
         {
             return Err(format!(
                 "HTTP request to a private/loopback address is not allowed: {host}"
@@ -483,39 +561,6 @@ impl ChannelHostState {
     }
 }
 
-/// Whether `ip` is one a guest HTTP request must never reach: loopback, private
-/// (RFC1918 / CGNAT), link-local (incl. the cloud-metadata 169.254.169.254),
-/// unspecified, broadcast, documentation, or the IPv6 equivalents.
-fn is_blocked_http_ip(ip: std::net::IpAddr) -> bool {
-    use std::net::IpAddr;
-    match ip {
-        IpAddr::V4(v4) => {
-            let [a, b, ..] = v4.octets();
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                // CGNAT / shared address space 100.64.0.0/10
-                || (a == 100 && (b & 0xc0) == 64)
-        }
-        IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_blocked_http_ip(IpAddr::V4(mapped));
-            }
-            let first = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                // unique-local fc00::/7
-                || (first & 0xfe00) == 0xfc00
-                // link-local fe80::/10
-                || (first & 0xffc0) == 0xfe80
-        }
-    }
-}
-
 /// Workspace store for WASM channels with optional disk persistence.
 ///
 /// Persists workspace writes across callback invocations. When a
@@ -537,6 +582,9 @@ pub struct ChannelWorkspaceStore {
     /// Serialized snapshot of the last content flushed to disk.
     /// Compared against new serialization to skip redundant writes.
     last_flushed: std::sync::Mutex<Vec<u8>>,
+    /// Serializes the read-modify-persist-publish transaction so concurrent
+    /// callback completions cannot overwrite one another with stale snapshots.
+    commit_lock: std::sync::Mutex<()>,
 }
 
 impl ChannelWorkspaceStore {
@@ -549,6 +597,7 @@ impl ChannelWorkspaceStore {
             data: std::sync::RwLock::new(std::collections::HashMap::new()),
             persist_path: None,
             last_flushed: std::sync::Mutex::new(Vec::new()),
+            commit_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -558,38 +607,20 @@ impl ChannelWorkspaceStore {
     /// calls to [`commit_writes`] will flush the full store back to disk
     /// only when the serialized content has actually changed.
     pub fn with_persistence(path: std::path::PathBuf) -> Self {
-        let (data, initial_snapshot) = if path.exists() {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    match serde_json::from_str::<std::collections::HashMap<String, String>>(
-                        &content,
-                    ) {
-                        Ok(map) => {
-                            // Pre-compute initial snapshot for change detection
-                            let snapshot = Self::serialize_deterministic(&map).unwrap_or_default();
-                            (map, snapshot)
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                path = %path.display(),
-                                error = %err,
-                                "Failed to parse persisted channel workspace, starting fresh"
-                            );
-                            (std::collections::HashMap::new(), Vec::new())
-                        }
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %err,
-                        "Failed to read persisted channel workspace, starting fresh"
-                    );
-                    (std::collections::HashMap::new(), Vec::new())
-                }
+        let (data, initial_snapshot) = match Self::load_from_disk(&path) {
+            Ok(Some(map)) => {
+                let snapshot = Self::serialize_deterministic(&map).unwrap_or_default();
+                (map, snapshot)
             }
-        } else {
-            (std::collections::HashMap::new(), Vec::new())
+            Ok(None) => (std::collections::HashMap::new(), Vec::new()),
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "Rejected persisted channel workspace, starting fresh"
+                );
+                (std::collections::HashMap::new(), Vec::new())
+            }
         };
 
         tracing::debug!(
@@ -602,7 +633,62 @@ impl ChannelWorkspaceStore {
             data: std::sync::RwLock::new(data),
             persist_path: Some(path),
             last_flushed: std::sync::Mutex::new(initial_snapshot),
+            commit_lock: std::sync::Mutex::new(()),
         }
+    }
+
+    fn load_from_disk(
+        path: &std::path::Path,
+    ) -> Result<Option<std::collections::HashMap<String, String>>, String> {
+        use std::io::Read as _;
+
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("cannot inspect workspace file: {error}")),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("workspace persistence path is not a regular file".to_string());
+        }
+        if metadata.len() > MAX_WORKSPACE_STORE_FILE_BYTES as u64 {
+            return Err("workspace persistence file is oversized".to_string());
+        }
+
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options
+            .open(path)
+            .map_err(|error| format!("cannot open workspace file: {error}"))?;
+        let opened_metadata = file
+            .metadata()
+            .map_err(|error| format!("cannot inspect opened workspace file: {error}"))?;
+        if !opened_metadata.is_file()
+            || opened_metadata.len() > MAX_WORKSPACE_STORE_FILE_BYTES as u64
+        {
+            return Err("opened workspace persistence file is invalid or oversized".to_string());
+        }
+
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(opened_metadata.len())
+                .unwrap_or(MAX_WORKSPACE_STORE_FILE_BYTES)
+                .min(MAX_WORKSPACE_STORE_FILE_BYTES),
+        );
+        std::io::Read::by_ref(&mut file)
+            .take((MAX_WORKSPACE_STORE_FILE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("cannot read workspace file: {error}"))?;
+        if bytes.len() > MAX_WORKSPACE_STORE_FILE_BYTES {
+            return Err("workspace persistence file is oversized".to_string());
+        }
+        let map: std::collections::HashMap<String, String> = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("invalid workspace JSON: {error}"))?;
+        Self::validate_store_data(&map)?;
+        Ok(Some(map))
     }
 
     /// Commit pending writes from a callback execution into the store.
@@ -611,50 +697,93 @@ impl ChannelWorkspaceStore {
     /// when the serialized content has actually changed since the last flush.
     /// The disk flush happens outside the data write lock to avoid blocking
     /// concurrent readers.
-    pub fn commit_writes(&self, writes: &[PendingWorkspaceWrite]) {
+    pub fn commit_writes(&self, writes: &[PendingWorkspaceWrite]) -> Result<(), String> {
         if writes.is_empty() {
-            return;
+            return Ok(());
         }
+        if writes.len() > MAX_WORKSPACE_WRITES_PER_EXECUTION {
+            return Err("workspace write batch exceeds the entry limit".to_string());
+        }
+        let _commit_guard = self
+            .commit_lock
+            .lock()
+            .map_err(|_| "workspace commit lock is poisoned".to_string())?;
+        let mut candidate = self
+            .data
+            .read()
+            .map_err(|_| "workspace data lock is poisoned".to_string())?
+            .clone();
 
-        // Apply writes under the lock, then snapshot for out-of-lock flush.
-        let snapshot = {
-            let mut data = match self.data.write() {
-                Ok(guard) => guard,
-                Err(_poisoned) => return,
-            };
-            for write in writes {
-                tracing::debug!(
-                    path = %write.path,
-                    content_len = write.content.len(),
-                    "Committing workspace write to channel store"
-                );
-
-                if Self::is_managed_private_topics_path(&write.path) {
-                    let merged = data
-                        .get(&write.path)
-                        .map(|existing| {
-                            Self::merge_managed_private_topic_registry(existing, &write.content)
-                        })
-                        .unwrap_or_else(|| write.content.clone());
-                    data.insert(write.path.clone(), merged);
-                } else {
-                    data.insert(write.path.clone(), write.content.clone());
-                }
-            }
-
-            // Only clone for flush if persistence is configured
-            if self.persist_path.is_some() {
-                Some(data.clone())
+        for write in writes {
+            Self::validate_write(write)?;
+            let value = if Self::is_managed_private_topics_path(&write.path) {
+                candidate
+                    .get(&write.path)
+                    .map(|existing| {
+                        Self::merge_managed_private_topic_registry(existing, &write.content)
+                    })
+                    .unwrap_or_else(|| write.content.clone())
             } else {
-                None
+                write.content.clone()
+            };
+            if value.len() > MAX_WORKSPACE_WRITE_SIZE {
+                return Err("merged workspace value exceeds the per-entry limit".to_string());
             }
-            // data write lock is released here
-        };
-
-        // Flush to disk outside the data lock
-        if let (Some(snapshot), Some(persist_path)) = (snapshot, &self.persist_path) {
-            self.flush_if_changed(persist_path, &snapshot);
+            candidate.insert(write.path.clone(), value);
         }
+        Self::validate_store_data(&candidate)?;
+
+        // Persist the complete candidate before publishing it to readers. A
+        // disk failure therefore leaves both the durable and in-memory views
+        // on the previous successful state.
+        if let Some(persist_path) = &self.persist_path {
+            self.flush_if_changed(persist_path, &candidate)?;
+        }
+        *self
+            .data
+            .write()
+            .map_err(|_| "workspace data lock is poisoned".to_string())? = candidate;
+        Ok(())
+    }
+
+    fn validate_write(write: &PendingWorkspaceWrite) -> Result<(), String> {
+        if write.path.is_empty()
+            || write.path.len() > MAX_WORKSPACE_PATH_SIZE
+            || write.path.starts_with('/')
+            || write.path.contains('\\')
+            || write.path.chars().any(char::is_control)
+            || write
+                .path
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        {
+            return Err("workspace write path is invalid".to_string());
+        }
+        if write.content.len() > MAX_WORKSPACE_WRITE_SIZE {
+            return Err("workspace write value exceeds the per-entry limit".to_string());
+        }
+        Ok(())
+    }
+
+    fn validate_store_data(data: &std::collections::HashMap<String, String>) -> Result<(), String> {
+        if data.len() > MAX_WORKSPACE_STORE_ENTRIES {
+            return Err("workspace store exceeds the entry limit".to_string());
+        }
+        let mut total = 0usize;
+        for (path, content) in data {
+            Self::validate_write(&PendingWorkspaceWrite {
+                path: path.clone(),
+                content: content.clone(),
+            })?;
+            total = total
+                .checked_add(path.len())
+                .and_then(|value| value.checked_add(content.len()))
+                .ok_or_else(|| "workspace store size overflow".to_string())?;
+            if total > MAX_WORKSPACE_STORE_BYTES {
+                return Err("workspace store exceeds the aggregate byte limit".to_string());
+            }
+        }
+        Ok(())
     }
 
     fn is_managed_private_topics_path(path: &str) -> bool {
@@ -711,57 +840,68 @@ impl ChannelWorkspaceStore {
         &self,
         path: &std::path::Path,
         data: &std::collections::HashMap<String, String>,
-    ) {
-        let serialized = match Self::serialize_deterministic(data) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "Failed to serialize channel workspace store"
-                );
-                return;
-            }
-        };
+    ) -> Result<(), String> {
+        let serialized = Self::serialize_deterministic(data)
+            .map_err(|error| format!("cannot serialize workspace store: {error}"))?;
+        if serialized.len() > MAX_WORKSPACE_STORE_FILE_BYTES {
+            return Err("serialized workspace store exceeds the file limit".to_string());
+        }
 
-        // Compare with last-flushed snapshot to skip redundant writes
-        if let Ok(last) = self.last_flushed.lock()
-            && *last == serialized
-        {
-            return; // Content unchanged, skip disk I/O
+        // Acquire the snapshot lock before I/O so a poisoned lock cannot leave
+        // disk advanced while memory remains on the previous candidate.
+        let mut last = self
+            .last_flushed
+            .lock()
+            .map_err(|_| "workspace snapshot lock is poisoned".to_string())?;
+        if *last == serialized {
+            return Ok(()); // Content unchanged, skip disk I/O
         }
 
         // Content changed — write to disk atomically
-        Self::write_to_disk(path, &serialized);
+        Self::write_to_disk(path, &serialized)?;
 
-        // Update last-flushed snapshot
-        if let Ok(mut last) = self.last_flushed.lock() {
-            *last = serialized;
-        }
+        // Update last-flushed snapshot only after the durable replacement.
+        *last = serialized;
+        Ok(())
     }
 
     /// Write serialized bytes to disk atomically (write-tmp + rename).
-    fn write_to_disk(path: &std::path::Path, serialized: &[u8]) {
-        if let Some(parent) = path.parent()
-            && let Err(err) = std::fs::create_dir_all(parent)
-        {
-            tracing::warn!(
-                path = %parent.display(),
-                error = %err,
-                "Failed to create directory for channel workspace persistence"
-            );
-            return;
+    fn write_to_disk(path: &std::path::Path, serialized: &[u8]) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("cannot create workspace directory: {error}"))?;
         }
 
-        let tmp_path = path.with_extension("tmp");
-        if let Err(err) =
-            std::fs::write(&tmp_path, serialized).and_then(|()| std::fs::rename(&tmp_path, path))
+        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "workspace persistence path has no valid filename".to_string())?;
+        let tmp_path = parent.join(format!(
+            ".{file_name}.{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
         {
-            tracing::warn!(
-                path = %path.display(),
-                error = %err,
-                "Failed to persist channel workspace store to disk"
-            );
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
+        let result = (|| -> Result<(), std::io::Error> {
+            let mut file = options.open(&tmp_path)?;
+            std::io::Write::write_all(&mut file, serialized)?;
+            file.sync_all()?;
+            std::fs::rename(&tmp_path, path)?;
+            if let Ok(directory) = std::fs::File::open(parent) {
+                let _ = directory.sync_all();
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+        result.map_err(|error| format!("cannot persist workspace store: {error}"))
     }
 }
 
@@ -861,7 +1001,6 @@ impl ChannelEmitRateLimiter {
 
 #[cfg(test)]
 mod tests {
-    use super::is_blocked_http_ip;
     use crate::wasm::capabilities::{ChannelCapabilities, EmitRateLimitConfig};
     use crate::wasm::host::{
         ChannelEmitRateLimiter, ChannelHostState, EmittedMessage, MAX_EMITS_PER_EXECUTION,
@@ -883,7 +1022,7 @@ mod tests {
             "::ffff:127.0.0.1", // IPv4-mapped loopback
         ] {
             assert!(
-                is_blocked_http_ip(ip.parse().unwrap()),
+                !thinclaw_tools_core::is_public_outbound_ip(ip.parse().unwrap()),
                 "{ip} should be blocked"
             );
         }
@@ -894,7 +1033,7 @@ mod tests {
             "2606:4700:4700::1111",
         ] {
             assert!(
-                !is_blocked_http_ip(ip.parse().unwrap()),
+                thinclaw_tools_core::is_public_outbound_ip(ip.parse().unwrap()),
                 "{ip} should be allowed"
             );
         }
@@ -1030,7 +1169,7 @@ mod tests {
                 content: r#"{"ok":true}"#.to_string(),
             },
         ];
-        store.commit_writes(&writes);
+        store.commit_writes(&writes).unwrap();
 
         // Should be readable
         assert_eq!(
@@ -1047,14 +1186,14 @@ mod tests {
             path: "channels/telegram/offset".to_string(),
             content: "200".to_string(),
         }];
-        store.commit_writes(&writes2);
+        store.commit_writes(&writes2).unwrap();
         assert_eq!(
             store.read("channels/telegram/offset"),
             Some("200".to_string())
         );
 
         // Empty writes are a no-op
-        store.commit_writes(&[]);
+        store.commit_writes(&[]).unwrap();
         assert_eq!(
             store.read("channels/telegram/offset"),
             Some("200".to_string())
@@ -1082,7 +1221,7 @@ mod tests {
                 path: "channels/telegram/state/managed_private_topics".to_string(),
                 content: r#"{"chats":{"123":{"general_thread_id":42}}}"#.to_string(),
             }];
-            store.commit_writes(&writes);
+            store.commit_writes(&writes).unwrap();
 
             assert_eq!(
                 store.read("channels/telegram/state/managed_private_topics"),
@@ -1118,7 +1257,7 @@ mod tests {
             path: "channels/telegram/state/managed_private_topics".to_string(),
             content: r#"{"chats":{"123":{"general_thread_id":42}}}"#.to_string(),
         }];
-        store.commit_writes(&writes);
+        store.commit_writes(&writes).unwrap();
         assert!(path.exists());
 
         let mtime_after_first = std::fs::metadata(&path).unwrap().modified().unwrap();
@@ -1127,7 +1266,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
 
         // Second write with identical content — should NOT touch the file
-        store.commit_writes(&writes);
+        store.commit_writes(&writes).unwrap();
 
         let mtime_after_second = std::fs::metadata(&path).unwrap().modified().unwrap();
 
@@ -1142,7 +1281,7 @@ mod tests {
             path: "channels/telegram/state/managed_private_topics".to_string(),
             content: r#"{"chats":{"123":{"general_thread_id":99}}}"#.to_string(),
         }];
-        store.commit_writes(&writes_changed);
+        store.commit_writes(&writes_changed).unwrap();
 
         let mtime_after_third = std::fs::metadata(&path).unwrap().modified().unwrap();
 
@@ -1160,15 +1299,19 @@ mod tests {
         let store = ChannelWorkspaceStore::new();
         let path = "channels/telegram/state/managed_private_topics".to_string();
 
-        store.commit_writes(&[PendingWorkspaceWrite {
-            path: path.clone(),
-            content: r#"{"chats":{"123":{"onboarding_thread_id":61419}}}"#.to_string(),
-        }]);
+        store
+            .commit_writes(&[PendingWorkspaceWrite {
+                path: path.clone(),
+                content: r#"{"chats":{"123":{"onboarding_thread_id":61419}}}"#.to_string(),
+            }])
+            .unwrap();
 
-        store.commit_writes(&[PendingWorkspaceWrite {
-            path: path.clone(),
-            content: r#"{"chats":{"123":{"general_thread_id":7}}}"#.to_string(),
-        }]);
+        store
+            .commit_writes(&[PendingWorkspaceWrite {
+                path: path.clone(),
+                content: r#"{"chats":{"123":{"general_thread_id":7}}}"#.to_string(),
+            }])
+            .unwrap();
 
         let raw = store
             .read(&path)
@@ -1194,16 +1337,21 @@ mod tests {
         let store = ChannelWorkspaceStore::new();
         let path = "channels/telegram/state/managed_private_topics".to_string();
 
-        store.commit_writes(&[PendingWorkspaceWrite {
-            path: path.clone(),
-            content: r#"{"chats":{"123":{"onboarding_thread_id":61419,"general_thread_id":7}}}"#
-                .to_string(),
-        }]);
+        store
+            .commit_writes(&[PendingWorkspaceWrite {
+                path: path.clone(),
+                content:
+                    r#"{"chats":{"123":{"onboarding_thread_id":61419,"general_thread_id":7}}}"#
+                        .to_string(),
+            }])
+            .unwrap();
 
-        store.commit_writes(&[PendingWorkspaceWrite {
-            path: path.clone(),
-            content: r#"{"chats":{"123":{"general_thread_id":null}}}"#.to_string(),
-        }]);
+        store
+            .commit_writes(&[PendingWorkspaceWrite {
+                path: path.clone(),
+                content: r#"{"chats":{"123":{"general_thread_id":null}}}"#.to_string(),
+            }])
+            .unwrap();
 
         let raw = store
             .read(&path)

@@ -90,15 +90,31 @@ pub async fn run_trajectory_command(cmd: TrajectoryCommand) -> anyhow::Result<()
                 anyhow::bail!("--with-manifest requires --output");
             }
             if let Some(output) = output {
-                if let Some(parent) = output.parent() {
+                if let Some(parent) = output
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                {
                     tokio::fs::create_dir_all(parent).await?;
+                    let metadata = tokio::fs::symlink_metadata(parent).await?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        anyhow::bail!("trajectory export parent is not a real directory");
+                    }
                 }
-                tokio::fs::write(&output, &rendered.payload).await?;
                 if with_manifest {
                     let manifest = rendered.manifest();
-                    tokio::fs::write(
+                    thinclaw_platform::publish_file_pair(
+                        output.clone(),
                         manifest_path_for_output(&output),
-                        serde_json::to_string_pretty(&manifest)?,
+                        rendered.payload.as_bytes().to_vec(),
+                        Some(serde_json::to_vec_pretty(&manifest)?),
+                        thinclaw_platform::ExistingPairPolicy::Replace,
+                    )
+                    .await?;
+                } else {
+                    thinclaw_platform::write_private_file_atomic_async(
+                        output.clone(),
+                        rendered.payload.as_bytes().to_vec(),
+                        true,
                     )
                     .await?;
                 }

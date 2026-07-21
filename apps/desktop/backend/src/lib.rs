@@ -68,6 +68,7 @@ fn toggle_spotlight(app: tauri::AppHandle) {
 pub mod chat;
 pub mod cloud;
 pub mod config;
+mod debug_redaction;
 pub mod direct_assets;
 pub mod engine;
 pub mod file_store;
@@ -388,6 +389,9 @@ pub fn run() {
 
     app.manage(SidecarManager::new());
     app.manage(model_manager::DownloadManager::new());
+    // Load the secure store before ConfigManager so legacy plaintext MCP
+    // credentials can be migrated without clobbering the in-memory key cache.
+    thinclaw::config::keychain::load_all();
     app.manage(config::ConfigManager::new(app.handle()));
     app.manage(thinclaw::ThinClawManager::new(app.handle().clone()));
     app.manage(rig_cache::RigManagerCache::new());
@@ -406,13 +410,21 @@ pub fn run() {
                 .expect("failed to get app data dir");
             migrate_legacy_app_data(&app_data_dir);
             fs::create_dir_all(&app_data_dir).expect("failed to create app data dir");
+            match cloud::migration::apply_pending_restore(&app_data_dir).await {
+                Ok(true) => println!("[main] Activated pending cloud restore before startup."),
+                Ok(false) => {}
+                Err(error) => {
+                    panic!(
+                        "Refusing to start with a partially applied cloud restore: {}",
+                        error
+                    );
+                }
+            }
 
             // ── Load ALL API keys from Keychain in a single read ─────────────
             // This triggers exactly one macOS authorization prompt, then caches
             // everything in memory.  Must happen before ThinClawConfig::new()
             // or any other code that calls keychain::get_key().
-            thinclaw::config::keychain::load_all();
-
             // ── App-wide secret store (reads from the just-loaded keychain) ───
             let secret_store = secret_store::SecretStore::new();
             // InferenceRouter needs an Arc handle to the store.  Since
@@ -423,7 +435,10 @@ pub fn run() {
             handle.manage(secret_store);
 
             // ── Inference Router — routes all AI modalities to backends ───
-            let inference_router = inference::InferenceRouter::new(secret_store_for_router.clone());
+            let inference_router = inference::InferenceRouter::new(
+                secret_store_for_router.clone(),
+                app_data_dir.join("images"),
+            );
             handle.manage(inference_router);
 
             // ── Cloud Model Discovery Registry ───
@@ -482,6 +497,49 @@ pub fn run() {
 
             handle.manage(pool);
 
+            // Restore persisted cloud inference selections on every launch.
+            // Previously the router was only configured when the settings UI
+            // changed a backend, so cloud modalities silently disappeared
+            // after a restart.
+            {
+                let config_manager = handle.state::<config::ConfigManager>();
+                let mut user_config = config_manager.get_config();
+                let router = handle.state::<inference::InferenceRouter>();
+                let result = router.reconfigure(&user_config).await;
+                if let Some(backend) = router.embedding_backend().await {
+                    let pool = handle.state::<sqlx::SqlitePool>();
+                    let vectors = handle.state::<vector_store::VectorStoreManager>();
+                    match rag::activate_embedding_profile(
+                        pool.inner(),
+                        vectors.inner(),
+                        &backend.profile_id(),
+                        backend.dimensions(),
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            if user_config.vector_dimensions as usize != backend.dimensions() {
+                                user_config.vector_dimensions =
+                                    u32::try_from(backend.dimensions()).unwrap_or(u32::MAX);
+                                if let Err(error) = config_manager.save_config(&user_config) {
+                                    tracing::warn!(
+                                        "Failed to persist restored embedding dimensions: {error}"
+                                    );
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("[main] Failed to restore embedding profile: {error}");
+                            router.clear_backend(inference::Modality::Embedding).await;
+                        }
+                    }
+                } else if result.new_embedding_dims > 0 {
+                    // Defensive: a dimension without a backend should never be
+                    // externally observable.
+                    router.clear_backend(inference::Modality::Embedding).await;
+                }
+            }
+
             // Cloud Storage Manager
             let cloud_manager = cloud::CloudManager::new(app_data_dir.clone());
             {
@@ -504,7 +562,10 @@ pub fn run() {
                 let cloud_state = handle.state::<cloud::CloudManager>();
                 if cloud_state.is_cloud_mode().await {
                     let fs_state = handle.state::<file_store::FileStore>();
-                    match cloud::live_sync::start_live_sync(&fs_state, &cloud_state).await {
+                    let pool_state = handle.state::<sqlx::SqlitePool>();
+                    match cloud::live_sync::start_live_sync(&fs_state, &cloud_state, &pool_state)
+                        .await
+                    {
                         Ok(handles) => {
                             cloud_state.install_sync_handles(handles).await;
                             println!("[main] Cloud mode restored: live sync started.");

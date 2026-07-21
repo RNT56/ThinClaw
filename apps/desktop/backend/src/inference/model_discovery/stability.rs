@@ -4,7 +4,7 @@ use super::types::*;
 use std::collections::HashMap;
 
 pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
-    let client = reqwest::Client::new();
+    let client = super::http_client(api_key)?;
 
     let response = client
         .get("https://api.stability.ai/v1/engines/list")
@@ -12,12 +12,6 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
         .send()
         .await
         .map_err(|e| format!("Stability API request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("Stability API error ({}): {}", status, body));
-    }
 
     #[derive(serde::Deserialize)]
     struct Engine {
@@ -28,10 +22,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
         engine_type: Option<String>,
     }
 
-    let engines: Vec<Engine> = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse Stability engines: {}", e))?;
+    let engines: Vec<Engine> = super::bounded_json(response, "Stability AI").await?;
 
     let models: Vec<CloudModelEntry> = engines
         .into_iter()

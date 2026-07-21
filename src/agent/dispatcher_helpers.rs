@@ -407,6 +407,9 @@ mod tests {
                     arguments: serde_json::json!({"message": "done"}),
                 },
             ],
+            requesting_identity: None,
+            request_channel: String::new(),
+            request_metadata: serde_json::Value::Null,
         };
 
         let json = serde_json::to_string(&pending).expect("serialize");

@@ -13,6 +13,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
+use futures::StreamExt as _;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::Mutex;
 
@@ -24,7 +25,7 @@ use thinclaw_core::channels::ChannelManager;
 use thinclaw_core::extensions::clawhub::CatalogCache;
 use thinclaw_core::extensions::manifest_validator::ManifestValidator;
 
-use super::runtime_bridge::ThinClawRuntimeInner;
+use super::runtime_bridge::{RuntimeAuxiliaryTasks, ThinClawRuntimeInner};
 use super::tauri_channel::TauriChannel;
 use super::tool_bridge::TauriToolBridge;
 use super::ui_types::UiEvent;
@@ -108,6 +109,172 @@ pub(crate) fn runtime_db_path(state_dir: &std::path::Path) -> std::path::PathBuf
 
 pub(crate) fn runtime_toml_path(state_dir: &std::path::Path) -> std::path::PathBuf {
     state_dir.join(RUNTIME_TOML_NAME)
+}
+
+async fn desktop_setting(
+    store: &Arc<dyn thinclaw_core::db::Database>,
+    key: &str,
+) -> Option<serde_json::Value> {
+    store.get_setting("local_user", key).await.ok().flatten()
+}
+
+async fn desktop_runtime_secret(
+    store: &Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
+    name: &str,
+) -> Option<String> {
+    store
+        .get_for_injection(
+            "local_user",
+            name,
+            thinclaw_core::secrets::SecretAccessContext::new(
+                "desktop.gmail",
+                "gmail_channel_runtime",
+            ),
+        )
+        .await
+        .ok()
+        .map(|secret| secret.expose().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+async fn migrate_legacy_gmail_refresh_token(
+    database: &Arc<dyn thinclaw_core::db::Database>,
+    secrets: &Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
+) {
+    let Some(value) = desktop_setting(database, "gmail_refresh_token")
+        .await
+        .and_then(|value| value.as_str().map(str::to_string))
+    else {
+        return;
+    };
+    if secrets
+        .exists("local_user", "google_oauth_token_refresh_token")
+        .await
+        .unwrap_or(false)
+    {
+        if let Err(error) = database
+            .delete_setting("local_user", "gmail_refresh_token")
+            .await
+        {
+            tracing::warn!(%error, "Failed to remove migrated legacy Gmail credential row");
+        }
+        return;
+    }
+    if value.is_empty() || value.len() > 64 * 1024 || value.chars().any(char::is_control) {
+        tracing::error!("Refusing malformed legacy Gmail refresh credential");
+        if let Err(error) = database
+            .delete_setting("local_user", "gmail_refresh_token")
+            .await
+        {
+            tracing::warn!(%error, "Failed to remove malformed legacy Gmail credential row");
+        }
+        return;
+    }
+    let params =
+        thinclaw_core::secrets::CreateSecretParams::new("google_oauth_token_refresh_token", value)
+            .with_provider("google");
+    match secrets.create("local_user", params).await {
+        Ok(_) => {
+            if let Err(error) = database
+                .delete_setting("local_user", "gmail_refresh_token")
+                .await
+            {
+                tracing::warn!(%error, "Failed to remove migrated legacy Gmail credential row");
+            }
+        }
+        Err(error) => tracing::error!(
+            %error,
+            "Failed to migrate legacy Gmail refresh credential to secure storage"
+        ),
+    }
+}
+
+async fn resolve_desktop_gmail_config(
+    config: &thinclaw_core::config::Config,
+    database: Option<&Arc<dyn thinclaw_core::db::Database>>,
+    secrets: Option<&Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>>,
+) -> thinclaw_core::channels::gmail_wiring::GmailConfig {
+    use thinclaw_core::channels::gmail_wiring::GmailConfig;
+
+    let mut resolved = GmailConfig::default();
+    if let Some(source) = config.channels.gmail.as_ref() {
+        resolved.enabled = true;
+        resolved.project_id = source.project_id.clone();
+        resolved.subscription_id = source.subscription_id.clone();
+        resolved.topic_id = source.topic_id.clone();
+        resolved.oauth_token = source.oauth_token.clone();
+        resolved.refresh_token = source.refresh_token.clone();
+        resolved.client_id = source.client_id.clone();
+        resolved.client_secret = source.client_secret.clone();
+        resolved.allowed_senders = source.allowed_senders.clone();
+        resolved.label_filters = source.label_filters.clone();
+        resolved.max_message_size_bytes = source.max_message_size_bytes;
+    }
+
+    if let Some(database) = database {
+        if let Some(value) = desktop_setting(database, "channels.gmail_enabled").await {
+            resolved.enabled = value
+                .as_bool()
+                .or_else(|| value.as_str().map(|value| matches!(value, "1" | "true")))
+                .unwrap_or(resolved.enabled);
+        }
+        for (key, target) in [
+            ("channels.gmail_project_id", &mut resolved.project_id),
+            (
+                "channels.gmail_subscription_id",
+                &mut resolved.subscription_id,
+            ),
+            ("channels.gmail_topic_id", &mut resolved.topic_id),
+        ] {
+            if let Some(value) = desktop_setting(database, key)
+                .await
+                .and_then(|value| value.as_str().map(str::to_string))
+            {
+                *target = value;
+            }
+        }
+        if let Some(value) = desktop_setting(database, "channels.gmail_allowed_senders")
+            .await
+            .and_then(|value| value.as_str().map(str::to_string))
+        {
+            resolved.allowed_senders = value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        if let Some(value) = desktop_setting(database, "channels.gmail_label_filters")
+            .await
+            .and_then(|value| value.as_str().map(str::to_string))
+        {
+            resolved.label_filters = value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+    }
+
+    if let Some(secrets) = secrets {
+        resolved.oauth_token = desktop_runtime_secret(secrets, "google_oauth_token")
+            .await
+            .or(resolved.oauth_token);
+        resolved.refresh_token =
+            desktop_runtime_secret(secrets, "google_oauth_token_refresh_token")
+                .await
+                .or(resolved.refresh_token);
+        resolved.client_id = desktop_runtime_secret(secrets, "google_oauth_token_client_id")
+            .await
+            .or(resolved.client_id);
+        resolved.client_secret =
+            desktop_runtime_secret(secrets, "google_oauth_token_client_secret")
+                .await
+                .or(resolved.client_secret);
+    }
+
+    resolved
 }
 
 fn migrate_legacy_runtime_file(state_dir: &std::path::Path, legacy_name: &str, current_name: &str) {
@@ -195,18 +362,9 @@ pub(crate) async fn build_inner(
     }
 
     // ── 1b. Set WHISPER_HTTP_ENDPOINT for ThinClaw voice/talk mode ───
-    // ThinClaw Desktop's STT sidecar runs on port 53757 (fixed). ThinClaw uses
-    // this env var to call the local whisper server instead of bundling
-    // its own whisper-rs. The endpoint is OpenAI-compatible.
-    if !bridge_var_exists("WHISPER_HTTP_ENDPOINT") {
-        bridge_config.insert(
-            "WHISPER_HTTP_ENDPOINT".into(),
-            "http://127.0.0.1:53757/v1/audio/transcriptions".into(),
-        );
-        tracing::debug!(
-            "[thinclaw-runtime] Set WHISPER_HTTP_ENDPOINT=http://127.0.0.1:53757/v1/audio/transcriptions"
-        );
-    }
+    // A managed STT endpoint is injected only after its authenticated server
+    // is actually ready. Its port is not guaranteed to be the preferred one,
+    // and its per-launch credential must be installed at the same time.
 
     // ── 1b-2. Set Extended Thinking env vars for ThinClaw ───────────
     // ThinClaw v0.12.0 supports chain-of-thought reasoning via
@@ -514,6 +672,21 @@ pub(crate) async fn build_inner(
             thinclaw_core::Config::from_env().await?
         }
     };
+    let runtime_lease = thinclaw_core::runtime_lease::RuntimeLease::acquire(&state_dir)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    #[cfg(feature = "docker-sandbox")]
+    match thinclaw_core::sandbox::cleanup_stale_sandbox_resources(runtime_lease.scope_id()).await {
+        Ok((containers, networks)) if containers > 0 || networks > 0 => tracing::info!(
+            containers,
+            networks,
+            "[thinclaw-runtime] Cleaned stale desktop sandbox resources"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::debug!(
+            %error,
+            "[thinclaw-runtime] Sandbox startup cleanup unavailable"
+        ),
+    }
 
     // ── 3. Create TauriChannel + ToolBridge ────────────────────────────
     let (tauri_channel, inject_tx, active_sessions) = TauriChannel::new(app_handle.clone());
@@ -546,7 +719,9 @@ pub(crate) async fn build_inner(
         AppBuilderFlags::default(),
         toml_path_opt,
         log_broadcaster.clone(),
-    );
+    )
+    .with_workspace_principal("local_user", Some("default".to_string()))
+    .with_runtime_scope(runtime_lease.scope_id());
 
     if let Some(store) = secrets_store {
         builder = builder.with_secrets_store(store);
@@ -588,10 +763,60 @@ pub(crate) async fn build_inner(
     }
 
     let components = builder.build_all().await?;
+    if let Some(db) = components.db.as_ref() {
+        if let Err(error) = db
+            .cleanup_stale_sandbox_jobs(runtime_lease.scope_id())
+            .await
+        {
+            tracing::warn!(%error, "Failed to clean up owned stale desktop sandbox jobs");
+        }
+    }
 
-    // ── 5. Create channel manager and register TauriChannel ─────────
+    // ── 5. Create channel manager and register desktop channels ──────
     let channel_manager = Arc::new(ChannelManager::new());
     channel_manager.add(Box::new(tauri_channel)).await;
+
+    if let (Some(database), Some(secrets)) =
+        (components.db.as_ref(), components.secrets_store.as_ref())
+    {
+        migrate_legacy_gmail_refresh_token(database, secrets).await;
+    }
+
+    let gmail_config = resolve_desktop_gmail_config(
+        &components.config,
+        components.db.as_ref(),
+        components.secrets_store.as_ref(),
+    )
+    .await;
+    if gmail_config.enabled {
+        let has_access_token = gmail_config
+            .oauth_token
+            .as_deref()
+            .is_some_and(|token| !token.is_empty());
+        if !has_access_token && !gmail_config.can_refresh_token() {
+            tracing::error!(
+                "Gmail is enabled but has no secure access token or refresh-token/client-id pair; \
+                 channel activation skipped"
+            );
+        } else {
+            if gmail_config.allowed_senders.is_empty() {
+                tracing::warn!(
+                    "Gmail sender allowlist is empty; messages from every sender will be accepted"
+                );
+            }
+            match thinclaw_core::channels::GmailChannel::new(gmail_config) {
+                Ok(channel) => {
+                    channel_manager.add(Box::new(channel)).await;
+                    tracing::info!("Gmail desktop channel registered");
+                }
+                Err(error) => {
+                    // Gmail is optional. Preserve the local Tauri runtime while
+                    // making the activation error visible in diagnostics.
+                    tracing::error!(%error, "Failed to register Gmail desktop channel");
+                }
+            }
+        }
+    }
 
     {
         let send_handle = app_handle.clone();
@@ -755,7 +980,110 @@ pub(crate) async fn build_inner(
         registry
     };
 
-    let mut auxiliary_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let mut auxiliary_tasks = RuntimeAuxiliaryTasks::default();
+
+    // Local Docker sandbox: lets the repo project supervisor (and other sandbox
+    // tools) spawn coding/worker containers on the desktop when the sandbox is
+    // enabled in config. Actual container spawning is further gated at runtime.
+    #[cfg(feature = "docker-sandbox")]
+    let desktop_sandbox = build_desktop_container_job_manager(
+        &components.config,
+        components.llm.clone(),
+        components.db.clone(),
+        components.secrets_store.clone(),
+        runtime_lease.scope_id(),
+    )
+    .await?;
+    #[cfg(feature = "docker-sandbox")]
+    let job_manager = desktop_sandbox
+        .as_ref()
+        .map(|runtime| Arc::clone(&runtime.job_manager));
+    #[cfg(feature = "docker-sandbox")]
+    let sandbox_children = desktop_sandbox
+        .as_ref()
+        .map(|runtime| Arc::clone(&runtime.sandbox_children));
+    #[cfg(feature = "docker-sandbox")]
+    let sandbox_prompt_queue = desktop_sandbox
+        .as_ref()
+        .map(|runtime| Arc::clone(&runtime.prompt_queue));
+    #[cfg(feature = "docker-sandbox")]
+    let sandbox_event_tx = desktop_sandbox
+        .as_ref()
+        .map(|runtime| runtime.job_event_tx.clone());
+    #[cfg(not(feature = "docker-sandbox"))]
+    let job_manager: Option<Arc<thinclaw_core::sandbox_types::ContainerJobManager>> = None;
+    #[cfg(not(feature = "docker-sandbox"))]
+    let sandbox_children = None;
+    #[cfg(not(feature = "docker-sandbox"))]
+    let sandbox_prompt_queue = None;
+    #[cfg(not(feature = "docker-sandbox"))]
+    let sandbox_event_tx = None;
+
+    let canvas_store = thinclaw_core::channels::canvas_gateway::CanvasStore::new(
+        std::time::Duration::from_secs(30 * 60), // 30 minute TTL
+    );
+    canvas_store.set_submission_sender(inject_tx.clone()).await;
+
+    let agent_deps = AgentDeps {
+        observer: components.observer.clone(),
+        store: components.db.clone(),
+        llm: components.llm.clone(),
+        cheap_llm: components.cheap_llm.clone(),
+        safety: components.safety.clone(),
+        tools: components.tools.clone(),
+        desktop_autonomy_manager: components.desktop_autonomy_manager.clone(),
+        workspace: components.workspace.clone(),
+        extension_manager: components.extension_manager.clone(),
+        skill_registry: components.skill_registry.clone(),
+        skill_catalog: components.skill_catalog.clone(),
+        skills_config: components.config.skills.clone(),
+        hooks: components.hooks.clone(),
+        cost_guard: components.cost_guard.clone(),
+        cost_tracker: Some(components.cost_tracker.clone()),
+        response_cache: Some(components.response_cache.clone()),
+        llm_runtime: Some(components.llm_runtime.clone()),
+        routing_policy: Some(components.routing_policy.clone()),
+        sse_sender: Some(sse_tx.clone()), // ← wired into RoutineEngine + Dispatcher
+        job_manager: job_manager.clone(),
+        secrets_store: components.secrets_store.clone(),
+        // Desktop has no gateway webhook surface, so no shared supervisor slot.
+        repo_project_supervisor_slot: None,
+        agent_router: Some(shared_agent_router),
+        agent_registry: Some(agent_registry),
+        canvas_store: Some(canvas_store),
+        subagent_executor: Some(subagent_executor.clone()),
+        model_override: Some(model_override),
+        restart_requested: Arc::new(AtomicBool::new(false)),
+        sandbox_children: sandbox_children.clone(),
+        runtime_ports: None,
+    };
+
+    let agent = Arc::new(Agent::new(
+        components.config.agent.clone(),
+        agent_deps,
+        channel_manager,
+        Some(components.config.heartbeat.clone()),
+        Some(components.config.hygiene.clone()),
+        Some(components.config.routines.clone()),
+        Some(components.context_manager.clone()),
+        None,
+    ));
+
+    // Enforce the exact same pre-start policy as the standalone host, using
+    // the actual routed provider/model. No runtime-owned task is started until
+    // an explicit policy rejection has had a chance to stop construction.
+    agent.enforce_startup_policy().await?;
+
+    // Tauri commands usually call the external API directly, but Canvas
+    // callbacks and scheduler/job continuations enter through the channel's
+    // bounded injection queue. The desktop host previously never started or
+    // consumed this stream, so those accepted messages disappeared silently.
+    let mut desktop_message_stream = agent.channels().start_all().await?;
+
+    #[cfg(feature = "docker-sandbox")]
+    if let Some(runtime) = desktop_sandbox {
+        runtime.start(&mut auxiliary_tasks);
+    }
 
     if let Some(ref db) = components.db {
         let persistence_plan = PeriodicPersistencePlan::cost_entries();
@@ -795,76 +1123,15 @@ pub(crate) async fn build_inner(
     ));
     tracing::info!("[thinclaw-runtime] Pricing sync background task started");
 
-    // Local Docker sandbox: lets the repo project supervisor (and other sandbox
-    // tools) spawn coding/worker containers on the desktop when the sandbox is
-    // enabled in config. Actual container spawning is further gated at runtime.
-    #[cfg(feature = "docker-sandbox")]
-    let job_manager = build_desktop_container_job_manager(
-        &components.config,
-        components.llm.clone(),
-        components.db.clone(),
-        components.secrets_store.clone(),
-    )
-    .await;
-    #[cfg(not(feature = "docker-sandbox"))]
-    let job_manager: Option<Arc<thinclaw_core::sandbox_types::ContainerJobManager>> = None;
-
-    let agent_deps = AgentDeps {
-        observer: components.observer.clone(),
-        store: components.db.clone(),
-        llm: components.llm.clone(),
-        cheap_llm: components.cheap_llm.clone(),
-        safety: components.safety.clone(),
-        tools: components.tools.clone(),
-        desktop_autonomy_manager: components.desktop_autonomy_manager.clone(),
-        workspace: components.workspace.clone(),
-        extension_manager: components.extension_manager.clone(),
-        skill_registry: components.skill_registry.clone(),
-        skill_catalog: components.skill_catalog.clone(),
-        skills_config: components.config.skills.clone(),
-        hooks: components.hooks.clone(),
-        cost_guard: components.cost_guard.clone(),
-        cost_tracker: Some(components.cost_tracker.clone()),
-        response_cache: Some(components.response_cache.clone()),
-        llm_runtime: Some(components.llm_runtime.clone()),
-        routing_policy: Some(components.routing_policy.clone()),
-        sse_sender: Some(sse_tx.clone()), // ← wired into RoutineEngine + Dispatcher
-        job_manager,
-        secrets_store: components.secrets_store.clone(),
-        // Desktop has no gateway webhook surface, so no shared supervisor slot.
-        repo_project_supervisor_slot: None,
-        agent_router: Some(shared_agent_router),
-        agent_registry: Some(agent_registry),
-        canvas_store: Some(thinclaw_core::channels::canvas_gateway::CanvasStore::new(
-            std::time::Duration::from_secs(30 * 60), // 30 minute TTL
-        )),
-        subagent_executor: Some(subagent_executor.clone()),
-        model_override: Some(model_override),
-        restart_requested: Arc::new(AtomicBool::new(false)),
-        sandbox_children: None,
-        runtime_ports: None,
-    };
-
-    let agent = Arc::new(Agent::new(
-        components.config.agent.clone(),
-        agent_deps,
-        channel_manager,
-        Some(components.config.heartbeat.clone()),
-        Some(components.config.hygiene.clone()),
-        Some(components.config.routines.clone()),
-        Some(components.context_manager.clone()),
-        None,
-    ));
-
     agent.tools().register_job_tools(
         components.context_manager.clone(),
-        None,
+        job_manager.clone(),
         components.db.clone(),
         Some(Arc::clone(agent.scheduler())),
-        None,
+        sandbox_event_tx,
         Some(inject_tx.clone()),
-        None,
-        None,
+        sandbox_prompt_queue,
+        sandbox_children,
         components.secrets_store.clone(),
     );
     tracing::info!(
@@ -879,7 +1146,7 @@ pub(crate) async fn build_inner(
     {
         let agent_for_subagent = Arc::clone(&agent);
         let mut rx = subagent_result_rx;
-        tokio::spawn(async move {
+        auxiliary_tasks.push(tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 let result = &msg.result;
                 let synthetic_content = if result.success {
@@ -912,22 +1179,34 @@ pub(crate) async fn build_inner(
                 );
 
                 // Build an IncomingMessage that goes through the normal pipeline
-                let incoming = thinclaw_core::channels::IncomingMessage::new(
-                    "subagent",
-                    "system",
+                let mut incoming = thinclaw_core::channels::IncomingMessage::new(
+                    msg.channel_name.clone(),
+                    msg.parent_user_id.clone(),
                     &synthetic_content,
                 )
                 .with_thread(&msg.parent_thread_id)
                 .with_metadata(msg.channel_metadata.clone());
+                if let Some(identity) = msg.parent_identity.clone() {
+                    incoming = incoming.with_identity(identity);
+                }
 
                 match agent_for_subagent.handle_message_external(&incoming).await {
                     Ok(Some(response)) if !response.is_empty() => {
                         tracing::debug!(
                             "Main agent response to sub-agent result: {} chars",
-                            response.len()
+                            response.content.len()
                         );
-                        // The response goes through TauriChannel automatically
-                        // via the normal respond() path in handle_message
+                        if let Err(error) = agent_for_subagent
+                            .channels()
+                            .respond(
+                                &incoming,
+                                thinclaw_core::channels::OutgoingResponse::text(response.content)
+                                    .with_attachments(response.attachments),
+                            )
+                            .await
+                        {
+                            tracing::error!(%error, "Failed to deliver sub-agent continuation");
+                        }
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -936,7 +1215,7 @@ pub(crate) async fn build_inner(
                 }
             }
             tracing::debug!("[subagent] Result injector task ended");
-        });
+        }));
     }
 
     // ── 7. Start background tasks ───────────────────────────────────
@@ -946,7 +1225,60 @@ pub(crate) async fn build_inner(
     // routine_engine_for_loop). The same Arc stays in bg_handle too.
     let routine_engine = bg_handle.routine_engine().map(Arc::clone);
 
-    // ── 7a. System event consumer (heartbeat → livechat) ─────────────
+    // ── 7a. Tauri injection consumer ─────────────────────────────────
+    // Process sequentially: the queue is already bounded, and avoiding nested
+    // detached tasks makes ordering and shutdown deterministic.
+    {
+        let agent_for_inject = Arc::clone(&agent);
+        let routine_for_inject = routine_engine.clone();
+        auxiliary_tasks.push(tokio::spawn(async move {
+            tracing::info!("[thinclaw-runtime] Tauri injection consumer started");
+            while let Some(message) = desktop_message_stream.next().await {
+                agent_for_inject
+                    .channels()
+                    .record_received(&message.channel)
+                    .await;
+                match agent_for_inject.handle_message_external(&message).await {
+                    Ok(Some(response)) if !response.is_empty() => {
+                        if let Err(error) = agent_for_inject
+                            .channels()
+                            .respond(
+                                &message,
+                                thinclaw_core::channels::OutgoingResponse::text(response.content)
+                                    .with_attachments(response.attachments),
+                            )
+                            .await
+                        {
+                            tracing::error!(%error, "Failed to deliver injected desktop response");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::error!(%error, "Injected desktop message failed");
+                        if let Err(send_error) = agent_for_inject
+                            .channels()
+                            .respond(
+                                &message,
+                                thinclaw_core::channels::OutgoingResponse::text(format!(
+                                    "Error: {error}"
+                                )),
+                            )
+                            .await
+                        {
+                            tracing::error!(%send_error, "Failed to deliver injected-message error");
+                        }
+                    }
+                }
+
+                if let Some(engine) = &routine_for_inject {
+                    engine.check_event_triggers(&message).await;
+                }
+            }
+            tracing::info!("[thinclaw-runtime] Tauri injection consumer ended");
+        }));
+    }
+
+    // ── 7b. System event consumer (heartbeat → livechat) ─────────────
     // In standalone mode, agent.run() reads from system_event_rx in its
     // main select! loop. In Tauri mode, there IS no message loop — each
     // user message is processed on-demand via handle_message_external().
@@ -956,7 +1288,7 @@ pub(crate) async fn build_inner(
         let mut bg_lock = bg_handle.lock_system_events().await;
         if let Some(mut system_rx) = bg_lock.take() {
             let agent_for_sys = Arc::clone(&agent);
-            tokio::spawn(async move {
+            auxiliary_tasks.push(tokio::spawn(async move {
                 tracing::info!(
                     "[thinclaw-runtime] System event consumer started (heartbeat → livechat)"
                 );
@@ -976,7 +1308,10 @@ pub(crate) async fn build_inner(
                                 .channels()
                                 .broadcast_all(
                                     &msg.user_id,
-                                    thinclaw_core::channels::OutgoingResponse::text(response),
+                                    thinclaw_core::channels::OutgoingResponse::text(
+                                        response.content,
+                                    )
+                                    .with_attachments(response.attachments),
                                 )
                                 .await;
                             for (ch, result) in results {
@@ -1003,111 +1338,7 @@ pub(crate) async fn build_inner(
                     }
                 }
                 tracing::info!("[thinclaw-runtime] System event consumer ended");
-            });
-        }
-    }
-
-    // ── 7b. Job TTL reaper — force-cancel zombie jobs ────────────────
-    // Prevents the "Maximum parallel jobs (5) exceeded" cascade.
-    // If a job is active for longer than JOB_MAX_TTL, we force-cancel it
-    // to free the slot. The existing cleanup tasks in scheduler.rs only
-    // remove finished handles from the jobs HashMap — they don't touch
-    // the ContextManager, which is where the slot-counting happens.
-    {
-        const JOB_MAX_TTL_SECS: i64 = 600; // 10 minutes
-        const REAPER_INTERVAL_SECS: u64 = 60; // check every minute
-
-        let agent_for_reaper = Arc::clone(&agent);
-        tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(REAPER_INTERVAL_SECS));
-            // Skip immediate first tick
-            interval.tick().await;
-
-            loop {
-                interval.tick().await;
-
-                let cm = agent_for_reaper.context_manager();
-                let active = cm.active_jobs().await;
-
-                if active.is_empty() {
-                    continue;
-                }
-
-                let now = chrono::Utc::now();
-                let mut reaped = 0usize;
-
-                for job_id in active {
-                    if let Ok(ctx) = cm.get_context(job_id).await {
-                        // Only reap InProgress or Pending jobs (not Stuck — self-repair handles those)
-                        if !matches!(
-                            ctx.state,
-                            thinclaw_core::context::JobState::InProgress
-                                | thinclaw_core::context::JobState::Pending
-                        ) {
-                            continue;
-                        }
-
-                        let age = now.signed_duration_since(ctx.created_at);
-                        if age.num_seconds() > JOB_MAX_TTL_SECS {
-                            tracing::warn!(
-                                job_id = %job_id,
-                                age_secs = age.num_seconds(),
-                                title = %ctx.title,
-                                "[reaper] Force-cancelling zombie job (exceeded {}s TTL)",
-                                JOB_MAX_TTL_SECS
-                            );
-
-                            // Try to cancel via scheduler first (sends Stop + abort)
-                            agent_for_reaper.scheduler().stop(job_id).await.ok();
-
-                            // Also force the ContextManager state to terminal
-                            // in case the scheduler didn't clean it up
-                            let _ = cm
-                                .update_context(job_id, |c| {
-                                    let _ = c.transition_to(
-                                        thinclaw_core::context::JobState::Failed,
-                                        Some(format!(
-                                            "Force-cancelled by TTL reaper (alive {}s, limit {}s)",
-                                            age.num_seconds(),
-                                            JOB_MAX_TTL_SECS
-                                        )),
-                                    );
-                                })
-                                .await;
-
-                            reaped += 1;
-                        }
-                    }
-                }
-
-                if reaped > 0 {
-                    tracing::info!(
-                        "[reaper] Force-cancelled {} zombie job(s), freeing slots",
-                        reaped
-                    );
-                }
-            }
-        });
-    }
-
-    // ── 7c. BeforeAgentStart hook ────────────────────────────────────
-    // Parity with run() loop — allows hooks to inspect startup config.
-    {
-        let event = thinclaw_core::hooks::HookEvent::AgentStart {
-            model: "tauri-direct".to_string(),
-            provider: "ironclaw".to_string(),
-        };
-        match agent.hooks().run(&event).await {
-            Err(thinclaw_core::hooks::HookError::Rejected { reason }) => {
-                tracing::error!("BeforeAgentStart hook rejected startup: {}", reason);
-                // Don't fail the engine start — just log. The hook can still
-                // do pre-flight checks, but we don't want to prevent the UI.
-            }
-            Err(err) => {
-                tracing::warn!("BeforeAgentStart hook error (fail-open): {}", err);
-            }
-            Ok(_) => {}
+            }));
         }
     }
 
@@ -1125,7 +1356,7 @@ pub(crate) async fn build_inner(
     {
         let mut sse_rx = sse_tx.subscribe();
         let fwd_handle = app_handle.clone();
-        tokio::spawn(async move {
+        auxiliary_tasks.push(tokio::spawn(async move {
             use tauri::Emitter as _;
             loop {
                 match sse_rx.recv().await {
@@ -1194,7 +1425,7 @@ pub(crate) async fn build_inner(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
-        });
+        }));
     }
 
     // ── 8c. Live log push → Tauri frontend ──────────────────────────────────────────────
@@ -1204,7 +1435,7 @@ pub(crate) async fn build_inner(
     {
         let mut log_rx = log_broadcaster.subscribe();
         let log_fwd_handle = app_handle.clone();
-        tokio::spawn(async move {
+        auxiliary_tasks.push(tokio::spawn(async move {
             use tauri::Emitter as _;
             loop {
                 match log_rx.recv().await {
@@ -1224,7 +1455,7 @@ pub(crate) async fn build_inner(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
-        });
+        }));
     }
 
     // Use the SAME cost_tracker that AgentDeps uses — so every LLM call
@@ -1245,6 +1476,7 @@ pub(crate) async fn build_inner(
     let manifest_validator = Arc::new(ManifestValidator::new());
 
     Ok(ThinClawRuntimeInner {
+        _runtime_lease: runtime_lease,
         agent,
         bg_handle: Mutex::new(Some(bg_handle)),
         inject_tx,
@@ -1263,24 +1495,87 @@ pub(crate) async fn build_inner(
     })
 }
 
-/// Build a local Docker sandbox `ContainerJobManager` + orchestrator for the
-/// desktop runtime (mirrors the server path in `src/main.rs`). Returns `None`
-/// when the sandbox is disabled in config. Actual container spawning is further
-/// gated by the repo project supervisor (and Docker availability) at runtime.
+#[cfg(feature = "docker-sandbox")]
+struct DesktopSandboxRuntime {
+    job_manager: Arc<thinclaw_core::sandbox_types::ContainerJobManager>,
+    orchestrator_state: thinclaw_core::orchestrator::api::OrchestratorState,
+    listener: tokio::net::TcpListener,
+    prompt_queue: thinclaw_core::sandbox_types::PromptQueue,
+    job_event_tx: tokio::sync::broadcast::Sender<(uuid::Uuid, SseEvent)>,
+    sandbox_children: Arc<thinclaw_core::sandbox_jobs::SandboxChildRegistry>,
+    controller: thinclaw_core::sandbox_jobs::SandboxJobController,
+}
+
+#[cfg(feature = "docker-sandbox")]
+impl DesktopSandboxRuntime {
+    fn start(self, tasks: &mut RuntimeAuxiliaryTasks) {
+        let address = self.listener.local_addr().ok();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let job_manager = Arc::clone(&self.job_manager);
+        let controller = self.controller.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(error) = thinclaw_core::orchestrator::OrchestratorApi::serve_listener(
+                self.orchestrator_state,
+                self.listener,
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+            )
+            .await
+            {
+                tracing::error!("desktop orchestrator API failed: {error}");
+            }
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(90),
+                controller.finalize_all_jobs_for_shutdown("Desktop orchestrator stopped"),
+            )
+            .await
+            {
+                Ok(results) => {
+                    for (job_id, result) in results {
+                        if let Err(error) = result {
+                            tracing::warn!(%job_id, %error, "Failed to finalize desktop sandbox job");
+                        }
+                    }
+                }
+                Err(_) => tracing::warn!("Timed out finalizing desktop sandbox jobs"),
+            }
+            job_manager.shutdown_all().await;
+        });
+        // Includes the controller's 90s terminal-state budget plus the job
+        // manager's bounded create/finalization/container/network drains.
+        tasks.push_graceful(handle, shutdown_tx, std::time::Duration::from_secs(360));
+        tracing::info!(
+            address = ?address,
+            "[thinclaw-runtime] Local Docker sandbox orchestrator started"
+        );
+    }
+}
+
+/// Build (but do not start) the local Docker sandbox runtime. Background
+/// cleanup and the orchestrator listener start only after startup policy passes.
 #[cfg(feature = "docker-sandbox")]
 async fn build_desktop_container_job_manager(
     config: &thinclaw_core::config::Config,
     llm: Arc<dyn thinclaw_core::llm::LlmProvider>,
     db: Option<Arc<dyn thinclaw_core::db::Database>>,
     secrets: Option<Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>>,
-) -> Option<Arc<thinclaw_core::sandbox_types::ContainerJobManager>> {
+    runtime_scope: &str,
+) -> anyhow::Result<Option<DesktopSandboxRuntime>> {
     use thinclaw_core::orchestrator::api::{OrchestratorState, PendingPrompt};
-    use thinclaw_core::orchestrator::OrchestratorApi;
     use thinclaw_core::sandbox_types::{ContainerJobConfig, ContainerJobManager, TokenStore};
 
     if !config.sandbox.enabled {
-        return None;
+        return Ok(None);
     }
+
+    let listener = thinclaw_core::orchestrator::OrchestratorApi::bind_listener(0)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to bind desktop orchestrator API: {error}"))?;
+    let orchestrator_port = listener
+        .local_addr()
+        .map_err(|error| anyhow::anyhow!("failed to inspect desktop orchestrator API: {error}"))?
+        .port();
 
     let token_store = TokenStore::new();
     let claude_code_api_key =
@@ -1288,11 +1583,15 @@ async fn build_desktop_container_job_manager(
     let codex_code_api_key =
         resolve_desktop_provider_key("OPENAI_API_KEY", "llm_openai_api_key", &secrets).await;
 
+    let runtime_sandbox_config = config.sandbox.to_sandbox_config();
     let job_config = ContainerJobConfig {
+        runtime_scope: runtime_scope.to_string(),
         image: config.sandbox.image.clone(),
         memory_limit_mb: config.sandbox.memory_limit_mb,
         cpu_shares: config.sandbox.cpu_shares,
-        orchestrator_port: 50051,
+        orchestrator_port,
+        network_allowlist: runtime_sandbox_config.network_allowlist,
+        proxy_port: runtime_sandbox_config.proxy_port,
         claude_code_api_key,
         claude_code_oauth_token: thinclaw_core::config::ClaudeCodeConfig::extract_oauth_token(),
         claude_code_enabled: config.claude_code.enabled,
@@ -1309,12 +1608,9 @@ async fn build_desktop_container_job_manager(
     };
     let job_manager = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
-    {
-        let cleanup = Arc::clone(&job_manager);
-        tokio::spawn(async move {
-            cleanup.cleanup_orphan_containers().await;
-        });
-    }
+    // Finish cleanup before exposing the manager to tools. A detached cleanup
+    // can race a fresh Docker create whose ID is not yet published.
+    job_manager.cleanup_orphan_containers().await;
 
     let prompt_queue = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<
         uuid::Uuid,
@@ -1322,23 +1618,34 @@ async fn build_desktop_container_job_manager(
     >::new()));
     let (job_event_tx, _) = tokio::sync::broadcast::channel::<(uuid::Uuid, SseEvent)>(256);
 
+    let controller = thinclaw_core::sandbox_jobs::SandboxJobController::new(
+        db.clone(),
+        Some(Arc::clone(&job_manager)),
+        Some(job_event_tx.clone()),
+        Some(Arc::clone(&prompt_queue)),
+    );
+    let sandbox_children = Arc::new(thinclaw_core::sandbox_jobs::SandboxChildRegistry::new(
+        controller.clone(),
+    ));
+
     let orchestrator_state = OrchestratorState {
         llm,
         job_manager: Arc::clone(&job_manager),
         token_store,
-        job_event_tx: Some(job_event_tx),
-        prompt_queue,
+        job_event_tx: Some(job_event_tx.clone()),
+        prompt_queue: Arc::clone(&prompt_queue),
         store: db,
         secrets_store: secrets,
     };
-    tokio::spawn(async move {
-        if let Err(error) = OrchestratorApi::start(orchestrator_state, 50051).await {
-            tracing::error!("desktop orchestrator API failed: {error}");
-        }
-    });
-
-    tracing::info!("[thinclaw-runtime] Local Docker sandbox orchestrator started on :50051");
-    Some(job_manager)
+    Ok(Some(DesktopSandboxRuntime {
+        job_manager,
+        orchestrator_state,
+        listener,
+        prompt_queue,
+        job_event_tx,
+        sandbox_children,
+        controller,
+    }))
 }
 
 #[cfg(feature = "docker-sandbox")]

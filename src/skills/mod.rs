@@ -22,6 +22,7 @@ pub mod lobe_source;
 pub mod parser;
 pub mod quarantine;
 pub mod registry;
+mod remote_http;
 pub mod remote_source;
 pub mod selector;
 pub mod skills_sh_source;

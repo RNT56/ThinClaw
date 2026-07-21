@@ -214,61 +214,50 @@ pub async fn thinclaw_spawn_session(
     }
 
     // Capture what the background task needs
-    let agent = ironclaw.agent().await?;
     let app_handle = ironclaw.app_handle().clone();
     let parent_bg = parent_session.clone();
     let child_bg = child_key.clone();
     let task_bg = task.clone();
 
-    // ── Non-blocking: full agent turn runs in a background task ──────────
-    tokio::spawn(async move {
-        // 1. Full agentic loop: workspace + memory + tools + streaming
-        let run_ok =
-            thinclaw_core::api::chat::send_message(agent.clone(), &child_bg, &task_bg, true)
-                .await
-                .is_ok();
-
+    // ── Non-blocking: full agent turn runs in a runtime-owned task ───────
+    if let Err(error) = ironclaw
+        .spawn_auxiliary_task(move |agent| async move {
+        // 1. Run the full loop to a terminal result. `send_message` is a
+        // spawn-and-return API and previously caused this task to announce
+        // completion immediately while the actual turn was still running.
+        let run_result = thinclaw_core::api::chat::run_message_to_completion(
+            agent.clone(),
+            &child_bg,
+            &task_bg,
+        )
+        .await;
+        let run_ok = run_result.is_ok();
         let status = if run_ok { "completed" } else { "failed" };
 
-        // 2. Extract a short preview from the last assistant turn
-        let preview: Option<String> = if run_ok {
-            let session_mgr = agent.session_manager();
-            let all = session_mgr.list_sessions().await;
-            let session_exists = all.iter().any(|entry| {
-                entry.get("user_id").and_then(|v| v.as_str()) == Some(child_bg.as_str())
-            });
-            if session_exists {
-                let sess_arc = session_mgr.get_or_create_session(&child_bg).await;
-                let sess = sess_arc.lock().await;
-                // Turn.turns is a public Vec<Turn>; Turn.response is Option<String>
-                sess.threads
-                    .values()
-                    .filter_map(|thread| {
-                        thread
-                            .turns
-                            .iter()
-                            .rev()
-                            .find_map(|t| t.response.as_deref())
-                    })
-                    .next()
-                    .map(|text| {
-                        let trimmed = text.trim();
-                        if trimmed.len() > 280 {
-                            let mut end = 280;
-                            while !trimmed.is_char_boundary(end) && end > 0 {
-                                end -= 1;
-                            }
-                            format!("{}…", &trimmed[..end])
-                        } else {
-                            trimmed.to_string()
-                        }
-                    })
-            } else {
-                None
+        // 2. Build the preview from the exact completed payload, rather than
+        // guessing a session key and scanning unrelated in-memory sessions.
+        let preview_text = match run_result {
+            Ok(Some(payload)) if !payload.content.trim().is_empty() => payload.content,
+            Ok(Some(payload)) if !payload.attachments.is_empty() => {
+                format!("Generated {} attachment(s).", payload.attachments.len())
             }
-        } else {
-            None
+            Ok(_) => String::new(),
+            Err(error) => {
+                tracing::warn!(child = %child_bg, %error, "Desktop sub-agent turn failed");
+                format!("Failed: {error}")
+            }
         };
+        let preview = (!preview_text.trim().is_empty()).then(|| {
+            let trimmed = preview_text.trim();
+            if trimmed.len() <= 280 {
+                return trimmed.to_string();
+            }
+            let mut end = 280;
+            while end > 0 && !trimmed.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &trimmed[..end])
+        });
 
         // 3. Update the in-memory registry
         sub_agent_registry::update_status(&child_bg, status, preview.as_deref()).await;
@@ -308,7 +297,13 @@ pub async fn thinclaw_spawn_session(
             "[thinclaw-runtime] Sub-agent session {} finished: status={}",
             child_bg, status
         );
-    });
+        })
+        .await
+    {
+        sub_agent_registry::update_status(&child_key, "failed", Some(&error)).await;
+        let _ = ironclaw.deactivate_session(&child_key).await;
+        return Err(error);
+    }
 
     info!(
         "[thinclaw-runtime] Spawned session {} for agent {} (parent: {:?}) — non-blocking",
@@ -427,7 +422,11 @@ pub async fn thinclaw_agents_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<Vec<AgentProfile>, String> {
     let cfg = state.get_config().await.ok_or("Config not loaded")?;
-    let mut profiles = cfg.profiles.clone();
+    let mut profiles = cfg
+        .profiles
+        .iter()
+        .map(AgentProfile::without_token)
+        .collect::<Vec<_>>();
 
     if ironclaw.is_initialized() && !profiles.iter().any(|p| p.id == "local-core") {
         profiles.insert(
@@ -493,14 +492,9 @@ pub async fn thinclaw_canvas_dispatch_event(
     .to_string();
 
     let agent = ironclaw.agent().await?;
-    thinclaw_core::api::chat::send_message(
-        agent,
-        &session_key,
-        &content,
-        false, // Context injection, don't trigger turn
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    thinclaw_core::api::chat::send_message(agent, &session_key, &content, true)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(ThinClawRpcResponse {
         ok: true,

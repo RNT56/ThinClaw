@@ -68,47 +68,22 @@ pub(super) async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(Str
         None => return static_defaults,
     };
 
-    let client = reqwest::Client::new();
-    let resp = match client
-        .get("https://api.anthropic.com/v1/models")
-        .header("x-api-key", &api_key)
-        .header("anthropic-version", "2023-06-01")
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        _ => return static_defaults,
-    };
-
-    #[derive(serde::Deserialize)]
-    struct ModelEntry {
-        id: String,
+    let result = crate::llm::discovery::ModelDiscovery::new()
+        .discover_anthropic(&api_key)
+        .await;
+    if result.error.is_some() {
+        return static_defaults;
     }
-    #[derive(serde::Deserialize)]
-    struct ModelsResponse {
-        data: Vec<ModelEntry>,
+    let mut models: Vec<(String, String)> = result
+        .models
+        .into_iter()
+        .map(|model| (model.id, model.name))
+        .collect();
+    if models.is_empty() {
+        return static_defaults;
     }
-
-    match resp.json::<ModelsResponse>().await {
-        Ok(body) => {
-            let mut models: Vec<(String, String)> = body
-                .data
-                .into_iter()
-                .filter(|m| !m.id.contains("embedding") && !m.id.contains("audio"))
-                .map(|m| {
-                    let label = m.id.clone();
-                    (m.id, label)
-                })
-                .collect();
-            if models.is_empty() {
-                return static_defaults;
-            }
-            models.sort_by(|a, b| a.0.cmp(&b.0));
-            models
-        }
-        Err(_) => static_defaults,
-    }
+    models.sort_by(|a, b| a.0.cmp(&b.0));
+    models
 }
 
 /// Fetch models from the OpenAI API.
@@ -144,46 +119,24 @@ pub(super) async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String
         None => return static_defaults,
     };
 
-    let client = reqwest::Client::new();
-    let resp = match client
-        .get("https://api.openai.com/v1/models")
-        .bearer_auth(&api_key)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        _ => return static_defaults,
-    };
-
-    #[derive(serde::Deserialize)]
-    struct ModelEntry {
-        id: String,
+    let auth = format!("Bearer {api_key}");
+    let result = crate::llm::discovery::ModelDiscovery::new()
+        .discover_public_openai_compatible("https://api.openai.com", Some(&auth))
+        .await;
+    if result.error.is_some() {
+        return static_defaults;
     }
-    #[derive(serde::Deserialize)]
-    struct ModelsResponse {
-        data: Vec<ModelEntry>,
+    let mut models: Vec<(String, String)> = result
+        .models
+        .into_iter()
+        .filter(|model| is_openai_chat_model(&model.id))
+        .map(|model| (model.id, model.name))
+        .collect();
+    if models.is_empty() {
+        return static_defaults;
     }
-
-    match resp.json::<ModelsResponse>().await {
-        Ok(body) => {
-            let mut models: Vec<(String, String)> = body
-                .data
-                .into_iter()
-                .filter(|m| is_openai_chat_model(&m.id))
-                .map(|m| {
-                    let label = m.id.clone();
-                    (m.id, label)
-                })
-                .collect();
-            if models.is_empty() {
-                return static_defaults;
-            }
-            sort_openai_models(&mut models);
-            models
-        }
-        Err(_) => static_defaults,
-    }
+    sort_openai_models(&mut models);
+    models
 }
 
 // Delegate to the shared implementation in discovery.rs to avoid drift.
@@ -213,49 +166,22 @@ pub(super) async fn fetch_ollama_models(base_url: &str) -> Vec<(String, String)>
         ("codellama".into(), "codellama".into()),
     ];
 
-    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
-
-    let resp = match client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        Ok(_) => return static_defaults,
-        Err(_) => {
-            print_info("Could not connect to Ollama. Is it running?");
-            return static_defaults;
-        }
-    };
-
-    #[derive(serde::Deserialize)]
-    struct ModelEntry {
-        name: String,
+    let result = crate::llm::discovery::ModelDiscovery::new()
+        .discover_ollama(base_url)
+        .await;
+    if result.error.is_some() {
+        print_info("Could not connect to Ollama. Is it running?");
+        return static_defaults;
     }
-    #[derive(serde::Deserialize)]
-    struct TagsResponse {
-        models: Vec<ModelEntry>,
+    let models: Vec<(String, String)> = result
+        .models
+        .into_iter()
+        .map(|model| (model.id, model.name))
+        .collect();
+    if models.is_empty() {
+        return static_defaults;
     }
-
-    match resp.json::<TagsResponse>().await {
-        Ok(body) => {
-            let models: Vec<(String, String)> = body
-                .models
-                .into_iter()
-                .map(|m| {
-                    let label = m.name.clone();
-                    (m.name, label)
-                })
-                .collect();
-            if models.is_empty() {
-                return static_defaults;
-            }
-            models
-        }
-        Err(_) => static_defaults,
-    }
+    models
 }
 
 /// Fetch models from an OpenAI-compatible endpoint.
@@ -265,15 +191,23 @@ pub(super) async fn fetch_ollama_models(base_url: &str) -> Vec<(String, String)>
 pub(super) async fn fetch_openai_compatible_models(
     base_url: &str,
     auth_header: Option<&str>,
+    public_only: bool,
     static_defaults: Vec<(String, String)>,
 ) -> Vec<(String, String)> {
     if base_url.trim().is_empty() {
         return static_defaults;
     }
 
-    let result = crate::llm::discovery::ModelDiscovery::new()
-        .discover_openai_compatible(base_url, auth_header)
-        .await;
+    let discovery = crate::llm::discovery::ModelDiscovery::new();
+    let result = if public_only {
+        discovery
+            .discover_public_openai_compatible(base_url, auth_header)
+            .await
+    } else {
+        discovery
+            .discover_openai_compatible(base_url, auth_header)
+            .await
+    };
 
     let mut seen = HashSet::new();
     let mut models: Vec<(String, String)> = result
@@ -309,7 +243,10 @@ pub(super) async fn discover_wasm_channels(
 ) -> Vec<(String, ChannelCapabilitiesFile)> {
     let mut channels = Vec::new();
 
-    if !dir.is_dir() {
+    if !tokio::fs::symlink_metadata(dir)
+        .await
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    {
         return channels;
     }
 
@@ -318,7 +255,12 @@ pub(super) async fn discover_wasm_channels(
         Err(_) => return channels,
     };
 
+    let mut scanned = 0usize;
     while let Ok(Some(entry)) = entries.next_entry().await {
+        scanned = scanned.saturating_add(1);
+        if scanned > 4_096 || channels.len() >= 64 {
+            break;
+        }
         let path = entry.path();
 
         // Look for .capabilities.json files
@@ -330,18 +272,31 @@ pub(super) async fn discover_wasm_channels(
 
         // Extract channel name
         let name = filename.trim_end_matches(".capabilities.json").to_string();
-        if name.is_empty() {
+        if name.is_empty()
+            || name.len() > 128
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
             continue;
         }
 
         // Check if corresponding .wasm file exists
         let wasm_path = dir.join(format!("{}.wasm", name));
-        if !wasm_path.exists() {
+        if !tokio::fs::symlink_metadata(&wasm_path)
+            .await
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        {
             continue;
         }
 
         // Parse capabilities file
-        match tokio::fs::read(&path).await {
+        match thinclaw_platform::read_regular_file_bounded_single_link_async(
+            path.clone(),
+            1024 * 1024,
+        )
+        .await
+        {
             Ok(bytes) => match ChannelCapabilitiesFile::from_bytes(&bytes) {
                 Ok(cap_file) => {
                     channels.push((name, cap_file));

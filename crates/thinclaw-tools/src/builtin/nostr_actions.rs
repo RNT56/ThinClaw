@@ -17,6 +17,16 @@ use thinclaw_tools_core::{
 };
 use thinclaw_types::JobContext;
 
+const MAX_NOSTR_TOOL_CONTENT_BYTES: usize = 256 * 1024;
+const MAX_NOSTR_TOOL_CONTENT_CHARS: usize = 64 * 1024;
+const MAX_NOSTR_TOOL_KEY_BYTES: usize = 1024;
+const MAX_NOSTR_TOOL_URL_BYTES: usize = 4 * 1024;
+const MAX_NOSTR_DELETE_EVENTS: usize = 100;
+const MAX_NOSTR_REACTION_CHARS: usize = 32;
+const MAX_NOSTR_REASON_CHARS: usize = 1024;
+const MAX_NOSTR_PROFILE_SHORT_CHARS: usize = 256;
+const MAX_NOSTR_PROFILE_ABOUT_CHARS: usize = 4096;
+
 pub struct NostrActionsTool {
     runtime: Arc<NostrRuntime>,
 }
@@ -73,27 +83,43 @@ impl Tool for NostrActionsTool {
                 },
                 "pubkey": {
                     "type": "string",
+                    "maxLength": MAX_NOSTR_TOOL_KEY_BYTES,
                     "description": "Target Nostr pubkey (hex or npub). Defaults to the tool identity for reads when omitted."
                 },
                 "event_id": {
                     "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "pattern": "^[0-9A-Fa-f]{64}$",
                     "description": "Target event id (hex)"
                 },
                 "event_ids": {
                     "type": "array",
-                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "maxItems": MAX_NOSTR_DELETE_EVENTS,
+                    "items": {
+                        "type": "string",
+                        "minLength": 64,
+                        "maxLength": 64,
+                        "pattern": "^[0-9A-Fa-f]{64}$"
+                    },
                     "description": "Event ids (hex) for delete_events"
                 },
                 "recipient": {
                     "type": "string",
+                    "maxLength": MAX_NOSTR_TOOL_KEY_BYTES,
                     "description": "Recipient pubkey (hex or npub) for send_dm"
                 },
                 "content": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_NOSTR_TOOL_CONTENT_CHARS,
                     "description": "Text content for publish, reply, quote, or DM actions"
                 },
                 "reaction": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_NOSTR_REACTION_CHARS,
                     "description": "Reaction content such as '+', '-', or an emoji"
                 },
                 "limit": {
@@ -109,23 +135,25 @@ impl Tool for NostrActionsTool {
                 },
                 "reason": {
                     "type": "string",
+                    "maxLength": MAX_NOSTR_REASON_CHARS,
                     "description": "Optional deletion reason"
                 },
                 "profile": {
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string" },
-                        "display_name": { "type": "string" },
-                        "about": { "type": "string" },
-                        "website": { "type": "string" },
-                        "picture": { "type": "string" },
-                        "nip05": { "type": "string" },
-                        "lud16": { "type": "string" }
+                        "name": { "type": "string", "maxLength": MAX_NOSTR_PROFILE_SHORT_CHARS },
+                        "display_name": { "type": "string", "maxLength": MAX_NOSTR_PROFILE_SHORT_CHARS },
+                        "about": { "type": "string", "maxLength": MAX_NOSTR_PROFILE_ABOUT_CHARS },
+                        "website": { "type": "string", "maxLength": MAX_NOSTR_TOOL_URL_BYTES },
+                        "picture": { "type": "string", "maxLength": MAX_NOSTR_TOOL_URL_BYTES },
+                        "nip05": { "type": "string", "maxLength": MAX_NOSTR_PROFILE_SHORT_CHARS },
+                        "lud16": { "type": "string", "maxLength": MAX_NOSTR_PROFILE_SHORT_CHARS }
                     },
                     "additionalProperties": false
                 }
             },
-            "required": ["action"]
+            "required": ["action"],
+            "additionalProperties": false
         })
     }
 
@@ -135,6 +163,7 @@ impl Tool for NostrActionsTool {
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
+        validate_params(&params)?;
         let action = require_str(&params, "action")?;
 
         let result = match action {
@@ -364,11 +393,10 @@ impl Tool for NostrActionsTool {
                     .map_err(channel_err)?;
                 serde_json::json!({ "published": true, "event_id": event_id })
             }
-            other => {
-                return Err(ToolError::InvalidParameters(format!(
-                    "unsupported nostr action '{}'",
-                    other
-                )));
+            _ => {
+                return Err(ToolError::InvalidParameters(
+                    "unsupported nostr action".to_string(),
+                ));
             }
         };
 
@@ -398,18 +426,217 @@ impl Tool for NostrActionsTool {
     }
 }
 
+fn validate_params(params: &serde_json::Value) -> Result<(), ToolError> {
+    let object = params
+        .as_object()
+        .ok_or_else(|| ToolError::InvalidParameters("parameters must be an object".to_string()))?;
+    const ALLOWED_FIELDS: &[&str] = &[
+        "action",
+        "pubkey",
+        "event_id",
+        "event_ids",
+        "recipient",
+        "content",
+        "reaction",
+        "limit",
+        "dm_protocol",
+        "reason",
+        "profile",
+    ];
+    if object.len() > ALLOWED_FIELDS.len()
+        || object
+            .keys()
+            .any(|key| !ALLOWED_FIELDS.contains(&key.as_str()))
+    {
+        return Err(ToolError::InvalidParameters(
+            "parameters contain unsupported fields".to_string(),
+        ));
+    }
+
+    validate_optional_string(object, "action", 64, 64, false)?;
+    validate_optional_string(
+        object,
+        "pubkey",
+        MAX_NOSTR_TOOL_KEY_BYTES,
+        MAX_NOSTR_TOOL_KEY_BYTES,
+        true,
+    )?;
+    validate_optional_string(
+        object,
+        "recipient",
+        MAX_NOSTR_TOOL_KEY_BYTES,
+        MAX_NOSTR_TOOL_KEY_BYTES,
+        true,
+    )?;
+    validate_optional_string(
+        object,
+        "content",
+        MAX_NOSTR_TOOL_CONTENT_BYTES,
+        MAX_NOSTR_TOOL_CONTENT_CHARS,
+        false,
+    )?;
+    validate_optional_string(object, "reaction", 128, MAX_NOSTR_REACTION_CHARS, false)?;
+    validate_optional_string(object, "dm_protocol", 32, 32, false)?;
+    validate_optional_string(
+        object,
+        "reason",
+        4 * MAX_NOSTR_REASON_CHARS,
+        MAX_NOSTR_REASON_CHARS,
+        true,
+    )?;
+
+    if let Some(event_id) = object.get("event_id") {
+        validate_event_id_value(event_id)?;
+    }
+    if let Some(event_ids) = object.get("event_ids") {
+        let event_ids = event_ids.as_array().ok_or_else(|| {
+            ToolError::InvalidParameters("event_ids must be an array".to_string())
+        })?;
+        if event_ids.is_empty() || event_ids.len() > MAX_NOSTR_DELETE_EVENTS {
+            return Err(ToolError::InvalidParameters(format!(
+                "event_ids must contain between 1 and {MAX_NOSTR_DELETE_EVENTS} entries"
+            )));
+        }
+        for event_id in event_ids {
+            validate_event_id_value(event_id)?;
+        }
+    }
+    if let Some(limit) = object.get("limit")
+        && !limit
+            .as_u64()
+            .is_some_and(|limit| (1..=100).contains(&limit))
+    {
+        return Err(ToolError::InvalidParameters(
+            "limit must be an integer between 1 and 100".to_string(),
+        ));
+    }
+    if let Some(profile) = object.get("profile") {
+        validate_profile(profile)?;
+    }
+    Ok(())
+}
+
+fn validate_optional_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    max_bytes: usize,
+    max_chars: usize,
+    allow_blank: bool,
+) -> Result<(), ToolError> {
+    let Some(value) = object.get(key) else {
+        return Ok(());
+    };
+    let value = value
+        .as_str()
+        .ok_or_else(|| ToolError::InvalidParameters(format!("{key} must be a string")))?;
+    if value.len() > max_bytes
+        || value.chars().count() > max_chars
+        || (!allow_blank && value.trim().is_empty())
+    {
+        return Err(ToolError::InvalidParameters(format!(
+            "{key} is empty or exceeds its size limit"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_event_id_value(value: &serde_json::Value) -> Result<(), ToolError> {
+    let value = value
+        .as_str()
+        .ok_or_else(|| ToolError::InvalidParameters("event IDs must be strings".to_string()))?;
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ToolError::InvalidParameters(
+            "event IDs must contain exactly 64 hexadecimal characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_profile(value: &serde_json::Value) -> Result<(), ToolError> {
+    let profile = value
+        .as_object()
+        .ok_or_else(|| ToolError::InvalidParameters("profile must be an object".to_string()))?;
+    const PROFILE_FIELDS: &[&str] = &[
+        "name",
+        "display_name",
+        "about",
+        "website",
+        "picture",
+        "nip05",
+        "lud16",
+    ];
+    if profile.len() > PROFILE_FIELDS.len()
+        || profile
+            .keys()
+            .any(|key| !PROFILE_FIELDS.contains(&key.as_str()))
+    {
+        return Err(ToolError::InvalidParameters(
+            "profile contains unsupported fields".to_string(),
+        ));
+    }
+    for key in ["name", "display_name", "nip05", "lud16"] {
+        validate_optional_string(
+            profile,
+            key,
+            4 * MAX_NOSTR_PROFILE_SHORT_CHARS,
+            MAX_NOSTR_PROFILE_SHORT_CHARS,
+            true,
+        )?;
+    }
+    validate_optional_string(
+        profile,
+        "about",
+        4 * MAX_NOSTR_PROFILE_ABOUT_CHARS,
+        MAX_NOSTR_PROFILE_ABOUT_CHARS,
+        true,
+    )?;
+    for key in ["website", "picture"] {
+        validate_optional_string(
+            profile,
+            key,
+            MAX_NOSTR_TOOL_URL_BYTES,
+            MAX_NOSTR_TOOL_URL_BYTES,
+            true,
+        )?;
+    }
+    Ok(())
+}
+
 fn channel_err(err: thinclaw_types::error::ChannelError) -> ToolError {
     ToolError::ExternalService(err.to_string())
 }
 
 fn parse_event_id(raw: &str) -> Result<EventId, ToolError> {
-    EventId::from_hex(raw.trim())
-        .map_err(|err| ToolError::InvalidParameters(format!("invalid event_id '{}': {}", raw, err)))
+    let raw = raw.trim();
+    if raw.len() != 64 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ToolError::InvalidParameters(
+            "event_id must contain exactly 64 hexadecimal characters".to_string(),
+        ));
+    }
+    EventId::from_hex(raw).map_err(|_| ToolError::InvalidParameters("invalid event_id".to_string()))
 }
 
 fn parse_url(raw: &str) -> Result<Url, ToolError> {
-    Url::parse(raw.trim())
-        .map_err(|err| ToolError::InvalidParameters(format!("invalid URL '{}': {}", raw, err)))
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > MAX_NOSTR_TOOL_URL_BYTES || raw.chars().any(char::is_control) {
+        return Err(ToolError::InvalidParameters(
+            "profile URL is malformed or exceeds its size limit".to_string(),
+        ));
+    }
+    let url = Url::parse(raw)
+        .map_err(|_| ToolError::InvalidParameters("invalid profile URL".to_string()))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str().is_none()
+        || url.fragment().is_some()
+    {
+        return Err(ToolError::InvalidParameters(
+            "profile URLs must use http:// or https:// and contain no credentials or fragments"
+                .to_string(),
+        ));
+    }
+    Ok(url)
 }
 
 fn resolve_target_pubkey(
@@ -427,10 +654,9 @@ fn parse_dm_protocol(raw: &str) -> Result<Option<NostrDmProtocol>, ToolError> {
         "" | "auto" => Ok(None),
         "nip04" => Ok(Some(NostrDmProtocol::Nip04)),
         "gift_wrap" | "giftwrap" | "nip17" | "nip59" => Ok(Some(NostrDmProtocol::GiftWrap)),
-        other => Err(ToolError::InvalidParameters(format!(
-            "invalid dm_protocol '{}'",
-            other
-        ))),
+        _ => Err(ToolError::InvalidParameters(
+            "invalid dm_protocol".to_string(),
+        )),
     }
 }
 
@@ -443,9 +669,7 @@ async fn fetch_required_event(
         .fetch_event(event_id)
         .await
         .map_err(channel_err)?
-        .ok_or_else(|| {
-            ToolError::ExecutionFailed(format!("event '{}' was not found", raw_event_id))
-        })
+        .ok_or_else(|| ToolError::ExecutionFailed("requested event was not found".to_string()))
 }
 
 async fn resolve_root_event(
@@ -517,5 +741,45 @@ mod tests {
             parse_dm_protocol("gift_wrap").unwrap(),
             Some(NostrDmProtocol::GiftWrap)
         );
+    }
+
+    #[test]
+    fn validation_rejects_oversized_and_unknown_parameters() {
+        assert!(
+            validate_params(&serde_json::json!({
+                "action": "publish_note",
+                "content": "x".repeat(MAX_NOSTR_TOOL_CONTENT_BYTES + 1),
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_params(&serde_json::json!({
+                "action": "get_event",
+                "unexpected": "x",
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_params(&serde_json::json!({
+                "action": "delete_events",
+                "event_ids": vec!["a".repeat(64); MAX_NOSTR_DELETE_EVENTS + 1],
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn profile_url_validation_rejects_unsafe_schemes_and_credentials() {
+        assert!(parse_url("https://example.com/avatar.png").is_ok());
+        assert!(parse_url("file:///etc/passwd").is_err());
+        assert!(parse_url("https://user:secret@example.com/avatar.png").is_err());
+    }
+
+    #[test]
+    fn event_id_errors_do_not_echo_input() {
+        let error = parse_event_id("sensitive-invalid-event-id")
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("sensitive-invalid-event-id"));
     }
 }

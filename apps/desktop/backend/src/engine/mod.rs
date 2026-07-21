@@ -53,6 +53,12 @@ pub trait InferenceEngine: Send + Sync {
     /// The base URL for OpenAI-compatible API calls (e.g. `http://127.0.0.1:{port}/v1`).
     fn base_url(&self) -> Option<String>;
 
+    /// Credential required by the local endpoint. Public runtime snapshots
+    /// redact this; internal runtime wiring retains it.
+    fn api_key(&self) -> Option<String> {
+        None
+    }
+
     /// The model identifier that the engine's server expects in request bodies.
     ///
     /// For `mlx_lm.server` this must match the `--model` argument (a local path
@@ -95,8 +101,9 @@ pub trait InferenceEngine: Send + Sync {
 /// Returns `None` if the file doesn't exist or none of the fields are found.
 pub fn read_model_max_context(model_path: &str) -> Option<u32> {
     let config_path = std::path::Path::new(model_path).join("config.json");
-    let content = std::fs::read_to_string(&config_path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let content =
+        thinclaw_platform::read_regular_file_bounded(&config_path, 4 * 1024 * 1024).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&content).ok()?;
 
     // Try root-level fields first
     let root_fields = [
@@ -109,7 +116,7 @@ pub fn read_model_max_context(model_path: &str) -> Option<u32> {
     ];
     for field in &root_fields {
         if let Some(v) = json.get(field).and_then(|v| v.as_u64()) {
-            return Some(v as u32);
+            return u32::try_from(v).ok().filter(|value| *value > 0);
         }
     }
 
@@ -117,7 +124,7 @@ pub fn read_model_max_context(model_path: &str) -> Option<u32> {
     if let Some(tc) = json.get("text_config") {
         for field in &root_fields {
             if let Some(v) = tc.get(field).and_then(|v| v.as_u64()) {
-                return Some(v as u32);
+                return u32::try_from(v).ok().filter(|value| *value > 0);
             }
         }
     }
@@ -397,7 +404,7 @@ pub async fn local_runtime_snapshot(
                     readiness: RuntimeReadiness::Ready,
                     endpoint: Some(LocalRuntimeEndpoint {
                         base_url,
-                        api_key: None,
+                        api_key: engine.api_key(),
                         model_id: engine.model_id(),
                         context_size: engine.max_context(),
                         model_family: None,
@@ -538,12 +545,28 @@ impl EngineManager {
     /// 1. `backend/bin/uv-{target-triple}` (dev builds — compile-time CARGO_MANIFEST_DIR)
     /// 2. Next to the app executable (production Tauri bundles)
     /// 3. `uv` on system PATH
-    /// 4. `~/.thinclaw-desktop/uv` (auto-downloaded fallback)
-    /// 5. `~/.scrappy/uv` (legacy readable fallback)
     ///
-    /// If none found, returns `None` — the engine will auto-download in `bootstrap()`.
+    /// Every result is canonicalized and checked as an executable regular file.
+    /// If none is found, setup fails closed instead of executing an unverified
+    /// legacy cache or downloading an archive at runtime.
     #[allow(dead_code)]
     fn resolve_uv_path() -> Option<PathBuf> {
+        fn checked_candidate(path: PathBuf) -> Option<PathBuf> {
+            let path = path.canonicalize().ok()?;
+            let metadata = std::fs::metadata(&path).ok()?;
+            if !metadata.is_file() {
+                return None;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o111 == 0 {
+                    return None;
+                }
+            }
+            Some(path)
+        }
+
         let target_triple = Self::current_target_triple()?;
         let binary_name = format!("uv-{}", target_triple);
 
@@ -551,9 +574,9 @@ impl EngineManager {
         {
             let manifest_dir = env!("CARGO_MANIFEST_DIR");
             let dev_path = PathBuf::from(manifest_dir).join("bin").join(&binary_name);
-            if dev_path.exists() {
-                println!("[engine] Found uv sidecar at {:?}", dev_path);
-                return Some(dev_path);
+            if let Some(path) = checked_candidate(dev_path) {
+                tracing::info!("Using bundled uv sidecar");
+                return Some(path);
             }
         }
 
@@ -561,41 +584,22 @@ impl EngineManager {
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
                 let prod_path = exe_dir.join(&binary_name);
-                if prod_path.exists() {
-                    println!("[engine] Found uv sidecar at {:?}", prod_path);
-                    return Some(prod_path);
+                if let Some(path) = checked_candidate(prod_path) {
+                    tracing::info!("Using packaged uv sidecar");
+                    return Some(path);
                 }
             }
         }
 
-        // 3. Check if uv is on PATH
-        if let Ok(output) = std::process::Command::new("which").arg("uv").output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    println!("[engine] Found system uv at {}", path);
-                    return Some(PathBuf::from(path));
-                }
-            }
+        // 3. Resolve PATH without spawning `which` or trusting its output.
+        if let Some(path) =
+            thinclaw_platform::find_executable_in_path("uv").and_then(checked_candidate)
+        {
+            tracing::info!("Using uv from PATH");
+            return Some(path);
         }
 
-        // 4. Check ~/.thinclaw-desktop/uv (auto-download location)
-        if let Ok(home) = std::env::var("HOME") {
-            let home = PathBuf::from(home);
-            let local_uv = home.join(".thinclaw-desktop").join("uv");
-            if local_uv.exists() {
-                println!("[engine] Found local uv at {:?}", local_uv);
-                return Some(local_uv);
-            }
-
-            let legacy_uv = home.join(".scrappy").join("uv");
-            if legacy_uv.exists() {
-                println!("[engine] Found legacy local uv at {:?}", legacy_uv);
-                return Some(legacy_uv);
-            }
-        }
-
-        println!("[engine] uv binary not found — will auto-download during bootstrap");
+        tracing::warn!("uv binary is unavailable; local Python engine setup will fail closed");
         None
     }
 
@@ -663,6 +667,18 @@ pub async fn direct_runtime_setup_engine(
     _engine_manager: tauri::State<'_, EngineManager>,
 ) -> Result<(), String> {
     let info = direct_runtime_get_active_engine_info();
+
+    // Serialize setup against start/stop and refuse to replace an environment
+    // underneath a running interpreter. The bootstrap itself uses a staging
+    // directory, but Python can lazily import modules after server readiness.
+    let _setup_guard = _engine_manager.engine.lock().await;
+    if _setup_guard
+        .as_ref()
+        .and_then(|engine| engine.base_url())
+        .is_some()
+    {
+        return Err("Stop the local inference engine before running setup".to_string());
+    }
 
     #[derive(Clone, serde::Serialize)]
     struct SetupProgress {
@@ -743,16 +759,31 @@ pub async fn direct_runtime_start_engine(
     let engine = guard.as_mut().ok_or("No engine configured")?;
 
     let options = EngineStartOptions::default();
-    let (port, token) = engine.start(&model_path, context_size, options).await?;
+    let (port, _token) = engine.start(&model_path, context_size, options).await?;
 
-    Ok(EngineStartResult { port, token })
+    // Endpoint credentials stay in the backend runtime snapshot. They are not
+    // renderer state and must not cross the Tauri IPC boundary.
+    Ok(EngineStartResult {
+        port,
+        token: String::new(),
+    })
 }
 
 /// Result of starting an engine.
-#[derive(Debug, Clone, Serialize, Type)]
+#[derive(Clone, Serialize, Type)]
 pub struct EngineStartResult {
     pub port: u16,
     pub token: String,
+}
+
+impl std::fmt::Debug for EngineStartResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EngineStartResult")
+            .field("port", &self.port)
+            .field("token", &crate::debug_redaction::Redacted)
+            .finish()
+    }
 }
 
 /// Stop the active engine.

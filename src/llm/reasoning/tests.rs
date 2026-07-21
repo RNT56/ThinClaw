@@ -6,9 +6,10 @@ use rust_decimal::Decimal;
 use super::*;
 use crate::error::LlmError;
 use crate::llm::{
-    CompletionRequest, CompletionResponse, FinishReason, ToolCompletionRequest,
+    CompletionRequest, CompletionResponse, FinishReason, ThinkingConfig, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition,
 };
+use crate::media::MediaContent;
 use crate::testing::StubLlm;
 
 struct FinishReasonTestLlm {
@@ -205,6 +206,90 @@ impl LlmProvider for RoutingCaptureLlm {
 }
 
 #[test]
+fn response_cache_key_covers_effective_request_and_raw_attachments() {
+    let reasoning = Reasoning::new(Arc::new(StubLlm::new("done").with_model_name("base-model")));
+    let base = CompletionRequest::new(vec![ChatMessage::user("summarize")]);
+    let base_key = reasoning.make_cache_key(&base);
+
+    let mut context = base.clone();
+    context
+        .context_documents
+        .push("private context".to_string());
+    let mut max_tokens = base.clone();
+    max_tokens.max_tokens = Some(512);
+    let mut thinking = base.clone();
+    thinking.thinking = ThinkingConfig::Enabled { budget_tokens: 128 };
+    let mut model = base.clone();
+    model.model = Some("other-model".to_string());
+    let mut attachment = base.clone();
+    attachment.messages[0].attachments =
+        vec![MediaContent::new(vec![1, 2, 3], "image/png").with_filename("sample.png")];
+    let mut attachment_bytes = attachment.clone();
+    attachment_bytes.messages[0].attachments[0].data = vec![1, 2, 4];
+
+    for changed in [
+        &context,
+        &max_tokens,
+        &thinking,
+        &model,
+        &attachment,
+        &attachment_bytes,
+    ] {
+        assert_ne!(base_key, reasoning.make_cache_key(changed));
+    }
+    assert_ne!(
+        reasoning.make_cache_key(&attachment),
+        reasoning.make_cache_key(&attachment_bytes)
+    );
+
+    let mut metadata_a = base.clone();
+    metadata_a.metadata.insert("b".to_string(), "2".to_string());
+    metadata_a.metadata.insert("a".to_string(), "1".to_string());
+    let mut metadata_b = base.clone();
+    metadata_b.metadata.insert("a".to_string(), "1".to_string());
+    metadata_b.metadata.insert("b".to_string(), "2".to_string());
+    assert_eq!(
+        reasoning.make_cache_key(&metadata_a),
+        reasoning.make_cache_key(&metadata_b),
+        "metadata map insertion order must not affect cache identity"
+    );
+
+    let mut prompt_metadata_a = CompletionRequest::new(vec![ChatMessage::user("same")]);
+    prompt_metadata_a.messages[0].provider_metadata.insert(
+        "z-provider".to_string(),
+        serde_json::json!({"b": 2, "a": 1}),
+    );
+    prompt_metadata_a.messages[0].provider_metadata.insert(
+        "a-provider".to_string(),
+        serde_json::json!({"enabled": true}),
+    );
+    let mut prompt_metadata_b = CompletionRequest::new(vec![ChatMessage::user("same")]);
+    prompt_metadata_b.messages[0].provider_metadata.insert(
+        "a-provider".to_string(),
+        serde_json::json!({"enabled": true}),
+    );
+    prompt_metadata_b.messages[0].provider_metadata.insert(
+        "z-provider".to_string(),
+        serde_json::json!({"a": 1, "b": 2}),
+    );
+    assert_eq!(
+        reasoning.make_cache_key(&prompt_metadata_a),
+        reasoning.make_cache_key(&prompt_metadata_b),
+        "provider metadata and JSON object insertion order must be canonicalized"
+    );
+
+    let mut empty_filename = base;
+    empty_filename.messages[0].attachments =
+        vec![MediaContent::new(vec![1, 2, 3], "image/png").with_filename("")];
+    let mut absent_filename = empty_filename.clone();
+    absent_filename.messages[0].attachments[0].filename = None;
+    assert_ne!(
+        reasoning.make_cache_key(&empty_filename),
+        reasoning.make_cache_key(&absent_filename)
+    );
+}
+
+#[test]
 fn merge_streamed_tool_calls_dedupes_full_and_delta_versions() {
     let tool_calls = vec![ToolCall {
         id: "call_1".to_string(),
@@ -396,10 +481,7 @@ fn conversation_prompt_matches_identity_tool_paths() {
 #[test]
 fn conversation_prompt_falls_back_to_home_soul_without_workspace_prompt() {
     let temp_home = tempfile::tempdir().expect("temp home");
-    let previous_home = std::env::var_os("THINCLAW_HOME");
-    unsafe {
-        std::env::set_var("THINCLAW_HOME", temp_home.path());
-    }
+    let _home = crate::testing::ScopedEnvVar::set("THINCLAW_HOME", temp_home.path());
     crate::identity::soul_store::write_home_soul(
         &crate::identity::soul::compose_seeded_soul("balanced").expect("seeded soul"),
     )
@@ -409,17 +491,10 @@ fn conversation_prompt_falls_back_to_home_soul_without_workspace_prompt() {
 
     let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
     assert!(prompt.contains("## Soul"));
-    assert!(prompt.contains("Full canonical soul: `memory_read SOUL.md`"));
-
-    if let Some(previous_home) = previous_home {
-        unsafe {
-            std::env::set_var("THINCLAW_HOME", previous_home);
-        }
-    } else {
-        unsafe {
-            std::env::remove_var("THINCLAW_HOME");
-        }
-    }
+    assert!(
+        prompt.contains("The canonical soul is runtime-managed and loaded as trusted context.")
+    );
+    assert!(prompt.contains("### Core Truths"));
 }
 
 #[test]

@@ -3,6 +3,8 @@ use thinclaw_gateway::web::projects::{
     project_forbidden_error, project_not_found_error, validate_project_id,
 };
 
+const MAX_PROJECT_ASSET_BYTES: u64 = 32 * 1024 * 1024;
+
 pub(crate) async fn project_redirect_handler(Path(project_id): Path<String>) -> impl IntoResponse {
     axum::response::Redirect::permanent(&format!("/projects/{project_id}/"))
 }
@@ -38,7 +40,12 @@ pub(crate) async fn serve_project_file(project_id: &str, path: &str) -> axum::re
         return project_forbidden_error().into_response();
     }
 
-    match tokio::fs::read(&canonical).await {
+    match thinclaw_platform::read_regular_file_bounded_single_link_async(
+        canonical.clone(),
+        MAX_PROJECT_ASSET_BYTES,
+    )
+    .await
+    {
         Ok(contents) => {
             let mime = mime_guess::from_path(&canonical)
                 .first_or_octet_stream()

@@ -3,6 +3,146 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
+const MAX_USER_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_KNOWLEDGE_BITS: usize = 256;
+const MAX_CUSTOM_PERSONAS: usize = 64;
+const MAX_PERSONALIZATION_BYTES: usize = 256 * 1024;
+
+fn bounded_config_text(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
+    (allow_empty || !value.is_empty())
+        && value.len() <= max_bytes
+        && !value.contains('\0')
+        && !value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+}
+
+fn valid_mcp_auth_token(token: &str) -> bool {
+    token.trim() == token && token.len() <= 16 * 1024 && !token.chars().any(char::is_control)
+}
+
+fn validate_user_config(config: &UserConfig) -> Result<(), String> {
+    if !(1..=8).contains(&config.search_concurrency_limit)
+        || !(1..=8).contains(&config.scrape_concurrency_limit)
+        || !(1..=20).contains(&config.max_search_results)
+        || !(1_000..=200_000).contains(&config.max_scrape_chars)
+        || !(1..=120).contains(&config.scrape_timeout_secs)
+        || !(1_024..=2_000_000).contains(&config.default_context_window)
+        || !(1_000..=32_000).contains(&config.summarization_chunk_size)
+        || !config.llm_temperature.is_finite()
+        || !(0.0..=2.0).contains(&config.llm_temperature)
+        || !config.llm_top_p.is_finite()
+        || !(0.0..=1.0).contains(&config.llm_top_p)
+        || config.vector_dimensions == 0
+        || config.vector_dimensions
+            > u32::try_from(crate::inference::embedding::MAX_EMBEDDING_DIMENSIONS)
+                .unwrap_or(u32::MAX)
+        || config.sd_threads > 128
+        || config.memory_reservation_gb > 1_024
+        || !(1..=86_400).contains(&config.mcp_cache_ttl_secs)
+        || !(1_000..=1_000_000).contains(&config.mcp_tool_result_max_chars)
+        || config
+            .selected_model_context_size
+            .is_some_and(|value| !(1_024..=2_000_000).contains(&value))
+    {
+        return Err("User configuration contains an out-of-range numeric setting".to_string());
+    }
+
+    if !bounded_config_text(&config.selected_persona, 256, false)
+        || !bounded_config_text(&config.spotlight_shortcut, 128, false)
+        || !bounded_config_text(&config.ptt_shortcut, 128, false)
+        || config.disabled_providers.len() > 128
+        || config
+            .disabled_providers
+            .iter()
+            .any(|provider| !bounded_config_text(provider, 128, false))
+    {
+        return Err("User configuration contains invalid identifiers or shortcuts".to_string());
+    }
+
+    let mut personalization_bytes = 0usize;
+    let mut knowledge_ids = std::collections::HashSet::new();
+    if config.knowledge_bits.len() > MAX_KNOWLEDGE_BITS {
+        return Err("User configuration contains too many knowledge entries".to_string());
+    }
+    for bit in &config.knowledge_bits {
+        if !bounded_config_text(&bit.id, 256, false)
+            || !bounded_config_text(&bit.label, 1_024, false)
+            || !bounded_config_text(&bit.content, 64 * 1024, true)
+            || !knowledge_ids.insert(&bit.id)
+        {
+            return Err("User configuration contains an invalid knowledge entry".to_string());
+        }
+        personalization_bytes = personalization_bytes
+            .saturating_add(bit.label.len())
+            .saturating_add(bit.content.len());
+    }
+    let mut persona_ids = std::collections::HashSet::new();
+    if config.custom_personas.len() > MAX_CUSTOM_PERSONAS {
+        return Err("User configuration contains too many custom personas".to_string());
+    }
+    for persona in &config.custom_personas {
+        if !bounded_config_text(&persona.id, 256, false)
+            || !bounded_config_text(&persona.name, 1_024, false)
+            || !bounded_config_text(&persona.description, 16 * 1024, true)
+            || !bounded_config_text(&persona.instructions, 128 * 1024, false)
+            || !persona_ids.insert(&persona.id)
+        {
+            return Err("User configuration contains an invalid custom persona".to_string());
+        }
+        personalization_bytes = personalization_bytes
+            .saturating_add(persona.name.len())
+            .saturating_add(persona.description.len())
+            .saturating_add(persona.instructions.len());
+    }
+    if personalization_bytes > MAX_PERSONALIZATION_BYTES {
+        return Err("User personalization exceeds the aggregate size limit".to_string());
+    }
+
+    for backend in [
+        config.selected_chat_provider.as_deref(),
+        config.chat_backend.as_deref(),
+        config.embedding_backend.as_deref(),
+        config.tts_backend.as_deref(),
+        config.stt_backend.as_deref(),
+        config.diffusion_backend.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !bounded_config_text(backend, 128, false) {
+            return Err("User configuration contains an invalid backend identifier".to_string());
+        }
+    }
+    if config.inference_models.as_ref().is_some_and(|models| {
+        models.len() > 32
+            || models.iter().any(|(modality, model)| {
+                !bounded_config_text(modality, 64, false) || !bounded_config_text(model, 512, false)
+            })
+    }) {
+        return Err("User configuration contains invalid inference models".to_string());
+    }
+
+    if config
+        .mcp_auth_token
+        .as_deref()
+        .is_some_and(|token| !valid_mcp_auth_token(token))
+    {
+        return Err("MCP authentication token is invalid".to_string());
+    }
+    if let Some(base_url) = config.mcp_base_url.as_deref() {
+        thinclaw_desktop_tools::McpClient::new(thinclaw_desktop_tools::McpConfig {
+            base_url: base_url.to_string(),
+            auth_token: config.mcp_auth_token.clone().unwrap_or_default(),
+            timeout_ms: 30_000,
+        })
+        .map_err(|_| "MCP endpoint configuration is invalid".to_string())?;
+    } else if config.mcp_sandbox_enabled {
+        return Err("MCP sandbox mode requires an MCP endpoint".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct KnowledgeBit {
     pub id: String,
@@ -19,7 +159,7 @@ pub struct CustomPersona {
     pub instructions: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Serialize, Deserialize, specta::Type)]
 pub struct UserConfig {
     // --- Web Search & Scraping ---
     #[serde(default = "default_search_concurrency")]
@@ -156,6 +296,36 @@ pub struct UserConfig {
     pub selected_model_context_size: Option<u32>,
 }
 
+impl std::fmt::Debug for UserConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UserConfig")
+            .field("search_concurrency_limit", &self.search_concurrency_limit)
+            .field("scrape_concurrency_limit", &self.scrape_concurrency_limit)
+            .field("max_search_results", &self.max_search_results)
+            .field("max_scrape_chars", &self.max_scrape_chars)
+            .field("default_context_window", &self.default_context_window)
+            .field("knowledge_bit_count", &self.knowledge_bits.len())
+            .field("custom_persona_count", &self.custom_personas.len())
+            .field("selected_persona", &self.selected_persona)
+            .field("selected_chat_provider", &self.selected_chat_provider)
+            .field("mcp_base_url_configured", &self.mcp_base_url.is_some())
+            .field(
+                "mcp_auth_token",
+                &crate::debug_redaction::RedactedOption(&self.mcp_auth_token),
+            )
+            .field("mcp_sandbox_enabled", &self.mcp_sandbox_enabled)
+            .field("mcp_cache_ttl_secs", &self.mcp_cache_ttl_secs)
+            .field("mcp_tool_result_max_chars", &self.mcp_tool_result_max_chars)
+            .field("chat_backend", &self.chat_backend)
+            .field("embedding_backend", &self.embedding_backend)
+            .field("tts_backend", &self.tts_backend)
+            .field("stt_backend", &self.stt_backend)
+            .field("diffusion_backend", &self.diffusion_backend)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
@@ -266,14 +436,50 @@ fn default_mcp_base_url() -> Option<String> {
     std::env::var("THINCLAW_MCP_URL")
         .or_else(|_| std::env::var("SCRAPPY_MCP_URL"))
         .ok()
-        .filter(|s| !s.is_empty())
+        .filter(|value| {
+            !value.is_empty()
+                && thinclaw_desktop_tools::McpClient::new(thinclaw_desktop_tools::McpConfig {
+                    base_url: value.clone(),
+                    auth_token: String::new(),
+                    timeout_ms: 30_000,
+                })
+                .is_ok()
+        })
 }
 
 fn default_mcp_auth_token() -> Option<String> {
     std::env::var("THINCLAW_MCP_TOKEN")
         .or_else(|_| std::env::var("SCRAPPY_MCP_TOKEN"))
         .ok()
-        .filter(|s| !s.is_empty())
+        .filter(|value| !value.is_empty() && valid_mcp_auth_token(value))
+}
+
+pub(crate) const MCP_AUTH_TOKEN_SECRET_KEY: &str = "desktop_mcp_auth_token";
+
+fn config_json_for_persistence(config: &UserConfig) -> Result<String, serde_json::Error> {
+    let mut value = serde_json::to_value(config)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("mcp_auth_token");
+    }
+    serde_json::to_string_pretty(&value)
+}
+
+pub(crate) fn write_config_file(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    if contents.len() > MAX_USER_CONFIG_BYTES as usize {
+        return Err("user configuration exceeds the size limit".to_string());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "user config path has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create user config directory: {error}"))?;
+    let metadata = std::fs::symlink_metadata(parent)
+        .map_err(|error| format!("failed to inspect user config directory: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("user config directory is not a real directory".to_string());
+    }
+    thinclaw_platform::write_private_file_atomic(path, contents.as_bytes(), true)
+        .map_err(|error| format!("failed to atomically publish user config: {error}"))
 }
 
 fn normalize_user_config(mut config: UserConfig) -> UserConfig {
@@ -296,22 +502,108 @@ impl ConfigManager {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("user_config.json");
 
-        let config = if config_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&config_path) {
-                let loaded: UserConfig = serde_json::from_str(&content).unwrap_or_default();
-                normalize_user_config(loaded)
-            } else {
+        let mut legacy_mcp_token = None;
+        let mut legacy_scrubbed_json = None;
+        let metadata = std::fs::symlink_metadata(&config_path);
+        let should_create_default = metadata
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        let mut config = match metadata {
+            Ok(_) => match thinclaw_platform::read_regular_file_bounded_single_link(
+                &config_path,
+                MAX_USER_CONFIG_BYTES,
+            ) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(content) => {
+                        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&content) {
+                            legacy_mcp_token = value
+                                .get("mcp_auth_token")
+                                .and_then(serde_json::Value::as_str)
+                                .filter(|token| !token.is_empty() && valid_mcp_auth_token(token))
+                                .map(str::to_owned);
+                            if legacy_mcp_token.is_some() {
+                                if let Some(object) = value.as_object_mut() {
+                                    object.remove("mcp_auth_token");
+                                }
+                                legacy_scrubbed_json = serde_json::to_string_pretty(&value).ok();
+                            }
+                        }
+                        match serde_json::from_str::<UserConfig>(&content)
+                            .map(normalize_user_config)
+                        {
+                            Ok(loaded) if validate_user_config(&loaded).is_ok() => loaded,
+                            Ok(_) => {
+                                tracing::warn!(
+                                    "User configuration failed validation; using defaults"
+                                );
+                                UserConfig::default()
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    "User configuration could not be decoded; using defaults: {error}"
+                                );
+                                UserConfig::default()
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!("User configuration is not valid UTF-8; using defaults");
+                        UserConfig::default()
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!("User configuration could not be read safely: {error}");
+                    UserConfig::default()
+                }
+            },
+            Err(error) => {
+                if !should_create_default {
+                    tracing::warn!("User configuration could not be inspected: {error}");
+                }
                 UserConfig::default()
             }
-        } else {
-            let default = UserConfig::default();
-            // Try to create the file
-            if let Ok(json) = serde_json::to_string_pretty(&default) {
-                let _ = std::fs::create_dir_all(config_path.parent().unwrap());
-                let _ = std::fs::write(&config_path, json);
-            }
-            default
         };
+
+        if should_create_default {
+            match config_json_for_persistence(&config) {
+                Ok(json) => {
+                    if let Err(error) = write_config_file(&config_path, &json) {
+                        tracing::warn!("Failed to persist default user configuration: {error}");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("Failed to encode default user configuration: {error}")
+                }
+            }
+        }
+
+        let mut migrated_legacy_token = false;
+        if let Some(token) = legacy_mcp_token.as_deref() {
+            match crate::thinclaw::config::keychain::set_key(MCP_AUTH_TOKEN_SECRET_KEY, Some(token))
+            {
+                Ok(()) => migrated_legacy_token = true,
+                Err(error) => tracing::warn!(
+                    "Failed to migrate legacy MCP credential to secure storage: {error}"
+                ),
+            }
+            if migrated_legacy_token {
+                if let Some(json) = legacy_scrubbed_json.as_deref() {
+                    if let Err(error) = write_config_file(&config_path, json) {
+                        tracing::warn!(
+                            "MCP credential was secured but legacy config could not be scrubbed: {error}"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        "MCP credential was secured but the legacy config could not be scrubbed safely"
+                    );
+                }
+            }
+        }
+        config.mcp_auth_token =
+            crate::thinclaw::config::keychain::get_key(MCP_AUTH_TOKEN_SECRET_KEY)
+                .or_else(|| legacy_mcp_token.filter(|_| !migrated_legacy_token))
+                .or_else(default_mcp_auth_token);
 
         Self {
             config: Mutex::new(config),
@@ -326,24 +618,32 @@ impl ConfigManager {
             .clone()
     }
 
-    pub fn save_config(&self, new_config: &UserConfig) {
+    pub fn save_config(&self, new_config: &UserConfig) -> Result<(), String> {
         let normalized = normalize_user_config(new_config.clone());
-        *self.config.lock().unwrap_or_else(|e| e.into_inner()) = normalized.clone();
-        // Spawn an async write so we never block the Tokio thread-pool under
-        // lock contention (the in-memory cache above is already updated).
-        if let Ok(json) = serde_json::to_string_pretty(&normalized) {
-            let path = self.config_path.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = tokio::fs::write(&path, json).await;
-            });
-        }
+        validate_user_config(&normalized)?;
+        let json = config_json_for_persistence(&normalized).map_err(|error| error.to_string())?;
+        let mut config = self
+            .config
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        write_config_file(&self.config_path, &json)?;
+        *config = normalized;
+        Ok(())
     }
 
     pub fn reload(&self) {
-        if let Ok(content) = std::fs::read_to_string(&self.config_path) {
-            if let Ok(new_config) = serde_json::from_str(&content) {
-                *self.config.lock().unwrap_or_else(|e| e.into_inner()) =
-                    normalize_user_config(new_config);
+        if let Ok(bytes) = thinclaw_platform::read_regular_file_bounded_single_link(
+            &self.config_path,
+            MAX_USER_CONFIG_BYTES,
+        ) {
+            if let Ok(new_config) = serde_json::from_slice(&bytes) {
+                let mut normalized = normalize_user_config(new_config);
+                normalized.mcp_auth_token =
+                    crate::thinclaw::config::keychain::get_key(MCP_AUTH_TOKEN_SECRET_KEY)
+                        .or_else(default_mcp_auth_token);
+                if validate_user_config(&normalized).is_ok() {
+                    *self.config.lock().unwrap_or_else(|e| e.into_inner()) = normalized;
+                }
             }
         }
     }
@@ -358,13 +658,15 @@ pub fn open_config_file(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .join("user_config.json");
 
-    if !config_path.exists() {
-        return Err("Config file does not exist yet".to_string());
-    }
+    thinclaw_platform::read_regular_file_bounded_single_link(&config_path, MAX_USER_CONFIG_BYTES)
+        .map_err(|error| format!("Config file cannot be opened safely: {error}"))?;
 
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(&config_path).spawn();
+        std::process::Command::new("open")
+            .arg(&config_path)
+            .spawn()
+            .map_err(|error| format!("Failed to open config file: {error}"))?;
     }
     #[cfg(not(target_os = "macos"))]
     open::that(&config_path).map_err(|e| e.to_string())?;
@@ -398,19 +700,35 @@ pub async fn get_hf_token(app: AppHandle) -> Result<Option<String>, String> {
 
 #[tauri::command]
 #[specta::specta]
-pub fn get_user_config(state: tauri::State<ConfigManager>) -> UserConfig {
-    state.get_config()
+pub fn get_user_config(
+    state: tauri::State<ConfigManager>,
+    secret_store: tauri::State<crate::secret_store::SecretStore>,
+) -> UserConfig {
+    let mut config = state.get_config();
+    config.mcp_auth_token = secret_store
+        .get(MCP_AUTH_TOKEN_SECRET_KEY)
+        .or_else(default_mcp_auth_token);
+    config
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn update_user_config(
     state: tauri::State<ConfigManager>,
+    secret_store: tauri::State<crate::secret_store::SecretStore>,
     config: UserConfig,
 ) -> Result<(), String> {
-    // JSON-level merge: read current config, overlay incoming fields, save.
-    // This prevents a stale frontend copy from overwriting concurrent backend
-    // changes (e.g. local inference config written by the sidecar manager).
+    let submitted_mcp_token = config
+        .mcp_auth_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned);
+
+    // Merge against the latest backend snapshot before the durable write. The
+    // command currently receives a full `UserConfig`, so incoming values have
+    // last-write-wins semantics while newly added backend-only fields remain
+    // represented by their serde defaults.
     let current = state.get_config();
     let mut base = serde_json::to_value(&current).map_err(|e| e.to_string())?;
     let incoming = serde_json::to_value(&config).map_err(|e| e.to_string())?;
@@ -421,8 +739,20 @@ pub fn update_user_config(
         }
     }
 
-    let merged: UserConfig = serde_json::from_value(base).map_err(|e| e.to_string())?;
-    state.save_config(&merged);
+    let mut merged: UserConfig = serde_json::from_value(base).map_err(|e| e.to_string())?;
+    merged.mcp_auth_token = submitted_mcp_token.clone().or_else(default_mcp_auth_token);
+    validate_user_config(&normalize_user_config(merged.clone()))?;
+
+    let previous_mcp_token = secret_store.get(MCP_AUTH_TOKEN_SECRET_KEY);
+    secret_store.set(MCP_AUTH_TOKEN_SECRET_KEY, submitted_mcp_token.as_deref())?;
+    if let Err(save_error) = state.save_config(&merged) {
+        return match secret_store.set(MCP_AUTH_TOKEN_SECRET_KEY, previous_mcp_token.as_deref()) {
+            Ok(()) => Err(save_error),
+            Err(rollback_error) => Err(format!(
+                "{save_error}; additionally failed to restore the previous MCP credential: {rollback_error}"
+            )),
+        };
+    }
     Ok(())
 }
 
@@ -535,6 +865,26 @@ mod tests {
     }
 
     #[test]
+    fn invalid_mcp_environment_defaults_are_ignored() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("THINCLAW_MCP_URL", "http://public.example.com");
+            std::env::set_var("THINCLAW_MCP_TOKEN", "bad\ntoken");
+            std::env::remove_var("SCRAPPY_MCP_URL");
+            std::env::remove_var("SCRAPPY_MCP_TOKEN");
+        }
+        let config = UserConfig::default();
+        unsafe {
+            std::env::remove_var("THINCLAW_MCP_URL");
+            std::env::remove_var("THINCLAW_MCP_TOKEN");
+        }
+
+        assert!(config.mcp_base_url.is_none());
+        assert!(config.mcp_auth_token.is_none());
+        assert!(validate_user_config(&config).is_ok());
+    }
+
+    #[test]
     fn legacy_scrappy_persona_is_normalized_for_new_writes() {
         let cfg = UserConfig {
             selected_persona: "scrappy".to_string(),
@@ -575,6 +925,62 @@ mod tests {
     }
 
     #[test]
+    fn persisted_user_config_omits_mcp_token_and_debug_redacts_private_content() {
+        let config = UserConfig {
+            mcp_auth_token: Some("mcp-live-secret".into()),
+            knowledge_bits: vec![KnowledgeBit {
+                id: "private".into(),
+                label: "Private".into(),
+                content: "private-knowledge-content".into(),
+                enabled: true,
+            }],
+            ..UserConfig::default()
+        };
+
+        let persisted = config_json_for_persistence(&config).unwrap();
+        assert!(!persisted.contains("mcp-live-secret"));
+        assert!(!persisted.contains("mcp_auth_token"));
+
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("mcp-live-secret"));
+        assert!(!debug.contains("private-knowledge-content"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn user_config_validation_rejects_unsafe_endpoints_and_oversized_personalization() {
+        let remote_http = UserConfig {
+            mcp_base_url: Some("http://public.example.com".into()),
+            ..UserConfig::default()
+        };
+        assert!(validate_user_config(&remote_http).is_err());
+
+        let oversized = UserConfig {
+            knowledge_bits: (0..5)
+                .map(|index| KnowledgeBit {
+                    id: format!("knowledge-{index}"),
+                    label: "label".into(),
+                    content: "x".repeat(64 * 1024),
+                    enabled: true,
+                })
+                .collect(),
+            ..UserConfig::default()
+        };
+        assert!(validate_user_config(&oversized).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_writer_rejects_a_symlink_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let target = directory.path().join("user_config.json");
+        std::os::unix::fs::symlink(outside.path(), &target).unwrap();
+        assert!(write_config_file(&target, "{}").is_err());
+        assert_eq!(std::fs::read(outside.path()).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
     fn partial_json_with_missing_fields_uses_serde_defaults() {
         // Simulate a config file that predates the new mcp_cache_ttl_secs field.
         let minimal_json = r#"{ "selected_persona": "thinclaw" }"#;
@@ -607,19 +1013,28 @@ mod tests {
         assert_eq!(mgr.get_config().selected_persona, "custom");
     }
 
-    #[tokio::test]
-    async fn config_manager_save_updates_in_memory_immediately() {
-        let mgr = make_manager_from_config(UserConfig::default());
+    #[test]
+    fn config_manager_save_updates_in_memory_after_durable_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager {
+            config: Mutex::new(UserConfig::default()),
+            config_path: directory.path().join("user_config.json"),
+        };
 
         let mut updated = mgr.get_config();
-        updated.max_search_results = 99;
+        updated.max_search_results = 19;
         updated.mcp_cache_ttl_secs = 120;
-        mgr.save_config(&updated);
+        updated.mcp_auth_token = Some("not-persisted".into());
+        mgr.save_config(&updated).unwrap();
 
-        // The in-memory state must be updated synchronously (disk write is async)
         let read_back = mgr.get_config();
-        assert_eq!(read_back.max_search_results, 99);
+        assert_eq!(read_back.max_search_results, 19);
         assert_eq!(read_back.mcp_cache_ttl_secs, 120);
+        assert_eq!(read_back.mcp_auth_token.as_deref(), Some("not-persisted"));
+
+        let persisted = std::fs::read_to_string(&mgr.config_path).unwrap();
+        assert!(!persisted.contains("not-persisted"));
+        assert!(!persisted.contains("mcp_auth_token"));
     }
 
     // -------------------------------------------------------------------------

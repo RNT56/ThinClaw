@@ -14,6 +14,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "macros", "
 futures = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = { workspace = true }
+thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
 
 [dev-dependencies]
 # Contract test only: assert the client's wire DTOs stay compatible with the

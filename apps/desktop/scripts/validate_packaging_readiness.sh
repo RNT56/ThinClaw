@@ -98,7 +98,7 @@ NODE
 done
 
 echo "== Focused platform tests =="
-cargo test --manifest-path backend/Cargo.toml --locked thinclaw::ironclaw_secrets::tests:: -- --test-threads=1
+cargo test --manifest-path backend/Cargo.toml --locked thinclaw::secrets_adapter::tests:: -- --test-threads=1
 cargo test --manifest-path backend/Cargo.toml --locked personas::tests::legacy_scrappy_persona_aliases_to_thinclaw -- --test-threads=1
 cargo test --manifest-path backend/Cargo.toml --locked cloud::providers::icloud::tests:: -- --test-threads=1
 cargo test --manifest-path backend/Cargo.toml --locked cloud::migration::tests::test_validated_manifest_relative_path_rejects_traversal -- --test-threads=1

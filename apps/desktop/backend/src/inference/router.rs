@@ -4,7 +4,9 @@
 //! Cloud backends receive keys from `SecretStore` (not `ThinClawConfig`).
 
 use crate::config::UserConfig;
+use crate::inference::{InferenceError, InferenceResult};
 use crate::secret_store::SecretStore;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -13,6 +15,64 @@ use super::embedding::EmbeddingBackend;
 use super::stt::SttBackend;
 use super::tts::TtsBackend;
 use super::{BackendInfo, Modality};
+
+fn configured_cloud_embedding_model(config: &UserConfig, provider: &str) -> Option<String> {
+    let models = config.inference_models.as_ref()?;
+    let provider_key = format!("embedding_{provider}");
+    if let Some(model) = models.get(&provider_key) {
+        return Some(model.clone());
+    }
+
+    // Older configs used one `embedding` slot for both a local filesystem path
+    // and a cloud model ID. Only accept that legacy value when it is a known
+    // model for the selected provider; otherwise a local path could be sent to
+    // a cloud API when the user switches modes.
+    models
+        .get("embedding")
+        .filter(|model| {
+            super::embedding::cloud_embedding_dimensions(provider, model.as_str()).is_some()
+        })
+        .cloned()
+}
+
+fn is_known_cloud_diffusion_model(provider: &str, model: &str) -> bool {
+    match provider {
+        "gemini" => matches!(
+            model,
+            "gemini-3.1-flash-image"
+                | "gemini-3-pro-image"
+                | "gemini-2.5-flash-image"
+                | "gemini-3-pro-image-preview"
+                | "nano-banana"
+                | "nano-banana-pro"
+        ),
+        "fal" => matches!(model, "fal-ai/flux/dev" | "fal-ai/flux/schnell"),
+        "together" => matches!(
+            model,
+            "black-forest-labs/FLUX.1-schnell-Free"
+                | "black-forest-labs/FLUX.1-schnell"
+                | "black-forest-labs/FLUX.1.1-pro"
+        ),
+        "openai" => model == "gpt-image-2",
+        "stability" => model == "sd3.5-large",
+        _ => false,
+    }
+}
+
+fn configured_cloud_diffusion_model(config: &UserConfig, provider: &str) -> Option<String> {
+    let models = config.inference_models.as_ref()?;
+    let provider_key = format!("diffusion_{provider}");
+    if let Some(model) = models.get(&provider_key) {
+        return Some(model.clone());
+    }
+
+    // The legacy generic slot is also used for local filesystem model paths.
+    // Never forward one of those paths to a cloud provider after a mode switch.
+    models
+        .get("diffusion")
+        .filter(|model| is_known_cloud_diffusion_model(provider, model))
+        .cloned()
+}
 
 /// Result of a `reconfigure()` call.
 ///
@@ -47,6 +107,8 @@ pub struct InferenceRouter {
     diffusion: RwLock<Option<Arc<dyn DiffusionBackend>>>,
     /// Reference to the app-wide secret store for live key reads.
     secret_store: Arc<SecretStore>,
+    /// Managed output location for generated images.
+    images_dir: PathBuf,
 }
 
 impl InferenceRouter {
@@ -54,13 +116,14 @@ impl InferenceRouter {
     ///
     /// All backends start as `None`.  Call `reconfigure()` or
     /// `set_embedding_backend()` etc. to activate them.
-    pub fn new(secret_store: Arc<SecretStore>) -> Self {
+    pub fn new(secret_store: Arc<SecretStore>, images_dir: PathBuf) -> Self {
         Self {
             embedding: RwLock::new(None),
             tts: RwLock::new(None),
             stt: RwLock::new(None),
             diffusion: RwLock::new(None),
             secret_store,
+            images_dir,
         }
     }
 
@@ -98,6 +161,66 @@ impl InferenceRouter {
     /// Get the active diffusion backend.
     pub async fn diffusion_backend(&self) -> Option<Arc<dyn DiffusionBackend>> {
         self.diffusion.read().await.clone()
+    }
+
+    /// Resolve the backend explicitly selected by an image-generation request.
+    /// This prevents an Imagine UI selection from accidentally being billed to
+    /// a different, globally active diffusion provider.
+    pub async fn diffusion_backend_for(
+        &self,
+        provider: &str,
+        model_hint: Option<&str>,
+    ) -> InferenceResult<Arc<dyn DiffusionBackend>> {
+        let (provider, forced_model) = match provider {
+            "nano-banana" => ("gemini", Some("gemini-3.1-flash-image".to_string())),
+            "nano-banana-pro" => ("gemini", Some("gemini-3-pro-image".to_string())),
+            provider => (provider, model_hint.map(str::to_string)),
+        };
+        let api_key = self.get_secret(provider).ok_or_else(|| {
+            InferenceError::auth(format!(
+                "No credential is configured for the {provider} image provider"
+            ))
+        })?;
+        let backend: Arc<dyn DiffusionBackend> = match provider {
+            "openai" => Arc::new(super::diffusion::cloud_dalle::DalleDiffusionBackend::new(
+                api_key,
+                self.images_dir.clone(),
+            )),
+            "gemini" => Arc::new(super::diffusion::cloud_imagen::ImagenDiffusionBackend::new(
+                api_key,
+                forced_model,
+                self.images_dir.clone(),
+            )),
+            "stability" => Arc::new(
+                super::diffusion::cloud_stability::StabilityDiffusionBackend::new(
+                    api_key,
+                    self.images_dir.clone(),
+                ),
+            ),
+            "fal" => Arc::new(super::diffusion::cloud_fal::FalDiffusionBackend::new(
+                api_key,
+                forced_model,
+                self.images_dir.clone(),
+            )),
+            "together" => Arc::new(
+                super::diffusion::cloud_together::TogetherDiffusionBackend::new(
+                    api_key,
+                    forced_model,
+                    self.images_dir.clone(),
+                ),
+            ),
+            _ => {
+                return Err(InferenceError::config(format!(
+                    "Unsupported image provider '{provider}'"
+                )));
+            }
+        };
+        if !backend.info().available {
+            return Err(InferenceError::config(format!(
+                "The selected {provider} image model is not supported"
+            )));
+        }
+        Ok(backend)
     }
 
     /// Get a reference to the secret store.
@@ -271,8 +394,8 @@ impl InferenceRouter {
                 ("deepgram", "Deepgram", "deepgram"),
             ],
             Modality::Diffusion => vec![
-                ("openai", "DALL·E 3", "llm_openai_api_key"),
-                ("gemini", "Imagen 3", "gemini"),
+                ("openai", "OpenAI GPT Image 2", "llm_openai_api_key"),
+                ("gemini", "Gemini Nano Banana", "gemini"),
                 ("stability", "Stability AI", "stability"),
                 ("fal", "fal.ai", "fal"),
                 ("together", "Together AI", "together"),
@@ -321,13 +444,9 @@ impl InferenceRouter {
         let embed_id = config.embedding_backend.as_deref().unwrap_or("local");
         tracing::info!("[inference_router] Embedding backend: {}", embed_id);
 
-        if embed_id != "local" {
+        let next_embedding: Option<Arc<dyn EmbeddingBackend>> = if embed_id != "local" {
             if let Some(api_key) = self.get_secret(embed_id) {
-                let model_override = config
-                    .inference_models
-                    .as_ref()
-                    .and_then(|m| m.get("embedding"))
-                    .cloned();
+                let model_override = configured_cloud_embedding_model(config, embed_id);
                 let maybe_backend: Option<Arc<dyn EmbeddingBackend>> = match embed_id {
                     "openai" => Some(Arc::new(
                         super::embedding::cloud_openai::OpenAiEmbeddingBackend::new(
@@ -358,25 +477,33 @@ impl InferenceRouter {
                         None
                     }
                 };
-                if let Some(backend) = maybe_backend {
+                if let Some(backend) = maybe_backend.filter(|backend| backend.dimensions() > 0) {
                     tracing::info!(
                         "[inference_router] Activated embedding backend: {} ({}d)",
                         embed_id,
                         backend.dimensions()
                     );
-                    *self.embedding.write().await = Some(backend);
+                    Some(backend)
+                } else {
+                    tracing::warn!(
+                        "[inference_router] Embedding backend configuration was rejected"
+                    );
+                    None
                 }
+            } else {
+                tracing::warn!("[inference_router] Embedding backend credential is unavailable");
+                None
             }
         } else {
-            // Local — clear any stale cloud embedding backend
-            *self.embedding.write().await = None;
-        }
+            None
+        };
+        *self.embedding.write().await = next_embedding;
 
         // ── TTS backend ─────────────────────────────────────────────────
         let tts_id = config.tts_backend.as_deref().unwrap_or("local");
         tracing::info!("[inference_router] TTS backend: {}", tts_id);
 
-        if tts_id != "local" {
+        let next_tts: Option<Arc<dyn TtsBackend>> = if tts_id != "local" {
             if let Some(api_key) = self.get_secret(tts_id) {
                 let backend: Option<Arc<dyn TtsBackend>> = match tts_id {
                     "openai" => Some(Arc::new(super::tts::cloud_openai::OpenAiTtsBackend::new(
@@ -393,20 +520,21 @@ impl InferenceRouter {
                         None
                     }
                 };
-                if let Some(b) = backend {
-                    *self.tts.write().await = Some(b);
-                }
+                backend
+            } else {
+                tracing::warn!("[inference_router] TTS backend credential is unavailable");
+                None
             }
         } else {
-            // Local — clear any stale cloud TTS backend
-            *self.tts.write().await = None;
-        }
+            None
+        };
+        *self.tts.write().await = next_tts;
 
         // ── STT backend ─────────────────────────────────────────────────
         let stt_id = config.stt_backend.as_deref().unwrap_or("local");
         tracing::info!("[inference_router] STT backend: {}", stt_id);
 
-        if stt_id != "local" {
+        let next_stt: Option<Arc<dyn SttBackend>> = if stt_id != "local" {
             if let Some(api_key) = self.get_secret(stt_id) {
                 let backend: Option<Arc<dyn SttBackend>> = match stt_id {
                     "openai" => Some(Arc::new(super::stt::cloud_openai::OpenAiSttBackend::new(
@@ -423,49 +551,55 @@ impl InferenceRouter {
                         None
                     }
                 };
-                if let Some(b) = backend {
-                    *self.stt.write().await = Some(b);
-                }
+                backend
+            } else {
+                tracing::warn!("[inference_router] STT backend credential is unavailable");
+                None
             }
         } else {
-            // Local — clear any stale cloud STT backend
-            *self.stt.write().await = None;
-        }
+            None
+        };
+        *self.stt.write().await = next_stt;
 
         // ── Diffusion backend ───────────────────────────────────────────
         let diffusion_id = config.diffusion_backend.as_deref().unwrap_or("local");
         tracing::info!("[inference_router] Diffusion backend: {}", diffusion_id);
 
-        if diffusion_id != "local" {
+        let next_diffusion: Option<Arc<dyn DiffusionBackend>> = if diffusion_id != "local" {
             if let Some(api_key) = self.get_secret(diffusion_id) {
-                let model_override = config
-                    .inference_models
-                    .as_ref()
-                    .and_then(|m| m.get("diffusion"))
-                    .cloned();
+                let model_override = configured_cloud_diffusion_model(config, diffusion_id);
                 let backend: Option<Arc<dyn DiffusionBackend>> = match diffusion_id {
                     "openai" => Some(Arc::new(
-                        super::diffusion::cloud_dalle::DalleDiffusionBackend::new(api_key),
+                        super::diffusion::cloud_dalle::DalleDiffusionBackend::new(
+                            api_key,
+                            self.images_dir.clone(),
+                        ),
                     )),
                     "gemini" => Some(Arc::new(
                         super::diffusion::cloud_imagen::ImagenDiffusionBackend::new(
                             api_key,
                             model_override,
+                            self.images_dir.clone(),
                         ),
                     )),
                     "stability" => Some(Arc::new(
-                        super::diffusion::cloud_stability::StabilityDiffusionBackend::new(api_key),
+                        super::diffusion::cloud_stability::StabilityDiffusionBackend::new(
+                            api_key,
+                            self.images_dir.clone(),
+                        ),
                     )),
                     "fal" => Some(Arc::new(
                         super::diffusion::cloud_fal::FalDiffusionBackend::new(
                             api_key,
                             model_override,
+                            self.images_dir.clone(),
                         ),
                     )),
                     "together" => Some(Arc::new(
                         super::diffusion::cloud_together::TogetherDiffusionBackend::new(
                             api_key,
                             model_override,
+                            self.images_dir.clone(),
                         ),
                     )),
                     other => {
@@ -473,11 +607,15 @@ impl InferenceRouter {
                         None
                     }
                 };
-                if let Some(b) = backend {
-                    *self.diffusion.write().await = Some(b);
-                }
+                backend
+            } else {
+                tracing::warn!("[inference_router] Diffusion backend credential is unavailable");
+                None
             }
-        }
+        } else {
+            None
+        };
+        *self.diffusion.write().await = next_diffusion;
 
         // ── Build result ────────────────────────────────────────────────
         let new_embedding_dims = {

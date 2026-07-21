@@ -1,11 +1,91 @@
 use super::*;
 
+const MAX_SETTINGS_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SETTINGS_DB_ENTRIES: usize = 20_000;
+const MAX_SETTINGS_JSON_NODES: usize = 200_000;
+const MAX_SETTINGS_TEXT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SETTING_PATH_BYTES: usize = 2_048;
+const MAX_SETTING_PATH_COMPONENTS: usize = 64;
+const MAX_SETTING_COMPONENT_BYTES: usize = 256;
+const MAX_SETTING_VALUE_BYTES: usize = 1024 * 1024;
+
+fn settings_value_within_bounds(
+    value: &serde_json::Value,
+    depth: usize,
+    nodes: &mut usize,
+    text_bytes: &mut usize,
+) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    *nodes = nodes.saturating_add(1);
+    if *nodes > MAX_SETTINGS_JSON_NODES {
+        return false;
+    }
+
+    match value {
+        serde_json::Value::String(value) => {
+            *text_bytes = text_bytes.saturating_add(value.len());
+        }
+        serde_json::Value::Array(values) => {
+            if values.len() > MAX_SETTINGS_JSON_NODES {
+                return false;
+            }
+            for value in values {
+                if !settings_value_within_bounds(value, depth + 1, nodes, text_bytes) {
+                    return false;
+                }
+            }
+        }
+        serde_json::Value::Object(values) => {
+            if values.len() > MAX_SETTINGS_DB_ENTRIES {
+                return false;
+            }
+            for (key, value) in values {
+                *text_bytes = text_bytes.saturating_add(key.len());
+                if !settings_value_within_bounds(value, depth + 1, nodes, text_bytes) {
+                    return false;
+                }
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+    *text_bytes <= MAX_SETTINGS_TEXT_BYTES
+}
+
+fn settings_db_map_within_bounds(
+    map: &std::collections::HashMap<String, serde_json::Value>,
+) -> bool {
+    if map.len() > MAX_SETTINGS_DB_ENTRIES {
+        return false;
+    }
+    let mut nodes = 0_usize;
+    let mut text_bytes = 0_usize;
+    map.iter().all(|(key, value)| {
+        text_bytes = text_bytes.saturating_add(key.len());
+        text_bytes <= MAX_SETTINGS_TEXT_BYTES
+            && settings_value_within_bounds(value, 0, &mut nodes, &mut text_bytes)
+    })
+}
+
+fn normalized_runtime_settings(mut settings: Settings) -> Settings {
+    settings.prompt.normalize_runtime_bounds();
+    settings
+}
+
 impl Settings {
     /// Reconstruct Settings from a flat key-value map (as stored in the DB).
     ///
     /// Each key is a dotted path (e.g., "agent.name"), value is a JSONB value.
     /// Missing keys get their default value.
     pub fn from_db_map(map: &std::collections::HashMap<String, serde_json::Value>) -> Self {
+        if !settings_db_map_within_bounds(map) {
+            tracing::warn!(
+                entries = map.len(),
+                "DB settings exceeded structural limits; using fail-safe defaults"
+            );
+            return Self::default();
+        }
         // Reconstruct the full nested JSON tree from flattened DB key-value
         // pairs, then deserialize all at once.
         //
@@ -17,15 +97,19 @@ impl Settings {
         let mut tree = serde_json::to_value(Self::default())
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
-        for (key, value) in map {
+        let mut entries = map.iter().collect::<Vec<_>>();
+        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (key, value) in entries {
             if matches!(value, serde_json::Value::Null) {
                 continue; // null means default, skip
             }
-            insert_dotted_path(&mut tree, key, value.clone());
+            if let Err(error) = insert_dotted_path(&mut tree, key, value.clone()) {
+                tracing::warn!(setting = %key, %error, "ignored invalid DB settings path");
+            }
         }
 
         match serde_json::from_value::<Self>(tree.clone()) {
-            Ok(settings) => settings,
+            Ok(settings) => normalized_runtime_settings(settings),
             Err(e) => {
                 tracing::warn!(
                     "from_db_map full-tree deserialize failed, falling back to per-key set(): {}",
@@ -47,15 +131,15 @@ impl Settings {
                         Err(e) if e.starts_with("Path not found") => {}
                         Err(e) => {
                             tracing::warn!(
-                                "Failed to apply DB setting '{}' = '{}': {}",
-                                key,
-                                value_str,
-                                e
+                                setting = %key,
+                                value_bytes = value_str.len(),
+                                error = %e,
+                                "Failed to apply DB setting"
                             );
                         }
                     }
                 }
-                settings
+                normalized_runtime_settings(settings)
             }
         }
     }
@@ -86,9 +170,30 @@ impl Settings {
 
     /// Load settings from a specific path (used by bootstrap legacy migration).
     pub fn load_from(path: &std::path::Path) -> Self {
-        match std::fs::read_to_string(path) {
-            Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
-            Err(_) => Self::default(),
+        match thinclaw_platform::read_regular_file_bounded_single_link(
+            path,
+            MAX_SETTINGS_FILE_BYTES,
+        ) {
+            Ok(data) => match serde_json::from_slice(&data) {
+                Ok(settings) => normalized_runtime_settings(settings),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "settings file is invalid; using fail-safe defaults"
+                    );
+                    Self::default()
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "settings file could not be read safely; using fail-safe defaults"
+                );
+                Self::default()
+            }
         }
     }
 
@@ -102,15 +207,20 @@ impl Settings {
     /// Returns `None` if the file doesn't exist. Returns an error only
     /// if the file exists but can't be parsed.
     pub fn load_toml(path: &std::path::Path) -> Result<Option<Self>, String> {
-        let data = match std::fs::read_to_string(path) {
+        let data = match thinclaw_platform::read_regular_file_bounded_single_link(
+            path,
+            MAX_SETTINGS_FILE_BYTES,
+        ) {
             Ok(d) => d,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(format!("failed to read {}: {}", path.display(), e)),
         };
 
-        let settings: Self = toml::from_str(&data)
+        let data = std::str::from_utf8(&data)
+            .map_err(|_| format!("invalid UTF-8 in {}", path.display()))?;
+        let settings: Self = toml::from_str(data)
             .map_err(|e| format!("invalid TOML in {}: {}", path.display(), e))?;
-        Ok(Some(settings))
+        Ok(Some(normalized_runtime_settings(settings)))
     }
 
     /// Write a well-commented TOML config file with current settings.
@@ -135,7 +245,7 @@ impl Settings {
                 .map_err(|e| format!("failed to create {}: {}", parent.display(), e))?;
         }
 
-        std::fs::write(path, content)
+        thinclaw_platform::write_private_file_atomic(path, content.as_bytes(), true)
             .map_err(|e| format!("failed to write {}: {}", path.display(), e))
     }
 
@@ -162,7 +272,7 @@ impl Settings {
         merge_non_default(&mut self_json, &other_json, &default_json);
 
         if let Ok(merged) = serde_json::from_value(self_json) {
-            *self = merged;
+            *self = normalized_runtime_settings(merged);
         }
     }
 
@@ -193,8 +303,18 @@ impl Settings {
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
         let parts: Vec<&str> = path.split('.').collect();
-        if parts.is_empty() {
-            return Err("Empty path".to_string());
+        if path.trim().is_empty()
+            || path.len() > MAX_SETTING_PATH_BYTES
+            || parts.len() > MAX_SETTING_PATH_COMPONENTS
+            || parts.iter().any(|part| {
+                part.is_empty()
+                    || part.len() > MAX_SETTING_COMPONENT_BYTES
+                    || part.chars().any(char::is_control)
+            })
+            || value.len() > MAX_SETTING_VALUE_BYTES
+            || value.contains('\0')
+        {
+            return Err("Setting path or value is malformed or oversized".to_string());
         }
 
         // Navigate to parent and set the final key
@@ -205,13 +325,13 @@ impl Settings {
                 .ok_or_else(|| format!("Path not found: {}", path))?;
         }
 
-        let final_key = parts.last().expect("parts is non-empty after split");
+        let final_key = parts[parts.len() - 1];
         let obj = current
             .as_object_mut()
             .ok_or_else(|| format!("Parent is not an object: {}", path))?;
 
         // Try to infer the type from the existing value
-        let new_value = if let Some(existing) = obj.get(*final_key) {
+        let new_value = if let Some(existing) = obj.get(final_key) {
             match existing {
                 serde_json::Value::Bool(_) => {
                     let b = value
@@ -276,14 +396,14 @@ impl Settings {
             serde_json::from_str(value).unwrap_or(serde_json::Value::String(value.to_string()))
         };
 
-        obj.insert((*final_key).to_string(), new_value.clone());
+        obj.insert(final_key.to_string(), new_value.clone());
 
         // Deserialize back to Settings.
         // If this fails and the value was inserted into a Null field as a Number
         // (e.g. "684480568" into an Option<String>), retry with String.
         match serde_json::from_value(json.clone()) {
             Ok(s) => {
-                *self = s;
+                *self = normalized_runtime_settings(s);
             }
             Err(e) => {
                 if matches!(new_value, serde_json::Value::Number(_)) {
@@ -291,18 +411,24 @@ impl Settings {
                     // Re-navigate to the parent and insert as String instead.
                     let mut cur = &mut json;
                     for part in &parts[..parts.len() - 1] {
-                        cur = cur.get_mut(*part).expect("path already validated");
+                        cur = cur
+                            .get_mut(*part)
+                            .ok_or_else(|| format!("Path disappeared while updating: {path}"))?;
                     }
-                    cur.as_object_mut().expect("parent is object").insert(
-                        (*final_key).to_string(),
-                        serde_json::Value::String(value.to_string()),
-                    );
-                    *self = serde_json::from_value(json).map_err(|e2| {
-                        format!(
-                            "Failed to apply setting: {} (also tried as string: {})",
-                            e, e2
-                        )
-                    })?;
+                    cur.as_object_mut()
+                        .ok_or_else(|| format!("Parent is not an object: {path}"))?
+                        .insert(
+                            final_key.to_string(),
+                            serde_json::Value::String(value.to_string()),
+                        );
+                    *self = normalized_runtime_settings(serde_json::from_value(json).map_err(
+                        |e2| {
+                            format!(
+                                "Failed to apply setting: {} (also tried as string: {})",
+                                e, e2
+                            )
+                        },
+                    )?);
                 } else {
                     return Err(format!("Failed to apply setting: {}", e));
                 }
@@ -333,5 +459,42 @@ impl Settings {
         collect_settings(&json, String::new(), &mut results);
         results.sort_by(|a, b| a.0.cmp(&b.0));
         results
+    }
+}
+
+#[cfg(test)]
+mod runtime_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn settings_file_load_normalizes_prompt_limits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        std::fs::write(
+            &path,
+            br#"{"prompt":{"safety_margin_percent":255,"max_total_tokens":9999999}}"#,
+        )
+        .unwrap();
+
+        let settings = Settings::load_from(&path);
+
+        assert_eq!(settings.prompt.safety_margin_percent, 25);
+        assert_eq!(settings.prompt.max_total_tokens, 256_000);
+    }
+
+    #[test]
+    fn excessive_db_setting_cardinality_fails_closed() {
+        let mut map = std::collections::HashMap::new();
+        for index in 0..=MAX_SETTINGS_DB_ENTRIES {
+            map.insert(format!("unknown.{index}"), serde_json::json!(index));
+        }
+        map.insert(
+            "prompt.safety_margin_percent".to_string(),
+            serde_json::json!(25),
+        );
+
+        let settings = Settings::from_db_map(&map);
+
+        assert_eq!(settings.prompt.safety_margin_percent, 10);
     }
 }

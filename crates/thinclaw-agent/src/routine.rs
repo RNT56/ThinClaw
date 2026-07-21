@@ -551,12 +551,30 @@ pub fn heartbeat_schedule_hint(interval_secs: u64) -> String {
     "0 * * * * * *".to_string()
 }
 
+/// Resolve an actor-specific timezone stored on the routine before falling
+/// back to the principal setting supplied by the scheduler.
+pub fn routine_timezone_setting<'a>(
+    routine: &'a Routine,
+    principal_setting: Option<&'a str>,
+) -> Option<&'a str> {
+    routine
+        .state
+        .get("user_timezone")
+        .and_then(|value| value.as_str())
+        .or(principal_setting)
+}
+
 /// Compute the next fire time for a routine from the provided base time.
 pub fn next_fire_for_routine(
     routine: &Routine,
     user_setting: Option<&str>,
     from: DateTime<Utc>,
 ) -> Result<Option<DateTime<Utc>>, RoutineError> {
+    // A routine may belong to an actor whose timezone differs from the
+    // household/principal default. Persist that timezone in routine state so
+    // every scheduler path (startup, completion, retry, update) makes the same
+    // decision instead of reverting to the engine-wide setting.
+    let user_setting = routine_timezone_setting(routine, user_setting);
     if let Some(interval_secs) = routine
         .action
         .heartbeat_interval_secs(Some(&routine.guardrails))
@@ -951,6 +969,51 @@ mod tests {
             .expect("interval next fire")
             .expect("interval should schedule");
         assert_eq!(next, base + ChronoDuration::minutes(90));
+    }
+
+    #[test]
+    fn test_next_fire_prefers_actor_timezone_persisted_on_routine() {
+        let base = Utc
+            .with_ymd_and_hms(2026, 4, 16, 23, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let routine = Routine {
+            id: Uuid::new_v4(),
+            name: "actor-morning".to_string(),
+            description: "actor-local wall clock".to_string(),
+            user_id: "household".to_string(),
+            actor_id: "alice".to_string(),
+            enabled: true,
+            trigger: Trigger::Cron {
+                schedule: "0 0 9 * * * *".to_string(),
+            },
+            action: RoutineAction::Lightweight {
+                prompt: "Morning check".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 256,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: NotifyConfig::default(),
+            policy: Default::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({ "user_timezone": "Asia/Tokyo" }),
+            config_version: 1,
+            created_at: base,
+            updated_at: base,
+        };
+
+        let next = next_fire_for_routine(&routine, Some("America/Los_Angeles"), base)
+            .expect("cron next fire")
+            .expect("cron should schedule");
+        assert_eq!(
+            next,
+            Utc.with_ymd_and_hms(2026, 4, 17, 0, 0, 0)
+                .single()
+                .expect("valid timestamp")
+        );
     }
 
     #[test]

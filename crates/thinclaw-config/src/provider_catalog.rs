@@ -6,11 +6,10 @@
 //! explicit base_url configuration; ThinClaw also works with additional
 //! env-configured OpenAI-compatible backends that are not in the catalog.
 //!
-//! ## Loading order
-//!
-//! 1. **Disk**: `registry/providers.json` resolved via CWD, executable
-//!    ancestors, then the workspace root relative to this crate.
-//! 2. **Embedded**: compiled-in copy from the workspace registry.
+//! The compiled-in catalog is authoritative. Loading endpoint metadata from
+//! the process working directory would let an unrelated checkout replace API
+//! origins and receive provider credentials. Operators can still configure
+//! additional OpenAI-compatible endpoints through the normal provider config.
 //!
 //! ## Usage
 //!
@@ -29,86 +28,18 @@ pub use thinclaw_runtime_contracts::{ApiStyle, ProviderEndpoint};
 ///
 /// The key is the **provider slug** (matches Provider Vault identifiers, UI
 /// identifiers, and the `providers.enabled` config values).
-///
-/// Loading order: disk `registry/providers.json` → embedded fallback.
 pub fn catalog() -> &'static HashMap<String, ProviderEndpoint> {
     use std::sync::LazyLock;
 
     static CATALOG: LazyLock<HashMap<String, ProviderEndpoint>> = LazyLock::new(|| {
-        // Try disk first.
-        if let Some(dir) = find_registry_dir() {
-            let path = dir.join("providers.json");
-            if let Ok(contents) = std::fs::read_to_string(&path) {
-                match serde_json::from_str::<Vec<ProviderEndpoint>>(&contents) {
-                    Ok(entries) if !entries.is_empty() => {
-                        tracing::info!(
-                            path = %path.display(),
-                            count = entries.len(),
-                            "Loaded provider catalog from registry"
-                        );
-                        return entries.into_iter().map(|e| (e.slug.clone(), e)).collect();
-                    }
-                    Ok(_) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            "Registry providers.json was empty, using embedded fallback"
-                        );
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %err,
-                            "Failed to parse registry providers.json, using embedded fallback"
-                        );
-                    }
-                }
-            }
-        }
-
-        // Embedded fallback.
         let fallback = include_str!("../../../registry/providers.json");
         let entries: Vec<ProviderEndpoint> =
             serde_json::from_str(fallback).expect("embedded providers_catalog.json must be valid");
-        tracing::info!(
-            count = entries.len(),
-            "Loaded embedded provider catalog fallback"
-        );
+        tracing::info!(count = entries.len(), "Loaded embedded provider catalog");
         entries.into_iter().map(|e| (e.slug.clone(), e)).collect()
     });
 
     &CATALOG
-}
-
-fn find_registry_dir() -> Option<std::path::PathBuf> {
-    if let Ok(cwd) = std::env::current_dir() {
-        let candidate = cwd.join("registry");
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        let mut dir = Some(parent);
-        for _ in 0..3 {
-            if let Some(d) = dir {
-                let candidate = d.join("registry");
-                if candidate.is_dir() {
-                    return Some(candidate);
-                }
-                dir = d.parent();
-            }
-        }
-    }
-
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let candidate = manifest_dir.join("../../registry");
-    if candidate.is_dir() {
-        return Some(candidate);
-    }
-
-    None
 }
 
 /// Look up a provider's endpoint configuration by its slug.

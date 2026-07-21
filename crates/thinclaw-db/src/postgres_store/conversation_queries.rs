@@ -446,13 +446,56 @@ impl Store {
                        metadata, created_at
                 FROM conversation_messages
                 WHERE conversation_id = $1
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, id ASC
                 "#,
                 &[&conversation_id],
             )
             .await?;
 
         Ok(rows.iter().map(conversation_message_from_row).collect())
+    }
+
+    /// Load a stable bounded slice of the append-only message log.
+    pub async fn list_conversation_messages_window(
+        &self,
+        conversation_id: Uuid,
+        start_row: i64,
+        limit: i64,
+    ) -> Result<Vec<ConversationMessage>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, role, content, actor_id, actor_display_name, raw_sender_id,
+                       metadata, created_at
+                FROM conversation_messages
+                WHERE conversation_id = $1
+                ORDER BY created_at ASC, id ASC
+                LIMIT $2 OFFSET $3
+                "#,
+                &[&conversation_id, &limit, &start_row.max(0)],
+            )
+            .await?;
+
+        Ok(rows.iter().map(conversation_message_from_row).collect())
+    }
+
+    pub async fn count_conversation_messages(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?;
+        Ok(row.get::<_, i64>(0).max(0))
     }
 
     /// Search conversation messages for a user across transcripts.

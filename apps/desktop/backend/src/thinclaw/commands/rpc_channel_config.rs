@@ -84,47 +84,75 @@ pub async fn thinclaw_channel_config_submit(
     let obj = values.as_object().cloned().ok_or_else(|| {
         crate::thinclaw::bridge::BridgeError::from("channel config must be a JSON object")
     })?;
+    if channel_id.trim().is_empty()
+        || channel_id.len() > 128
+        || channel_id.chars().any(char::is_control)
+        || obj.len() > 256
+    {
+        return Err(crate::thinclaw::bridge::BridgeError::from(
+            "channel config target is malformed or oversized",
+        ));
+    }
 
-    if let Some(schema) = agent.channels().config_schema_for(&channel_id).await {
-        for (field_id, value) in &obj {
-            let field = schema
-                .fields
-                .iter()
-                .find(|field| field.id == *field_id)
-                .ok_or_else(|| {
-                    crate::thinclaw::bridge::BridgeError::from(format!(
-                        "unknown channel config field: {field_id}"
-                    ))
-                })?;
-            let required_value_missing = field.required
-                && (value.is_null() || value.as_str().is_some_and(|value| value.trim().is_empty()));
-            let value_valid = (!field.required && value.is_null())
-                || match field.field_type.as_str() {
-                    "text" | "password" | "textarea" => value.is_string(),
-                    "number" => value.is_number(),
-                    "checkbox" => value.is_boolean(),
-                    "select" => value.as_str().is_some_and(|value| {
-                        field.options.as_ref().is_some_and(|options| {
-                            options.iter().any(|option| option.value == value)
-                        })
-                    }),
-                    _ => false,
-                };
-            if required_value_missing || !value_valid {
-                return Err(crate::thinclaw::bridge::BridgeError::from(format!(
-                    "invalid value for channel config field: {field_id}"
-                )));
-            }
+    let schema = agent
+        .channels()
+        .config_schema_for(&channel_id)
+        .await
+        .ok_or_else(|| {
+            crate::thinclaw::bridge::BridgeError::from("channel does not expose a config schema")
+        })?;
+    for (field_id, value) in &obj {
+        let field = schema
+            .fields
+            .iter()
+            .find(|field| field.id == *field_id)
+            .ok_or_else(|| {
+                crate::thinclaw::bridge::BridgeError::from(format!(
+                    "unknown channel config field: {field_id}"
+                ))
+            })?;
+        if field.field_type == "password" {
+            return Err(crate::thinclaw::bridge::BridgeError::from(
+                "password fields require an encrypted channel-secret binding",
+            ));
+        }
+        let required_value_missing = field.required
+            && (value.is_null() || value.as_str().is_some_and(|value| value.trim().is_empty()));
+        let value_valid = (!field.required && value.is_null())
+            || match field.field_type.as_str() {
+                "text" | "password" | "textarea" => value.is_string(),
+                "number" => value.is_number(),
+                "checkbox" => value.is_boolean(),
+                "select" => value.as_str().is_some_and(|value| {
+                    field
+                        .options
+                        .as_ref()
+                        .is_some_and(|options| options.iter().any(|option| option.value == value))
+                }),
+                _ => false,
+            };
+        if required_value_missing || !value_valid {
+            return Err(crate::thinclaw::bridge::BridgeError::from(format!(
+                "invalid value for channel config field: {field_id}"
+            )));
         }
     }
 
-    // Persist each submitted field under channels.{channel_id}_{field}.
+    // Persist the submitted fields atomically under channels.{channel_id}_{field}.
     let mut persisted = false;
     if let Some(store) = agent.store() {
+        let mut settings = std::collections::HashMap::with_capacity(obj.len());
         for (field, val) in &obj {
             let key = format!("channels.{channel_id}_{field}");
-            let _ = thinclaw_core::api::config::set_setting(store, "local_user", &key, val).await;
+            settings.insert(key, val.clone());
         }
+        thinclaw_core::api::config::import_settings(store, "local_user", &settings)
+            .await
+            .map_err(|error| {
+                crate::thinclaw::bridge::BridgeError::from(format!(
+                    "failed to persist channel config: {error}"
+                ))
+            })?;
         persisted = true;
     }
 

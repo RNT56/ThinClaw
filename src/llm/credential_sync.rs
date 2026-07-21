@@ -353,13 +353,18 @@ fn load_source_token(source: &ResolvedOAuthSource) -> Result<Option<String>, Str
                 .path
                 .as_ref()
                 .ok_or_else(|| format!("{} source is missing a file path", source.label))?;
-            if !path.is_file() {
-                return Ok(None);
-            }
-            let raw = std::fs::read_to_string(path)
-                .map_err(|error| format!("failed to read '{}': {}", path.display(), error))?;
-            let value: Value = serde_json::from_str(&raw)
-                .map_err(|error| format!("invalid JSON in '{}': {}", path.display(), error))?;
+            let raw = match thinclaw_platform::read_regular_file_bounded_single_link(
+                path,
+                4 * 1024 * 1024,
+            ) {
+                Ok(raw) => raw,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => {
+                    return Err(format!("failed to read OAuth credential source: {error}"));
+                }
+            };
+            let value: Value = serde_json::from_slice(&raw)
+                .map_err(|error| format!("invalid OAuth credential JSON: {error}"))?;
             Ok(extract_token_from_json(
                 &value,
                 source.json_pointer.as_deref(),

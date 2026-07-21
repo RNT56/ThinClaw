@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -30,10 +30,97 @@ use crate::context::JobContext;
 use crate::tools::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};
 
 fn default_audio_recording_path(extension: &str) -> PathBuf {
-    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
     crate::platform::state_paths()
         .audio_dir
-        .join(format!("recording_{ts}.{extension}"))
+        .join(format!("recording_{}.{extension}", uuid::Uuid::new_v4()))
+}
+
+async fn ensure_audio_parent(path: &std::path::Path) -> Result<(), ToolError> {
+    let parent = path.parent().ok_or_else(|| {
+        ToolError::ExecutionFailed("Audio recording path has no parent directory".to_string())
+    })?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|error| ToolError::ExecutionFailed(format!("Create audio directory: {error}")))?;
+    let metadata = tokio::fs::symlink_metadata(parent)
+        .await
+        .map_err(|error| ToolError::ExecutionFailed(format!("Inspect audio directory: {error}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ToolError::ExecutionFailed(
+            "Audio recording directory is not a real directory".to_string(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .await
+            .map_err(|error| {
+                ToolError::ExecutionFailed(format!("Secure audio directory: {error}"))
+            })?;
+    }
+    Ok(())
+}
+
+fn resolve_audio_executable(binary: &str) -> Result<PathBuf, ToolError> {
+    let path = thinclaw_platform::find_executable_in_path(binary)
+        .ok_or_else(|| ToolError::ExecutionFailed(format!("{binary} is not installed")))?
+        .canonicalize()
+        .map_err(|error| {
+            ToolError::ExecutionFailed(format!("Could not resolve {binary}: {error}"))
+        })?;
+    let metadata = std::fs::metadata(&path).map_err(|error| {
+        ToolError::ExecutionFailed(format!("Could not inspect {binary}: {error}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(ToolError::ExecutionFailed(format!(
+            "{binary} is not a regular file"
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(ToolError::ExecutionFailed(format!(
+                "{binary} is not executable"
+            )));
+        }
+    }
+    Ok(path)
+}
+
+async fn run_audio_command(
+    binary: &str,
+    args: &[std::ffi::OsString],
+    timeout: Duration,
+) -> Result<thinclaw_platform::BoundedProcessOutput, ToolError> {
+    let executable = resolve_audio_executable(binary)?;
+    let mut command = Command::new(executable);
+    command.args(args);
+    thinclaw_platform::bounded_command_output(&mut command, timeout, 64 * 1024, 256 * 1024)
+        .await
+        .map_err(|error| match error {
+            thinclaw_platform::BoundedProcessError::Timeout(_) => ToolError::Timeout(timeout),
+            thinclaw_platform::BoundedProcessError::OutputLimit { .. } => {
+                ToolError::ExecutionFailed(format!("{binary} produced too much output"))
+            }
+            other => ToolError::ExecutionFailed(format!("Could not run {binary}: {other}")),
+        })
+}
+
+fn safe_audio_diagnostic(bytes: &[u8]) -> String {
+    let diagnostic = String::from_utf8_lossy(bytes);
+    let mut safe = diagnostic
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
+        .take(4096)
+        .collect::<String>();
+    safe = safe.trim().to_string();
+    if safe.is_empty() {
+        "no diagnostic output".to_string()
+    } else {
+        safe
+    }
 }
 
 /// Talk mode configuration.
@@ -87,7 +174,7 @@ impl AudioFormat {
 }
 
 /// Transcription backend.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum TranscriptionBackend {
     /// OpenAI Whisper API (cloud).
     WhisperApi,
@@ -106,6 +193,25 @@ pub enum TranscriptionBackend {
     #[cfg(target_os = "macos")]
     #[allow(dead_code)]
     MacOsDictation,
+}
+
+impl std::fmt::Debug for TranscriptionBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WhisperApi => formatter.write_str("WhisperApi"),
+            Self::WhisperHttp { token, .. } => formatter
+                .debug_struct("WhisperHttp")
+                .field("endpoint", &"[REDACTED URL]")
+                .field("token", &token.as_ref().map(|_| "[REDACTED]"))
+                .finish(),
+            Self::WhisperLocal { model_path } => formatter
+                .debug_struct("WhisperLocal")
+                .field("model_path", model_path)
+                .finish(),
+            #[cfg(target_os = "macos")]
+            Self::MacOsDictation => formatter.write_str("MacOsDictation"),
+        }
+    }
 }
 
 impl TranscriptionBackend {
@@ -186,23 +292,23 @@ impl TalkModeRuntime {
 
     /// Start recording audio.
     pub async fn start_recording(&self) -> Result<PathBuf, String> {
-        if self.recording.load(Ordering::Relaxed) {
+        if self
+            .recording
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return Err("Already recording".to_string());
         }
 
-        self.recording.store(true, Ordering::Relaxed);
-        let _ = self.status_tx.send(true);
-        let _ = self.event_tx.send(TalkModeEvent::RecordingStarted).await;
-
         let ext = self.config.audio_format.extension();
         let path = default_audio_recording_path(ext);
-
-        // Ensure directory exists
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("Create audio dir: {e}"))?;
+        if let Err(error) = ensure_audio_parent(&path).await {
+            self.recording.store(false, Ordering::Release);
+            let _ = self.status_tx.send(false);
+            return Err(error.to_string());
         }
+        let _ = self.status_tx.send(true);
+        let _ = self.event_tx.send(TalkModeEvent::RecordingStarted).await;
 
         Ok(path)
     }
@@ -240,59 +346,56 @@ async fn record_audio(
     sample_rate: u32,
     _device_name: Option<&str>,
 ) -> Result<(), ToolError> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Create audio dir: {e}")))?;
-    }
+    ensure_audio_parent(path).await?;
+    let timeout = Duration::from_secs(u64::from(duration_secs).saturating_add(30));
+    let sample_rate = sample_rate.to_string();
+    let duration_secs = duration_secs.to_string();
 
     // Try SoX `rec` first
-    let sox = Command::new("rec")
-        .args([
-            "-r",
-            &sample_rate.to_string(),
-            "-c",
-            "1",
-            "-b",
-            "16",
-            &path.to_string_lossy(),
-            "trim",
-            "0",
-            &duration_secs.to_string(),
-        ])
-        .output()
-        .await;
-
-    if let Ok(output) = sox
-        && output.status.success()
-    {
-        return Ok(());
-    }
+    let sox_args = vec![
+        "-r".into(),
+        sample_rate.clone().into(),
+        "-c".into(),
+        "1".into(),
+        "-b".into(),
+        "16".into(),
+        path.as_os_str().to_owned(),
+        "trim".into(),
+        "0".into(),
+        duration_secs.clone().into(),
+    ];
+    let sox_error = match run_audio_command("rec", &sox_args, timeout).await {
+        Ok(output) if output.status.success() => return Ok(()),
+        Ok(output) => safe_audio_diagnostic(&output.stderr),
+        Err(error) => error.to_string(),
+    };
 
     // Fallback to ffmpeg
-    let ffmpeg = Command::new("ffmpeg")
-        .args([
-            "-f",
-            "avfoundation",
-            "-i",
-            ":0",
-            "-ar",
-            &sample_rate.to_string(),
-            "-ac",
-            "1",
-            "-t",
-            &duration_secs.to_string(),
-            "-y",
-            &path.to_string_lossy(),
-        ])
-        .output()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("ffmpeg: {e}")))?;
+    let ffmpeg_args = vec![
+        "-nostdin".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-f".into(),
+        "avfoundation".into(),
+        "-i".into(),
+        ":0".into(),
+        "-ar".into(),
+        sample_rate.into(),
+        "-ac".into(),
+        "1".into(),
+        "-t".into(),
+        duration_secs.into(),
+        "-y".into(),
+        path.as_os_str().to_owned(),
+    ];
+    let ffmpeg = run_audio_command("ffmpeg", &ffmpeg_args, timeout).await?;
 
     if !ffmpeg.status.success() {
-        return Err(ToolError::ExecutionFailed(
-            "Audio recording failed. Install SoX or ffmpeg.".to_string(),
-        ));
+        return Err(ToolError::ExecutionFailed(format!(
+            "Audio recording failed with both SoX ({sox_error}) and ffmpeg ({})",
+            safe_audio_diagnostic(&ffmpeg.stderr)
+        )));
     }
 
     Ok(())
@@ -398,43 +501,45 @@ async fn record_audio(
     sample_rate: u32,
     device_name: Option<&str>,
 ) -> Result<(), ToolError> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Create audio dir: {e}")))?;
-    }
+    ensure_audio_parent(path).await?;
 
     let backend = LinuxMicrophoneBackend::from_env().map_err(ToolError::ExecutionFailed)?;
+    let timeout = Duration::from_secs(u64::from(duration_secs).saturating_add(30));
     let sample_rate = sample_rate.to_string();
     let duration_secs = duration_secs.to_string();
-    let output_path = path.to_string_lossy().to_string();
     let mut attempted = Vec::new();
 
     for input in linux_audio_inputs(backend, device_name) {
-        let ffmpeg = Command::new("ffmpeg")
-            .args([
-                "-f",
-                input.format,
-                "-i",
-                &input.input,
-                "-ar",
-                &sample_rate,
-                "-ac",
-                "1",
-                "-t",
-                &duration_secs,
-                "-y",
-                &output_path,
-            ])
-            .output()
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("ffmpeg: {e}")))?;
+        if input.input.is_empty() || input.input.len() > 512 {
+            return Err(ToolError::InvalidParameters(
+                "Microphone device name is empty or too long".to_string(),
+            ));
+        }
+        let args = vec![
+            "-nostdin".into(),
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-f".into(),
+            input.format.into(),
+            "-i".into(),
+            input.input.clone().into(),
+            "-ar".into(),
+            sample_rate.clone().into(),
+            "-ac".into(),
+            "1".into(),
+            "-t".into(),
+            duration_secs.clone().into(),
+            "-y".into(),
+            path.as_os_str().to_owned(),
+        ];
+        let ffmpeg = run_audio_command("ffmpeg", &args, timeout).await?;
 
         if ffmpeg.status.success() {
             return Ok(());
         }
-        let stderr = String::from_utf8_lossy(&ffmpeg.stderr).trim().to_string();
-        attempted.push(if stderr.is_empty() {
+        let stderr = safe_audio_diagnostic(&ffmpeg.stderr);
+        attempted.push(if stderr == "no diagnostic output" {
             format!(
                 "{} input '{}' exited with {}",
                 input.label, input.input, ffmpeg.status
@@ -453,19 +558,17 @@ async fn record_audio(
 /// Record audio on Windows.
 #[cfg(target_os = "windows")]
 async fn list_windows_audio_devices() -> Result<Vec<String>, ToolError> {
-    let output = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-list_devices",
-            "true",
-            "-f",
-            "dshow",
-            "-i",
-            "dummy",
-        ])
-        .output()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("ffmpeg: {e}")))?;
+    let args = vec![
+        "-nostdin".into(),
+        "-hide_banner".into(),
+        "-list_devices".into(),
+        "true".into(),
+        "-f".into(),
+        "dshow".into(),
+        "-i".into(),
+        "dummy".into(),
+    ];
+    let output = run_audio_command("ffmpeg", &args, Duration::from_secs(15)).await?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let mut devices = Vec::new();
@@ -483,7 +586,10 @@ async fn list_windows_audio_devices() -> Result<Vec<String>, ToolError> {
             && let Some(start) = trimmed.find('"')
             && let Some(end) = trimmed[start + 1..].find('"')
         {
-            devices.push(trimmed[start + 1..start + 1 + end].to_string());
+            let device = &trimmed[start + 1..start + 1 + end];
+            if !device.is_empty() && device.len() <= 512 {
+                devices.push(device.to_string());
+            }
         }
     }
     if devices.is_empty() {
@@ -501,11 +607,7 @@ async fn record_audio(
     sample_rate: u32,
     device_name: Option<&str>,
 ) -> Result<(), ToolError> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Create audio dir: {e}")))?;
-    }
+    ensure_audio_parent(path).await?;
 
     let device = if let Some(device) = device_name.filter(|value| !value.trim().is_empty()) {
         device.to_string()
@@ -515,29 +617,37 @@ async fn record_audio(
         let mut devices = list_windows_audio_devices().await?;
         devices.remove(0)
     };
+    if device.len() > 512 {
+        return Err(ToolError::InvalidParameters(
+            "Microphone device name is too long".to_string(),
+        ));
+    }
 
-    let ffmpeg = Command::new("ffmpeg")
-        .args([
-            "-f",
-            "dshow",
-            "-i",
-            &format!("audio={device}"),
-            "-ar",
-            &sample_rate.to_string(),
-            "-ac",
-            "1",
-            "-t",
-            &duration_secs.to_string(),
-            "-y",
-            &path.to_string_lossy(),
-        ])
-        .output()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("ffmpeg: {e}")))?;
+    let args = vec![
+        "-nostdin".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-f".into(),
+        "dshow".into(),
+        "-i".into(),
+        format!("audio={device}").into(),
+        "-ar".into(),
+        sample_rate.to_string().into(),
+        "-ac".into(),
+        "1".into(),
+        "-t".into(),
+        duration_secs.to_string().into(),
+        "-y".into(),
+        path.as_os_str().to_owned(),
+    ];
+    let timeout = Duration::from_secs(u64::from(duration_secs).saturating_add(30));
+    let ffmpeg = run_audio_command("ffmpeg", &args, timeout).await?;
 
     if !ffmpeg.status.success() {
         return Err(ToolError::ExecutionFailed(format!(
-            "Audio recording failed for Windows device '{device}'. Install ffmpeg or set THINCLAW_MICROPHONE_DEVICE/device_name to a valid DirectShow microphone."
+            "Audio recording failed for the selected Windows device: {}",
+            safe_audio_diagnostic(&ffmpeg.stderr)
         )));
     }
 
@@ -550,11 +660,21 @@ async fn transcribe_whisper_api(
     api_key: &str,
     language: &str,
 ) -> Result<String, ToolError> {
-    let client = reqwest::Client::new();
+    if api_key.trim().is_empty() || api_key.len() > 4096 {
+        return Err(ToolError::ExecutionFailed(
+            "OpenAI API credential is empty or too long".to_string(),
+        ));
+    }
+    validate_language(language)?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(5 * 60))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(|error| ToolError::ExternalService(format!("Build Whisper client: {error}")))?;
 
-    let file_bytes = tokio::fs::read(path)
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("Read audio file: {e}")))?;
+    let file_bytes = read_bounded_audio(path).await?;
 
     let file_name = path
         .file_name()
@@ -565,7 +685,7 @@ async fn transcribe_whisper_api(
     let part = reqwest::multipart::Part::bytes(file_bytes)
         .file_name(file_name)
         .mime_str("audio/wav")
-        .expect("valid MIME type");
+        .map_err(|error| ToolError::ExecutionFailed(format!("Invalid audio MIME type: {error}")))?;
 
     let form = reqwest::multipart::Form::new()
         .part("file", part)
@@ -578,27 +698,25 @@ async fn transcribe_whisper_api(
         .multipart(form)
         .send()
         .await
-        .map_err(|e| ToolError::ExternalService(format!("Whisper API: {e}")))?;
+        .map_err(|e| ToolError::ExternalService(format!("Whisper API: {}", e.without_url())))?;
 
     if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
         return Err(ToolError::ExternalService(format!(
-            "Whisper API error: {body}"
+            "Whisper API returned HTTP {}",
+            resp.status()
         )));
     }
 
-    let body: serde_json::Value = resp
-        .json()
+    let body: serde_json::Value = crate::http_response::bounded_json(resp, 1024 * 1024)
         .await
         .map_err(|e| ToolError::ExternalService(format!("Parse Whisper response: {e}")))?;
 
-    let text = body
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    Ok(text)
+    validate_http_transcript(
+        body.get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    )
 }
 
 /// Transcribe audio via a local whisper HTTP sidecar.
@@ -613,13 +731,20 @@ async fn transcribe_whisper_http(
     path: &std::path::Path,
     endpoint: &str,
     token: Option<&str>,
+    model: &str,
     language: &str,
 ) -> Result<String, ToolError> {
-    let client = reqwest::Client::new();
-
-    let file_bytes = tokio::fs::read(path)
+    validate_language(language)?;
+    if model.is_empty() || model.len() > 256 {
+        return Err(ToolError::ExecutionFailed(
+            "Whisper model identifier is empty or too long".to_string(),
+        ));
+    }
+    let (client, endpoint) = crate::media::guarded_whisper_http_client(endpoint)
         .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("Read audio file: {e}")))?;
+        .map_err(ToolError::NotAuthorized)?;
+
+    let file_bytes = read_bounded_audio(path).await?;
 
     let file_name = path
         .file_name()
@@ -630,11 +755,11 @@ async fn transcribe_whisper_http(
     let part = reqwest::multipart::Part::bytes(file_bytes)
         .file_name(file_name)
         .mime_str("audio/wav")
-        .expect("valid MIME type");
+        .map_err(|error| ToolError::ExecutionFailed(format!("Invalid audio MIME type: {error}")))?;
 
     let form = reqwest::multipart::Form::new()
         .part("file", part)
-        .text("model", "whisper-1")
+        .text("model", model.to_string())
         .text("language", language.to_string());
 
     let mut request = client.post(endpoint).multipart(form);
@@ -643,30 +768,77 @@ async fn transcribe_whisper_http(
         request = request.bearer_auth(tok);
     }
 
-    let resp = request
-        .send()
-        .await
-        .map_err(|e| ToolError::ExternalService(format!("Whisper HTTP sidecar: {e}")))?;
+    let resp = request.send().await.map_err(|e| {
+        ToolError::ExternalService(format!("Whisper HTTP sidecar: {}", e.without_url()))
+    })?;
 
     if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
         return Err(ToolError::ExternalService(format!(
-            "Whisper HTTP sidecar error ({}): {}",
-            endpoint, body
+            "Whisper HTTP sidecar returned HTTP {}",
+            resp.status()
         )));
     }
 
-    let body: serde_json::Value = resp
-        .json()
+    let body: serde_json::Value = crate::http_response::bounded_json(resp, 1024 * 1024)
         .await
         .map_err(|e| ToolError::ExternalService(format!("Parse whisper response: {e}")))?;
 
-    let text = body
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    validate_http_transcript(
+        body.get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    )
+}
 
+async fn read_bounded_audio(path: &std::path::Path) -> Result<Vec<u8>, ToolError> {
+    const MAX_AUDIO_BYTES: u64 = 25 * 1024 * 1024;
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|error| ToolError::ExecutionFailed(format!("Inspect audio file: {error}")))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_AUDIO_BYTES
+    {
+        return Err(ToolError::ExecutionFailed(
+            "Recorded audio must be a non-empty regular file no larger than 25 MiB".to_string(),
+        ));
+    }
+    thinclaw_platform::read_regular_file_bounded_single_link_async(
+        path.to_path_buf(),
+        MAX_AUDIO_BYTES,
+    )
+    .await
+    .map_err(|error| ToolError::ExecutionFailed(format!("Read audio file: {error}")))
+}
+
+fn validate_language(language: &str) -> Result<(), ToolError> {
+    if language.is_empty()
+        || language.len() > 35
+        || !language
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(ToolError::InvalidParameters(
+            "language must be a short BCP-47-style tag".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_http_transcript(text: String) -> Result<String, ToolError> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err(ToolError::ExternalService(
+            "Whisper returned an empty transcript".to_string(),
+        ));
+    }
+    if text.len() > 512 * 1024 {
+        return Err(ToolError::ExternalService(
+            "Whisper transcript exceeds the 512 KiB limit".to_string(),
+        ));
+    }
     Ok(text)
 }
 
@@ -702,30 +874,42 @@ pub async fn capture_and_transcribe(
     device_name: Option<&str>,
 ) -> Result<String, ToolError> {
     let duration = duration_seconds.min(120);
+    validate_language(language)?;
     let path = default_audio_recording_path("wav");
-    record_audio(&path, duration, 16000, device_name).await?;
+    let result = async {
+        record_audio(&path, duration, 16000, device_name).await?;
 
-    let text = if let Some(whisper_url) =
-        crate::config::helpers::optional_env("WHISPER_HTTP_ENDPOINT")
+        if let Some(whisper_url) = crate::config::helpers::optional_env("WHISPER_HTTP_ENDPOINT")
             .ok()
             .flatten()
-    {
-        let token = std::env::var("WHISPER_HTTP_TOKEN").ok();
-        transcribe_whisper_http(&path, &whisper_url, token.as_deref(), language).await?
-    } else {
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-            ToolError::ExecutionFailed(
-                "No OpenAI API key or WHISPER_HTTP_ENDPOINT found. \
+        {
+            let token = crate::config::helpers::optional_env("WHISPER_HTTP_TOKEN")
+                .ok()
+                .flatten();
+            let model = crate::config::helpers::optional_env("WHISPER_HTTP_MODEL")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "whisper-1".to_string());
+            transcribe_whisper_http(&path, &whisper_url, token.as_deref(), &model, language).await
+        } else {
+            let api_key = crate::config::helpers::optional_env("OPENAI_API_KEY")
+                .ok()
+                .flatten()
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(
+                        "No OpenAI API key or WHISPER_HTTP_ENDPOINT found. \
                  Set OPENAI_API_KEY for cloud Whisper or WHISPER_HTTP_ENDPOINT \
                  for local sidecar transcription."
-                    .to_string(),
-            )
-        })?;
-        transcribe_whisper_api(&path, &api_key, language).await?
-    };
+                            .to_string(),
+                    )
+                })?;
+            transcribe_whisper_api(&path, &api_key, language).await
+        }
+    }
+    .await;
 
     let _ = tokio::fs::remove_file(&path).await;
-    Ok(text)
+    result
 }
 
 #[async_trait]

@@ -21,6 +21,34 @@ use crate::tools::wasm::{
     compute_binary_hash,
 };
 
+const MAX_TOOL_WASM_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TOOL_CAPABILITIES_BYTES: u64 = 1024 * 1024;
+const MAX_TOOL_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_TOOL_DIRECTORY_ENTRIES: usize = 4096;
+
+fn validate_tool_name(name: &str, allow_protected: bool) -> anyhow::Result<()> {
+    let valid = !name.is_empty()
+        && name.len() <= 128
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        });
+    if !valid {
+        anyhow::bail!(
+            "tool name must contain only lowercase ASCII letters, digits, hyphens, or underscores"
+        );
+    }
+    if !allow_protected && thinclaw_tools::registry::PROTECTED_TOOL_NAMES.contains(&name) {
+        anyhow::bail!("tool name conflicts with a protected built-in tool");
+    }
+    Ok(())
+}
+
+async fn read_bounded_file(path: &Path, max_bytes: u64, label: &str) -> anyhow::Result<Vec<u8>> {
+    thinclaw_platform::read_regular_file_bounded_single_link_async(path.to_path_buf(), max_bytes)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to read {label}: {error}"))
+}
+
 /// Default tools directory.
 fn default_tools_dir() -> PathBuf {
     crate::platform::state_paths().tools_dir
@@ -149,7 +177,10 @@ async fn install_tool(
     let target_dir = target.unwrap_or_else(default_tools_dir);
 
     // Determine if path is a directory (source) or .wasm file
-    let metadata = fs::metadata(&path).await?;
+    let metadata = fs::symlink_metadata(&path).await?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("tool source must not be a symlink");
+    }
 
     let (wasm_path, tool_name, caps_path) = if metadata.is_dir() {
         // Source directory, need to build
@@ -180,7 +211,7 @@ async fn install_tool(
                     )
                 })?
         } else {
-            crate::registry::artifacts::build_wasm_component_sync(&path, release)?
+            crate::registry::artifacts::build_wasm_component(&path, &tool_name, release).await?
         };
 
         // Look for capabilities file
@@ -220,44 +251,61 @@ async fn install_tool(
             path.display()
         );
     };
+    validate_tool_name(&tool_name, false)?;
 
     // Ensure target directory exists
     fs::create_dir_all(&target_dir).await?;
+    let target_metadata = fs::symlink_metadata(&target_dir).await?;
+    if target_metadata.file_type().is_symlink() || !target_metadata.is_dir() {
+        anyhow::bail!("tool installation target is not a real directory");
+    }
 
     // Target paths
     let target_wasm = target_dir.join(format!("{}.wasm", tool_name));
     let target_caps = target_dir.join(format!("{}.capabilities.json", tool_name));
 
-    // Check if already exists
-    if target_wasm.exists() && !force {
-        anyhow::bail!(
-            "Tool '{}' already exists at {}. Use --force to overwrite.",
-            tool_name,
-            target_wasm.display()
-        );
+    let wasm_bytes = read_bounded_file(&wasm_path, MAX_TOOL_WASM_BYTES, "WASM tool").await?;
+    if wasm_bytes.len() < 8 || !wasm_bytes.starts_with(b"\0asm") {
+        anyhow::bail!("tool input is not a valid-looking WebAssembly module");
     }
+    let caps_bytes = if let Some(ref caps) = caps_path {
+        let bytes =
+            read_bounded_file(caps, MAX_TOOL_CAPABILITIES_BYTES, "tool capabilities").await?;
+        CapabilitiesFile::from_bytes(&bytes)
+            .map_err(|error| anyhow::anyhow!("invalid tool capabilities: {error}"))?;
+        Some(bytes)
+    } else {
+        None
+    };
 
-    // Validate capabilities file if provided
-    if let Some(ref caps) = caps_path {
-        let content = fs::read_to_string(caps).await?;
-        CapabilitiesFile::from_json(&content)
-            .map_err(|e| anyhow::anyhow!("Invalid capabilities file {}: {}", caps.display(), e))?;
-    }
-
-    // Copy WASM file
     println!("Installing {} to {}", tool_name, target_wasm.display());
-    fs::copy(&wasm_path, &target_wasm).await?;
+    thinclaw_platform::publish_file_pair(
+        target_wasm.clone(),
+        target_caps.clone(),
+        wasm_bytes.clone(),
+        caps_bytes.clone(),
+        if force {
+            thinclaw_platform::ExistingPairPolicy::Replace
+        } else {
+            thinclaw_platform::ExistingPairPolicy::Refuse
+        },
+    )
+    .await
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            anyhow::anyhow!("tool already exists; use --force to replace it")
+        } else {
+            anyhow::anyhow!("failed to publish tool package: {error}")
+        }
+    })?;
 
-    // Copy capabilities file if present
-    if let Some(caps) = caps_path {
-        println!("  Copying capabilities from {}", caps.display());
-        fs::copy(&caps, &target_caps).await?;
+    if caps_bytes.is_some() {
+        println!("  Installed validated capabilities");
     } else {
         println!("  Warning: No capabilities file found. Tool will have no permissions.");
     }
 
     // Calculate and display hash
-    let wasm_bytes = fs::read(&target_wasm).await?;
     let hash = compute_binary_hash(&wasm_bytes);
     let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
 
@@ -267,7 +315,7 @@ async fn install_tool(
     println!("  Size: {} bytes", wasm_bytes.len());
     println!("  Hash: {}", &hash_hex[..16]); // Show first 16 chars
 
-    if target_caps.exists() {
+    if caps_bytes.is_some() {
         println!("  Caps: {}", target_caps.display());
     }
 
@@ -276,23 +324,14 @@ async fn install_tool(
 
 /// Extract crate name from Cargo.toml.
 async fn extract_crate_name(cargo_toml: &Path) -> anyhow::Result<String> {
-    let content = fs::read_to_string(cargo_toml).await?;
-
-    // Simple TOML parsing for [package] name
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with("name")
-            && let Some((_, value)) = line.split_once('=')
-        {
-            let name = value.trim().trim_matches('"').trim_matches('\'');
-            return Ok(name.to_string());
-        }
-    }
-
-    anyhow::bail!(
-        "Could not extract package name from {}",
-        cargo_toml.display()
-    )
+    let content = read_bounded_file(cargo_toml, MAX_TOOL_MANIFEST_BYTES, "Cargo manifest").await?;
+    let manifest: toml::Value = toml::from_str(std::str::from_utf8(&content)?)?;
+    manifest
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("Cargo manifest has no package.name"))
 }
 
 /// List installed tools.
@@ -304,13 +343,23 @@ async fn list_tools(dir: Option<PathBuf>, verbose: bool) -> anyhow::Result<()> {
         println!("Install a tool with: thinclaw tool install <path>");
         return Ok(());
     }
+    let directory_metadata = fs::symlink_metadata(&tools_dir).await?;
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        anyhow::bail!("tools path is not a real directory");
+    }
 
     let mut entries = fs::read_dir(&tools_dir).await?;
     let mut tools = Vec::new();
+    let mut entries_seen = 0_usize;
 
     while let Some(entry) = entries.next_entry().await? {
+        entries_seen = entries_seen.saturating_add(1);
+        if entries_seen > MAX_TOOL_DIRECTORY_ENTRIES {
+            anyhow::bail!("tools directory contains too many entries");
+        }
         let path = entry.path();
-        if path.extension().map(|e| e == "wasm").unwrap_or(false) {
+        let file_type = entry.file_type().await?;
+        if file_type.is_file() && path.extension().map(|e| e == "wasm").unwrap_or(false) {
             let name = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -318,9 +367,11 @@ async fn list_tools(dir: Option<PathBuf>, verbose: bool) -> anyhow::Result<()> {
                 .to_string();
 
             let caps_path = path.with_extension("capabilities.json");
-            let has_caps = caps_path.exists();
+            let has_caps = fs::symlink_metadata(&caps_path)
+                .await
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
 
-            let size = fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+            let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
 
             tools.push((name, path, has_caps, size));
         }
@@ -338,7 +389,8 @@ async fn list_tools(dir: Option<PathBuf>, verbose: bool) -> anyhow::Result<()> {
 
     for (name, path, has_caps, size) in tools {
         if verbose {
-            let wasm_bytes = fs::read(&path).await?;
+            let wasm_bytes =
+                read_bounded_file(&path, MAX_TOOL_WASM_BYTES, "installed tool").await?;
             let hash = compute_binary_hash(&wasm_bytes);
             let hash_hex: String = hash.iter().take(8).map(|b| format!("{:02x}", b)).collect();
 
@@ -349,8 +401,10 @@ async fn list_tools(dir: Option<PathBuf>, verbose: bool) -> anyhow::Result<()> {
 
             if has_caps {
                 let caps_path = path.with_extension("capabilities.json");
-                if let Ok(content) = fs::read_to_string(&caps_path).await
-                    && let Ok(caps) = CapabilitiesFile::from_json(&content)
+                if let Ok(content) =
+                    read_bounded_file(&caps_path, MAX_TOOL_CAPABILITIES_BYTES, "tool capabilities")
+                        .await
+                    && let Ok(caps) = CapabilitiesFile::from_bytes(&content)
                 {
                     print_capabilities_summary(&caps);
                 }
@@ -372,22 +426,22 @@ async fn list_tools(dir: Option<PathBuf>, verbose: bool) -> anyhow::Result<()> {
 
 /// Remove an installed tool.
 async fn remove_tool(name: String, dir: Option<PathBuf>) -> anyhow::Result<()> {
+    validate_tool_name(&name, true)?;
     let tools_dir = dir.unwrap_or_else(default_tools_dir);
 
     let wasm_path = tools_dir.join(format!("{}.wasm", name));
     let caps_path = tools_dir.join(format!("{}.capabilities.json", name));
 
-    if !wasm_path.exists() {
+    if !fs::symlink_metadata(&wasm_path)
+        .await
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+    {
         anyhow::bail!("Tool '{}' not found in {}", name, tools_dir.display());
     }
 
-    fs::remove_file(&wasm_path).await?;
+    thinclaw_platform::remove_file_pair(wasm_path.clone(), caps_path.clone()).await?;
     println!("Removed {}", wasm_path.display());
-
-    if caps_path.exists() {
-        fs::remove_file(&caps_path).await?;
-        println!("Removed {}", caps_path.display());
-    }
+    println!("Removed associated capabilities when present");
 
     println!("\nTool '{}' removed.", name);
     Ok(())
@@ -398,15 +452,12 @@ async fn show_tool_info(name_or_path: String, dir: Option<PathBuf>) -> anyhow::R
     let wasm_path = if name_or_path.ends_with(".wasm") {
         PathBuf::from(&name_or_path)
     } else {
+        validate_tool_name(&name_or_path, true)?;
         let tools_dir = dir.unwrap_or_else(default_tools_dir);
         tools_dir.join(format!("{}.wasm", name_or_path))
     };
 
-    if !wasm_path.exists() {
-        anyhow::bail!("Tool not found: {}", wasm_path.display());
-    }
-
-    let wasm_bytes = fs::read(&wasm_path).await?;
+    let wasm_bytes = read_bounded_file(&wasm_path, MAX_TOOL_WASM_BYTES, "WASM tool").await?;
     let hash = compute_binary_hash(&wasm_bytes);
     let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
 
@@ -425,10 +476,14 @@ async fn show_tool_info(name_or_path: String, dir: Option<PathBuf>) -> anyhow::R
     println!("Hash: {}", hash_hex);
 
     let caps_path = wasm_path.with_extension("capabilities.json");
-    if caps_path.exists() {
+    if fs::symlink_metadata(&caps_path)
+        .await
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+    {
         println!("\nCapabilities ({}):", caps_path.display());
-        let content = fs::read_to_string(&caps_path).await?;
-        match CapabilitiesFile::from_json(&content) {
+        let content =
+            read_bounded_file(&caps_path, MAX_TOOL_CAPABILITIES_BYTES, "tool capabilities").await?;
+        match CapabilitiesFile::from_bytes(&content) {
             Ok(caps) => print_capabilities_detail(&caps),
             Err(e) => println!("  Error parsing: {}", e),
         }
@@ -541,11 +596,15 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
 
 /// Configure authentication for a tool.
 async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyhow::Result<()> {
+    validate_tool_name(&name, true)?;
     let branding = TerminalBranding::current();
     let tools_dir = dir.unwrap_or_else(default_tools_dir);
     let caps_path = tools_dir.join(format!("{}.capabilities.json", name));
 
-    if !caps_path.exists() {
+    if !fs::symlink_metadata(&caps_path)
+        .await
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+    {
         anyhow::bail!(
             "Tool '{}' not found or has no capabilities file at {}",
             name,
@@ -554,12 +613,13 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
     }
 
     // Parse capabilities
-    let content = fs::read_to_string(&caps_path).await?;
-    let caps = CapabilitiesFile::from_json(&content)
+    let content =
+        read_bounded_file(&caps_path, MAX_TOOL_CAPABILITIES_BYTES, "tool capabilities").await?;
+    let caps = CapabilitiesFile::from_bytes(&content)
         .map_err(|e| anyhow::anyhow!("Invalid capabilities file: {}", e))?;
 
     // Check for auth section
-    let auth = caps.auth.ok_or_else(|| {
+    let auth = caps.auth.clone().ok_or_else(|| {
         anyhow::anyhow!(
             "Tool '{}' has no auth configuration.\n\
              The tool may not require authentication, or auth setup is not defined.",
@@ -676,7 +736,7 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
             print!("  Validating token...");
             std::io::stdout().flush()?;
 
-            match validate_token(&token, validation, &auth.secret_name).await {
+            match validate_token(&token, validation, &auth.secret_name, &caps).await {
                 Ok(()) => {
                     println!(" ✓");
                 }
@@ -685,7 +745,7 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
                     println!("  Validation failed: {}", e);
                     println!();
                     println!("  Falling back to manual entry...");
-                    return auth_tool_manual(secrets_store.as_ref(), &user_id, &auth).await;
+                    return auth_tool_manual(secrets_store.as_ref(), &user_id, &auth, &caps).await;
                 }
             }
         }
@@ -716,7 +776,7 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
     }
 
     // Fall back to manual entry
-    auth_tool_manual(secrets_store.as_ref(), &user_id, &auth).await
+    auth_tool_manual(secrets_store.as_ref(), &user_id, &auth, &caps).await
 }
 
 /// OAuth browser-based login flow.
@@ -815,6 +875,7 @@ async fn auth_tool_manual(
     store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
     auth: &crate::tools::wasm::AuthCapabilitySchema,
+    capabilities: &CapabilitiesFile,
 ) -> anyhow::Result<()> {
     let display_name = auth.display_name.as_deref().unwrap_or(&auth.secret_name);
 
@@ -870,7 +931,7 @@ async fn auth_tool_manual(
         print!("  Validating token...");
         std::io::stdout().flush()?;
 
-        match validate_token(&token, validation, &auth.secret_name).await {
+        match validate_token(&token, validation, &auth.secret_name, capabilities).await {
             Ok(()) => {
                 println!(" ✓");
             }
@@ -944,48 +1005,78 @@ fn read_hidden_input() -> anyhow::Result<String> {
 async fn validate_token(
     token: &str,
     validation: &crate::tools::wasm::ValidationEndpointSchema,
-    _secret_name: &str,
+    secret_name: &str,
+    capabilities: &CapabilitiesFile,
 ) -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-
-    // Build request based on method
-    let request = match validation.method.to_uppercase().as_str() {
-        "GET" => client.get(&validation.url),
-        "POST" => client.post(&validation.url),
-        _ => client.get(&validation.url),
+    use crate::setup::validation::{
+        ValidationCredential, ValidationEndpointGrant, ensure_endpoint_is_granted,
+        validate_extension_credential,
     };
 
-    // Add authorization header (assume Bearer for now, could be extended)
-    let response = request
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Notion-Version", "2022-06-28") // Notion-specific, but harmless for others
-        .send()
-        .await?;
-
-    if response.status().as_u16() == validation.success_status {
-        Ok(())
-    } else {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        Err(anyhow::anyhow!(
-            "HTTP {} (expected {}): {}",
-            status,
-            validation.success_status,
-            if body.len() > 100 {
-                let end = body
-                    .char_indices()
-                    .map(|(i, _)| i)
-                    .take_while(|&i| i < 100)
-                    .last()
-                    .unwrap_or(0);
-                format!("{}...", &body[..end])
-            } else {
-                body
+    let runtime = capabilities.to_capabilities();
+    let http = runtime
+        .http
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("validation endpoint has no HTTP capability"))?;
+    let grants = http
+        .allowlist
+        .iter()
+        .map(|grant| ValidationEndpointGrant {
+            host: grant.host.clone(),
+            path_prefix: grant.path_prefix.clone(),
+            methods: grant.methods.clone(),
+        })
+        .collect::<Vec<_>>();
+    let credential = if let Some(mapping) = http.credentials.get(secret_name) {
+        if !mapping.host_patterns.is_empty() {
+            let host_grants = mapping
+                .host_patterns
+                .iter()
+                .map(|host| ValidationEndpointGrant {
+                    host: host.clone(),
+                    path_prefix: None,
+                    methods: vec![validation.method.clone()],
+                })
+                .collect::<Vec<_>>();
+            ensure_endpoint_is_granted(&validation.url, &validation.method, &host_grants)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        }
+        match &mapping.location {
+            crate::secrets::CredentialLocation::AuthorizationBearer => {
+                ValidationCredential::Bearer(token)
             }
-        ))
-    }
+            crate::secrets::CredentialLocation::AuthorizationBasic { username } => {
+                ValidationCredential::Basic {
+                    username,
+                    password: token,
+                }
+            }
+            crate::secrets::CredentialLocation::Header { name, prefix } => {
+                ValidationCredential::Header {
+                    name,
+                    prefix: prefix.as_deref(),
+                    value: token,
+                }
+            }
+            crate::secrets::CredentialLocation::QueryParam { .. }
+            | crate::secrets::CredentialLocation::UrlPath { .. }
+            | crate::secrets::CredentialLocation::UrlBase { .. }
+            | crate::secrets::CredentialLocation::Body { .. } => {
+                anyhow::bail!("validation credentials may not be placed in URLs")
+            }
+        }
+    } else {
+        ValidationCredential::Bearer(token)
+    };
+    validate_extension_credential(
+        &validation.url,
+        &validation.method,
+        validation.success_status,
+        &grants,
+        credential,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 /// Print success message.
@@ -1015,5 +1106,40 @@ mod tests {
         let dir = default_tools_dir();
         assert!(dir.to_string_lossy().contains(".thinclaw"));
         assert!(dir.to_string_lossy().contains("tools"));
+    }
+
+    #[test]
+    fn tool_names_cannot_escape_install_directory() {
+        assert!(validate_tool_name("../../outside", true).is_err());
+        assert!(validate_tool_name("safe_tool-1", true).is_ok());
+        assert!(validate_tool_name("shell", false).is_err());
+    }
+
+    #[tokio::test]
+    async fn force_install_without_capabilities_removes_stale_sidecar() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let wasm = source.path().join("demo.wasm");
+        std::fs::write(&wasm, b"\0asm\x01\0\0\0").unwrap();
+        std::fs::write(
+            target.path().join("demo.capabilities.json"),
+            br#"{"workspace":{"allowed_prefixes":[""]}}"#,
+        )
+        .unwrap();
+
+        install_tool(
+            wasm,
+            Some("demo".to_string()),
+            None,
+            Some(target.path().to_path_buf()),
+            true,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(target.path().join("demo.wasm").is_file());
+        assert!(!target.path().join("demo.capabilities.json").exists());
     }
 }

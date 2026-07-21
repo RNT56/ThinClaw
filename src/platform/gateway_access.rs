@@ -2,13 +2,29 @@
 
 use crate::settings::Settings;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GatewayAccessInfo {
     pub enabled: bool,
     pub host: String,
     pub port: u16,
     pub auth_token: Option<String>,
     pub cli_enabled: bool,
+}
+
+impl std::fmt::Debug for GatewayAccessInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewayAccessInfo")
+            .field("enabled", &self.enabled)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("cli_enabled", &self.cli_enabled)
+            .finish()
+    }
 }
 
 impl GatewayAccessInfo {

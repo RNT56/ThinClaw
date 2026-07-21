@@ -3,6 +3,16 @@ use specta::Type;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
+const MAX_GGUF_KV_COUNT: u64 = 1_000_000;
+const MAX_GGUF_TENSOR_COUNT: u64 = 100_000_000;
+const MAX_GGUF_METADATA_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_GGUF_KEY_BYTES: u64 = 64 * 1024;
+const MAX_GGUF_VALUE_STRING_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_GGUF_CHAT_TEMPLATE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_GGUF_SKIPPED_STRING_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_GGUF_ARRAY_ITEMS: u64 = 20_000_000;
+const MAX_GGUF_NESTING: usize = 8;
+
 #[derive(Serialize, Clone, Type, Debug, Default)]
 pub struct GGUFMetadata {
     pub architecture: String,
@@ -24,76 +34,77 @@ pub struct GGUFMetadata {
 }
 
 pub fn read_gguf_metadata(path: &str) -> Result<GGUFMetadata, String> {
-    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let path = std::path::Path::new(path);
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("GGUF model must be a regular, non-symlink file".to_string());
+    }
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let mut reader = BoundedGgufReader::new(file, metadata.len());
 
     // Read Magic
     let mut magic = [0u8; 4];
-    file.read_exact(&mut magic).map_err(|e| e.to_string())?;
+    reader.read_exact(&mut magic)?;
     if &magic != b"GGUF" {
         return Err("Not a GGUF file".to_string());
     }
 
     // Version
-    let mut version_bytes = [0u8; 4];
-    file.read_exact(&mut version_bytes)
-        .map_err(|e| e.to_string())?;
-    let version = u32::from_le_bytes(version_bytes);
+    let version = reader.read_u32()?;
     if version != 2 && version != 3 {
         return Err(format!("Unsupported GGUF version: {}", version));
     }
 
     // Tensor Count
-    let mut tensor_count_bytes = [0u8; 8];
-    file.read_exact(&mut tensor_count_bytes)
-        .map_err(|e| e.to_string())?;
+    let tensor_count = reader.read_u64()?;
+    if tensor_count > MAX_GGUF_TENSOR_COUNT {
+        return Err("GGUF tensor count exceeds the supported limit".to_string());
+    }
 
     // Metadata KV Count
-    let mut kv_count_bytes = [0u8; 8];
-    file.read_exact(&mut kv_count_bytes)
-        .map_err(|e| e.to_string())?;
-    let kv_count = u64::from_le_bytes(kv_count_bytes);
+    let kv_count = reader.read_u64()?;
+    if kv_count > MAX_GGUF_KV_COUNT {
+        return Err("GGUF metadata entry count exceeds the supported limit".to_string());
+    }
 
     let mut metadata = GGUFMetadata::default();
 
     for _ in 0..kv_count {
-        let key = read_gguf_string(&mut file)?;
-
-        let mut type_bytes = [0u8; 4];
-        file.read_exact(&mut type_bytes)
-            .map_err(|e| e.to_string())?;
-        let val_type = u32::from_le_bytes(type_bytes);
+        let key = reader.read_string(MAX_GGUF_KEY_BYTES, "metadata key")?;
+        let val_type = reader.read_u32()?;
 
         match key.as_str() {
             "general.architecture" => {
-                metadata.architecture = read_value_string(&mut file, val_type)?;
+                metadata.architecture = read_value_string(&mut reader, val_type)?;
             }
             "tokenizer.chat_template" => {
                 if val_type == 8 {
-                    metadata.chat_template = Some(read_gguf_string(&mut file)?);
+                    metadata.chat_template =
+                        Some(reader.read_string(MAX_GGUF_CHAT_TEMPLATE_BYTES, "chat template")?);
                 } else {
-                    skip_value(&mut file, val_type)?;
+                    skip_value(&mut reader, val_type, 0)?;
                 }
             }
             _ if key.ends_with(".context_length") => {
-                metadata.context_length = read_value_u64(&mut file, val_type)?;
+                metadata.context_length = read_value_u64(&mut reader, val_type)?;
             }
             _ if key.ends_with(".embedding_length") => {
-                metadata.embedding_length = read_value_u64(&mut file, val_type)?;
+                metadata.embedding_length = read_value_u64(&mut reader, val_type)?;
             }
             _ if key.ends_with(".block_count") => {
-                metadata.block_count = read_value_u64(&mut file, val_type)?;
+                metadata.block_count = read_value_u64(&mut reader, val_type)?;
             }
             _ if key.ends_with(".attention.head_count") => {
-                metadata.head_count = read_value_u64(&mut file, val_type)?;
+                metadata.head_count = read_value_u64(&mut reader, val_type)?;
             }
             _ if key.ends_with(".attention.head_count_kv") => {
-                metadata.head_count_kv = read_value_u64(&mut file, val_type)?;
+                metadata.head_count_kv = read_value_u64(&mut reader, val_type)?;
             }
             "general.file_type" => {
-                metadata.file_type = read_value_u32(&mut file, val_type)?;
+                metadata.file_type = read_value_u32(&mut reader, val_type)?;
             }
             _ => {
-                skip_value(&mut file, val_type)?;
+                skip_value(&mut reader, val_type, 0)?;
             }
         }
     }
@@ -201,86 +212,238 @@ pub fn stop_tokens_for_family(family: &str) -> Vec<String> {
     }
 }
 
-fn read_gguf_string(file: &mut File) -> Result<String, String> {
-    let mut len_bytes = [0u8; 8];
-    file.read_exact(&mut len_bytes).map_err(|e| e.to_string())?;
-    let len = u64::from_le_bytes(len_bytes) as usize;
-    let mut buf = vec![0u8; len];
-    file.read_exact(&mut buf).map_err(|e| e.to_string())?;
-    String::from_utf8(buf).map_err(|e| e.to_string())
+struct BoundedGgufReader {
+    file: File,
+    file_len: u64,
+    position: u64,
 }
 
-fn read_value_string(file: &mut File, val_type: u32) -> Result<String, String> {
+impl BoundedGgufReader {
+    fn new(file: File, file_len: u64) -> Self {
+        Self {
+            file,
+            file_len,
+            position: 0,
+        }
+    }
+
+    fn reserve(&self, length: u64) -> Result<u64, String> {
+        let end = self
+            .position
+            .checked_add(length)
+            .ok_or_else(|| "GGUF metadata offset overflowed".to_string())?;
+        if end > self.file_len {
+            return Err("GGUF metadata is truncated".to_string());
+        }
+        if end > MAX_GGUF_METADATA_BYTES {
+            return Err("GGUF metadata exceeds the supported scan limit".to_string());
+        }
+        Ok(end)
+    }
+
+    fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), String> {
+        let length = u64::try_from(buffer.len())
+            .map_err(|_| "GGUF read length exceeds the supported range".to_string())?;
+        let end = self.reserve(length)?;
+        self.file
+            .read_exact(buffer)
+            .map_err(|error| error.to_string())?;
+        self.position = end;
+        Ok(())
+    }
+
+    fn read_u32(&mut self) -> Result<u32, String> {
+        let mut bytes = [0_u8; 4];
+        self.read_exact(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, String> {
+        let mut bytes = [0_u8; 8];
+        self.read_exact(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn skip(&mut self, length: u64) -> Result<(), String> {
+        let end = self.reserve(length)?;
+        self.file
+            .seek(SeekFrom::Start(end))
+            .map_err(|error| error.to_string())?;
+        self.position = end;
+        Ok(())
+    }
+
+    fn read_string(&mut self, limit: u64, label: &str) -> Result<String, String> {
+        let length = self.read_u64()?;
+        if length > limit {
+            return Err(format!("GGUF {label} exceeds the {limit}-byte limit"));
+        }
+        let length = usize::try_from(length)
+            .map_err(|_| format!("GGUF {label} length exceeds this platform's range"))?;
+        let mut bytes = vec![0_u8; length];
+        self.read_exact(&mut bytes)?;
+        String::from_utf8(bytes).map_err(|_| format!("GGUF {label} is not valid UTF-8"))
+    }
+
+    fn skip_string(&mut self) -> Result<(), String> {
+        let length = self.read_u64()?;
+        if length > MAX_GGUF_SKIPPED_STRING_BYTES {
+            return Err("GGUF string value exceeds the supported limit".to_string());
+        }
+        self.skip(length)
+    }
+}
+
+fn read_value_string(reader: &mut BoundedGgufReader, val_type: u32) -> Result<String, String> {
     if val_type != 8 {
         return Err("Expected string".to_string());
     }
-    read_gguf_string(file)
+    reader.read_string(MAX_GGUF_VALUE_STRING_BYTES, "string value")
 }
 
-fn read_value_u64(file: &mut File, val_type: u32) -> Result<u64, String> {
+fn read_value_u64(reader: &mut BoundedGgufReader, val_type: u32) -> Result<u64, String> {
     match val_type {
-        4 => {
-            let mut b = [0u8; 4];
-            file.read_exact(&mut b).map_err(|e| e.to_string())?;
-            Ok(u32::from_le_bytes(b) as u64)
-        }
-        10 => {
-            let mut b = [0u8; 8];
-            file.read_exact(&mut b).map_err(|e| e.to_string())?;
-            Ok(u64::from_le_bytes(b))
-        }
+        4 => Ok(u64::from(reader.read_u32()?)),
+        10 => reader.read_u64(),
         _ => Err(format!("Expected UINT32/UINT64, got type {}", val_type)),
     }
 }
 
-fn read_value_u32(file: &mut File, val_type: u32) -> Result<u32, String> {
+fn read_value_u32(reader: &mut BoundedGgufReader, val_type: u32) -> Result<u32, String> {
     if val_type != 4 {
         return Err("Expected UINT32".to_string());
     }
-    let mut b = [0u8; 4];
-    file.read_exact(&mut b).map_err(|e| e.to_string())?;
-    Ok(u32::from_le_bytes(b))
+    reader.read_u32()
 }
 
-fn skip_value(file: &mut File, val_type: u32) -> Result<(), String> {
-    match val_type {
-        0..=7 => {
-            // 0=UINT8(1) 1=INT8(1) 2=UINT16(2) 3=INT16(2) 4=UINT32(4) 5=INT32(4) 6=FLOAT32(4) 7=BOOL(1)
-            let sizes: [i64; 8] = [1, 1, 2, 2, 4, 4, 4, 1];
-            file.seek(SeekFrom::Current(sizes[val_type as usize]))
-                .map_err(|e| e.to_string())?;
-        }
+fn scalar_size(value_type: u32) -> Option<u64> {
+    match value_type {
+        0 | 1 | 7 => Some(1),
+        2 | 3 => Some(2),
+        4..=6 => Some(4),
+        10..=12 => Some(8),
+        _ => None,
+    }
+}
+
+fn skip_array(
+    reader: &mut BoundedGgufReader,
+    element_type: u32,
+    length: u64,
+    depth: usize,
+) -> Result<(), String> {
+    if length > MAX_GGUF_ARRAY_ITEMS {
+        return Err("GGUF array length exceeds the supported limit".to_string());
+    }
+    if let Some(size) = scalar_size(element_type) {
+        let bytes = length
+            .checked_mul(size)
+            .ok_or_else(|| "GGUF array byte length overflowed".to_string())?;
+        return reader.skip(bytes);
+    }
+    match element_type {
         8 => {
-            let mut len_bytes = [0u8; 8];
-            file.read_exact(&mut len_bytes).map_err(|e| e.to_string())?;
-            let len = u64::from_le_bytes(len_bytes);
-            file.seek(SeekFrom::Current(len as i64))
-                .map_err(|e| e.to_string())?;
+            for _ in 0..length {
+                reader.skip_string()?;
+            }
+            Ok(())
         }
         9 => {
-            let mut arr_type_bytes = [0u8; 4];
-            file.read_exact(&mut arr_type_bytes)
-                .map_err(|e| e.to_string())?;
-            let arr_type = u32::from_le_bytes(arr_type_bytes);
-            let mut len_bytes = [0u8; 8];
-            file.read_exact(&mut len_bytes).map_err(|e| e.to_string())?;
-            let len = u64::from_le_bytes(len_bytes);
-            for _ in 0..len {
-                skip_value(file, arr_type)?;
+            if depth >= MAX_GGUF_NESTING {
+                return Err("GGUF array nesting exceeds the supported limit".to_string());
             }
+            for _ in 0..length {
+                let nested_type = reader.read_u32()?;
+                let nested_length = reader.read_u64()?;
+                skip_array(reader, nested_type, nested_length, depth + 1)?;
+            }
+            Ok(())
         }
-        // 10=UINT64 11=FLOAT64 12=INT64 13=INT64 — all 8 bytes
-        10..=13 => {
-            file.seek(SeekFrom::Current(8)).map_err(|e| e.to_string())?;
-        }
-        _ => return Err(format!("Unknown GGUF type: {}", val_type)),
+        _ => Err(format!("Unknown GGUF array element type: {element_type}")),
     }
-    Ok(())
+}
+
+fn skip_value(reader: &mut BoundedGgufReader, val_type: u32, depth: usize) -> Result<(), String> {
+    if let Some(size) = scalar_size(val_type) {
+        return reader.skip(size);
+    }
+    match val_type {
+        8 => reader.skip_string(),
+        9 => {
+            if depth >= MAX_GGUF_NESTING {
+                return Err("GGUF value nesting exceeds the supported limit".to_string());
+            }
+            let element_type = reader.read_u32()?;
+            let length = reader.read_u64()?;
+            skip_array(reader, element_type, length, depth + 1)
+        }
+        _ => Err(format!("Unknown GGUF type: {val_type}")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
+
+    fn write_header(file: &mut File, tensor_count: u64, kv_count: u64) {
+        file.write_all(b"GGUF").unwrap();
+        file.write_all(&3_u32.to_le_bytes()).unwrap();
+        file.write_all(&tensor_count.to_le_bytes()).unwrap();
+        file.write_all(&kv_count.to_le_bytes()).unwrap();
+    }
+
+    fn write_string(file: &mut File, value: &[u8]) {
+        file.write_all(&(value.len() as u64).to_le_bytes()).unwrap();
+        file.write_all(value).unwrap();
+    }
+
+    #[test]
+    fn parses_a_bounded_minimal_header() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let mut file = temp.reopen().unwrap();
+        write_header(&mut file, 0, 1);
+        write_string(&mut file, b"general.architecture");
+        file.write_all(&8_u32.to_le_bytes()).unwrap();
+        write_string(&mut file, b"llama");
+        drop(file);
+
+        let metadata = read_gguf_metadata(temp.path().to_str().unwrap()).unwrap();
+        assert_eq!(metadata.architecture, "llama");
+        assert_eq!(metadata.model_family.as_deref(), Some("llama3"));
+    }
+
+    #[test]
+    fn rejects_hostile_counts_and_string_lengths_before_allocation() {
+        let excessive_count = tempfile::NamedTempFile::new().unwrap();
+        let mut file = excessive_count.reopen().unwrap();
+        write_header(&mut file, 0, MAX_GGUF_KV_COUNT + 1);
+        drop(file);
+        assert!(read_gguf_metadata(excessive_count.path().to_str().unwrap()).is_err());
+
+        let excessive_key = tempfile::NamedTempFile::new().unwrap();
+        let mut file = excessive_key.reopen().unwrap();
+        write_header(&mut file, 0, 1);
+        file.write_all(&(MAX_GGUF_KEY_BYTES + 1).to_le_bytes())
+            .unwrap();
+        drop(file);
+        assert!(read_gguf_metadata(excessive_key.path().to_str().unwrap()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_model_files() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let model = temp.path().join("model.gguf");
+        let link = temp.path().join("link.gguf");
+        let mut file = File::create(&model).unwrap();
+        write_header(&mut file, 0, 0);
+        drop(file);
+        symlink(&model, &link).unwrap();
+        assert!(read_gguf_metadata(link.to_str().unwrap()).is_err());
+    }
 
     // -----------------------------------------------------------------------
     // detect_model_family — architecture-based

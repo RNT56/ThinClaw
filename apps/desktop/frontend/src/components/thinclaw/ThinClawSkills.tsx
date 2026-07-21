@@ -48,6 +48,31 @@ function actionOk(resp: any): boolean {
     return Boolean(resp?.success ?? resp?.ok);
 }
 
+const REPO_APPROVAL_MARKER = 'SKILL_REPO_APPROVAL_REQUIRED:';
+
+function commandErrorMessage(error: unknown): string {
+    if (typeof error === 'string') return error;
+    if (error instanceof Error) return error.message;
+    if (error && typeof error === 'object' && 'message' in error) {
+        const message = (error as { message?: unknown }).message;
+        if (typeof message === 'string') return message;
+    }
+    return String(error);
+}
+
+function parseRepoApproval(error: unknown): { digest: string; summary: string } | null {
+    const message = commandErrorMessage(error);
+    const markerIndex = message.indexOf(REPO_APPROVAL_MARKER);
+    if (markerIndex < 0) return null;
+    const payload = message.slice(markerIndex + REPO_APPROVAL_MARKER.length);
+    const separator = payload.indexOf(':');
+    if (separator < 0) return null;
+    const digest = payload.slice(0, separator).toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(digest)) return null;
+    const summary = payload.slice(separator + 1).trim();
+    return { digest, summary };
+}
+
 function SkillCard({
     skill,
     onInspect,
@@ -192,6 +217,7 @@ export function ThinClawSkills() {
     const [search, setSearch] = useState('');
     const [showMarketplace, setShowMarketplace] = useState(false);
     const [repoUrl, setRepoUrl] = useState('');
+    const [repoApproval, setRepoApproval] = useState<{ digest: string; summary: string } | null>(null);
     const [isInstalling, setIsInstalling] = useState(false);
     const [gatewayMode, setGatewayMode] = useState('local');
     const [catalogQuery, setCatalogQuery] = useState('');
@@ -223,17 +249,25 @@ export function ThinClawSkills() {
         fetchData();
     }, []);
 
-    const handleInstallRepo = async () => {
-        if (!repoUrl) return;
+    const handleInstallRepo = async (approvedDigest: string | null = null) => {
+        const normalizedUrl = repoUrl.trim();
+        if (!normalizedUrl) return;
         setIsInstalling(true);
         try {
-            const result = await thinclaw.installThinClawSkillRepo(repoUrl);
+            const result = await thinclaw.installThinClawSkillRepo(normalizedUrl, approvedDigest);
             toast.success(result);
             setRepoUrl('');
+            setRepoApproval(null);
             setShowMarketplace(false);
             fetchData();
         } catch (e) {
-            toast.error(`Install failed: ${e}`);
+            const approval = parseRepoApproval(e);
+            if (approval) {
+                setRepoApproval(approval);
+            } else {
+                setRepoApproval(null);
+                toast.error('Install failed', { description: commandErrorMessage(e) });
+            }
         } finally {
             setIsInstalling(false);
         }
@@ -477,11 +511,14 @@ export function ThinClawSkills() {
                                         type="text"
                                         placeholder="https://github.com/thinclaw/skills"
                                         value={repoUrl}
-                                        onChange={(e) => setRepoUrl(e.target.value)}
+                                        onChange={(e) => {
+                                            setRepoUrl(e.target.value);
+                                            setRepoApproval(null);
+                                        }}
                                         className="flex-1 px-4 py-2.5 rounded-xl bg-white/5 border border-border/40 focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm"
                                     />
                                     <button
-                                        onClick={handleInstallRepo}
+                                        onClick={() => handleInstallRepo()}
                                         disabled={isInstalling || !repoUrl}
                                         className="px-6 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-bold hover:opacity-90 transition-all disabled:opacity-50 flex items-center gap-2"
                                     >
@@ -493,6 +530,38 @@ export function ThinClawSkills() {
                                         Install
                                     </button>
                                 </div>
+                                {repoApproval && (
+                                    <div className="space-y-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4" role="alert">
+                                        <div className="flex items-start gap-3">
+                                            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+                                            <div className="space-y-1">
+                                                <p className="text-sm font-semibold text-amber-200">Security review required</p>
+                                                <p className="text-xs text-amber-100/80">{repoApproval.summary}</p>
+                                                <p className="text-[10px] text-muted-foreground">
+                                                    Approval is bound to the exact scanned commit and package contents. If the repository changes, another review is required.
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <div className="flex justify-end gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => setRepoApproval(null)}
+                                                disabled={isInstalling}
+                                                className="rounded-lg border border-border/50 px-3 py-1.5 text-xs font-medium hover:bg-white/5 disabled:opacity-50"
+                                            >
+                                                Cancel
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => handleInstallRepo(repoApproval.digest)}
+                                                disabled={isInstalling}
+                                                className="rounded-lg border border-amber-400/30 bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-amber-100 hover:bg-amber-500/30 disabled:opacity-50"
+                                            >
+                                                Approve scanned content
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
                                 <div className="flex items-center gap-2 p-3 rounded-lg bg-white/5 border border-white/5">
                                     <Info className="w-3.5 h-3.5 text-muted-foreground" />
                                     <p className="text-[10px] text-muted-foreground">

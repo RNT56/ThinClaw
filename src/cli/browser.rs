@@ -10,7 +10,7 @@
 //! `--headless` and `--dump-dom` flags for basic operations.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 
 use clap::Subcommand;
 use regex::Regex;
@@ -101,17 +101,25 @@ fn find_browser() -> Option<PathBuf> {
 }
 
 /// Run browser headless and capture DOM content.
-fn headless_dom_dump(browser: &Path, url: &str, wait_secs: u64) -> anyhow::Result<String> {
-    let output = Command::new(browser)
-        .args([
-            "--headless",
-            "--disable-gpu",
-            "--no-sandbox",
-            "--dump-dom",
-            &format!("--virtual-time-budget={}", wait_secs * 1000),
-            url,
-        ])
-        .output()?;
+async fn headless_dom_dump(browser: &Path, url: &str, wait_secs: u64) -> anyhow::Result<String> {
+    validate_browser_url(url)?;
+    let wait_secs = wait_secs.min(120);
+    let mut command = tokio::process::Command::new(browser);
+    command.args([
+        "--headless",
+        "--disable-gpu",
+        "--dump-dom",
+        &format!("--virtual-time-budget={}", wait_secs.saturating_mul(1000)),
+        "--",
+        url,
+    ]);
+    let output = thinclaw_platform::bounded_command_output(
+        &mut command,
+        Duration::from_secs(wait_secs.saturating_add(30)),
+        16 * 1024 * 1024,
+        1024 * 1024,
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -122,29 +130,101 @@ fn headless_dom_dump(browser: &Path, url: &str, wait_secs: u64) -> anyhow::Resul
 }
 
 /// Run browser headless and take a screenshot.
-fn headless_screenshot(
+async fn headless_screenshot(
     browser: &Path,
     url: &str,
     output_path: &str,
     width: u32,
     height: u32,
 ) -> anyhow::Result<()> {
-    let status = Command::new(browser)
-        .args([
-            "--headless",
-            "--disable-gpu",
-            "--no-sandbox",
-            &format!("--screenshot={}", output_path),
-            &format!("--window-size={},{}", width, height),
-            url,
-        ])
-        .status()?;
-
-    if !status.success() {
-        anyhow::bail!("Screenshot capture failed");
+    validate_browser_url(url)?;
+    if width == 0
+        || height == 0
+        || width > 8_192
+        || height > 8_192
+        || u64::from(width) * u64::from(height) > 33_554_432
+    {
+        anyhow::bail!("screenshot dimensions must be 1..=8192 with at most 33,554,432 pixels");
     }
+    let output_path = PathBuf::from(output_path);
+    let parent = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_metadata = std::fs::symlink_metadata(parent)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        anyhow::bail!("screenshot parent is not a real directory");
+    }
+    let canonical_parent = std::fs::canonicalize(parent)?;
+    let filename = output_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("screenshot output path has no file name"))?;
+    let output_path = canonical_parent.join(filename);
+    let stage_dir = tempfile::Builder::new()
+        .prefix(".thinclaw-screenshot-")
+        .tempdir_in(&canonical_parent)?;
+    let staged_path = stage_dir.path().join("screenshot.png");
+    let mut command = tokio::process::Command::new(browser);
+    command.args([
+        "--headless",
+        "--disable-gpu",
+        &format!("--screenshot={}", staged_path.display()),
+        &format!("--window-size={width},{height}"),
+        "--",
+        url,
+    ]);
+    let result = thinclaw_platform::bounded_command_output(
+        &mut command,
+        Duration::from_secs(120),
+        1024 * 1024,
+        1024 * 1024,
+    )
+    .await;
+    let output = result?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "screenshot capture failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    const MAX_SCREENSHOT_FILE_BYTES: u64 = 128 * 1024 * 1024;
+    let bytes =
+        thinclaw_platform::read_regular_file_bounded(&staged_path, MAX_SCREENSHOT_FILE_BYTES)?;
+    if !valid_png_screenshot(&bytes) {
+        anyhow::bail!("browser produced an invalid screenshot file");
+    }
+    thinclaw_platform::write_private_file_atomic(&output_path, &bytes, true)?;
 
     Ok(())
+}
+
+fn valid_png_screenshot(bytes: &[u8]) -> bool {
+    if bytes.len() < 24
+        || !bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || &bytes[8..12] != 13_u32.to_be_bytes().as_slice()
+        || &bytes[12..16] != b"IHDR"
+    {
+        return false;
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap_or_default());
+    let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap_or_default());
+    width > 0
+        && height > 0
+        && width <= 8_192
+        && height <= 8_192
+        && u64::from(width) * u64::from(height) <= 33_554_432
+}
+
+fn validate_browser_url(raw: &str) -> anyhow::Result<url::Url> {
+    let parsed = url::Url::parse(raw)?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        anyhow::bail!("browser URL must be HTTP(S) without embedded credentials");
+    }
+    Ok(parsed)
 }
 
 /// Extract text content from HTML (very basic — strips tags).
@@ -223,7 +303,15 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
                     println!("✅ Browser found: {}", path.display());
 
                     // Try getting version
-                    if let Ok(output) = Command::new(&path).arg("--version").output()
+                    let mut command = tokio::process::Command::new(&path);
+                    command.arg("--version");
+                    if let Ok(output) = thinclaw_platform::bounded_command_output(
+                        &mut command,
+                        Duration::from_secs(10),
+                        64 * 1024,
+                        64 * 1024,
+                    )
+                    .await
                         && output.status.success()
                     {
                         let version = String::from_utf8_lossy(&output.stdout);
@@ -263,7 +351,7 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
                 anyhow::anyhow!("No browser found. Run `thinclaw browser check` for setup info.")
             })?;
 
-            let html = headless_dom_dump(&browser, &url, wait)?;
+            let html = headless_dom_dump(&browser, &url, wait).await?;
 
             match format.as_str() {
                 "html" => println!("{}", html),
@@ -288,7 +376,7 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
             }
 
             if let Some(ref path) = screenshot {
-                headless_screenshot(&browser, &url, path, 1280, 720)?;
+                headless_screenshot(&browser, &url, path, 1280, 720).await?;
                 println!("\nScreenshot saved to: {}", path);
             }
         }
@@ -303,7 +391,7 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
                 anyhow::anyhow!("No browser found. Run `thinclaw browser check` for setup info.")
             })?;
 
-            headless_screenshot(&browser, &url, &output, width, height)?;
+            headless_screenshot(&browser, &url, &output, width, height).await?;
             println!("Screenshot saved to: {}", output);
         }
 
@@ -312,7 +400,7 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
                 anyhow::anyhow!("No browser found. Run `thinclaw browser check` for setup info.")
             })?;
 
-            let html = headless_dom_dump(&browser, &url, 3)?;
+            let html = headless_dom_dump(&browser, &url, 3).await?;
             let links = extract_links(&html, &url);
 
             let filtered: Vec<&PageLink> = if external_only {
@@ -404,5 +492,16 @@ mod tests {
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("example.com"));
+    }
+
+    #[test]
+    fn png_screenshot_validation_checks_magic_and_dimensions() {
+        let mut png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();
+        png.extend_from_slice(&1280_u32.to_be_bytes());
+        png.extend_from_slice(&720_u32.to_be_bytes());
+        assert!(valid_png_screenshot(&png));
+
+        png[0] = 0;
+        assert!(!valid_png_screenshot(&png));
     }
 }

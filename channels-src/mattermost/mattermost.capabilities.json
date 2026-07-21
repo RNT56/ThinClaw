@@ -32,6 +32,16 @@
         }
       ],
       "credentials": {
+        "mattermost_base_url": {
+          "secret_name": "mattermost_base_url",
+          "location": {
+            "type": "url_base",
+            "placeholder": "{MATTERMOST_BASE_URL}"
+          },
+          "host_patterns": [
+            "*"
+          ]
+        },
         "mattermost_bot_token": {
           "secret_name": "mattermost_bot_token",
           "location": {

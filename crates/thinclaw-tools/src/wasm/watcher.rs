@@ -284,8 +284,8 @@ async fn scan_current_sources(
             name,
             ToolSource {
                 mtime: metadata_mtime(&discovered.wasm_path).await?,
+                capabilities_path: Some(discovered.wasm_path.with_extension("capabilities.json")),
                 wasm_path: discovered.wasm_path,
-                capabilities_path: discovered.capabilities_path,
             },
         );
     }

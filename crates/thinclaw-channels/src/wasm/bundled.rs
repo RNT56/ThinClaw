@@ -9,9 +9,78 @@
 //!     target/wasm32-wasip2/release/<name>_channel.wasm
 //!     <name>.capabilities.json
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tokio::fs;
+
+use crate::wasm::schema::ChannelCapabilitiesFile;
+
+const MAX_WASM_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CAPABILITIES_BYTES: usize = 2 * 1024 * 1024;
+const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const MAX_BUILD_STDOUT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_BUILD_STDERR_BYTES: usize = 4 * 1024 * 1024;
+
+fn is_real_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| !metadata.file_type().is_symlink() && metadata.is_dir())
+        .unwrap_or(false)
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| !metadata.file_type().is_symlink() && metadata.is_file())
+        .unwrap_or(false)
+}
+
+async fn read_regular_file_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let display = path.display().to_string();
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > max_bytes as u64
+        {
+            return Err(std::io::Error::other(
+                "channel artifact is not a bounded regular file",
+            ));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&path)?;
+        let opened = file.metadata()?;
+        if !opened.is_file() || opened.len() > max_bytes as u64 {
+            return Err(std::io::Error::other(
+                "channel artifact changed or exceeds its size limit",
+            ));
+        }
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(opened.len())
+                .unwrap_or(max_bytes)
+                .min(max_bytes),
+        );
+        file.by_ref()
+            .take(max_bytes as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > max_bytes {
+            return Err(std::io::Error::other(
+                "channel artifact exceeds its size limit",
+            ));
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|error| format!("channel artifact reader panicked: {error}"))?
+    .map_err(|error| format!("failed to read {display}: {error}"))
+}
 
 /// Compile-time crate root, used to locate the workspace `channels-src/` in dev builds.
 const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
@@ -70,18 +139,25 @@ fn locate_channel_artifacts(name: &str) -> Result<(PathBuf, PathBuf), String> {
 
     let src_dir = channels_src_dir();
     let channel_dir = src_dir.join(name);
+    if !is_real_directory(&channel_dir) {
+        return Err(format!(
+            "Channel '{}' source directory is missing or is not a real directory: {}",
+            name,
+            channel_dir.display()
+        ));
+    }
 
     let caps_path = channel_dir.join(format!("{}.capabilities.json", name));
 
     // Check flat layout first (Docker/packaged deployments)
     let flat_wasm = channel_dir.join(format!("{}.wasm", name));
-    if flat_wasm.exists() && caps_path.exists() {
+    if is_regular_file(&flat_wasm) && is_regular_file(&caps_path) {
         return Ok((flat_wasm, caps_path));
     }
 
     // Fall back to build tree layout (dev builds) — search across all WASM triples
     if let Some(build_wasm) = find_wasm_artifact(&channel_dir, crate_name, "release")
-        && caps_path.exists()
+        && is_regular_file(&caps_path)
     {
         return Ok((build_wasm, caps_path));
     }
@@ -132,7 +208,7 @@ fn find_wasm_artifact(crate_dir: &Path, crate_name: &str, profile: &str) -> Opti
             dir.join(format!("{}.wasm", crate_name)),
             dir.join(format!("{}.wasm", snake_name)),
         ] {
-            if candidate.exists() {
+            if is_regular_file(&candidate) {
                 return Some(candidate);
             }
         }
@@ -147,67 +223,114 @@ pub async fn install_bundled_channel(
     target_dir: &Path,
     force: bool,
 ) -> Result<(), String> {
+    if !KNOWN_CHANNELS.iter().any(|(known, _)| *known == name) {
+        return Err(format!("Unknown channel '{name}'"));
+    }
+    fs::create_dir_all(target_dir)
+        .await
+        .map_err(|e| format!("Failed to create channels directory: {e}"))?;
+    let target_metadata = fs::symlink_metadata(target_dir)
+        .await
+        .map_err(|error| format!("Failed to inspect channels directory: {error}"))?;
+    if target_metadata.file_type().is_symlink() || !target_metadata.is_dir() {
+        return Err(format!(
+            "Channels target is not a real directory: {}",
+            target_dir.display()
+        ));
+    }
+
+    let wasm_dst = target_dir.join(format!("{name}.wasm"));
+    let caps_dst = target_dir.join(format!("{name}.capabilities.json"));
+    let has_existing = match fs::symlink_metadata(&wasm_dst).await {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("Failed to inspect existing channel: {error}")),
+    } || match fs::symlink_metadata(&caps_dst).await {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("Failed to inspect existing channel: {error}")),
+    };
+    if has_existing && !force {
+        return Err(format!(
+            "Channel '{name}' already exists at {}",
+            target_dir.display()
+        ));
+    }
+
     let (wasm_src, caps_src) = match locate_channel_artifacts(name) {
         Ok(paths) => paths,
         Err(initial_error) => {
-            build_channel_artifact(name).map_err(|build_error| {
+            build_channel_artifact(name).await.map_err(|build_error| {
                 format!("{initial_error}\nAutomatic build also failed: {build_error}")
             })?;
             locate_channel_artifacts(name)?
         }
     };
 
-    fs::create_dir_all(target_dir)
-        .await
-        .map_err(|e| format!("Failed to create channels directory: {}", e))?;
-
-    let wasm_dst = target_dir.join(format!("{}.wasm", name));
-    let caps_dst = target_dir.join(format!("{}.capabilities.json", name));
-
-    let has_existing = wasm_dst.exists() || caps_dst.exists();
-    if has_existing && !force {
+    let wasm = read_regular_file_bounded(&wasm_src, MAX_WASM_BYTES).await?;
+    if wasm.len() < 8 || !wasm.starts_with(b"\0asm") {
         return Err(format!(
-            "Channel '{}' already exists at {}",
-            name,
-            target_dir.display()
+            "Channel '{name}' build artifact is not a valid-looking WASM module"
+        ));
+    }
+    let capabilities = read_regular_file_bounded(&caps_src, MAX_CAPABILITIES_BYTES).await?;
+    let manifest = ChannelCapabilitiesFile::from_bytes(&capabilities)
+        .map_err(|error| format!("Channel '{name}' capabilities are invalid: {error}"))?;
+    if manifest.r#type != "channel" || manifest.name != name {
+        return Err(format!(
+            "Channel '{name}' capabilities type/name does not match the requested package"
         ));
     }
 
-    fs::copy(&wasm_src, &wasm_dst)
-        .await
-        .map_err(|e| format!("Failed to copy {}: {}", wasm_src.display(), e))?;
-    fs::copy(&caps_src, &caps_dst)
-        .await
-        .map_err(|e| format!("Failed to copy {}: {}", caps_src.display(), e))?;
+    thinclaw_platform::publish_file_pair(
+        wasm_dst,
+        caps_dst,
+        wasm,
+        Some(capabilities),
+        if force {
+            thinclaw_platform::ExistingPairPolicy::Replace
+        } else {
+            thinclaw_platform::ExistingPairPolicy::Refuse
+        },
+    )
+    .await
+    .map_err(|error| format!("Failed to publish channel '{name}': {error}"))?;
 
     Ok(())
 }
 
-fn build_channel_artifact(name: &str) -> Result<(), String> {
+async fn build_channel_artifact(name: &str) -> Result<(), String> {
     let (_, _) = KNOWN_CHANNELS
         .iter()
         .find(|(n, _)| *n == name)
         .ok_or_else(|| format!("Unknown channel '{}'", name))?;
 
     let channel_dir = channels_src_dir().join(name);
-    if !channel_dir.join("Cargo.toml").exists() {
+    if !is_real_directory(&channel_dir) || !is_regular_file(&channel_dir.join("Cargo.toml")) {
         return Err(format!(
-            "Channel '{}' has no source Cargo.toml at {}",
+            "Channel '{}' has no regular source Cargo.toml at {}",
             name,
             channel_dir.display()
         ));
     }
 
-    let output = std::process::Command::new("cargo")
+    let mut command = tokio::process::Command::new("cargo");
+    command
         .args(["component", "build", "--release"])
-        .current_dir(&channel_dir)
-        .output()
-        .map_err(|error| {
-            format!(
-                "failed to execute `cargo component build --release` in {}: {error}",
-                channel_dir.display()
-            )
-        })?;
+        .current_dir(&channel_dir);
+    let output = thinclaw_platform::bounded_command_output(
+        &mut command,
+        BUILD_TIMEOUT,
+        MAX_BUILD_STDOUT_BYTES,
+        MAX_BUILD_STDERR_BYTES,
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "failed to execute bounded `cargo component build --release` in {}: {error}",
+            channel_dir.display()
+        )
+    })?;
 
     if output.status.success() {
         return Ok(());

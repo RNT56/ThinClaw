@@ -46,6 +46,7 @@
 //! only the start token — both leave the alert registration intact.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -629,9 +630,13 @@ fn env_value_or_file(value_key: &str, path_key: &str) -> Result<Option<String>, 
     let Some(path) = env_value(path_key) else {
         return Ok(None);
     };
-    std::fs::read_to_string(&path)
+    thinclaw_platform::read_regular_file_bounded_single_link(Path::new(&path), 1024 * 1024)
+        .and_then(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })
         .map(|value| Some(value.replace("\\n", "\n")))
-        .map_err(|error| format!("failed to read {path_key}={path}: {error}"))
+        .map_err(|error| format!("failed to read the file configured by {path_key}: {error}"))
 }
 
 fn env_bool(key: &str) -> Result<Option<bool>, String> {

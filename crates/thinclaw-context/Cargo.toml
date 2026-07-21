@@ -7,4 +7,8 @@ publish = false
 
 [dependencies]
 serde = { workspace = true }
+thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
+
+[dev-dependencies]
+tempfile = "3"

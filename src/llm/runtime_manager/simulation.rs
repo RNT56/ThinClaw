@@ -30,7 +30,7 @@ impl LlmRuntimeManager {
         let last_user_message = messages
             .iter()
             .rev()
-            .find(|m| m.role == crate::llm::Role::User)
+            .find(|m| m.is_user_instruction())
             .map(|m| m.content.trim().to_string())
             .filter(|msg| !msg.is_empty());
 

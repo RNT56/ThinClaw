@@ -112,8 +112,18 @@ impl DeviceRegistry {
     /// Build a registry backed by `store`, loading its current contents
     /// into memory immediately.
     pub async fn load(store: DeviceStore) -> Result<Self, DeviceStoreError> {
-        let store = Arc::new(store);
         let records = store.list()?;
+        Ok(Self::from_records(store, records))
+    }
+
+    /// Build a fail-closed registry without touching the backing store.
+    /// Authentication rejects every device until a later refresh succeeds.
+    pub fn empty(store: DeviceStore) -> Self {
+        Self::from_records(store, Vec::new())
+    }
+
+    fn from_records(store: DeviceStore, records: Vec<DeviceRecord>) -> Self {
+        let store = Arc::new(store);
         let mut by_hash = HashMap::with_capacity(records.len());
         let mut by_id = HashMap::with_capacity(records.len());
         for record in &records {
@@ -123,7 +133,7 @@ impl DeviceRegistry {
 
         let (tx, _rx) = broadcast::channel(REVOCATION_CHANNEL_CAPACITY);
 
-        Ok(Self {
+        Self {
             store,
             by_hash: Arc::new(RwLock::new(by_hash)),
             by_id: Arc::new(RwLock::new(by_id)),
@@ -133,7 +143,7 @@ impl DeviceRegistry {
             })),
             revocations: tx,
             active_streams: Arc::new(Mutex::new(HashMap::new())),
-        })
+        }
     }
 
     /// Read-only handle to the backing store, so runtime consumers (e.g. the
@@ -171,6 +181,18 @@ impl DeviceRegistry {
             }
         }
         Ok(())
+    }
+
+    /// Apply a record already returned by a successful store mutation.
+    /// This avoids a second fallible disk read after issuing a one-time token.
+    pub async fn upsert_record(&self, record: DeviceRecord) {
+        let device_id = record.device_id.clone();
+        {
+            let mut by_hash = self.by_hash.write().await;
+            by_hash.retain(|_, entry| entry.device_id != device_id);
+            by_hash.insert(record.token_hash.clone(), index_entry(&record));
+        }
+        self.by_id.write().await.insert(device_id, record);
     }
 
     /// Cloned snapshot of every device record currently in the in-memory
@@ -267,13 +289,15 @@ impl DeviceRegistry {
     /// store. Returns the primary (target) record.
     pub async fn revoke(&self, device_id: &str) -> Result<DeviceRecord, DeviceStoreError> {
         let affected = self.store.revoke_cascade(device_id)?;
+        let target = affected.first().cloned().ok_or_else(|| {
+            DeviceStoreError::InvalidData("revoke returned no target record".to_string())
+        })?;
         for record in &affected {
-            self.refresh(&record.device_id).await?;
+            self.upsert_record(record.clone()).await;
             // Best-effort: no receivers is not an error (nothing is streaming).
             let _ = self.revocations.send(record.device_id.clone());
         }
-        // `revoke_cascade` guarantees the target is first and non-empty.
-        Ok(affected.into_iter().next().expect("target record present"))
+        Ok(target)
     }
 
     /// Subscribe to device-revocation notifications. Stream handlers

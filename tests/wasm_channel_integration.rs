@@ -63,22 +63,23 @@ mod router_tests {
         let channel = Arc::new(create_test_channel(
             runtime,
             "test-channel",
-            vec!["/webhook/test"],
+            vec!["/webhook/test-channel"],
         ));
 
         let endpoints = vec![RegisteredEndpoint {
             channel_name: "test-channel".to_string(),
-            path: "/webhook/test".to_string(),
+            path: "/webhook/test-channel".to_string(),
             methods: vec!["POST".to_string()],
             require_secret: false,
         }];
 
         router
             .register(channel.clone(), endpoints, RegisteredWebhookAuth::default())
-            .await;
+            .await
+            .unwrap();
 
         // Verify channel is found by path
-        let found = router.get_channel_for_path("/webhook/test").await;
+        let found = router.get_channel_for_path("/webhook/test-channel").await;
         assert!(found.is_some());
         assert_eq!(found.unwrap().channel_name(), "test-channel");
 
@@ -107,7 +108,8 @@ mod router_tests {
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         // Correct secret validates
         assert!(
@@ -123,8 +125,8 @@ mod router_tests {
                 .await
         );
 
-        // Non-existent channel without secret always validates
-        assert!(router.validate_secret("nonexistent", "anything").await);
+        // Secret validation fails closed for unknown channels.
+        assert!(!router.validate_secret("nonexistent", "anything").await);
     }
 
     #[tokio::test]
@@ -135,28 +137,39 @@ mod router_tests {
         let channel = Arc::new(create_test_channel(
             runtime,
             "temp-channel",
-            vec!["/webhook/temp"],
+            vec!["/webhook/temp-channel"],
         ));
 
         let endpoints = vec![RegisteredEndpoint {
             channel_name: "temp-channel".to_string(),
-            path: "/webhook/temp".to_string(),
+            path: "/webhook/temp-channel".to_string(),
             methods: vec!["POST".to_string()],
             require_secret: false,
         }];
 
         router
             .register(channel, endpoints, RegisteredWebhookAuth::default())
-            .await;
+            .await
+            .unwrap();
 
         // Channel exists
-        assert!(router.get_channel_for_path("/webhook/temp").await.is_some());
+        assert!(
+            router
+                .get_channel_for_path("/webhook/temp-channel")
+                .await
+                .is_some()
+        );
 
         // Unregister
         router.unregister("temp-channel").await;
 
         // Channel no longer exists
-        assert!(router.get_channel_for_path("/webhook/temp").await.is_none());
+        assert!(
+            router
+                .get_channel_for_path("/webhook/temp-channel")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -181,7 +194,8 @@ mod router_tests {
 
             router
                 .register(channel, endpoints, RegisteredWebhookAuth::default())
-                .await;
+                .await
+                .unwrap();
         }
 
         // Verify all channels are registered

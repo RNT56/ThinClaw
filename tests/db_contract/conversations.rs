@@ -56,7 +56,8 @@ async fn conversation_message_flow_contract() {
         .expect("create_conversation should succeed");
     assert_ne!(conversation_id, Uuid::nil());
 
-    ctx.db
+    let user_message_id = ctx
+        .db
         .add_conversation_message(conversation_id, "user", "hello contract world")
         .await
         .expect("add_conversation_message should succeed");
@@ -79,6 +80,29 @@ async fn conversation_message_flow_contract() {
         .await
         .expect("list_conversation_messages should succeed");
     assert_eq!(messages.len(), 2);
+
+    ctx.db
+        .set_effective_user_instruction(
+            conversation_id,
+            user_message_id,
+            "hook-rewritten contract input",
+        )
+        .await
+        .expect("set_effective_user_instruction should succeed");
+    let messages = ctx
+        .db
+        .list_conversation_messages(conversation_id)
+        .await
+        .expect("rewritten conversation messages should load");
+    let rewritten_user = messages
+        .iter()
+        .find(|message| message.id == user_message_id)
+        .expect("rewritten user row should remain present");
+    assert_eq!(rewritten_user.content, "hello contract world");
+    assert_eq!(
+        rewritten_user.metadata["_thinclaw_effective_user_instruction"],
+        "hook-rewritten contract input"
+    );
 
     let (page, has_more) = ctx
         .db

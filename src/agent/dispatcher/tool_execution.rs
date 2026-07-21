@@ -66,10 +66,12 @@ impl Agent {
                 && let Some(turn) = thread.last_turn_mut()
             {
                 for tc in &tool_calls {
-                    turn.record_tool_call(&tc.name, tc.arguments.clone());
+                    turn.record_tool_call_with_id(&tc.id, &tc.name, tc.arguments.clone());
                 }
             }
         }
+        self.persist_thread_runtime_snapshot(message, session, thread_id)
+            .await;
 
         // === Phase 1: Preflight (sequential) ===
         // Walk tool_calls checking approval and hooks. Classify
@@ -181,6 +183,20 @@ impl Agent {
                 _ => {}
             }
 
+            // The durable audit must reflect the post-hook arguments that are
+            // actually policy-checked/executed, not only the model's original
+            // proposal.
+            {
+                let mut sess = session.lock().await;
+                if let Some(turn) = sess
+                    .threads
+                    .get_mut(&thread_id)
+                    .and_then(|thread| thread.last_turn_mut())
+                {
+                    turn.update_tool_call_parameters_for_id(&tc.id, tc.arguments.clone());
+                }
+            }
+
             // Argument-scoped policy on the final (post-hook) arguments:
             // `Deny` blocks the call outright; `RequireApproval` escalates it.
             let arg_decision = arg_tool_policies.evaluate_arg_policy(&tc.name, &tc.arguments);
@@ -217,7 +233,11 @@ impl Agent {
                         ApprovalRequirement::Never => false,
                         ApprovalRequirement::UnlessAutoApproved => {
                             let sess = session.lock().await;
-                            !sess.is_tool_auto_approved_for_channel(&message.channel, &tc.name)
+                            !sess.is_tool_auto_approved_for_identity(
+                                &message.resolved_identity().actor_id,
+                                &message.channel,
+                                &tc.name,
+                            )
                         }
                         ApprovalRequirement::Always => true,
                     }
@@ -233,6 +253,8 @@ impl Agent {
             preflight.push((tc.clone(), PreflightOutcome::Runnable));
             runnable.push((preflight_idx, tc));
         }
+        self.persist_thread_runtime_snapshot(message, session, thread_id)
+            .await;
 
         // === Phase 2: Parallel execution ===
         // Execute runnable tools and slot results back by preflight
@@ -504,15 +526,26 @@ impl Agent {
         for (pf_idx, (tc, outcome)) in preflight.into_iter().enumerate() {
             match outcome {
                 PreflightOutcome::Rejected(error_msg) => {
+                    let error_msg = self
+                        .safety()
+                        .sanitize_tool_output(&tc.name, &error_msg)
+                        .content;
                     // Record hook rejection in thread
                     {
                         let mut sess = session.lock().await;
                         if let Some(thread) = sess.threads.get_mut(&thread_id)
                             && let Some(turn) = thread.last_turn_mut()
+                            && !turn.record_tool_error_for_id(&tc.id, error_msg.clone())
                         {
-                            turn.record_tool_error(error_msg.clone());
+                            tracing::error!(
+                                tool_call_id = %tc.id,
+                                tool = %tc.name,
+                                "Rejected tool result had no registered call"
+                            );
                         }
                     }
+                    self.persist_thread_runtime_snapshot(message, session, thread_id)
+                        .await;
                     if tc.name != crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
                         advisor_state.real_tool_result_count += 1;
                         advisor_state.last_failure = Some(AdvisorFailureContext {
@@ -573,57 +606,75 @@ impl Agent {
                             crate::tools::builtin::CanvasAction,
                         >(&output.content)
                     {
-                        // Emit the action to the channel for
-                        // real-time rendering in the frontend.
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::CanvasAction(action.clone()),
-                                &message.metadata,
-                            )
-                            .await;
-
-                        // Persist in the CanvasStore for HTTP
-                        // access at /canvas/.
+                        // Persist first and replace the model-chosen panel ID
+                        // with a conversation-scoped public handle. Model IDs
+                        // only need to be unique inside their own conversation;
+                        // exposing them globally let one actor overwrite or
+                        // dismiss another actor's panel.
+                        let mut client_action = action.clone();
                         if let Some(ref store) = self.deps.canvas_store {
-                            match &action {
+                            match action {
                                 crate::tools::builtin::CanvasAction::Show {
                                     panel_id,
                                     title,
                                     components,
-                                    ..
+                                    position,
+                                    modal,
                                 } => {
-                                    store
-                                        .upsert(
-                                            panel_id.clone(),
+                                    let metadata = serde_json::json!({
+                                        "position": position,
+                                        "modal": modal,
+                                        "session_key": message.thread_id,
+                                        "run_id": message.metadata.get("run_id"),
+                                    });
+                                    let public_handle = store
+                                        .upsert_for_message(
+                                            panel_id,
                                             title.clone(),
-                                            serde_json::to_value(components).unwrap_or_default(),
-                                            None,
+                                            serde_json::to_value(&components).unwrap_or_default(),
+                                            Some(metadata),
+                                            message.clone(),
                                         )
                                         .await;
+                                    client_action = crate::tools::builtin::CanvasAction::Show {
+                                        panel_id: public_handle,
+                                        title,
+                                        components,
+                                        position,
+                                        modal,
+                                    };
                                 }
                                 crate::tools::builtin::CanvasAction::Update {
                                     panel_id,
                                     components,
                                 } => {
-                                    // Update: keep existing title
-                                    let existing_title = store
-                                        .get(panel_id)
-                                        .await
-                                        .map(|p| p.title)
+                                    let existing = store.get_for_message(&panel_id, message).await;
+                                    let title = existing
+                                        .as_ref()
+                                        .map(|panel| panel.title.clone())
                                         .unwrap_or_else(|| panel_id.clone());
-                                    store
-                                        .upsert(
-                                            panel_id.clone(),
-                                            existing_title,
-                                            serde_json::to_value(components).unwrap_or_default(),
-                                            None,
+                                    let metadata = existing.and_then(|panel| panel.metadata);
+                                    let public_handle = store
+                                        .upsert_for_message(
+                                            panel_id,
+                                            title,
+                                            serde_json::to_value(&components).unwrap_or_default(),
+                                            metadata,
+                                            message.clone(),
                                         )
                                         .await;
+                                    client_action = crate::tools::builtin::CanvasAction::Update {
+                                        panel_id: public_handle,
+                                        components,
+                                    };
                                 }
                                 crate::tools::builtin::CanvasAction::Dismiss { panel_id } => {
-                                    store.dismiss(panel_id).await;
+                                    let public_handle =
+                                        store.public_handle_for_message(&panel_id, message);
+                                    store.dismiss_for_message(&panel_id, message).await;
+                                    client_action = crate::tools::builtin::CanvasAction::Dismiss {
+                                        panel_id: public_handle,
+                                    };
                                 }
                                 crate::tools::builtin::CanvasAction::Notify { .. } => {
                                     // Notifications are transient;
@@ -631,6 +682,17 @@ impl Agent {
                                 }
                             }
                         }
+
+                        // Emit only after the public handle is registered, so
+                        // an immediate UI click can always be routed back.
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::CanvasAction(client_action),
+                                &message.metadata,
+                            )
+                            .await;
                     }
 
                     // ── Credential prompt interception ───────────────
@@ -808,7 +870,6 @@ impl Agent {
                             ));
                         }
                     }
-
                     // ── message_agent interception ────────────────────
                     // The message_agent tool outputs a structured A2A
                     // request. We intercept it here to run the target
@@ -963,14 +1024,39 @@ impl Agent {
                         {
                             match &tool_result {
                                 Ok(output) => {
-                                    turn.record_tool_result(serde_json::json!(output.content));
+                                    let safe_content = self
+                                        .safety()
+                                        .sanitize_tool_output(&tc.name, &output.content)
+                                        .content;
+                                    if !turn.record_tool_result_for_id(
+                                        &tc.id,
+                                        serde_json::json!(safe_content),
+                                    ) {
+                                        tracing::error!(
+                                            tool_call_id = %tc.id,
+                                            tool = %tc.name,
+                                            "Tool result had no registered call"
+                                        );
+                                    }
                                 }
                                 Err(e) => {
-                                    turn.record_tool_error(e.to_string());
+                                    let safe_error = self
+                                        .safety()
+                                        .sanitize_tool_output(&tc.name, &e.to_string())
+                                        .content;
+                                    if !turn.record_tool_error_for_id(&tc.id, safe_error) {
+                                        tracing::error!(
+                                            tool_call_id = %tc.id,
+                                            tool = %tc.name,
+                                            "Tool error had no registered call"
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
+                    self.persist_thread_runtime_snapshot(message, session, thread_id)
+                        .await;
 
                     // Check for auth awaiting — defer the return
                     // until all results are recorded.
@@ -995,6 +1081,7 @@ impl Agent {
                                 thread.enter_auth_mode(
                                     auth_request.extension_name.clone(),
                                     auth_request.auth_mode,
+                                    message.resolved_identity(),
                                 );
                             }
                         }
@@ -1075,7 +1162,13 @@ impl Agent {
                                 sanitized.was_modified,
                             )
                         }
-                        Err(e) => format!("Error: {}", e),
+                        Err(e) => {
+                            let safe_error = self
+                                .safety()
+                                .sanitize_tool_output(&tc.name, &e.to_string())
+                                .content;
+                            format!("Error: {safe_error}")
+                        }
                     };
 
                     context_messages.push(ChatMessage::tool_result(
@@ -1114,6 +1207,9 @@ impl Agent {
                 tool_call_id: tc.id.clone(),
                 context_messages: context_messages.clone(),
                 deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
+                requesting_identity: Some(message.resolved_identity()),
+                request_channel: message.channel.clone(),
+                request_metadata: message.metadata.clone(),
             };
 
             return Ok(Some(AgenticLoopResult::NeedApproval { pending }));

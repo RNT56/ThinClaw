@@ -18,6 +18,7 @@
 
 mod channels;
 mod prompts;
+pub(crate) mod validation;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 mod wizard;
 
@@ -59,10 +60,11 @@ pub fn check_onboard_needed(toml_path: Option<&std::path::Path>, no_db: bool) ->
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("bootstrap.json");
-    let bootstrap_json: serde_json::Value = std::fs::read_to_string(&bootstrap_path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or(serde_json::Value::Null);
+    let bootstrap_json: serde_json::Value =
+        thinclaw_platform::read_regular_file_bounded_single_link(&bootstrap_path, 1024 * 1024)
+            .ok()
+            .and_then(|content| serde_json::from_slice(&content).ok())
+            .unwrap_or(serde_json::Value::Null);
 
     let env_backend = std::env::var("DATABASE_BACKEND").ok();
     let settings_backend = settings.database_backend.clone();

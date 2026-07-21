@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use libsql::params;
+use libsql::{TransactionBehavior, params};
 
 use super::{LibSqlBackend, fmt_ts, get_i64, get_json, get_text, get_ts};
 use crate::SettingsStore;
@@ -155,32 +155,30 @@ impl SettingsStore for LibSqlBackend {
         user_id: &str,
         settings: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
+        let _transaction_guard = self.transaction_lock.lock().await;
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
-        conn.execute("BEGIN", ())
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         for (key, value) in settings {
-            if let Err(e) = conn
-                .execute(
-                    r#"
+            tx.execute(
+                r#"
                     INSERT INTO settings (user_id, key, value, updated_at)
                     VALUES (?1, ?2, ?3, ?4)
                     ON CONFLICT (user_id, key) DO UPDATE SET
                         value = excluded.value,
                         updated_at = ?4
                     "#,
-                    params![user_id, key.as_str(), value.to_string(), now.as_str()],
-                )
-                .await
-            {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(DatabaseError::Query(e.to_string()));
-            }
+                params![user_id, key.as_str(), value.to_string(), now.as_str()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
         }
 
-        conn.execute("COMMIT", ())
+        tx.commit()
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())

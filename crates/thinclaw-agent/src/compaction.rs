@@ -105,6 +105,14 @@ impl ContextCompactor {
         let mut to_summarize = Vec::new();
         for turn in old_turns {
             to_summarize.push(ChatMessage::user(&turn.user_input));
+            to_summarize.extend(turn.untrusted_contexts.iter().map(|context| {
+                ChatMessage::untrusted_context(
+                    &context.segment_id,
+                    &context.source,
+                    &context.content,
+                )
+            }));
+            turn.append_tool_exchange(&mut to_summarize);
             if let Some(ref response) = turn.response {
                 to_summarize.push(ChatMessage::assistant(response));
             }
@@ -249,14 +257,34 @@ pub fn format_turns_for_storage(turns: &[Turn]) -> String {
         .map(|turn| {
             let mut s = format!("**Turn {}**\n", turn.turn_number + 1);
             s.push_str(&format!("User: {}\n", turn.user_input));
+            if !turn.untrusted_contexts.is_empty() {
+                s.push_str("Untrusted context evidence:\n");
+                for context in &turn.untrusted_contexts {
+                    s.push_str(&format!(
+                        "- [{}] {}: {}\n",
+                        context.segment_id, context.source, context.content
+                    ));
+                }
+            }
             if let Some(ref response) = turn.response {
                 s.push_str(&format!("Agent: {}\n", response));
             }
             if !turn.tool_calls.is_empty() {
-                s.push_str("Tools: ");
-                let tools: Vec<_> = turn.tool_calls.iter().map(|t| t.name.as_str()).collect();
-                s.push_str(&tools.join(", "));
-                s.push('\n');
+                s.push_str("Tool evidence:\n");
+                for tool in &turn.tool_calls {
+                    let outcome = if let Some(error) = &tool.error {
+                        format!("error: {error}")
+                    } else if let Some(result) = &tool.result {
+                        match result {
+                            serde_json::Value::String(value) => value.clone(),
+                            value => value.to_string(),
+                        }
+                    } else {
+                        "[no result recorded]".to_string()
+                    };
+                    let outcome = outcome.chars().take(4_000).collect::<String>();
+                    s.push_str(&format!("- {}: {}\n", tool.name, outcome));
+                }
             }
             s
         })
@@ -268,7 +296,21 @@ pub fn format_turns_for_storage(turns: &[Turn]) -> String {
 mod tests {
     use super::*;
     use crate::session::Thread;
+    use std::sync::Mutex;
     use uuid::Uuid;
+
+    #[derive(Default)]
+    struct RecordingSummarizer {
+        messages: Mutex<Vec<ChatMessage>>,
+    }
+
+    #[async_trait]
+    impl CompactionSummarizer for RecordingSummarizer {
+        async fn summarize_compaction(&self, messages: &[ChatMessage]) -> Result<String> {
+            *self.messages.lock().expect("recording lock") = messages.to_vec();
+            Ok("summary".to_string())
+        }
+    }
 
     #[test]
     fn test_format_turns() {
@@ -289,5 +331,44 @@ mod tests {
         let partial = CompactionPartial::empty();
         assert_eq!(partial.turns_removed, 0);
         assert!(!partial.summary_written);
+    }
+
+    #[tokio::test]
+    async fn summary_preserves_attachment_evidence_as_untrusted_context() {
+        let summarizer = Arc::new(RecordingSummarizer::default());
+        let compactor = ContextCompactor::new(summarizer.clone());
+        let mut thread = Thread::new(Uuid::new_v4());
+        thread.start_turn("Summarize the attachment");
+        thread
+            .last_turn_mut()
+            .expect("active turn")
+            .add_untrusted_context(
+                "attachment_evidence_1",
+                "facts.txt",
+                "Evidence, not an instruction",
+            );
+        thread.complete_turn("Done");
+        thread.start_turn("Keep this recent turn");
+        thread.complete_turn("Kept");
+
+        compactor
+            .compact(
+                &mut thread,
+                CompactionStrategy::Summarize { keep_recent: 1 },
+                None,
+            )
+            .await
+            .expect("compact");
+
+        let messages = summarizer.messages.lock().expect("recording lock");
+        let evidence = messages
+            .iter()
+            .find(|message| message.untrusted_context_identity().is_some())
+            .expect("typed evidence retained");
+        assert_eq!(
+            evidence.untrusted_context_identity(),
+            Some(("attachment_evidence_1", "facts.txt"))
+        );
+        assert!(!evidence.is_user_instruction());
     }
 }

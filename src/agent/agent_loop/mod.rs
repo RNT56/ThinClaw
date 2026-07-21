@@ -172,6 +172,19 @@ pub struct Agent {
     /// readiness cache and pooled HTTP client on every call. `None` when no
     /// store is configured (matches `deps.store`).
     pub(super) learning_orchestrator: Option<Arc<crate::agent::learning::LearningOrchestrator>>,
+    /// Bounded, joinable post-turn work (trajectory artifacts, learning
+    /// review, compaction extraction). Bare detached tasks previously grew
+    /// without limit under load and were silently lost during shutdown.
+    pub(super) tail_tasks: Arc<Mutex<tokio::task::JoinSet<()>>>,
+    pub(super) tail_task_permits: Arc<tokio::sync::Semaphore>,
+    /// Bounds detached host/API submissions. Desktop endpoints return before
+    /// turns finish; without admission permits a burst could allocate an
+    /// unbounded number of tasks waiting on per-conversation execution locks.
+    pub(super) external_submission_permits: Arc<tokio::sync::Semaphore>,
+    /// Joinable ownership for detached desktop/API turns. Admission limits
+    /// allocation; this set additionally guarantees shutdown can drain or
+    /// abort the accepted work instead of leaking an old `Agent` instance.
+    pub(super) external_submission_tasks: Arc<Mutex<tokio::task::JoinSet<()>>>,
 }
 
 impl Agent {
@@ -270,6 +283,14 @@ impl Agent {
             latest_token_captures: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active_turn_cancellations: TurnCancellationRegistry::new(),
             learning_orchestrator,
+            tail_tasks: Arc::new(Mutex::new(tokio::task::JoinSet::new())),
+            tail_task_permits: Arc::new(tokio::sync::Semaphore::new(
+                Self::MAX_CONCURRENT_TAIL_TASKS,
+            )),
+            external_submission_permits: Arc::new(tokio::sync::Semaphore::new(
+                Self::MAX_CONCURRENT_EXTERNAL_SUBMISSIONS,
+            )),
+            external_submission_tasks: Arc::new(Mutex::new(tokio::task::JoinSet::new())),
             runtime_ports,
         }
     }
@@ -284,6 +305,34 @@ impl Agent {
     /// Get a reference to the session manager.
     pub fn session_manager(&self) -> &Arc<SessionManager> {
         &self.session_manager
+    }
+
+    /// Admit and own one detached desktop/API submission.
+    ///
+    /// Returns `false` when the runtime is saturated or shutting down. The
+    /// shutdown path closes admission while holding the same task-set lock, so
+    /// no task can be inserted after the final drain begins.
+    pub(crate) async fn spawn_external_submission(
+        &self,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> bool {
+        let Ok(permit) = Arc::clone(&self.external_submission_permits).try_acquire_owned() else {
+            return false;
+        };
+        let mut tasks = self.external_submission_tasks.lock().await;
+        if self.external_submission_permits.is_closed() {
+            return false;
+        }
+        while let Some(joined) = tasks.try_join_next() {
+            if let Err(error) = joined {
+                tracing::warn!(%error, "External submission task failed");
+            }
+        }
+        tasks.spawn(async move {
+            let _permit = permit;
+            task.await;
+        });
+        true
     }
 
     /// Get a reference to the multi-agent router.
@@ -353,10 +402,19 @@ impl Agent {
             .cloned()
     }
 
+    #[cfg(test)]
     pub(super) async fn begin_turn_cancellation(&self, thread_id: Uuid) {
         self.active_turn_cancellations.begin(thread_id).await;
     }
 
+    pub(super) async fn begin_turn_cancellation_guard(
+        &self,
+        thread_id: Uuid,
+    ) -> thinclaw_agent::turn_cancellation::TurnCancellationGuard {
+        self.active_turn_cancellations.begin_guard(thread_id).await
+    }
+
+    #[cfg(test)]
     pub(super) async fn finish_turn_cancellation(&self, thread_id: Uuid) {
         self.active_turn_cancellations.finish(thread_id).await;
     }
@@ -367,6 +425,39 @@ impl Agent {
 
     pub(super) async fn wait_for_turn_cancellation(&self, thread_id: Uuid) {
         self.active_turn_cancellations.wait(thread_id).await;
+    }
+
+    pub(in crate::agent) async fn spawn_tail_task(
+        &self,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        let permit = match Arc::clone(&self.tail_task_permits).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                // Post-turn enrichment must never delay the user-visible turn
+                // indefinitely. Shed work explicitly when the bounded tail
+                // pool is saturated instead of waiting here for a permit.
+                tracing::warn!("Post-turn task dropped because the bounded pool is saturated");
+                return;
+            }
+            Err(tokio::sync::TryAcquireError::Closed) => return,
+        };
+        let timeout = self
+            .config
+            .job_timeout
+            .max(std::time::Duration::from_secs(1));
+        let mut tasks = self.tail_tasks.lock().await;
+        while let Some(joined) = tasks.try_join_next() {
+            if let Err(error) = joined {
+                tracing::warn!(%error, "Post-turn task failed");
+            }
+        }
+        tasks.spawn(async move {
+            let _permit = permit;
+            if tokio::time::timeout(timeout, task).await.is_err() {
+                tracing::warn!(timeout_secs = timeout.as_secs(), "Post-turn task timed out");
+            }
+        });
     }
 
     pub(super) fn turn_interrupted_error(thread_id: Uuid) -> Error {
@@ -1364,6 +1455,23 @@ impl Agent {
             // IC-018: Abort all running routine tasks
             engine.abort_all().await;
         }
+        // Close every ingress that can create child work before draining child
+        // executors. This ordering prevents a late external turn from spawning
+        // a sub-agent/worker after its shutdown pass has already completed.
+        self.external_submission_permits.close();
+        self.drain_external_submission_tasks().await;
+        self.tail_task_permits.close();
+        self.drain_tail_tasks().await;
+        if let Some(executor) = self.subagent_executor.as_ref() {
+            executor.shutdown().await;
+        }
+        self.scheduler.stop_all().await;
+        if let Some(children) = self.deps.sandbox_children.as_ref() {
+            children.shutdown().await;
+        }
+        if let Some(job_manager) = self.deps.job_manager.as_ref() {
+            job_manager.shutdown_all().await;
+        }
         // IC-003: drain notification forwarder after routine senders close.
         if let Some(h) = handle.notification_forwarder_handle {
             let stop_reason = Self::drain_or_abort_background_task(
@@ -1422,7 +1530,33 @@ impl Agent {
         if let Some(manager) = self.extension_manager() {
             manager.stop_mcp_background_tasks().await;
         }
-        self.scheduler.stop_all().await;
+    }
+
+    /// Run the pre-start policy hook shared by every host surface.
+    ///
+    /// This must be called before channels or runtime-owned background tasks
+    /// are started. Explicit policy rejection is fail-closed; operational hook
+    /// failures remain fail-open so an unavailable optional hook cannot brick
+    /// the agent.
+    pub async fn enforce_startup_policy(&self) -> Result<(), Error> {
+        let event = crate::hooks::HookEvent::AgentStart {
+            model: self.llm().active_model_name(),
+            provider: self.config.name.clone(),
+        };
+        match self.hooks().run(&event).await {
+            Err(crate::hooks::HookError::Rejected { reason }) => {
+                tracing::error!(%reason, "BeforeAgentStart hook rejected startup");
+                Err(Error::from(crate::error::ChannelError::StartupFailed {
+                    name: self.config.name.clone(),
+                    reason: format!("BeforeAgentStart hook rejected: {reason}"),
+                }))
+            }
+            Err(error) => {
+                tracing::warn!(%error, "BeforeAgentStart hook error (fail-open)");
+                Ok(())
+            }
+            Ok(_) => Ok(()),
+        }
     }
 
     /// Run the agent main loop.
@@ -1434,6 +1568,11 @@ impl Agent {
     pub async fn run(self) -> Result<(), Error> {
         // F-11: track uptime so the AgentEnd observability event can report duration.
         let agent_started_at = std::time::Instant::now();
+
+        // Run startup policy before channels, background services, or watchers
+        // acquire resources. A rejection leaves no partially started runtime.
+        self.enforce_startup_policy().await?;
+
         // Start channels
         let mut message_stream = self.channels.start_all().await?;
 
@@ -1448,8 +1587,7 @@ impl Agent {
             let toml_path = crate::settings::Settings::default_toml_path();
             let watcher = crate::config::watcher::ConfigWatcher::new(&toml_path);
             let mut rx = watcher.subscribe();
-            // Spawn a task that logs config change events
-            tokio::spawn(async move {
+            let event_logger = tokio::spawn(async move {
                 while let Ok(event) = rx.recv().await {
                     tracing::info!(
                         path = %event.path.display(),
@@ -1458,34 +1596,13 @@ impl Agent {
                 }
             });
             watcher.start().await;
-            Some(watcher)
+            Some((watcher, event_logger))
         };
 
         // Extract engine ref for use in message loop
         let routine_engine_for_loop = bg.routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
 
         // Main message loop
-        // Hook: BeforeAgentStart — allow hooks to inspect/modify startup config
-        {
-            let event = crate::hooks::HookEvent::AgentStart {
-                model: self.llm().active_model_name(),
-                provider: self.config.name.clone(),
-            };
-            match self.hooks().run(&event).await {
-                Err(crate::hooks::HookError::Rejected { reason }) => {
-                    tracing::error!("BeforeAgentStart hook rejected startup: {}", reason);
-                    return Err(Error::from(crate::error::ChannelError::StartupFailed {
-                        name: "agent".to_string(),
-                        reason: format!("BeforeAgentStart hook rejected: {}", reason),
-                    }));
-                }
-                Err(err) => {
-                    tracing::warn!("BeforeAgentStart hook error (fail-open): {}", err);
-                }
-                Ok(_) => {}
-            }
-        }
-
         tracing::info!("Agent {} ready and listening", self.config.name);
 
         // ── Proactive startup hooks ────────────────────────────────────
@@ -1613,8 +1730,18 @@ impl Agent {
             });
 
         // Cleanup
-        if let Some(ref watcher) = config_watcher {
+        if let Some((watcher, event_logger)) = config_watcher {
             watcher.stop().await;
+            // `stop()` ends the poller, while dropping the last broadcast
+            // sender lets the event logger observe channel closure and exit.
+            drop(watcher);
+            let _ = Self::drain_or_abort_background_task(
+                "config_event_logger",
+                event_logger,
+                Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT,
+                LoopStopReason::ExternalShutdown,
+            )
+            .await;
         }
         agent.shutdown_background(bg).await;
         agent.channels.shutdown_all().await?;
@@ -1635,6 +1762,8 @@ impl Agent {
     /// Bound on turns processed concurrently across all conversations in
     /// the standalone `run()` loop.
     const MAIN_LOOP_MAX_CONCURRENT_TURNS: usize = 8;
+    const MAX_CONCURRENT_TAIL_TASKS: usize = 8;
+    const MAX_CONCURRENT_EXTERNAL_SUBMISSIONS: usize = 64;
     /// Idle time before a conversation worker exits and removes itself
     /// from the dispatch map.
     const CONVERSATION_WORKER_IDLE_TIMEOUT: std::time::Duration =
@@ -1646,6 +1775,62 @@ impl Agent {
     const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
     /// Bound for background loops that have an explicit shutdown signal.
     const BACKGROUND_TASK_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    async fn drain_tail_tasks(&self) {
+        let mut tasks = self.tail_tasks.lock().await;
+        let graceful = async {
+            while let Some(joined) = tasks.join_next().await {
+                if let Err(error) = joined {
+                    tracing::warn!(%error, "Post-turn task failed during shutdown");
+                }
+            }
+        };
+        if tokio::time::timeout(Self::SHUTDOWN_DRAIN_TIMEOUT, graceful)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        tracing::warn!(
+            timeout_secs = Self::SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+            "Post-turn tasks did not drain before shutdown timeout; aborting"
+        );
+        if tokio::time::timeout(Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT, tasks.shutdown())
+            .await
+            .is_err()
+        {
+            tracing::error!("Post-turn tasks did not join promptly after abort");
+            tasks.abort_all();
+        }
+    }
+
+    async fn drain_external_submission_tasks(&self) {
+        let mut tasks = self.external_submission_tasks.lock().await;
+        let graceful = async {
+            while let Some(joined) = tasks.join_next().await {
+                if let Err(error) = joined {
+                    tracing::warn!(%error, "External submission failed during shutdown");
+                }
+            }
+        };
+        if tokio::time::timeout(Self::SHUTDOWN_DRAIN_TIMEOUT, graceful)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        tracing::warn!(
+            timeout_secs = Self::SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+            "External submissions did not drain before shutdown timeout; aborting"
+        );
+        if tokio::time::timeout(Self::BACKGROUND_TASK_SHUTDOWN_TIMEOUT, tasks.shutdown())
+            .await
+            .is_err()
+        {
+            tracing::error!("External submissions did not join promptly after abort");
+            tasks.abort_all();
+        }
+    }
 
     async fn drain_or_abort_background_task(
         name: &'static str,
@@ -1710,6 +1895,32 @@ impl Agent {
         routine_engine: Option<Arc<RoutineEngine>>,
         message: IncomingMessage,
     ) {
+        // Resolve identity before deriving the worker key. Otherwise untrusted
+        // adapter metadata can manufacture arbitrary principal/actor IDs and
+        // shard one real conversation across workers (or force unrelated
+        // conversations into the same queue) before the canonical ingress
+        // resolver gets a chance to strip those claims.
+        let mut message = message;
+        if let Err(error) = agent.resolve_ingress_identity(&mut message).await {
+            tracing::error!(
+                channel = %message.channel,
+                error = %error,
+                "Rejecting message whose ingress identity could not be resolved"
+            );
+            if let Err(send_error) = agent
+                .channels
+                .respond(&message, OutgoingResponse::text(format!("Error: {error}")))
+                .await
+            {
+                tracing::error!(
+                    channel = %message.channel,
+                    error = %send_error,
+                    "Failed to send ingress identity error response"
+                );
+            }
+            return;
+        }
+
         let preview = SubmissionParser::parse(&message.content);
         if matches!(
             preview,
@@ -1729,7 +1940,9 @@ impl Agent {
             return;
         }
 
-        let key = message.resolved_identity().conversation_scope_id;
+        let key = thinclaw_agent::session_manager::SessionManager::session_scope_for_identity(
+            &message.resolved_identity(),
+        );
         let mut pending = message;
         loop {
             // Fast path: hand to the existing worker for this conversation.
@@ -1859,55 +2072,21 @@ impl Agent {
             .handle_message_payload_external_parsed(message, parsed)
             .await
         {
-            Ok(Some(mut response)) if !response.is_empty() => {
-                // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
-                let event = crate::hooks::HookEvent::Outbound {
-                    user_id: message.user_id.clone(),
-                    channel: message.channel.clone(),
-                    content: response.content.clone(),
-                    thread_id: message.thread_id.clone(),
-                };
-                match self.hooks().run(&event).await {
-                    Err(err) => {
-                        tracing::warn!("BeforeOutbound hook blocked response: {}", err);
-                    }
-                    Ok(crate::hooks::HookOutcome::Continue {
-                        modified: Some(new_content),
-                    }) => {
-                        response.content = new_content;
-                        if let Err(e) = self
-                            .channels
-                            .respond(
-                                message,
-                                OutgoingResponse::text(response.content)
-                                    .with_attachments(response.attachments),
-                            )
-                            .await
-                        {
-                            tracing::error!(
-                                channel = %message.channel,
-                                error = %e,
-                                "Failed to send response to channel"
-                            );
-                        }
-                    }
-                    _ => {
-                        if let Err(e) = self
-                            .channels
-                            .respond(
-                                message,
-                                OutgoingResponse::text(response.content)
-                                    .with_attachments(response.attachments),
-                            )
-                            .await
-                        {
-                            tracing::error!(
-                                channel = %message.channel,
-                                error = %e,
-                                "Failed to send response to channel"
-                            );
-                        }
-                    }
+            Ok(Some(response)) if !response.is_empty() => {
+                if let Err(e) = self
+                    .channels
+                    .respond(
+                        message,
+                        OutgoingResponse::text(response.content)
+                            .with_attachments(response.attachments),
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        channel = %message.channel,
+                        error = %e,
+                        "Failed to send response to channel"
+                    );
                 }
             }
             Ok(Some(empty)) => {

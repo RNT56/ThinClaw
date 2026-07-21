@@ -17,6 +17,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+use super::manifest::{MAX_ARCHIVE_FILE_BYTES, MAX_MANIFEST_FILES};
 use super::provider::CloudError;
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -99,6 +100,7 @@ impl FileTracker {
     ) -> Result<Vec<ChangedFile>, CloudError> {
         let mut changes = Vec::new();
         let mut seen_paths = std::collections::HashSet::new();
+        let mut scanned_files = 0_usize;
 
         for subdir in scan_dirs {
             let dir = root.join(subdir);
@@ -111,6 +113,8 @@ impl FileTracker {
                 &self.known_hashes,
                 &mut changes,
                 &mut seen_paths,
+                &mut scanned_files,
+                0,
             )
             .await?;
         }
@@ -119,14 +123,23 @@ impl FileTracker {
         for rel_path in self.known_hashes.keys() {
             if !seen_paths.contains(rel_path) {
                 let abs_path = root.join(rel_path);
-                if !abs_path.exists() {
-                    changes.push(ChangedFile {
-                        rel_path: rel_path.clone(),
-                        abs_path,
-                        change_type: ChangeType::Deleted,
-                        hash: None,
-                        size: 0,
-                    });
+                match tokio::fs::symlink_metadata(&abs_path).await {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        changes.push(ChangedFile {
+                            rel_path: rel_path.clone(),
+                            abs_path,
+                            change_type: ChangeType::Deleted,
+                            hash: None,
+                            size: 0,
+                        });
+                    }
+                    Err(error) => {
+                        return Err(CloudError::Provider(format!(
+                            "inspect '{}': {error}",
+                            abs_path.display()
+                        )));
+                    }
+                    Ok(_) => {}
                 }
             }
         }
@@ -165,7 +178,14 @@ impl FileTracker {
         known: &HashMap<String, String>,
         changes: &mut Vec<ChangedFile>,
         seen: &mut std::collections::HashSet<String>,
+        scanned_files: &mut usize,
+        depth: usize,
     ) -> Result<(), CloudError> {
+        if depth > 256 {
+            return Err(CloudError::Provider(
+                "sync directory tree exceeds 256 levels".to_string(),
+            ));
+        }
         let mut entries = tokio::fs::read_dir(dir)
             .await
             .map_err(|e| CloudError::Provider(format!("read_dir '{}': {}", dir.display(), e)))?;
@@ -186,36 +206,52 @@ impl FileTracker {
                 continue;
             }
 
-            let meta = entry.metadata().await.map_err(|e| {
+            let meta = tokio::fs::symlink_metadata(&path).await.map_err(|e| {
                 CloudError::Provider(format!("metadata '{}': {}", path.display(), e))
             })?;
 
-            if meta.is_dir() {
-                Box::pin(Self::scan_dir_recursive(&path, root, known, changes, seen)).await?;
+            if meta.file_type().is_symlink() {
+                return Err(CloudError::Provider(format!(
+                    "sync source contains a symlink: {}",
+                    path.display()
+                )));
+            } else if meta.is_dir() {
+                Box::pin(Self::scan_dir_recursive(
+                    &path,
+                    root,
+                    known,
+                    changes,
+                    seen,
+                    scanned_files,
+                    depth + 1,
+                ))
+                .await?;
             } else if meta.is_file() {
-                let rel_path = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .to_string();
+                *scanned_files = scanned_files.saturating_add(1);
+                if *scanned_files > MAX_MANIFEST_FILES {
+                    return Err(CloudError::Provider(format!(
+                        "sync source contains more than {MAX_MANIFEST_FILES} files"
+                    )));
+                }
+                let relative = path.strip_prefix(root).map_err(|_| {
+                    CloudError::Provider(format!("sync path '{}' escapes its root", path.display()))
+                })?;
+                let rel_path = archive_relative_path(relative)?;
 
                 seen.insert(rel_path.clone());
 
-                // Skip very large files (likely model files — too costly to hash/sync)
-                const MAX_SYNC_FILE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB
-                if meta.len() > MAX_SYNC_FILE_SIZE {
-                    debug!(
-                        "[cloud/sync] Skipping large file ({} MB): {}",
-                        meta.len() / (1024 * 1024),
-                        rel_path
-                    );
-                    continue;
+                if meta.len() > MAX_ARCHIVE_FILE_BYTES as u64 {
+                    return Err(CloudError::ObjectTooLarge {
+                        limit: MAX_ARCHIVE_FILE_BYTES,
+                    });
                 }
 
                 // Compute SHA-256 using streaming reader (constant memory)
-                let hash = compute_sha256_streaming(&path).await.map_err(|e| {
-                    CloudError::Provider(format!("hash '{}': {}", path.display(), e))
-                })?;
+                let hash = compute_sha256_streaming(&path, meta.len())
+                    .await
+                    .map_err(|e| {
+                        CloudError::Provider(format!("hash '{}': {}", path.display(), e))
+                    })?;
 
                 match known.get(&rel_path) {
                     None => {
@@ -250,22 +286,57 @@ impl FileTracker {
 }
 
 /// Streaming SHA-256: reads file in 64 KB chunks to avoid loading large files into RAM.
-async fn compute_sha256_streaming(path: &Path) -> Result<String, std::io::Error> {
+async fn compute_sha256_streaming(
+    path: &Path,
+    expected_size: u64,
+) -> Result<String, std::io::Error> {
     use tokio::io::AsyncReadExt;
 
     let mut file = tokio::fs::File::open(path).await?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024]; // 64 KB chunks
+    let mut total = 0_u64;
 
     loop {
         let n = file.read(&mut buf).await?;
         if n == 0 {
             break;
         }
+        total = total.saturating_add(n as u64);
+        if total > expected_size || total > MAX_ARCHIVE_FILE_BYTES as u64 {
+            return Err(std::io::Error::other("file grew while hashing"));
+        }
         hasher.update(&buf[..n]);
     }
 
+    if total != expected_size {
+        return Err(std::io::Error::other("file changed size while hashing"));
+    }
+
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn archive_relative_path(path: &Path) -> Result<String, CloudError> {
+    let mut segments = Vec::new();
+    for component in path.components() {
+        let std::path::Component::Normal(segment) = component else {
+            return Err(CloudError::Provider(format!(
+                "sync path '{}' is not normalized",
+                path.display()
+            )));
+        };
+        let segment = segment.to_str().ok_or_else(|| {
+            CloudError::Provider(format!("sync path '{}' is not UTF-8", path.display()))
+        })?;
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(CloudError::Provider(format!(
+                "sync path '{}' is not normalized",
+                path.display()
+            )));
+        }
+        segments.push(segment);
+    }
+    Ok(segments.join("/"))
 }
 
 // ── SyncEngine ───────────────────────────────────────────────────────────
@@ -360,18 +431,20 @@ impl SyncEngine {
             debug!("[cloud/sync] Starting sync cycle");
 
             match tracker.detect_changes(app_data_dir, scan_dirs).await {
-                Ok(changes) if changes.is_empty() => {
-                    debug!("[cloud/sync] No changes detected");
-                    consecutive_failures = 0; // Reset on successful detection
-                }
                 Ok(changes) => {
                     let count = changes.len();
-                    info!("[cloud/sync] {} changes detected, syncing...", count);
+                    if count == 0 {
+                        debug!("[cloud/sync] No file changes; refreshing database snapshots");
+                    } else {
+                        info!("[cloud/sync] {} changes detected, syncing...", count);
+                    }
 
                     match on_changes(changes.clone()).await {
                         Ok(()) => {
                             tracker.mark_synced(&changes);
-                            info!("[cloud/sync] Sync complete ({} files)", count);
+                            if count > 0 {
+                                info!("[cloud/sync] Sync complete ({} files)", count);
+                            }
                             consecutive_failures = 0;
                         }
                         Err(e) => {

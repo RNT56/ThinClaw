@@ -324,7 +324,11 @@ impl Agent {
             if let Some(thread) = sess.threads.get_mut(&thread_id)
                 && let Some(turn) = thread.last_turn_mut()
             {
-                turn.record_tool_call(&tool_call.name, tool_call.arguments.clone());
+                turn.record_tool_call_with_id(
+                    &tool_call.id,
+                    &tool_call.name,
+                    tool_call.arguments.clone(),
+                );
             }
         }
 
@@ -391,8 +395,13 @@ impl Agent {
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get_mut(&thread_id)
                 && let Some(turn) = thread.last_turn_mut()
+                && !turn
+                    .record_tool_result_for_id(&tool_call.id, serde_json::json!(serialized.clone()))
             {
-                turn.record_tool_result(serde_json::json!(serialized.clone()));
+                tracing::error!(
+                    tool_call_id = %tool_call.id,
+                    "Advisor result had no registered call"
+                );
             }
         }
         context_messages.push(ChatMessage::tool_result(

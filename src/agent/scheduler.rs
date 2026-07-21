@@ -2,15 +2,19 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures::FutureExt;
 pub use thinclaw_agent::scheduler::WorkerMessage;
 use thinclaw_agent::scheduler::{
     SUBTASK_CLEANUP_DELAYS_MS, SUBTASK_CLEANUP_TIMEOUT_SECS, ScheduledJob, ScheduledSubtask,
     SchedulerAdmissionKind, SchedulerAdmissionOutcome, SubtaskCleanupDecision,
     routine_job_metadata, scheduler_admission, subtask_cleanup_decision,
 };
-use tokio::sync::{RwLock, mpsc, oneshot};
+use thinclaw_agent::worker_runtime::is_worker_terminal_state;
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::task::{Task, TaskContext, TaskOutput};
@@ -42,13 +46,22 @@ pub struct Scheduler {
     workspace: Option<Arc<crate::workspace::Workspace>>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
+    /// Admission closes permanently during runtime shutdown. The flag is
+    /// rechecked while holding `jobs` admission so a racing schedule is either
+    /// included in the shutdown snapshot or rejected before it can spawn.
+    accepting_jobs: AtomicBool,
     /// Running sub-tasks (tool executions, background tasks).
     subtasks: Arc<RwLock<HashMap<Uuid, ScheduledSubtask>>>,
+    /// Short-lived cleanup waiters owned by the scheduler lifecycle.
+    maintenance_tasks: Mutex<JoinSet<()>>,
     /// Optional shared cost tracker for worker LLM calls.
     cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
     /// Shared observability sink for worker loop lifecycle metrics.
     observer: Arc<dyn Observer>,
 }
+
+const JOB_SNAPSHOT_PERSIST_TIMEOUT: Duration = Duration::from_secs(5);
+const SCHEDULER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn cleanup_finished_worker(
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
@@ -74,6 +87,48 @@ async fn cleanup_finished_worker(
     }
 }
 
+async fn record_unexpected_worker_failure(
+    context_manager: &ContextManager,
+    store: Option<&Arc<dyn Database>>,
+    job_id: Uuid,
+    reason: &str,
+) {
+    let transition = context_manager
+        .update_context(job_id, |context| {
+            if is_worker_terminal_state(context.state) {
+                Ok(())
+            } else {
+                context.transition_to(JobState::Failed, Some(reason.to_string()))
+            }
+        })
+        .await;
+
+    match transition {
+        Ok(Ok(())) => {
+            if let (Some(store), Ok(snapshot)) = (store, context_manager.get_context(job_id).await)
+            {
+                match tokio::time::timeout(JOB_SNAPSHOT_PERSIST_TIMEOUT, store.save_job(&snapshot))
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(job_id = %job_id, %error, "Failed to persist unexpected worker failure");
+                    }
+                    Err(_) => {
+                        tracing::warn!(job_id = %job_id, "Timed out persisting unexpected worker failure");
+                    }
+                }
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(job_id = %job_id, %error, "Could not transition unexpectedly exited worker");
+        }
+        Err(error) => {
+            tracing::debug!(job_id = %job_id, %error, "Unexpected worker exit arrived after context cleanup");
+        }
+    }
+}
+
 impl Scheduler {
     /// Create a new scheduler.
     pub fn new(
@@ -96,7 +151,9 @@ impl Scheduler {
             sse_tx: None,
             workspace: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
+            accepting_jobs: AtomicBool::new(true),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
+            maintenance_tasks: Mutex::new(JoinSet::new()),
             cost_tracker: None,
             observer: Arc::new(NoopObserver),
         }
@@ -129,15 +186,137 @@ impl Scheduler {
         self
     }
 
-    fn persist_job_snapshot(&self, ctx: JobContext) {
+    async fn persist_job_snapshot(&self, ctx: JobContext) {
         if let Some(ref store) = self.store {
-            let store = Arc::clone(store);
-            tokio::spawn(async move {
-                if let Err(error) = store.save_job(&ctx).await {
+            match tokio::time::timeout(JOB_SNAPSHOT_PERSIST_TIMEOUT, store.save_job(&ctx)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
                     tracing::warn!(job_id = %ctx.job_id, "Failed to persist job snapshot: {}", error);
                 }
-            });
+                Err(_) => {
+                    tracing::warn!(
+                        job_id = %ctx.job_id,
+                        timeout_secs = JOB_SNAPSHOT_PERSIST_TIMEOUT.as_secs(),
+                        "Timed out persisting job snapshot"
+                    );
+                }
+            }
         }
+    }
+
+    fn ensure_accepting(&self, job_id: Uuid) -> Result<(), JobError> {
+        if self.accepting_jobs.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(JobError::ContextError {
+                id: job_id,
+                reason: "scheduler is shutting down".to_string(),
+            })
+        }
+    }
+
+    async fn persist_initial_job(&self, job_id: Uuid) -> Result<(), JobError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        let context = self.context_manager.get_context(job_id).await?;
+        match tokio::time::timeout(JOB_SNAPSHOT_PERSIST_TIMEOUT, store.save_job(&context)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(JobError::Failed {
+                id: job_id,
+                reason: format!("failed to persist job: {error}"),
+            }),
+            Err(_) => Err(JobError::Failed {
+                id: job_id,
+                reason: format!(
+                    "timed out persisting job after {} seconds",
+                    JOB_SNAPSHOT_PERSIST_TIMEOUT.as_secs()
+                ),
+            }),
+        }
+    }
+
+    async fn abandon_unadmitted_job(&self, job_id: Uuid, reason: &str) {
+        let _ = self
+            .context_manager
+            .update_context(job_id, |context| {
+                if !is_worker_terminal_state(context.state) {
+                    let _ = context.transition_to(JobState::Abandoned, Some(reason.to_string()));
+                }
+            })
+            .await;
+        if let Ok(snapshot) = self.context_manager.get_context(job_id).await {
+            self.persist_job_snapshot(snapshot).await;
+        }
+        if let Err(error) = self.context_manager.remove_job(job_id).await {
+            tracing::debug!(%job_id, %error, "Unadmitted job context cleanup skipped");
+        }
+    }
+
+    /// Spawn one worker together with its terminal cleanup. Keeping cleanup in
+    /// the same owned task eliminates detached waiter leaks and guarantees a
+    /// worker cannot finish before its cleanup future is installed. The caller
+    /// holds `jobs` admission while inserting the returned handle, so cleanup's
+    /// write lock naturally waits until the map entry exists.
+    fn spawn_worker_with_cleanup(
+        &self,
+        worker: Worker,
+        rx: mpsc::Receiver<WorkerMessage>,
+        job_id: Uuid,
+        kind: &'static str,
+    ) -> tokio::task::JoinHandle<()> {
+        let jobs = Arc::clone(&self.jobs);
+        let context_manager = Arc::clone(&self.context_manager);
+        let store = self.store.clone();
+        tokio::spawn(async move {
+            let failure_reason = match std::panic::AssertUnwindSafe(worker.run(rx))
+                .catch_unwind()
+                .await
+            {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => {
+                    tracing::error!(job_id = %job_id, worker_kind = kind, %error, "Worker failed");
+                    Some(format!("Worker failed unexpectedly: {error}"))
+                }
+                Err(panic) => {
+                    let message = panic
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown panic");
+                    tracing::error!(job_id = %job_id, worker_kind = kind, %message, "Worker panicked");
+                    Some(format!("Worker panicked: {message}"))
+                }
+            };
+            if let Some(reason) = failure_reason {
+                record_unexpected_worker_failure(
+                    context_manager.as_ref(),
+                    store.as_ref(),
+                    job_id,
+                    &reason,
+                )
+                .await;
+            }
+            cleanup_finished_worker(jobs, context_manager, job_id).await;
+        })
+    }
+
+    async fn spawn_maintenance_task(
+        &self,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        let mut tasks = self.maintenance_tasks.lock().await;
+        if !self.accepting_jobs.load(Ordering::Acquire) {
+            return;
+        }
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result
+                && !error.is_cancelled()
+            {
+                tracing::warn!(%error, "Scheduler maintenance task failed");
+            }
+        }
+        tasks.spawn(task);
     }
 
     /// Create, persist, and schedule a job in one shot.
@@ -170,31 +349,32 @@ impl Scheduler {
         description: &str,
         metadata: Option<serde_json::Value>,
     ) -> Result<Uuid, JobError> {
+        self.ensure_accepting(Uuid::nil())?;
         let job_id = self
             .context_manager
             .create_job_for_identity(principal_id, actor_id, title, description)
             .await?;
 
-        // Apply metadata if provided
-        if let Some(meta) = metadata {
-            self.context_manager
-                .update_context(job_id, |ctx| {
-                    ctx.metadata = meta;
-                })
-                .await?;
+        let admission = async {
+            if let Some(meta) = metadata {
+                self.context_manager
+                    .update_context(job_id, |ctx| {
+                        ctx.metadata = meta;
+                    })
+                    .await?;
+            }
+            self.persist_initial_job(job_id).await?;
+            self.schedule(job_id).await
         }
-
-        // Persist to DB before scheduling so the worker's FK references are valid
-        if let Some(ref store) = self.store {
-            let ctx = self.context_manager.get_context(job_id).await?;
-            store.save_job(&ctx).await.map_err(|e| JobError::Failed {
-                id: job_id,
-                reason: format!("failed to persist job: {e}"),
-            })?;
+        .await;
+        match admission {
+            Ok(()) => Ok(job_id),
+            Err(error) => {
+                self.abandon_unadmitted_job(job_id, &error.to_string())
+                    .await;
+                Err(error)
+            }
         }
-
-        self.schedule(job_id).await?;
-        Ok(job_id)
     }
 
     /// Like `dispatch_job` but wires routine metadata into the worker so it can
@@ -213,29 +393,32 @@ impl Scheduler {
         routine_run_id: String,
         notify_tx: Option<mpsc::Sender<OutgoingResponse>>,
     ) -> Result<Uuid, JobError> {
+        self.ensure_accepting(Uuid::nil())?;
         let job_id = self
             .context_manager
             .create_job_for_identity(principal_id, actor_id, title, description)
             .await?;
 
-        let metadata = routine_job_metadata(metadata, false);
-        self.context_manager
-            .update_context(job_id, |ctx| {
-                ctx.metadata = metadata;
-            })
-            .await?;
-
-        if let Some(ref store) = self.store {
-            let ctx = self.context_manager.get_context(job_id).await?;
-            store.save_job(&ctx).await.map_err(|e| JobError::Failed {
-                id: job_id,
-                reason: format!("failed to persist job: {e}"),
-            })?;
+        let admission = async {
+            let metadata = routine_job_metadata(metadata, false);
+            self.context_manager
+                .update_context(job_id, |ctx| {
+                    ctx.metadata = metadata;
+                })
+                .await?;
+            self.persist_initial_job(job_id).await?;
+            self.schedule_for_routine(job_id, routine_id, routine_name, routine_run_id, notify_tx)
+                .await
         }
-
-        self.schedule_for_routine(job_id, routine_id, routine_name, routine_run_id, notify_tx)
-            .await?;
-        Ok(job_id)
+        .await;
+        match admission {
+            Ok(()) => Ok(job_id),
+            Err(error) => {
+                self.abandon_unadmitted_job(job_id, &error.to_string())
+                    .await;
+                Err(error)
+            }
+        }
     }
 
     /// Like `dispatch_job_for_routine` but uses the **reserved overflow slot**
@@ -255,37 +438,39 @@ impl Scheduler {
         routine_run_id: String,
         notify_tx: Option<mpsc::Sender<OutgoingResponse>>,
     ) -> Result<Uuid, JobError> {
+        self.ensure_accepting(Uuid::nil())?;
         // Use the reserved slot (max_jobs + 1) in ContextManager
         let job_id = self
             .context_manager
             .create_job_reserved_for_identity(principal_id, actor_id, title, description)
             .await?;
 
-        let metadata = routine_job_metadata(metadata, true);
-        self.context_manager
-            .update_context(job_id, |ctx| {
-                ctx.metadata = metadata;
-            })
-            .await?;
-
-        if let Some(ref store) = self.store {
-            let ctx = self.context_manager.get_context(job_id).await?;
-            store.save_job(&ctx).await.map_err(|e| JobError::Failed {
-                id: job_id,
-                reason: format!("failed to persist job: {e}"),
-            })?;
+        let admission = async {
+            let metadata = routine_job_metadata(metadata, true);
+            self.context_manager
+                .update_context(job_id, |ctx| {
+                    ctx.metadata = metadata;
+                })
+                .await?;
+            self.persist_initial_job(job_id).await?;
+            self.schedule_reserved_for_routine(
+                job_id,
+                routine_id,
+                routine_name,
+                routine_run_id,
+                notify_tx,
+            )
+            .await
         }
-
-        // Use the reserved schedule path (max_parallel_jobs + 1)
-        self.schedule_reserved_for_routine(
-            job_id,
-            routine_id,
-            routine_name,
-            routine_run_id,
-            notify_tx,
-        )
-        .await?;
-        Ok(job_id)
+        .await;
+        match admission {
+            Ok(()) => Ok(job_id),
+            Err(error) => {
+                self.abandon_unadmitted_job(job_id, &error.to_string())
+                    .await;
+                Err(error)
+            }
+        }
     }
 
     /// Internal: schedule with routine context, using the reserved overflow slot.
@@ -299,6 +484,7 @@ impl Scheduler {
     ) -> Result<(), JobError> {
         {
             let mut jobs = self.jobs.write().await;
+            self.ensure_accepting(job_id)?;
 
             let admission = scheduler_admission(
                 jobs.contains_key(&job_id),
@@ -333,7 +519,7 @@ impl Scheduler {
                     reason: s,
                 })?;
             if let Ok(snapshot) = self.context_manager.get_context(job_id).await {
-                self.persist_job_snapshot(snapshot);
+                self.persist_job_snapshot(snapshot).await;
             }
 
             let (tx, rx) = mpsc::channel(16);
@@ -359,30 +545,13 @@ impl Scheduler {
             };
             let worker = Worker::new(job_id, deps);
 
-            // Use oneshot for event-driven cleanup (Bug 34/36 fix).
-            let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
-            let handle = tokio::spawn(async move {
-                if let Err(e) = worker.run(rx).await {
-                    tracing::error!("Worker for reserved job {} failed: {}", job_id, e);
-                }
-                let _ = done_tx.send(());
-            });
+            let handle = self.spawn_worker_with_cleanup(worker, rx, job_id, "reserved_routine");
 
             if tx.send(WorkerMessage::Start).await.is_err() {
                 tracing::error!(job_id = %job_id, "Reserved worker died before receiving Start");
             }
 
             jobs.insert(job_id, ScheduledJob { handle, tx });
-
-            // Event-driven cleanup — wakes once on completion.
-            // Also remove from ContextManager so the completed job no longer
-            // counts against max_parallel_jobs (Completed is NOT terminal).
-            let jobs_cleanup = Arc::clone(&self.jobs);
-            let ctx_cleanup = Arc::clone(&self.context_manager);
-            tokio::spawn(async move {
-                let _ = done_rx.await;
-                cleanup_finished_worker(jobs_cleanup, ctx_cleanup, job_id).await;
-            });
         }
 
         tracing::info!("Scheduled reserved routine job {} for execution", job_id);
@@ -400,6 +569,7 @@ impl Scheduler {
     ) -> Result<(), JobError> {
         {
             let mut jobs = self.jobs.write().await;
+            self.ensure_accepting(job_id)?;
 
             let admission = scheduler_admission(
                 jobs.contains_key(&job_id),
@@ -434,7 +604,7 @@ impl Scheduler {
                     reason: s,
                 })?;
             if let Ok(snapshot) = self.context_manager.get_context(job_id).await {
-                self.persist_job_snapshot(snapshot);
+                self.persist_job_snapshot(snapshot).await;
             }
 
             let (tx, rx) = mpsc::channel(16);
@@ -460,30 +630,13 @@ impl Scheduler {
             };
             let worker = Worker::new(job_id, deps);
 
-            // Use oneshot for event-driven cleanup (Bug 34/36 fix).
-            let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
-            let handle = tokio::spawn(async move {
-                if let Err(e) = worker.run(rx).await {
-                    tracing::error!("Worker for routine job {} failed: {}", job_id, e);
-                }
-                let _ = done_tx.send(());
-            });
+            let handle = self.spawn_worker_with_cleanup(worker, rx, job_id, "routine");
 
             if tx.send(WorkerMessage::Start).await.is_err() {
                 tracing::error!(job_id = %job_id, "Routine worker died before receiving Start message");
             }
 
             jobs.insert(job_id, ScheduledJob { handle, tx });
-
-            // Event-driven cleanup — wakes once on completion.
-            // Also remove from ContextManager so the completed job no longer
-            // counts against max_parallel_jobs (Completed is NOT terminal).
-            let jobs_cleanup = Arc::clone(&self.jobs);
-            let ctx_cleanup = Arc::clone(&self.context_manager);
-            tokio::spawn(async move {
-                let _ = done_rx.await;
-                cleanup_finished_worker(jobs_cleanup, ctx_cleanup, job_id).await;
-            });
         }
 
         tracing::info!("Scheduled routine job {} for execution", job_id);
@@ -496,6 +649,7 @@ impl Scheduler {
         // TOCTOU races where two concurrent calls both pass the checks.
         {
             let mut jobs = self.jobs.write().await;
+            self.ensure_accepting(job_id)?;
 
             let admission = scheduler_admission(
                 jobs.contains_key(&job_id),
@@ -535,7 +689,7 @@ impl Scheduler {
                     reason: s,
                 })?;
             if let Ok(snapshot) = self.context_manager.get_context(job_id).await {
-                self.persist_job_snapshot(snapshot);
+                self.persist_job_snapshot(snapshot).await;
             }
 
             // Create worker channel
@@ -563,15 +717,7 @@ impl Scheduler {
             };
             let worker = Worker::new(job_id, deps);
 
-            // Spawn worker task
-            let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
-            let handle = tokio::spawn(async move {
-                if let Err(e) = worker.run(rx).await {
-                    tracing::error!("Worker for job {} failed: {}", job_id, e);
-                }
-                // Signal completion (ignore if receiver already dropped)
-                let _ = done_tx.send(());
-            });
+            let handle = self.spawn_worker_with_cleanup(worker, rx, job_id, "standard");
 
             // Start the worker
             if tx.send(WorkerMessage::Start).await.is_err() {
@@ -580,17 +726,6 @@ impl Scheduler {
 
             // Insert while still holding the write lock
             jobs.insert(job_id, ScheduledJob { handle, tx });
-
-            // Spawn a lightweight cleanup waiter — wakes only once on completion
-            // instead of polling at 1Hz per job (Bug 1 fix).
-            // Also remove from ContextManager so the completed job no longer
-            // counts against max_parallel_jobs (Completed is NOT terminal).
-            let jobs_cleanup = Arc::clone(&self.jobs);
-            let ctx_cleanup = Arc::clone(&self.context_manager);
-            tokio::spawn(async move {
-                let _ = done_rx.await; // wakes exactly once when job finishes
-                cleanup_finished_worker(jobs_cleanup, ctx_cleanup, job_id).await;
-            });
         }
 
         tracing::info!("Scheduled job {} for execution", job_id);
@@ -608,6 +743,7 @@ impl Scheduler {
         parent_id: Uuid,
         task: Task,
     ) -> Result<oneshot::Receiver<Result<TaskOutput, Error>>, JobError> {
+        self.ensure_accepting(parent_id)?;
         let task_id = Uuid::new_v4();
         let (result_tx, result_rx) = oneshot::channel();
 
@@ -664,10 +800,14 @@ impl Scheduler {
         // always returned Err(ContextError) and was misleading. The actual result is
         // delivered via the `oneshot` channel above; we only need the handle here for
         // tracking and abort-on-shutdown.
-        self.subtasks
-            .write()
-            .await
-            .insert(task_id, ScheduledSubtask::new(handle));
+        {
+            let mut subtasks = self.subtasks.write().await;
+            if let Err(error) = self.ensure_accepting(parent_id) {
+                handle.abort();
+                return Err(error);
+            }
+            subtasks.insert(task_id, ScheduledSubtask::new(handle));
+        }
 
         // Cleanup waiter — progressive polling with a hard timeout (Bug 35 fix).
         // We cannot use a oneshot here because the result is delivered via
@@ -675,10 +815,17 @@ impl Scheduler {
         // progressive intervals capped at a 10-minute timeout to prevent
         // infinite loops on stuck tasks.
         let subtasks_cleanup = Arc::clone(&self.subtasks);
-        tokio::spawn(async move {
+        self.spawn_maintenance_task(async move {
             let deadline =
                 tokio::time::Instant::now() + Duration::from_secs(SUBTASK_CLEANUP_TIMEOUT_SECS);
-            for delay_ms in SUBTASK_CLEANUP_DELAYS_MS {
+            let mut delay_index = 0usize;
+            loop {
+                let delay_ms = SUBTASK_CLEANUP_DELAYS_MS
+                    .get(delay_index)
+                    .or_else(|| SUBTASK_CLEANUP_DELAYS_MS.last())
+                    .copied()
+                    .unwrap_or(10_000);
+                delay_index = delay_index.saturating_add(1);
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 let finished = {
                     let subtasks_read = subtasks_cleanup.read().await;
@@ -693,13 +840,16 @@ impl Scheduler {
                         break;
                     }
                     SubtaskCleanupDecision::ForceRemoveTimedOut => {
-                        tracing::warn!("Subtask {} cleanup timed out, force-removing", task_id);
-                        subtasks_cleanup.write().await.remove(&task_id);
+                        tracing::warn!("Subtask {} cleanup timed out, aborting", task_id);
+                        if let Some(scheduled) = subtasks_cleanup.write().await.remove(&task_id) {
+                            scheduled.abort();
+                        }
                         break;
                     }
                 }
             }
-        });
+        })
+        .await;
 
         tracing::debug!(
             parent_id = %parent_id,
@@ -823,21 +973,15 @@ impl Scheduler {
 
     /// Stop a running job.
     pub async fn stop(&self, job_id: Uuid) -> Result<(), JobError> {
-        let mut jobs = self.jobs.write().await;
-
-        if let Some(scheduled) = jobs.remove(&job_id) {
-            // Send stop signal
-            let _ = scheduled.tx.send(WorkerMessage::Stop).await;
-
-            // Give it a moment to clean up
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            // Abort if still running
-            if !scheduled.handle.is_finished() {
-                scheduled.handle.abort();
+        let scheduled = {
+            // Hold worker-map admission until cancellation is durable. The
+            // worker's integrated cleanup also needs this write lock, so it
+            // cannot delete ContextManager state between our state transition
+            // and persistence snapshot.
+            let mut jobs = self.jobs.write().await;
+            if !jobs.contains_key(&job_id) {
+                return Ok(());
             }
-
-            // Update job state
             self.context_manager
                 .update_context(job_id, |ctx| {
                     if let Err(e) = ctx.transition_to(
@@ -853,13 +997,73 @@ impl Scheduler {
                 })
                 .await?;
             if let Ok(snapshot) = self.context_manager.get_context(job_id).await {
-                self.persist_job_snapshot(snapshot);
+                self.persist_job_snapshot(snapshot).await;
             }
+            jobs.remove(&job_id).ok_or_else(|| JobError::ContextError {
+                id: job_id,
+                reason: "job disappeared while scheduler admission was held".to_string(),
+            })?
+        };
 
-            tracing::info!("Stopped job {}", job_id);
+        // Never let cancellation block behind a full worker mailbox. Dropping
+        // the last sender closes the mailbox, and the bounded JoinHandle grace
+        // below hard-aborts a worker that is not currently polling it.
+        let _ = scheduled.tx.try_send(WorkerMessage::Stop);
+        drop(scheduled.tx);
+
+        let mut handle = scheduled.handle;
+        if tokio::time::timeout(Duration::from_secs(2), &mut handle)
+            .await
+            .is_err()
+        {
+            tracing::warn!(job_id = %job_id, "Worker did not stop within the grace period; aborting");
+            handle.abort();
+            let _ = handle.await;
+            // Aborting the wrapper also aborts its integrated cleanup tail.
+            // Free the in-memory slot explicitly; the Cancelled snapshot is
+            // already durable above.
+            if let Err(error) = self.context_manager.remove_job(job_id).await {
+                tracing::debug!(job_id = %job_id, %error, "Cancelled job context cleanup skipped");
+            }
         }
 
+        tracing::info!("Stopped job {}", job_id);
+
         Ok(())
+    }
+
+    async fn force_stop_job(&self, job_id: Uuid) {
+        let scheduled = self.jobs.write().await.remove(&job_id);
+        if let Some(scheduled) = scheduled {
+            let _ = scheduled.tx.try_send(WorkerMessage::Stop);
+            drop(scheduled.tx);
+            scheduled.handle.abort();
+            let _ = scheduled.handle.await;
+        }
+
+        if let Ok(result) = self
+            .context_manager
+            .update_context(job_id, |context| {
+                if is_worker_terminal_state(context.state) {
+                    Ok(())
+                } else {
+                    context.transition_to(
+                        JobState::Cancelled,
+                        Some("Force-stopped during scheduler shutdown".to_string()),
+                    )
+                }
+            })
+            .await
+            && let Err(error) = result
+        {
+            tracing::warn!(%job_id, %error, "Failed to mark force-stopped worker Cancelled");
+        }
+        if let Ok(snapshot) = self.context_manager.get_context(job_id).await {
+            self.persist_job_snapshot(snapshot).await;
+        }
+        if let Err(error) = self.context_manager.remove_job(job_id).await {
+            tracing::debug!(%job_id, %error, "Force-stopped worker context cleanup skipped");
+        }
     }
 
     /// Check if a job is running.
@@ -884,10 +1088,46 @@ impl Scheduler {
 
     /// Stop all jobs.
     pub async fn stop_all(&self) {
+        self.accepting_jobs.store(false, Ordering::Release);
         let job_ids: Vec<Uuid> = self.jobs.read().await.keys().cloned().collect();
 
         for job_id in job_ids {
-            let _ = self.stop(job_id).await;
+            match tokio::time::timeout(SCHEDULER_STOP_TIMEOUT, self.stop(job_id)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%job_id, %error, "Graceful worker stop failed; force-stopping");
+                    self.force_stop_job(job_id).await;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        %job_id,
+                        timeout_secs = SCHEDULER_STOP_TIMEOUT.as_secs(),
+                        "Graceful worker stop timed out; force-stopping"
+                    );
+                    self.force_stop_job(job_id).await;
+                }
+            }
+        }
+
+        // `accepting_jobs=false` and the in-lock schedule recheck guarantee no
+        // new entries can appear after this snapshot. Drain any job that raced
+        // the first snapshot but was already past its admission check.
+        let leftovers = self.running_jobs().await;
+        for job_id in leftovers {
+            self.force_stop_job(job_id).await;
+        }
+
+        // Stop cleanup waiters before draining the map they inspect.
+        {
+            let mut maintenance = self.maintenance_tasks.lock().await;
+            maintenance.abort_all();
+            while let Some(result) = maintenance.join_next().await {
+                if let Err(error) = result
+                    && !error.is_cancelled()
+                {
+                    tracing::warn!(%error, "Scheduler maintenance task failed during shutdown");
+                }
+            }
         }
 
         // Abort all subtasks
@@ -974,5 +1214,60 @@ mod tests {
         )
         .await;
         assert!(contexts.get_context(routine_job).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn unexpected_worker_exit_fails_only_running_contexts() {
+        let contexts = Arc::new(ContextManager::new(2));
+        let failed_job = contexts
+            .create_job("running", "must fail")
+            .await
+            .expect("job should be created");
+        contexts
+            .update_context(failed_job, |context| {
+                context.transition_to(JobState::InProgress, None)
+            })
+            .await
+            .expect("context should update")
+            .expect("transition should succeed");
+
+        record_unexpected_worker_failure(contexts.as_ref(), None, failed_job, "worker panic").await;
+        assert_eq!(
+            contexts
+                .get_context(failed_job)
+                .await
+                .expect("failed context should remain")
+                .state,
+            JobState::Failed
+        );
+
+        let completed_job = contexts
+            .create_job("completed", "must stay completed")
+            .await
+            .expect("job should be created");
+        contexts
+            .update_context(completed_job, |context| {
+                context.transition_to(JobState::InProgress, None)?;
+                context.transition_to(JobState::Completed, None)
+            })
+            .await
+            .expect("context should update")
+            .expect("transitions should succeed");
+
+        record_unexpected_worker_failure(
+            contexts.as_ref(),
+            None,
+            completed_job,
+            "late worker error",
+        )
+        .await;
+        assert_eq!(
+            contexts
+                .get_context(completed_job)
+                .await
+                .expect("completed context should remain")
+                .state,
+            JobState::Completed
+        );
     }
 }

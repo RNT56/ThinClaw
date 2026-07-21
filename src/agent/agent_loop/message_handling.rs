@@ -3,11 +3,100 @@
 use super::*;
 
 impl Agent {
+    /// Resolve and freeze the canonical request identity exactly once, before
+    /// hooks, session lookup, prompt assembly, or tool execution can observe
+    /// the message. Explicit identities supplied by trusted local/gateway
+    /// surfaces win. Native endpoints are bound only through approved, active
+    /// actor-registry records; unlinked endpoints retain the collision-safe
+    /// channel-namespaced fallback from `thinclaw-identity`.
+    pub(super) async fn resolve_ingress_identity(
+        &self,
+        message: &mut IncomingMessage,
+    ) -> Result<(), Error> {
+        if message.identity.is_some() {
+            return Ok(());
+        }
+
+        // Privilege metadata is meaningful only on surfaces that attach an
+        // explicit, authenticated identity (gateway/Tauri/TUI). Native channel
+        // payloads are untrusted and must not be able to self-assert admin
+        // authority through adapter metadata.
+        if let Some(metadata) = message.metadata.as_object_mut() {
+            metadata.remove("principal_admin");
+            metadata.remove("gateway_role");
+            metadata.remove("principal_id");
+            metadata.remove("actor_id");
+            metadata.remove("agent_id");
+            metadata.remove("agent_workspace_id");
+            metadata.remove("allowed_tools");
+            metadata.remove("allowed_skills");
+            metadata.remove("tool_profile");
+        }
+
+        let fallback_principal =
+            crate::identity::external_principal_id(&message.channel, &message.user_id);
+        let fallback = crate::identity::ResolvedIdentity::from_message_with_actor(
+            message,
+            fallback_principal.clone(),
+            fallback_principal,
+        );
+        let Some(store) = self.store() else {
+            message.identity = Some(fallback);
+            return Ok(());
+        };
+
+        match store
+            .resolve_actor_for_endpoint(&message.channel, &message.user_id)
+            .await
+        {
+            Ok(Some(actor)) => {
+                let identity = crate::identity::ResolvedIdentity::from_message_with_actor(
+                    message,
+                    actor.principal_id.clone(),
+                    actor.actor_id.to_string(),
+                );
+
+                if identity.conversation_kind == crate::identity::ConversationKind::Direct {
+                    let endpoint = crate::identity::ActorEndpointRef::new(
+                        message.channel.clone(),
+                        message.user_id.clone(),
+                    );
+                    if let Err(error) = store
+                        .set_actor_last_active_direct_endpoint(actor.actor_id, Some(&endpoint))
+                        .await
+                    {
+                        tracing::warn!(
+                            channel = %message.channel,
+                            actor_id = %actor.actor_id,
+                            error = %error,
+                            "Failed to record the actor's last active direct endpoint"
+                        );
+                    }
+                }
+
+                message.identity = Some(identity);
+            }
+            Ok(None) => {
+                message.identity = Some(fallback);
+            }
+            Err(error) => {
+                tracing::error!(
+                    channel = %message.channel,
+                    error = %error,
+                    "Actor endpoint lookup failed; rejecting ingress to avoid identity divergence"
+                );
+                return Err(error.into());
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn handle_message(
         &self,
         message: &IncomingMessage,
         parsed: Option<Submission>,
     ) -> Result<Option<thinclaw_agent::submission::AgentResponsePayload>, Error> {
+        let mut canonical_message = message.clone();
         self.observer()
             .record_event(&crate::observability::ObserverEvent::ChannelMessage {
                 channel: message.channel.clone(),
@@ -30,22 +119,21 @@ impl Agent {
             };
             match self.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
-                    return Ok(Some(
-                        thinclaw_agent::submission::AgentResponsePayload::text(
-                            inbound_rejected_response(&reason),
-                        ),
-                    ));
+                    let payload = thinclaw_agent::submission::AgentResponsePayload::text(
+                        inbound_rejected_response(&reason),
+                    );
+                    return Ok(self.apply_before_outbound_hook(message, payload).await);
                 }
                 Err(err) => {
-                    return Ok(Some(
-                        thinclaw_agent::submission::AgentResponsePayload::text(
-                            inbound_blocked_response(&err.to_string()),
-                        ),
-                    ));
+                    let payload = thinclaw_agent::submission::AgentResponsePayload::text(
+                        inbound_blocked_response(&err.to_string()),
+                    );
+                    return Ok(self.apply_before_outbound_hook(message, payload).await);
                 }
                 Ok(crate::hooks::HookOutcome::Continue {
                     modified: Some(new_content),
                 }) => {
+                    canonical_message.content = new_content.clone();
                     submission = Submission::UserInput {
                         content: new_content,
                     };
@@ -54,15 +142,11 @@ impl Agent {
             }
         }
 
-        // Hydrate thread from DB if it's a historical thread not in memory
-        if let Some(ref external_thread_id) = message.thread_id {
-            self.maybe_hydrate_thread(message, external_thread_id).await;
-        } else {
-            self.maybe_hydrate_primary_direct_thread(message).await;
-        }
+        let message = &canonical_message;
+
+        let identity = message.resolved_identity();
 
         // Resolve session and thread
-        let identity = message.resolved_identity();
         let (session, thread_id) = self
             .session_manager
             .resolve_thread_for_identity(&identity, &message.channel, message.thread_id.as_deref())
@@ -108,15 +192,21 @@ impl Agent {
 
         if let Some(pending) = pending_auth
             && pending.auth_mode == crate::agent::session::PendingAuthMode::ManualToken
+            && pending.accepts_identity(&identity)
         {
             if submission.consumes_pending_manual_auth() {
                 if let Submission::UserInput { content } = &submission {
-                    return self
+                    let response = self
                         .process_auth_token(message, &pending, content, session, thread_id)
-                        .await
-                        .map(|result| {
-                            result.map(thinclaw_agent::submission::AgentResponsePayload::text)
-                        });
+                        .await?;
+                    let Some(content) = response else {
+                        return Ok(None);
+                    };
+                    let mut payload =
+                        thinclaw_agent::submission::AgentResponsePayload::text(content);
+                    self.transform_response_payload(message, thread_id, &mut payload)
+                        .await;
+                    return Ok(self.apply_before_outbound_hook(message, payload).await);
                 }
             } else if submission.cancels_pending_manual_auth() {
                 // Any non-user-input submission (interrupt, undo, etc.) cancels auth mode.
@@ -158,12 +248,12 @@ impl Agent {
             Submission::Undo => self.process_undo(session, thread_id).await,
             Submission::Redo => self.process_redo(session, thread_id).await,
             Submission::Interrupt => self.process_interrupt(message, session, thread_id).await,
-            Submission::Compact => self.process_compact(session, thread_id).await,
-            Submission::Clear => self.process_clear(session, thread_id).await,
-            Submission::NewThread => self.process_new_thread(message).await,
-            Submission::Heartbeat => self.process_heartbeat().await,
-            Submission::Summarize => self.process_summarize(session, thread_id).await,
-            Submission::Suggest => self.process_suggest(session, thread_id).await,
+            Submission::Compact => self.process_compact(message, session, thread_id).await,
+            Submission::Clear => self.process_clear(message, session, thread_id).await,
+            Submission::NewThread => self.process_new_thread(message, thread_id).await,
+            Submission::Heartbeat => self.process_heartbeat(message).await,
+            Submission::Summarize => self.process_summarize(message, session, thread_id).await,
+            Submission::Suggest => self.process_suggest(message, session, thread_id).await,
             Submission::Quit => return Ok(None),
             Submission::Restart => {
                 // Notify the user that the agent is restarting, then trigger
@@ -189,7 +279,7 @@ impl Agent {
                 return Ok(None);
             }
             Submission::SwitchThread { thread_id: target } => {
-                self.process_switch_thread(message, target).await
+                self.process_switch_thread(message, thread_id, target).await
             }
             Submission::Resume { checkpoint_id } => {
                 self.process_resume(session, thread_id, checkpoint_id).await
@@ -234,7 +324,14 @@ impl Agent {
 
         // Convert SubmissionResult to a response payload or root-side status effect.
         match plan_submission_response(result?, crate::llm::is_silent_reply) {
-            SubmissionResponsePlan::Respond(payload) => Ok(Some(payload)),
+            SubmissionResponsePlan::Respond(mut payload) => {
+                if payload.is_empty() {
+                    return Ok(Some(payload));
+                }
+                self.transform_response_payload(message, thread_id, &mut payload)
+                    .await;
+                Ok(self.apply_before_outbound_hook(message, payload).await)
+            }
             SubmissionResponsePlan::Suppress => {
                 tracing::debug!("Suppressing silent or empty submission response");
                 Ok(None)
@@ -264,6 +361,32 @@ impl Agent {
         }
     }
 
+    async fn apply_before_outbound_hook(
+        &self,
+        message: &IncomingMessage,
+        mut payload: thinclaw_agent::submission::AgentResponsePayload,
+    ) -> Option<thinclaw_agent::submission::AgentResponsePayload> {
+        let event = crate::hooks::HookEvent::Outbound {
+            user_id: message.user_id.clone(),
+            channel: message.channel.clone(),
+            content: payload.content.clone(),
+            thread_id: message.thread_id.clone(),
+        };
+        match self.hooks().run(&event).await {
+            Err(err) => {
+                tracing::warn!(error = %err, "BeforeOutbound hook blocked response");
+                None
+            }
+            Ok(crate::hooks::HookOutcome::Continue {
+                modified: Some(new_content),
+            }) => {
+                payload.content = new_content;
+                Some(payload)
+            }
+            _ => Some(payload),
+        }
+    }
+
     // ─── Public API for external callers (Tauri, API module) ─────────
 
     /// Process a message from an external caller (Tauri command, API endpoint).
@@ -274,22 +397,25 @@ impl Agent {
     pub async fn handle_message_external(
         &self,
         message: &IncomingMessage,
-    ) -> Result<Option<String>, Error> {
-        Ok(self
-            .handle_message_payload_external(message)
-            .await?
-            .map(|payload| payload.content))
-    }
-
-    pub(crate) async fn handle_message_payload_external(
-        &self,
-        message: &IncomingMessage,
     ) -> Result<Option<thinclaw_agent::submission::AgentResponsePayload>, Error> {
         self.handle_message_payload_external_parsed(message, None)
             .await
     }
 
-    /// Like [`Self::handle_message_payload_external`], but accepts an
+    /// Compatibility adapter for protocols that can only represent text.
+    /// New response-capable callers should use [`Self::handle_message_external`]
+    /// so generated media attachments are not discarded.
+    pub async fn handle_message_text_external(
+        &self,
+        message: &IncomingMessage,
+    ) -> Result<Option<String>, Error> {
+        Ok(self
+            .handle_message_external(message)
+            .await?
+            .map(|payload| payload.content))
+    }
+
+    /// Like [`Self::handle_message_external`], but accepts an
     /// already-parsed submission so the standalone dispatch loop (which
     /// parses once for control-command routing) doesn't parse every message
     /// twice.
@@ -299,32 +425,60 @@ impl Agent {
         parsed: Option<Submission>,
     ) -> Result<Option<thinclaw_agent::submission::AgentResponsePayload>, Error> {
         let run_driver = AgentRunDriver::new();
-        if let Some(ref external_thread_id) = message.thread_id {
-            self.maybe_hydrate_thread(message, external_thread_id).await;
-        } else {
-            self.maybe_hydrate_primary_direct_thread(message).await;
-        }
+        let mut canonical_message = message.clone();
+        self.resolve_ingress_identity(&mut canonical_message)
+            .await?;
+        let message = &canonical_message;
         let identity = message.resolved_identity();
+        let submission = parsed.unwrap_or_else(|| SubmissionParser::parse(&message.content));
+        let is_interrupt = matches!(&submission, Submission::Interrupt);
+        let is_approval_response = matches!(
+            &submission,
+            Submission::ExecApproval { .. } | Submission::ApprovalResponse { .. }
+        );
+        // Hold admission through the exact post-turn snapshot. Otherwise a
+        // queued turn can complete after handle_message returns but before
+        // trajectory capture, causing the first caller to record the second
+        // caller's turn (and the second turn to be recorded twice).
+        let execution_lock = if is_interrupt {
+            None
+        } else {
+            Some(
+                self.session_manager
+                    .execution_lock_for_identity(&identity)
+                    .await,
+            )
+        };
+        let _execution_guard = match execution_lock.as_ref() {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
+        self.maybe_hydrate_ingress_thread(message).await?;
         let (session, thread_id) = self
             .session_manager
             .resolve_thread_for_identity(&identity, &message.channel, message.thread_id.as_deref())
             .await;
-        let starting_turn_count = {
+        let trajectory_turn_index = {
             let sess = session.lock().await;
-            sess.threads
-                .get(&thread_id)
-                .map(|thread| thread.turns.len())
-                .unwrap_or(0)
+            sess.threads.get(&thread_id).and_then(|thread| {
+                if is_approval_response
+                    && thread.state == crate::agent::session::ThreadState::AwaitingApproval
+                {
+                    thread.turns.len().checked_sub(1)
+                } else {
+                    Some(thread.turns.len())
+                }
+            })
         };
 
-        let result = self.handle_message(message, parsed).await;
+        let result = self.handle_message(message, Some(submission)).await;
 
         self.record_trajectory_turn(
             message,
             &run_driver,
             session,
             thread_id,
-            starting_turn_count,
+            trajectory_turn_index,
         )
         .await;
 
@@ -342,8 +496,11 @@ impl Agent {
         run_driver: &AgentRunDriver,
         session: Arc<tokio::sync::Mutex<crate::agent::session::Session>>,
         thread_id: Uuid,
-        starting_turn_count: usize,
+        turn_index: Option<usize>,
     ) {
+        let Some(turn_index) = turn_index else {
+            return;
+        };
         let (session_snapshot, thread_snapshot) = {
             let sess = session.lock().await;
             let thread = match sess.threads.get(&thread_id) {
@@ -353,11 +510,14 @@ impl Agent {
             (sess.clone(), thread)
         };
 
-        if thread_snapshot.turns.len() <= starting_turn_count {
+        let Some(turn_snapshot) = thread_snapshot.turns.get(turn_index).cloned() else {
             return;
-        }
-
-        if thread_snapshot.turns.last().is_none() {
+        };
+        // Approval chains can return multiple times while this same turn is
+        // still live. Persist only its eventual terminal form so trajectory
+        // learning sees the real tool outcome instead of an early
+        // "awaiting approval" snapshot.
+        if turn_snapshot.state == crate::agent::session::TurnState::Processing {
             return;
         }
 
@@ -375,11 +535,7 @@ impl Agent {
         // of constructing a fresh one.
         let orchestrator = self.learning_orchestrator().cloned();
 
-        tokio::spawn(async move {
-            let Some(turn) = thread_snapshot.turns.last() else {
-                return;
-            };
-
+        self.spawn_tail_task(async move {
             let harness = crate::agent::AgentRunHarness::with_driver_and_memory_manager(
                 run_driver,
                 harness_store,
@@ -392,7 +548,7 @@ impl Agent {
                     &session_snapshot,
                     thread_id,
                     &message,
-                    turn,
+                    &turn_snapshot,
                 )
                 .await
             {
@@ -412,7 +568,7 @@ impl Agent {
                         &session_snapshot,
                         thread_id,
                         &message,
-                        turn,
+                        &turn_snapshot,
                     )
                     .await
             {
@@ -422,26 +578,78 @@ impl Agent {
                     "Generated skill reviewer skipped turn"
                 );
             }
-        });
+        })
+        .await;
     }
 
     /// Inject a message into session history without triggering a turn.
     ///
     /// Used for boot sequences, date context injection, silent memory updates,
     /// and any case where the caller wants `deliver=false` semantics.
-    /// The message is persisted to the DB but no LLM call is made.
+    /// The message is appended to live state and persisted when a store exists;
+    /// no LLM call is made.
     pub async fn inject_context(&self, message: &IncomingMessage) -> Result<(), Error> {
-        if let Some(ref external_thread_id) = message.thread_id {
-            self.maybe_hydrate_thread(message, external_thread_id).await;
-        } else {
-            self.maybe_hydrate_primary_direct_thread(message).await;
-        }
+        let mut canonical_message = message.clone();
+        self.resolve_ingress_identity(&mut canonical_message)
+            .await?;
+        canonical_message.metadata = crate::agent::thread_ops::sanitized_injected_context_metadata(
+            &canonical_message.metadata,
+        );
+        let message = &canonical_message;
         let identity = message.resolved_identity();
-        let (_, thread_id) = self
+        let execution_lock = self
+            .session_manager
+            .execution_lock_for_identity(&identity)
+            .await;
+        let _execution_guard = execution_lock.lock().await;
+
+        self.maybe_hydrate_ingress_thread(message).await?;
+        let (session, thread_id) = self
             .session_manager
             .resolve_thread_for_identity(&identity, &message.channel, message.thread_id.as_deref())
             .await;
-        self.persist_user_message(thread_id, message, &message.content)
+        let pre_injection_thread = {
+            let mut sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            let before = thread.clone();
+            thread.inject_context(
+                message.content.clone(),
+                thinclaw_agent::session::message_hides_user_input_in_main_chat(&message.metadata),
+            );
+            sess.touch_last_active();
+            before
+        };
+        let persisted_message_id = match self
+            .persist_injected_context_message(thread_id, message, &message.content)
+            .await
+        {
+            Ok(message_id) => message_id,
+            Err(error) => {
+                let mut sess = session.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    *thread = pre_injection_thread;
+                }
+                return Err(error);
+            }
+        };
+        if let Some(message_id) = persisted_message_id {
+            let mut sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            let turn = thread.last_turn_mut().ok_or_else(|| {
+                Error::from(crate::error::JobError::ContextError {
+                    id: thread_id,
+                    reason: "Persisted context row has no owning in-memory turn".to_string(),
+                })
+            })?;
+            turn.durable_user_message_id = Some(message_id);
+        }
+        self.persist_thread_runtime_snapshot(message, &session, thread_id)
             .await;
         Ok(())
     }
@@ -458,10 +666,17 @@ impl Agent {
         identity: crate::identity::ResolvedIdentity,
         metadata: serde_json::Value,
     ) -> Result<(), Error> {
+        let scope_id = identity.conversation_scope_id;
         let (session, thread_id) = self
             .session_manager
-            .resolve_thread_for_identity(&identity, channel, Some(session_key))
-            .await;
+            .lookup_thread_for_identity(&identity, channel, Some(session_key))
+            .await
+            .ok_or_else(|| {
+                Error::from(crate::error::JobError::ContextError {
+                    id: scope_id,
+                    reason: format!("No active conversation for session key '{session_key}'"),
+                })
+            })?;
         let message = crate::channels::IncomingMessage::new(
             channel,
             identity.raw_sender_id.clone(),
@@ -478,9 +693,7 @@ impl Agent {
         let identity = crate::identity::ResolvedIdentity {
             principal_id: "local_user".to_string(),
             actor_id: "local_user".to_string(),
-            conversation_scope_id: crate::identity::scope_id_from_key(&format!(
-                "tauri:direct:{session_key}"
-            )),
+            conversation_scope_id: crate::identity::direct_scope_id("local_user", "local_user"),
             conversation_kind: crate::identity::ConversationKind::Direct,
             raw_sender_id: "local_user".to_string(),
             stable_external_conversation_key: format!("tauri:direct:{session_key}"),

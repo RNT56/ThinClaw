@@ -54,13 +54,13 @@ impl TurnAwareness {
         let last_user_objective = messages
             .iter()
             .rev()
-            .find(|message| message.role == Role::User)
+            .find(|message| message.is_user_instruction())
             .map(|message| message.content.trim().to_string())
             .filter(|content| !content.is_empty());
         let recent_user_messages = messages
             .iter()
             .rev()
-            .filter(|message| message.role == Role::User)
+            .filter(|message| message.is_user_instruction())
             .filter_map(|message| {
                 let trimmed = message.content.trim();
                 (!trimmed.is_empty()).then(|| trim_text(trimmed, 600))

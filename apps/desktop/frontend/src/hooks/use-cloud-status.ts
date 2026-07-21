@@ -14,6 +14,8 @@ export interface CloudStatusResponse {
     storage_used: number;
     storage_available: number | null;
     last_sync_at: number | null;
+    sync_active: boolean;
+    sync_error: string | null;
     has_recovery_key: boolean;
     migration_in_progress: boolean;
 }
@@ -93,7 +95,7 @@ export interface SftpConfigInput {
 
 export interface OAuthStartResult {
     auth_url: string;
-    code_verifier: string;
+    flow_id: string;
 }
 
 // ── Phase labels (for UI checklist) ──────────────────────────────────────

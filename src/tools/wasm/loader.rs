@@ -10,8 +10,8 @@ use crate::tools::registry;
 use crate::tools::registry::ToolRegistry;
 
 pub use thinclaw_tools::wasm::loader::{
-    DiscoveredTool, LoadResults, WasmLoadError, discover_dev_tools, discover_tools, load_dev_tools,
-    resolve_wasm_target_dir, wasm_artifact_path,
+    DiscoveredTool, LoadResults, LoadedToolMetadata, WasmLoadError, discover_dev_tools,
+    discover_tools, load_dev_tools, resolve_wasm_target_dir, wasm_artifact_path,
 };
 
 pub type WasmToolLoader = thinclaw_tools::wasm::WasmToolLoader<ToolRegistry>;

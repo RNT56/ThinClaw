@@ -13,6 +13,7 @@ use crate::experiments::{
 };
 
 const DEFAULT_USER_ID: &str = "default";
+const MAX_GATEWAY_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug, Clone)]
@@ -319,7 +320,7 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
     };
     match cmd {
         ExperimentsCommand::Enable => {
-            let db = db.as_ref().expect("experiments DB must be initialized");
+            let db = require_experiments_db(db.as_ref())?;
             db.set_setting(
                 DEFAULT_USER_ID,
                 "experiments.enabled",
@@ -330,7 +331,7 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
             println!("Experiments enabled.");
         }
         ExperimentsCommand::Disable => {
-            let db = db.as_ref().expect("experiments DB must be initialized");
+            let db = require_experiments_db(db.as_ref())?;
             db.set_setting(
                 DEFAULT_USER_ID,
                 "experiments.enabled",
@@ -342,17 +343,17 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
         }
         ExperimentsCommand::Projects(sub) => match sub {
             ExperimentProjectsCommand::List => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let response = experiments_api::list_projects(db, DEFAULT_USER_ID).await?;
                 println!("{}", serde_json::to_string_pretty(&response.projects)?);
             }
             ExperimentProjectsCommand::Show { id } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let project = experiments_api::get_project(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&project)?);
             }
             ExperimentProjectsCommand::Create(args) => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let request = experiments_api::CreateExperimentProjectRequest {
                     name: args.name,
                     workspace_path: args.workspace_path,
@@ -386,7 +387,7 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
                 println!("{}", serde_json::to_string_pretty(&project)?);
             }
             ExperimentProjectsCommand::Update { id, args } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let request = experiments_api::UpdateExperimentProjectRequest {
                     name: args.name,
                     workspace_path: args.workspace_path,
@@ -431,24 +432,24 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
                 println!("{}", serde_json::to_string_pretty(&project)?);
             }
             ExperimentProjectsCommand::Delete { id } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let deleted = experiments_api::delete_project(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::json!({ "deleted": deleted }));
             }
         },
         ExperimentsCommand::Runners(sub) => match sub {
             ExperimentRunnersCommand::List => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let response = experiments_api::list_runners(db, DEFAULT_USER_ID).await?;
                 println!("{}", serde_json::to_string_pretty(&response.runners)?);
             }
             ExperimentRunnersCommand::Show { id } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let runner = experiments_api::get_runner(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&runner)?);
             }
             ExperimentRunnersCommand::Create(args) => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let request = experiments_api::CreateExperimentRunnerProfileRequest {
                     name: args.name,
                     backend: parse_backend(&args.backend)?,
@@ -469,7 +470,7 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
                 println!("{}", serde_json::to_string_pretty(&runner)?);
             }
             ExperimentRunnersCommand::Update { id, args } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let request = experiments_api::UpdateExperimentRunnerProfileRequest {
                     name: args.name,
                     backend: args.backend.as_deref().map(parse_backend).transpose()?,
@@ -503,12 +504,12 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
                 println!("{}", serde_json::to_string_pretty(&runner)?);
             }
             ExperimentRunnersCommand::Delete { id } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let deleted = experiments_api::delete_runner(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::json!({ "deleted": deleted }));
             }
             ExperimentRunnersCommand::Validate { id } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let response = experiments_api::validate_runner(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
@@ -519,7 +520,7 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
                 runner_profile_id,
                 max_trials_override,
             } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let response = experiments_api::start_campaign(
                     db,
                     DEFAULT_USER_ID,
@@ -534,32 +535,32 @@ pub async fn run_experiments_command(cmd: ExperimentsCommand) -> anyhow::Result<
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
             ExperimentCampaignsCommand::List => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let response = experiments_api::list_campaigns(db, DEFAULT_USER_ID).await?;
                 println!("{}", serde_json::to_string_pretty(&response.campaigns)?);
             }
             ExperimentCampaignsCommand::Show { id } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let response = experiments_api::get_campaign(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
             ExperimentCampaignsCommand::Pause { id } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let response = experiments_api::pause_campaign(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
             ExperimentCampaignsCommand::Resume { id } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let response = experiments_api::resume_campaign(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
             ExperimentCampaignsCommand::Cancel { id } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let response = experiments_api::cancel_campaign(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
             ExperimentCampaignsCommand::Promote { id } => {
-                let db = db.as_ref().expect("experiments DB must be initialized");
+                let db = require_experiments_db(db.as_ref())?;
                 let response = experiments_api::promote_campaign(db, DEFAULT_USER_ID, id).await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
@@ -705,6 +706,12 @@ async fn connect_db() -> anyhow::Result<Arc<dyn Database>> {
         .map_err(|e| anyhow!("{}", e))
 }
 
+fn require_experiments_db(
+    database: Option<&Arc<dyn Database>>,
+) -> anyhow::Result<&Arc<dyn Database>> {
+    database.ok_or_else(|| anyhow!("this experiments command requires a database connection"))
+}
+
 fn parse_json_arg(
     value: Option<String>,
     default: serde_json::Value,
@@ -824,6 +831,8 @@ async fn experiments_gateway_request(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()?;
 
     let mut request = client.request(method, &url);
@@ -841,12 +850,14 @@ async fn experiments_gateway_request(
                 base_url
             )
         } else {
-            anyhow!("Request to {} failed: {}", url, e)
+            anyhow!("Gateway request failed: {}", e.without_url())
         }
     })?;
 
     let status = response.status();
-    let body_text = response.text().await.unwrap_or_default();
+    let body_text = crate::http_response::bounded_text(response, MAX_GATEWAY_RESPONSE_BYTES)
+        .await
+        .map_err(|error| anyhow!("Could not read the gateway response: {error}"))?;
 
     if !status.is_success() {
         if status == reqwest::StatusCode::NOT_FOUND {

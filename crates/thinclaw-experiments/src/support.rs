@@ -1,5 +1,6 @@
 //! Small runtime support helpers: lease/path validation, formatting, JSON parsing.
 
+use std::collections::HashSet;
 use std::path::{Component, PathBuf};
 
 use crate::types::*;
@@ -16,19 +17,23 @@ pub fn default_strategy_prompt() -> String {
 
 pub fn parse_secret_reference(reference: &str) -> Option<(String, Vec<String>)> {
     let trimmed = reference.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.len() > 512 || trimmed.chars().any(char::is_control) {
         return None;
     }
     for separator in [':', '='] {
         if let Some((secret_name, env_var)) = trimmed.split_once(separator) {
             let secret_name = secret_name.trim();
             let env_var = env_var.trim();
-            if !secret_name.is_empty() && !env_var.is_empty() {
+            if valid_secret_name(secret_name) && valid_env_name(env_var) {
                 return Some((secret_name.to_string(), vec![env_var.to_string()]));
             }
+            return None;
         }
     }
 
+    if !valid_secret_name(trimmed) || !valid_env_name(trimmed) {
+        return None;
+    }
     let upper = trimmed.to_ascii_uppercase();
     let env_names = if upper == trimmed {
         vec![trimmed.to_string()]
@@ -36,6 +41,45 @@ pub fn parse_secret_reference(reference: &str) -> Option<(String, Vec<String>)> 
         vec![trimmed.to_string(), upper]
     };
     Some((trimmed.to_string(), env_names))
+}
+
+fn valid_secret_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+pub fn valid_env_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+        })
+}
+
+pub fn validate_secret_references(references: &[String]) -> Result<(), String> {
+    if references.len() > 256 {
+        return Err("Runner contains more than 256 secret references.".to_string());
+    }
+    let mut destinations = HashSet::new();
+    for reference in references {
+        if reference.trim() != reference {
+            return Err("Runner contains a malformed secret reference.".to_string());
+        }
+        let Some((_, env_names)) = parse_secret_reference(reference) else {
+            return Err("Runner contains a malformed secret reference.".to_string());
+        };
+        if env_names
+            .into_iter()
+            .any(|env_name| !destinations.insert(env_name))
+        {
+            return Err(
+                "Runner secret references contain duplicate environment destinations.".to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn truncate_for_prompt(value: &str, max_len: usize) -> String {

@@ -4,6 +4,7 @@
 //! The orchestrator validates this token is scoped to the correct job.
 
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::error::WorkerError;
@@ -11,6 +12,16 @@ use crate::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
+
+const WORKER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const WORKER_CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const WORKER_LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const WORKER_COMPLETION_REQUEST_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const MAX_WORKER_CONTROL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_WORKER_LLM_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_WORKER_ERROR_RESPONSE_BYTES: usize = 8 * 1024;
+const MAX_WORKER_ENDPOINT_BYTES: usize = 16 * 1024;
+const MAX_WORKER_TOKEN_BYTES: usize = 64 * 1024;
 
 /// HTTP client that a container worker uses to talk to the orchestrator.
 pub struct WorkerHttpClient {
@@ -135,29 +146,47 @@ pub struct CredentialResponse {
 }
 
 impl WorkerHttpClient {
+    fn build_client() -> Result<reqwest::Client, WorkerError> {
+        reqwest::Client::builder()
+            .connect_timeout(WORKER_CONNECT_TIMEOUT)
+            .timeout(WORKER_LLM_REQUEST_TIMEOUT)
+            // The orchestrator is a local control-plane endpoint. Never send
+            // its bearer token through an environment-configured proxy and
+            // never follow a redirect to another origin.
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| WorkerError::ExecutionFailed {
+                reason: format!("failed to build orchestrator HTTP client: {error}"),
+            })
+    }
+
     /// Create a new client from environment.
     ///
     /// Reads `THINCLAW_WORKER_TOKEN` from the environment.
     pub fn from_env(orchestrator_url: String, job_id: Uuid) -> Result<Self, WorkerError> {
         let token =
             std::env::var("THINCLAW_WORKER_TOKEN").map_err(|_| WorkerError::MissingToken)?;
-
-        Ok(Self {
-            client: reqwest::Client::new(),
-            orchestrator_url: orchestrator_url.trim_end_matches('/').to_string(),
-            job_id,
-            token,
-        })
+        Self::new(orchestrator_url, job_id, token)
     }
 
     /// Create with an explicit token (for testing).
-    pub fn new(orchestrator_url: String, job_id: Uuid, token: String) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            orchestrator_url: orchestrator_url.trim_end_matches('/').to_string(),
+    pub fn new(orchestrator_url: String, job_id: Uuid, token: String) -> Result<Self, WorkerError> {
+        let orchestrator_url = validate_worker_endpoint(&orchestrator_url)?;
+        if token.trim().is_empty()
+            || token.len() > MAX_WORKER_TOKEN_BYTES
+            || token.chars().any(char::is_control)
+        {
+            return Err(WorkerError::ExecutionFailed {
+                reason: "worker token is empty, oversized, or malformed".to_string(),
+            });
+        }
+        Ok(Self {
+            client: Self::build_client()?,
+            orchestrator_url,
             job_id,
             token,
-        }
+        })
     }
 
     /// Get the base orchestrator URL.
@@ -179,11 +208,12 @@ impl WorkerHttpClient {
             .client
             .get(self.url(path))
             .bearer_auth(&self.token)
+            .timeout(WORKER_CONTROL_REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| WorkerError::ConnectionFailed {
                 url: self.orchestrator_url.clone(),
-                reason: e.to_string(),
+                reason: e.without_url().to_string(),
             })?;
 
         if !resp.status().is_success() {
@@ -193,9 +223,7 @@ impl WorkerHttpClient {
             });
         }
 
-        resp.json().await.map_err(|e| WorkerError::LlmProxyFailed {
-            reason: format!("{}: failed to parse response: {}", context, e),
-        })
+        deserialize_limited_json(resp, MAX_WORKER_CONTROL_RESPONSE_BYTES, context).await
     }
 
     /// Send a POST request with a JSON body, check the status, and deserialize the response.
@@ -204,29 +232,33 @@ impl WorkerHttpClient {
         path: &str,
         body: &B,
         context: &str,
+        timeout: Duration,
+        max_response_bytes: usize,
     ) -> Result<T, WorkerError> {
         let resp = self
             .client
             .post(self.url(path))
             .bearer_auth(&self.token)
             .json(body)
+            .timeout(timeout)
             .send()
             .await
             .map_err(|e| WorkerError::LlmProxyFailed {
-                reason: format!("{}: {}", context, e),
+                reason: format!("{}: {}", context, e.without_url()),
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_limited_body(resp, MAX_WORKER_ERROR_RESPONSE_BYTES)
+                .await
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_else(|error| format!("<failed to read bounded error body: {error}>"));
             return Err(WorkerError::LlmProxyFailed {
                 reason: format!("{}: orchestrator returned {}: {}", context, status, body),
             });
         }
 
-        resp.json().await.map_err(|e| WorkerError::LlmProxyFailed {
-            reason: format!("{}: failed to parse response: {}", context, e),
-        })
+        deserialize_limited_json(resp, max_response_bytes, context).await
     }
 
     /// Fetch the job description from the orchestrator.
@@ -249,7 +281,13 @@ impl WorkerHttpClient {
         };
 
         let proxy_resp: ProxyCompletionResponse = self
-            .post_json("llm/complete", &proxy_req, "LLM complete")
+            .post_json(
+                "llm/complete",
+                &proxy_req,
+                "LLM complete",
+                WORKER_LLM_REQUEST_TIMEOUT,
+                MAX_WORKER_LLM_RESPONSE_BYTES,
+            )
             .await?;
 
         Ok(CompletionResponse {
@@ -280,7 +318,13 @@ impl WorkerHttpClient {
         };
 
         let proxy_resp: ProxyToolCompletionResponse = self
-            .post_json("llm/complete_with_tools", &proxy_req, "LLM tool complete")
+            .post_json(
+                "llm/complete_with_tools",
+                &proxy_req,
+                "LLM tool complete",
+                WORKER_LLM_REQUEST_TIMEOUT,
+                MAX_WORKER_LLM_RESPONSE_BYTES,
+            )
             .await?;
 
         Ok(ToolCompletionResponse {
@@ -303,19 +347,24 @@ impl WorkerHttpClient {
             .post(self.url("status"))
             .bearer_auth(&self.token)
             .json(update)
+            .timeout(WORKER_CONTROL_REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| WorkerError::ConnectionFailed {
                 url: self.orchestrator_url.clone(),
-                reason: e.to_string(),
+                reason: e.without_url().to_string(),
             })?;
 
         if !resp.status().is_success() {
-            tracing::warn!(
-                "Status report failed with {}: {}",
-                resp.status(),
-                resp.text().await.unwrap_or_default()
-            );
+            let status = resp.status();
+            let body = read_limited_body(resp, MAX_WORKER_ERROR_RESPONSE_BYTES)
+                .await
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_else(|error| format!("<failed to read bounded error body: {error}>"));
+            return Err(WorkerError::OrchestratorRejected {
+                job_id: self.job_id,
+                reason: format!("status endpoint returned {status}: {body}"),
+            });
         }
 
         Ok(())
@@ -328,6 +377,7 @@ impl WorkerHttpClient {
             .post(self.url("event"))
             .bearer_auth(&self.token)
             .json(payload)
+            .timeout(WORKER_CONTROL_REQUEST_TIMEOUT)
             .send()
             .await;
 
@@ -344,7 +394,7 @@ impl WorkerHttpClient {
                 tracing::debug!(
                     job_id = %self.job_id,
                     event_type = %payload.event_type,
-                    "Job event POST failed: {}", e
+                    "Job event POST failed: {}", e.without_url()
                 );
             }
             _ => {}
@@ -359,11 +409,12 @@ impl WorkerHttpClient {
             .client
             .get(self.url("prompt"))
             .bearer_auth(&self.token)
+            .timeout(WORKER_CONTROL_REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| WorkerError::ConnectionFailed {
                 url: self.orchestrator_url.clone(),
-                reason: e.to_string(),
+                reason: e.without_url().to_string(),
             })?;
 
         if resp.status() == reqwest::StatusCode::NO_CONTENT {
@@ -378,9 +429,8 @@ impl WorkerHttpClient {
         }
 
         let prompt: PromptResponse =
-            resp.json().await.map_err(|e| WorkerError::LlmProxyFailed {
-                reason: format!("failed to parse prompt response: {}", e),
-            })?;
+            deserialize_limited_json(resp, MAX_WORKER_CONTROL_RESPONSE_BYTES, "prompt response")
+                .await?;
 
         Ok(Some(prompt))
     }
@@ -395,11 +445,12 @@ impl WorkerHttpClient {
             .client
             .get(self.url("credentials"))
             .bearer_auth(&self.token)
+            .timeout(WORKER_CONTROL_REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| WorkerError::ConnectionFailed {
                 url: self.orchestrator_url.clone(),
-                reason: e.to_string(),
+                reason: e.without_url().to_string(),
             })?;
 
         // 204 or 404 means no credentials granted, not an error
@@ -416,21 +467,110 @@ impl WorkerHttpClient {
             });
         }
 
-        resp.json()
-            .await
-            .map_err(|e| WorkerError::SecretResolveFailed {
-                secret_name: "(all)".to_string(),
-                reason: format!("failed to parse credentials response: {}", e),
-            })
+        deserialize_limited_json(
+            resp,
+            MAX_WORKER_CONTROL_RESPONSE_BYTES,
+            "credentials response",
+        )
+        .await
+        .map_err(|e| WorkerError::SecretResolveFailed {
+            secret_name: "(all)".to_string(),
+            reason: e.to_string(),
+        })
     }
 
     /// Signal job completion to the orchestrator.
     pub async fn report_complete(&self, report: &CompletionReport) -> Result<(), WorkerError> {
         let _: serde_json::Value = self
-            .post_json("complete", report, "report complete")
+            .post_json(
+                "complete",
+                report,
+                "report complete",
+                WORKER_COMPLETION_REQUEST_TIMEOUT,
+                MAX_WORKER_CONTROL_RESPONSE_BYTES,
+            )
             .await?;
         Ok(())
     }
+}
+
+async fn read_limited_body(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, WorkerError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(WorkerError::LlmProxyFailed {
+            reason: format!("orchestrator response exceeds the {max_bytes} byte limit"),
+        });
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| WorkerError::LlmProxyFailed {
+            reason: format!(
+                "failed to read orchestrator response: {}",
+                error.without_url()
+            ),
+        })?
+    {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(WorkerError::LlmProxyFailed {
+                reason: format!("orchestrator response exceeds the {max_bytes} byte limit"),
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn validate_worker_endpoint(raw: &str) -> Result<String, WorkerError> {
+    if raw.trim().is_empty()
+        || raw.len() > MAX_WORKER_ENDPOINT_BYTES
+        || raw.chars().any(char::is_control)
+    {
+        return Err(WorkerError::ExecutionFailed {
+            reason: "orchestrator URL is empty, oversized, or malformed".to_string(),
+        });
+    }
+    let mut url = reqwest::Url::parse(raw).map_err(|_| WorkerError::ExecutionFailed {
+        reason: "orchestrator URL is invalid".to_string(),
+    })?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(WorkerError::ExecutionFailed {
+            reason:
+                "orchestrator URL must be an HTTP(S) URL without credentials, query, or fragment"
+                    .to_string(),
+        });
+    }
+    let trimmed_path = url.path().trim_end_matches('/').to_string();
+    url.set_path(if trimmed_path.is_empty() {
+        "/"
+    } else {
+        &trimmed_path
+    });
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+async fn deserialize_limited_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    max_bytes: usize,
+    context: &str,
+) -> Result<T, WorkerError> {
+    let body = read_limited_body(response, max_bytes).await?;
+    serde_json::from_slice(&body).map_err(|error| WorkerError::LlmProxyFailed {
+        reason: format!("{context}: failed to parse response: {error}"),
+    })
 }
 
 fn parse_finish_reason(s: &str) -> FinishReason {
@@ -453,7 +593,8 @@ mod tests {
             "http://host.docker.internal:50051".to_string(),
             Uuid::nil(),
             "test-token".to_string(),
-        );
+        )
+        .expect("test client should build");
 
         assert_eq!(
             client.url("llm/complete"),
@@ -477,7 +618,8 @@ mod tests {
             "http://host.docker.internal:50051".to_string(),
             Uuid::nil(),
             "test-token".to_string(),
-        );
+        )
+        .expect("test client should build");
 
         assert_eq!(
             client.url("credentials"),

@@ -59,6 +59,7 @@ anyhow = "1"
 thiserror = "2"
 rand = "0.8"
 futures = "0.3.31"
+bytes = "1"
 tauri-specta = { version = "^2.0.0-rc", features = ["derive", "typescript"] }
 specta = { version = "2.0.0-rc", features = ["derive", "serde", "serde_json"] }
 specta-typescript = "0.0.7"
@@ -111,6 +112,14 @@ zstd = "0.13"
 thinclaw_core = { path = "../../..", package = "thinclaw", default-features = false }
 thinclaw-config = { path = "../../../crates/thinclaw-config" }
 thinclaw-runtime-contracts = { path = "../../../crates/thinclaw-runtime-contracts", features = ["specta"] }
+thinclaw-tools = { path = "../../../crates/thinclaw-tools" }
+thinclaw-tools-core = { path = "../../../crates/thinclaw-tools-core" }
+thinclaw-platform = { path = "../../../crates/thinclaw-platform" }
+thinclaw-secrets = { path = "../../../crates/thinclaw-secrets", default-features = false }
+
+#[cfg] secure no-follow file opens for migration inputs
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # macOS Keychain — secure encrypted storage for API keys
 [target.'cfg(target_os = "macos")'.dependencies]

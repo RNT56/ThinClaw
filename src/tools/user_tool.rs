@@ -308,14 +308,21 @@ impl UserToolRegistrar for RootUserToolRegistrar {
     ) -> Result<(), String> {
         match definition.kind {
             UserToolKind::Shell => {
-                self.registry
+                let name = definition.name.clone();
+                if !self
+                    .registry
                     .register(Arc::new(ShellCommandTool::new(
                         definition,
                         self.base_dir.clone(),
                         self.working_dir.clone(),
                         self.safety.as_ref(),
                     )))
-                    .await;
+                    .await
+                {
+                    return Err(format!(
+                        "user tool '{name}' conflicts with a protected built-in tool name"
+                    ));
+                }
                 Ok(())
             }
             UserToolKind::Wasm => {
@@ -360,7 +367,12 @@ impl UserToolRegistrar for RootUserToolRegistrar {
                     target.requires_sanitization(),
                     target.execution_timeout(),
                 )?;
-                self.registry.register(Arc::new(proxy)).await;
+                let name = proxy.name().to_string();
+                if !self.registry.register(Arc::new(proxy)).await {
+                    return Err(format!(
+                        "user tool '{name}' conflicts with a protected built-in tool name"
+                    ));
+                }
                 Ok(())
             }
         }

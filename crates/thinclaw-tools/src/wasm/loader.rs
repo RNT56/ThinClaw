@@ -34,9 +34,11 @@
 //! as `verified` or `system` in the database get elevated trust.
 
 use std::collections::HashMap;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures::StreamExt as _;
 use tokio::fs;
 
 use crate::wasm::capabilities_schema::CapabilitiesFile;
@@ -45,6 +47,92 @@ use crate::wasm::{
     Capabilities, WasmError, WasmStorageError, WasmToolRuntime, WasmToolStore,
     resolve_oauth_refresh_config,
 };
+
+const MAX_WASM_MODULE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CAPABILITIES_FILE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_TOOLS_PER_DIRECTORY: usize = 64;
+const MAX_STORED_TOOLS_PER_USER: usize = 256;
+const MAX_PARALLEL_COMPILATIONS: usize = 4;
+
+fn is_valid_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !crate::registry::PROTECTED_TOOL_NAMES.contains(&name)
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn publication_journal_path(wasm_path: &Path) -> Option<PathBuf> {
+    let parent = wasm_path.parent()?;
+    let filename = wasm_path.file_name()?.to_str()?;
+    Some(parent.join(format!(".{filename}.installing.json")))
+}
+
+fn publication_in_progress(wasm_path: &Path) -> Result<bool, std::io::Error> {
+    let Some(path) = publication_journal_path(wasm_path) else {
+        return Ok(false);
+    };
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+async fn read_regular_file_bounded(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, std::io::Error> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "tool package path is not a regular file",
+            ));
+        }
+        if metadata.len() > max_bytes as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "tool package file exceeds the size limit",
+            ));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&path)?;
+        let opened = file.metadata()?;
+        if !opened.is_file() || opened.len() > max_bytes as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "opened tool package file is invalid or oversized",
+            ));
+        }
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(opened.len())
+                .unwrap_or(max_bytes)
+                .min(max_bytes),
+        );
+        file.by_ref()
+            .take((max_bytes + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "tool package file exceeds the size limit",
+            ));
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|error| std::io::Error::other(format!("tool file reader panicked: {error}")))?
+}
 
 /// Error during WASM tool loading.
 #[derive(Debug, thiserror::Error)]
@@ -121,36 +209,74 @@ where
         wasm_path: &Path,
         capabilities_path: Option<&Path>,
     ) -> Result<(), WasmLoadError> {
-        if name.is_empty() || name.contains('/') || name.contains('\\') {
+        self.load_from_files_with_metadata(name, wasm_path, capabilities_path)
+            .await
+            .map(|_| ())
+    }
+
+    /// Load a file-backed tool and return the exact capabilities snapshot read
+    /// under the package lock. Callers can use it for sidecar-derived behavior
+    /// without reopening a possibly newer generation.
+    pub async fn load_from_files_with_metadata(
+        &self,
+        name: &str,
+        wasm_path: &Path,
+        capabilities_path: Option<&Path>,
+    ) -> Result<LoadedToolMetadata, WasmLoadError> {
+        if !is_valid_tool_name(name) {
             return Err(WasmLoadError::InvalidName(name.to_string()));
         }
 
-        // Read WASM bytes
-        if !wasm_path.exists() {
-            return Err(WasmLoadError::WasmNotFound(wasm_path.to_path_buf()));
+        if let Err(error) = fs::symlink_metadata(wasm_path).await {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return Err(WasmLoadError::WasmNotFound(wasm_path.to_path_buf()));
+            }
+            return Err(error.into());
         }
-        let wasm_bytes = fs::read(wasm_path).await?;
+        let publication_guard =
+            thinclaw_platform::acquire_artifact_read_lock(wasm_path.to_path_buf()).await?;
+        if publication_in_progress(wasm_path)? {
+            return Err(WasmLoadError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "tool package publication is incomplete",
+            )));
+        }
+
+        // Read WASM bytes
+        let wasm_bytes = read_regular_file_bounded(wasm_path, MAX_WASM_MODULE_BYTES).await?;
+        if wasm_bytes.len() < 8 || !wasm_bytes.starts_with(b"\0asm") {
+            return Err(WasmLoadError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "tool package is not a valid-looking WASM module",
+            )));
+        }
 
         // Read capabilities (optional) and extract OAuth refresh config
-        let (capabilities, oauth_refresh) = if let Some(cap_path) = capabilities_path {
-            if cap_path.exists() {
-                let cap_bytes = fs::read(cap_path).await?;
-                let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
-                    .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
-                let caps = cap_file.to_capabilities();
-                let oauth = resolve_oauth_refresh_config(&cap_file);
-                (caps, oauth)
-            } else {
-                tracing::warn!(
-                    path = %cap_path.display(),
-                    "Capabilities file not found, using default (no permissions)"
-                );
-                (Capabilities::default(), None)
+        let (capabilities, oauth_refresh, capabilities_file) = if let Some(cap_path) =
+            capabilities_path
+        {
+            match fs::symlink_metadata(cap_path).await {
+                Ok(_) => {
+                    let cap_bytes =
+                        read_regular_file_bounded(cap_path, MAX_CAPABILITIES_FILE_BYTES).await?;
+                    let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
+                        .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
+                    let caps = cap_file.to_capabilities();
+                    let oauth = resolve_oauth_refresh_config(&cap_file);
+                    (caps, oauth, Some(cap_file))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::warn!(
+                        path = %cap_path.display(),
+                        "Capabilities file not found, using default (no permissions)"
+                    );
+                    (Capabilities::default(), None, None)
+                }
+                Err(error) => return Err(error.into()),
             }
         } else {
-            (Capabilities::default(), None)
+            (Capabilities::default(), None, None)
         };
-
         // Register the tool
         self.registry
             .register_wasm(WasmToolRegistration {
@@ -167,6 +293,7 @@ where
             })
             .await
             .map_err(|error| WasmLoadError::Registration(error.to_string()))?;
+        drop(publication_guard);
 
         tracing::info!(
             name = name,
@@ -174,7 +301,7 @@ where
             "Loaded WASM tool from file"
         );
 
-        Ok(())
+        Ok(LoadedToolMetadata { capabilities_file })
     }
 
     /// Load all WASM tools from a directory.
@@ -194,10 +321,11 @@ where
     ///
     /// Tools without a capabilities file get no permissions (default deny).
     pub async fn load_from_dir(&self, dir: &Path) -> Result<LoadResults, WasmLoadError> {
-        if !dir.is_dir() {
+        let directory_metadata = fs::symlink_metadata(dir).await?;
+        if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
             return Err(WasmLoadError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotADirectory,
-                format!("{} is not a directory", dir.display()),
+                format!("{} is not a real directory", dir.display()),
             )));
         }
 
@@ -214,6 +342,11 @@ where
                 continue;
             }
 
+            let file_type = entry.file_type().await?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                continue;
+            }
+
             let name = match path.file_stem().and_then(|s| s.to_str()) {
                 Some(n) => n.to_string(),
                 None => {
@@ -224,20 +357,52 @@ where
                     continue;
                 }
             };
+            if !is_valid_tool_name(&name) {
+                results
+                    .errors
+                    .push((path.clone(), WasmLoadError::InvalidName(name)));
+                continue;
+            }
+            if publication_in_progress(&path)? {
+                results.errors.push((
+                    path.clone(),
+                    WasmLoadError::Io(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "tool package publication is incomplete",
+                    )),
+                ));
+                continue;
+            }
+            if tool_entries.len() >= MAX_TOOLS_PER_DIRECTORY {
+                results.errors.push((
+                    path.clone(),
+                    WasmLoadError::InvalidName(format!(
+                        "tool directory exceeds the {MAX_TOOLS_PER_DIRECTORY}-tool limit"
+                    )),
+                ));
+                continue;
+            }
 
             let cap_path = path.with_extension("capabilities.json");
-            let has_cap = cap_path.exists();
-            tool_entries.push((name, path, if has_cap { Some(cap_path) } else { None }));
+            tool_entries.push((name, path, Some(cap_path)));
         }
 
-        // Load all tools in parallel (file I/O + WASM compilation + registration)
-        let load_futures = tool_entries
-            .iter()
-            .map(|(name, path, cap_path)| self.load_from_files(name, path, cap_path.as_deref()));
+        // Keep Wasmtime compilation concurrency bounded: the directory is
+        // operator-controlled and each compile can consume substantial memory.
+        let mut load_results = futures::stream::iter(tool_entries.iter().enumerate().map(
+            |(index, (name, path, cap_path))| async move {
+                (
+                    index,
+                    self.load_from_files(name, path, cap_path.as_deref()).await,
+                )
+            },
+        ))
+        .buffer_unordered(MAX_PARALLEL_COMPILATIONS)
+        .collect::<Vec<_>>()
+        .await;
+        load_results.sort_by_key(|(index, _)| *index);
 
-        let load_results = futures::future::join_all(load_futures).await;
-
-        for ((name, path, _), result) in tool_entries.into_iter().zip(load_results) {
+        for ((name, path, _), (_, result)) in tool_entries.into_iter().zip(load_results) {
             match result {
                 Ok(()) => {
                     results.loaded.push(name);
@@ -301,6 +466,11 @@ where
         user_id: &str,
     ) -> Result<LoadResults, WasmLoadError> {
         let tools = store.list(user_id).await?;
+        if tools.len() > MAX_STORED_TOOLS_PER_USER {
+            return Err(WasmLoadError::Storage(WasmStorageError::InvalidData(
+                format!("stored tool count exceeds the {MAX_STORED_TOOLS_PER_USER}-tool limit"),
+            )));
+        }
         let mut results = LoadResults::default();
 
         for tool in tools {
@@ -327,6 +497,12 @@ where
 
         Ok(results)
     }
+}
+
+/// Metadata parsed from the same locked generation as a loaded tool.
+#[derive(Debug)]
+pub struct LoadedToolMetadata {
+    pub capabilities_file: Option<CapabilitiesFile>,
 }
 
 /// Results from loading multiple tools.
@@ -409,14 +585,23 @@ pub async fn discover_dev_tools() -> Result<HashMap<String, DiscoveredTool>, std
     let src_dir = tools_src_dir();
     let mut tools = HashMap::new();
 
-    if !src_dir.is_dir() {
-        return Ok(tools);
+    let source_metadata = match fs::symlink_metadata(&src_dir).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(tools),
+        Err(error) => return Err(error),
+    };
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "tool source directory is not a real directory",
+        ));
     }
 
     let mut entries = fs::read_dir(&src_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if !path.is_dir() {
+        let file_type = entry.file_type().await?;
+        if file_type.is_symlink() || !file_type.is_dir() {
             continue;
         }
 
@@ -428,24 +613,38 @@ pub async fn discover_dev_tools() -> Result<HashMap<String, DiscoveredTool>, std
         // Convention: crate name uses underscores, directory uses hyphens
         let crate_name = dir_name.replace('-', "_");
         let install_name = format!("{}-tool", dir_name);
+        if !is_valid_tool_name(&install_name) || tools.len() >= MAX_TOOLS_PER_DIRECTORY {
+            continue;
+        }
 
         let wasm_path = wasm_artifact_path(&path, &format!("{}_tool", crate_name));
-
-        if !wasm_path.exists() {
+        let wasm_metadata = match fs::symlink_metadata(&wasm_path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if wasm_metadata.file_type().is_symlink()
+            || !wasm_metadata.is_file()
+            || publication_in_progress(&wasm_path)?
+        {
             continue;
         }
 
         let caps_path = path.join(format!("{}-tool.capabilities.json", dir_name));
+        let capabilities_path = match fs::symlink_metadata(&caps_path).await {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                Some(caps_path)
+            }
+            Ok(_) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
 
         tools.insert(
             install_name,
             DiscoveredTool {
                 wasm_path,
-                capabilities_path: if caps_path.exists() {
-                    Some(caps_path)
-                } else {
-                    None
-                },
+                capabilities_path,
             },
         );
     }
@@ -543,8 +742,16 @@ where
 pub async fn discover_tools(dir: &Path) -> Result<HashMap<String, DiscoveredTool>, std::io::Error> {
     let mut tools = HashMap::new();
 
-    if !dir.is_dir() {
-        return Ok(tools);
+    let directory_metadata = match fs::symlink_metadata(dir).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(tools),
+        Err(error) => return Err(error),
+    };
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "tool package directory is not a real directory",
+        ));
     }
 
     let mut entries = fs::read_dir(dir).await?;
@@ -556,22 +763,35 @@ pub async fn discover_tools(dir: &Path) -> Result<HashMap<String, DiscoveredTool
             continue;
         }
 
+        let file_type = entry.file_type().await?;
+        if !file_type.is_file() || file_type.is_symlink() {
+            continue;
+        }
+
         let name = match path.file_stem().and_then(|s| s.to_str()) {
             Some(n) => n.to_string(),
             None => continue,
         };
+        if !is_valid_tool_name(&name)
+            || publication_in_progress(&path)?
+            || tools.len() >= MAX_TOOLS_PER_DIRECTORY
+        {
+            continue;
+        }
 
         let cap_path = path.with_extension("capabilities.json");
+        let capabilities_path = match fs::symlink_metadata(&cap_path).await {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                Some(cap_path)
+            }
+            _ => None,
+        };
 
         tools.insert(
             name,
             DiscoveredTool {
                 wasm_path: path,
-                capabilities_path: if cap_path.exists() {
-                    Some(cap_path)
-                } else {
-                    None
-                },
+                capabilities_path,
             },
         );
     }
@@ -645,6 +865,50 @@ mod tests {
         let tools = discover_tools(dir.path()).await.unwrap();
         assert_eq!(tools.len(), 1);
         assert!(tools.contains_key("tool"));
+    }
+
+    #[tokio::test]
+    async fn test_discover_tools_hides_incomplete_publication() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("tool.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        std::fs::write(
+            dir.path().join(".tool.wasm.installing.json"),
+            br#"{"version":1}"#,
+        )
+        .unwrap();
+
+        let tools = discover_tools(dir.path()).await.unwrap();
+        assert!(!tools.contains_key("tool"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_discover_tools_rejects_symlink_packages() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_wasm = outside.path().join("outside.wasm");
+        std::fs::write(&outside_wasm, b"\0asm\x01\0\0\0").unwrap();
+        symlink(&outside_wasm, dir.path().join("linked.wasm")).unwrap();
+
+        let tools = discover_tools(dir.path()).await.unwrap();
+        assert!(!tools.contains_key("linked"));
+    }
+
+    #[tokio::test]
+    async fn test_discover_tools_enforces_directory_limit() {
+        let dir = TempDir::new().unwrap();
+        for index in 0..(super::MAX_TOOLS_PER_DIRECTORY + 5) {
+            std::fs::write(
+                dir.path().join(format!("tool_{index}.wasm")),
+                b"\0asm\x01\0\0\0",
+            )
+            .unwrap();
+        }
+
+        let tools = discover_tools(dir.path()).await.unwrap();
+        assert_eq!(tools.len(), super::MAX_TOOLS_PER_DIRECTORY);
     }
 
     #[test]

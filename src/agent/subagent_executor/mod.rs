@@ -24,8 +24,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use futures::{FutureExt, future::join_all};
 use thinclaw_agent::loop_control::{LoopKind, LoopRunSummary, LoopStopReason};
 use thinclaw_agent::prompt_assembly::{
     SUBAGENT_AVAILABLE_SKILL_INSTRUCTION, render_skill_sections,
@@ -45,7 +47,7 @@ use thinclaw_agent::subagent::{
     subagent_default_system_prompt, subagent_execution_grants, subagent_heartbeat_message,
     subagent_identity_defaults, subagent_iteration_limit_reason, subagent_job_metadata,
     subagent_learning_completion, subagent_learning_risk_tier, subagent_parent_message,
-    subagent_result_from_completion, subagent_routine_actor, subagent_routine_completion,
+    subagent_result_from_completion, subagent_routine_completion,
     subagent_run_status_for_completion, subagent_spawned_response, subagent_status_from_result,
     subagent_tool_activity_message, subagent_tool_warning_message, subagent_warning_category,
     with_subagent_thread_metadata,
@@ -54,23 +56,20 @@ pub use thinclaw_types::{
     SubagentMemoryMode, SubagentProvidedContext, SubagentSkillMode, SubagentTaskPacket,
     SubagentToolMode,
 };
-use tokio::sync::{RwLock, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::learning::{
     ImprovementClass, LearningEvent as RuntimeLearningEvent, LearningOrchestrator, RiskTier,
 };
-use crate::agent::routine::{
-    routine_state_has_runtime_advance_for_run, routine_state_with_runtime_advance,
-};
-use crate::agent::routine_engine::persist_routine_runtime_update;
+use crate::agent::routine_engine::finalize_routine_run_record;
 use crate::channels::web::types::SseEvent;
 use crate::channels::{ChannelManager, StatusUpdate};
 use crate::config::SkillsConfig;
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
+use crate::identity::{ConversationKind, ResolvedIdentity};
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
 use crate::observability::{NoopObserver, Observer, ObserverMetric};
 use crate::safety::SafetyLayer;
@@ -177,6 +176,81 @@ fn touch_subagent_activity(activity_tx: &watch::Sender<Instant>) {
     let _ = activity_tx.send(Instant::now());
 }
 
+async fn finalize_forced_subagent_exit(
+    store: Option<&Arc<dyn crate::db::Database>>,
+    agent_id: Uuid,
+    routine_run_id: Option<Uuid>,
+    fallback_status: &SubagentStatus,
+    reason: &str,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let (ledger_status, ledger_error) = subagent_run_status_for_completion(fallback_status);
+    if let Err(error) = store
+        .complete_subagent_run(
+            agent_id,
+            ledger_status,
+            ledger_error.as_deref().or(Some(reason)),
+        )
+        .await
+    {
+        tracing::warn!(agent_id = %agent_id, %error, "Failed to close forcibly cancelled sub-agent ledger row");
+    }
+    if *fallback_status == SubagentStatus::Cancelled
+        && let Some(run_id) = routine_run_id
+        && let Err(error) = finalize_routine_run_record(
+            store,
+            run_id,
+            crate::agent::routine::RunStatus::Failed,
+            Some(reason),
+            None,
+        )
+        .await
+    {
+        tracing::warn!(agent_id = %agent_id, %run_id, %error, "Failed to close routine run after forced sub-agent cancellation");
+    }
+}
+
+async fn await_owned_subagent(
+    store: Option<Arc<dyn crate::db::Database>>,
+    agent_id: Uuid,
+    routine_run_id: Option<Uuid>,
+    fallback_status: SubagentStatus,
+    mut join_handle: JoinHandle<SubagentResult>,
+) {
+    let forced_reason = match tokio::time::timeout(SUBAGENT_CANCEL_GRACE, &mut join_handle).await {
+        Ok(Ok(_)) => None,
+        Ok(Err(error)) => {
+            tracing::warn!(agent_id = %agent_id, %error, "Sub-agent task failed while cancelling");
+            Some(format!(
+                "sub-agent task failed during cancellation: {error}"
+            ))
+        }
+        Err(_) => {
+            tracing::warn!(
+                agent_id = %agent_id,
+                grace_secs = SUBAGENT_CANCEL_GRACE.as_secs(),
+                "Sub-agent did not exit within cancel grace period; aborting"
+            );
+            join_handle.abort();
+            let _ = join_handle.await;
+            Some("aborted after cancel grace period".to_string())
+        }
+    };
+
+    if let Some(reason) = forced_reason {
+        finalize_forced_subagent_exit(
+            store.as_ref(),
+            agent_id,
+            routine_run_id,
+            &fallback_status,
+            &reason,
+        )
+        .await;
+    }
+}
+
 /// Handle to a running sub-agent.
 pub struct SubagentHandle {
     pub id: Uuid,
@@ -196,6 +270,10 @@ pub struct SubagentHandle {
     /// Principal that spawned this sub-agent, used for per-principal
     /// concurrency accounting so one principal cannot starve others.
     pub parent_user_id: String,
+    /// Routine run finalized by this sub-agent, if any. Retained so a forced
+    /// cancellation can close the durable routine row even though the task's
+    /// normal finalization tail was aborted.
+    routine_run_id: Option<Uuid>,
 }
 
 /// The sub-agent executor manages sub-agent lifecycle.
@@ -208,6 +286,12 @@ pub struct SubagentExecutor {
     config: SubagentConfig,
     /// Currently active sub-agents.
     active: Arc<RwLock<HashMap<Uuid, SubagentHandle>>>,
+    /// Serializes spawn registration with cancel/shutdown. Without this, cancel
+    /// could observe the pre-spawn placeholder, take no join handle, and let the
+    /// subsequently spawned task escape lifecycle ownership.
+    lifecycle_lock: Arc<Mutex<()>>,
+    /// Admission closes permanently when the owning runtime shuts down.
+    accepting: Arc<AtomicBool>,
     /// Sender for injecting sub-agent results back to the parent agent.
     result_tx: mpsc::Sender<SubagentResultMessage>,
     /// Optional database for finalizing routine runs.
@@ -218,9 +302,9 @@ pub struct SubagentExecutor {
     cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
     /// Optional shared cost guard enforcing daily-budget/hourly-rate limits.
     ///
-    /// This is the SAME guard instance that gates the main dispatcher loop, so
-    /// delegated sub-agent work draws from the same budget rather than being
-    /// an unmetered side channel. Checked before every sub-agent LLM iteration.
+    /// This is the SAME guard instance owned by the shared
+    /// `UsageTrackingProvider`; retaining it here keeps host wiring and
+    /// lifecycle ownership explicit without performing a duplicate admission.
     cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
     /// Optional workspace for loading identity/system prompt context.
     workspace: Option<Arc<Workspace>>,
@@ -252,6 +336,8 @@ impl SubagentExecutor {
             channels,
             config,
             active: Arc::new(RwLock::new(HashMap::new())),
+            lifecycle_lock: Arc::new(Mutex::new(())),
+            accepting: Arc::new(AtomicBool::new(true)),
             result_tx,
             store: None,
             sse_tx: None,
@@ -286,8 +372,7 @@ impl SubagentExecutor {
         self
     }
 
-    /// Set the cost guard so sub-agent iterations are gated by the same
-    /// daily-budget/hourly-rate limits as the main dispatcher loop.
+    /// Retain the shared cost guard used by the sub-agent's tracking provider.
     pub fn with_cost_guard(mut self, guard: Arc<crate::agent::cost_guard::CostGuard>) -> Self {
         self.cost_guard = Some(guard);
         self
@@ -358,13 +443,52 @@ impl SubagentExecutor {
         parent_identity: Option<&ResolvedIdentity>,
         parent_thread_id: Option<&str>,
     ) -> Result<SubagentResult, Error> {
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(Error::Tool(crate::error::ToolError::ExecutionFailed {
+                name: "spawn_subagent".to_string(),
+                reason: "Sub-agent executor is shutting down".to_string(),
+            }));
+        }
+        let lifecycle_guard = self.lifecycle_lock.lock().await;
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(Error::Tool(crate::error::ToolError::ExecutionFailed {
+                name: "spawn_subagent".to_string(),
+                reason: "Sub-agent executor is shutting down".to_string(),
+            }));
+        }
+
+        // A caller-supplied subagent request must never be able to switch
+        // tenant or actor. When a canonical parent identity is available it is
+        // authoritative; trusted background callers without one must provide
+        // an explicit request identity (with the delivery user as fallback).
+        if let Some(identity) = parent_identity {
+            request.principal_id = Some(identity.principal_id.clone());
+            request.actor_id = Some(identity.actor_id.clone());
+        } else {
+            request
+                .principal_id
+                .get_or_insert_with(|| parent_user_id.to_string());
+            let principal_id = request.principal_id.clone().unwrap_or_default();
+            request.actor_id.get_or_insert(principal_id);
+        }
         request.normalize_strict(None, None, self.config.default_tool_profile);
+        let canonical_parent_principal = request
+            .principal_id
+            .clone()
+            .unwrap_or_else(|| parent_user_id.to_string());
         let id = Uuid::new_v4();
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let heartbeat_cancel_tx = cancel_tx.clone();
         let (completion_tx, completion_rx) = oneshot::channel::<SubagentResult>();
         // Bidirectional: parent → sub-agent message channel
         let (parent_to_sub_tx, parent_to_sub_rx) = mpsc::channel::<String>(16);
+        let routine_run_id_for_ledger = channel_metadata
+            .get("routine_run_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let routine_run_id = routine_run_id_for_ledger
+            .as_deref()
+            .and_then(|value| value.parse::<Uuid>().ok());
 
         // Check concurrency limit AND insert tracking entry under a single
         // write lock to prevent TOCTOU races (Bug 37 fix).
@@ -389,7 +513,8 @@ impl SubagentExecutor {
             let principal_running = active
                 .values()
                 .filter(|h| {
-                    h.status == SubagentStatus::Running && h.parent_user_id == parent_user_id
+                    h.status == SubagentStatus::Running
+                        && h.parent_user_id == canonical_parent_principal
                 })
                 .count();
             let concurrency = SubagentConcurrency::with_principal_scope(
@@ -419,7 +544,8 @@ impl SubagentExecutor {
                     cancel_tx: cancel_tx.clone(),
                     join_handle: None, // filled in after tokio::spawn
                     parent_to_sub_tx: parent_to_sub_tx.clone(),
-                    parent_user_id: parent_user_id.to_string(),
+                    parent_user_id: canonical_parent_principal.clone(),
+                    routine_run_id,
                 },
             );
         }
@@ -427,15 +553,11 @@ impl SubagentExecutor {
         // ── Durable ledger: record the run BEFORE spawning ──────────────
         // Without this, a running sub-agent lives only in the in-memory
         // `active` map above, so a process restart silently drops it and
-        // leaks any routine run it was finalizing. Best-effort: a ledger
-        // write failure does not block the sub-agent from running — the
-        // in-memory tracking above is still authoritative for this process.
+        // leaks any routine run it was finalizing. When a store is configured,
+        // durable admission is mandatory: do not run work that a restart could
+        // neither reconcile nor account for.
         let resolved_parent_thread_id =
             resolve_parent_thread_id(parent_thread_id, channel_metadata);
-        let routine_run_id_for_ledger = channel_metadata
-            .get("routine_run_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
         if let Some(ref store) = self.store {
             let run = SubagentRunRecord::new_running(
                 id,
@@ -445,11 +567,9 @@ impl SubagentExecutor {
                 routine_run_id_for_ledger.clone(),
                 spawned_at,
             );
-            if let Err(e) = store.insert_subagent_run(&run).await {
-                tracing::warn!(
-                    agent_id = %id,
-                    "Failed to persist subagent run ledger entry: {}", e
-                );
+            if let Err(error) = store.insert_subagent_run(&run).await {
+                self.active.write().await.remove(&id);
+                return Err(error.into());
             }
         }
 
@@ -503,7 +623,8 @@ impl SubagentExecutor {
         let principal_id = request.principal_id.clone();
         let actor_id = request.actor_id.clone();
         let agent_workspace_id = request.agent_workspace_id;
-        let parent_user_id = parent_user_id.to_string();
+        let parent_delivery_user_id = parent_user_id.to_string();
+        let parent_principal_id = canonical_parent_principal;
         let parent_identity = parent_identity.cloned();
         let workspace = self.workspace.clone();
         let skill_registry = self.skill_registry.clone();
@@ -511,8 +632,29 @@ impl SubagentExecutor {
 
         // For the result injection message (already resolved above for the ledger write)
         let parent_thread_id = resolved_parent_thread_id;
-        let ch_meta =
+        let mut ch_meta =
             with_subagent_thread_metadata(channel_metadata, &parent_thread_id, channel_name);
+        if let (Some(identity), Some(metadata)) =
+            (parent_identity.as_ref(), ch_meta.as_object_mut())
+        {
+            metadata.insert(
+                "principal_id".to_string(),
+                serde_json::json!(identity.principal_id),
+            );
+            metadata.insert("actor_id".to_string(), serde_json::json!(identity.actor_id));
+            metadata.insert(
+                "conversation_kind".to_string(),
+                serde_json::json!(identity.conversation_kind.as_str()),
+            );
+            metadata.insert(
+                "conversation_scope_id".to_string(),
+                serde_json::json!(identity.conversation_scope_id.to_string()),
+            );
+            metadata.insert(
+                "stable_external_conversation_key".to_string(),
+                serde_json::json!(identity.stable_external_conversation_key),
+            );
+        }
 
         let agent_name = name.clone();
         let agent_task = task.clone();
@@ -531,23 +673,30 @@ impl SubagentExecutor {
         let observer_for_task = Arc::clone(&self.observer);
 
         // Emit SubagentSpawned event
-        let _ = channels
-            .send_status(
-                &ch_name,
-                StatusUpdate::SubagentSpawned {
-                    agent_id: id.to_string(),
-                    name: agent_name.clone(),
-                    task: agent_task.clone(),
-                    task_packet: event_task_packet.clone(),
-                    allowed_tools: event_allowed_tools.clone(),
-                    allowed_skills: event_allowed_skills.clone(),
-                    memory_mode: event_memory_mode.clone(),
-                    tool_mode: event_tool_mode.clone(),
-                    skill_mode: event_skill_mode.clone(),
-                },
-                &ch_meta,
-            )
-            .await;
+        let spawned_status = channels.send_status(
+            &ch_name,
+            StatusUpdate::SubagentSpawned {
+                agent_id: id.to_string(),
+                name: agent_name.clone(),
+                task: agent_task.clone(),
+                task_packet: event_task_packet.clone(),
+                allowed_tools: event_allowed_tools.clone(),
+                allowed_skills: event_allowed_skills.clone(),
+                memory_mode: event_memory_mode.clone(),
+                tool_mode: event_tool_mode.clone(),
+                skill_mode: event_skill_mode.clone(),
+            },
+            &ch_meta,
+        );
+        match tokio::time::timeout(SUBAGENT_STATUS_DELIVERY_TIMEOUT, spawned_status).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(agent_id = %id, %error, "Failed to deliver sub-agent spawn status");
+            }
+            Err(_) => {
+                tracing::warn!(agent_id = %id, "Timed out delivering sub-agent spawn status");
+            }
+        }
 
         let active_ref = self.active.clone();
         let active_for_task = self.active.clone();
@@ -571,7 +720,7 @@ impl SubagentExecutor {
 
             let result = tokio::time::timeout(
                 timeout,
-                run_subagent_loop(
+                std::panic::AssertUnwindSafe(run_subagent_loop(
                     llm,
                     safety,
                     tools,
@@ -602,7 +751,8 @@ impl SubagentExecutor {
                     activity_tx,
                     cost_tracker_for_task.clone(),
                     cost_guard_for_task,
-                ),
+                ))
+                .catch_unwind(),
             )
             .await;
 
@@ -611,7 +761,7 @@ impl SubagentExecutor {
             let duration_ms = start.elapsed().as_millis() as u64;
 
             let (subagent_result, loop_stop_reason) = match result {
-                Ok(Ok((response, iterations))) => (
+                Ok(Ok(Ok((response, iterations)))) => (
                     subagent_result_from_completion(
                         id,
                         agent_name.clone(),
@@ -623,7 +773,7 @@ impl SubagentExecutor {
                     ),
                     LoopStopReason::Completed,
                 ),
-                Ok(Err(e)) => {
+                Ok(Ok(Err(e))) => {
                     // A cancel signal makes the loop exit with an error; report
                     // it as a cancellation, not a failure.
                     let outcome = if *cancel_watch_outer.borrow() {
@@ -644,6 +794,25 @@ impl SubagentExecutor {
                             outcome,
                         ),
                         stop_reason,
+                    )
+                }
+                Ok(Err(panic)) => {
+                    let message = panic
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown panic");
+                    tracing::error!(agent_id = %id, %message, "Sub-agent loop panicked");
+                    (
+                        subagent_result_from_completion(
+                            id,
+                            agent_name.clone(),
+                            duration_ms,
+                            SubagentCompletionOutcome::Error(format!(
+                                "Sub-agent loop panicked: {message}"
+                            )),
+                        ),
+                        LoopStopReason::FatalError,
                     )
                 }
                 Err(_timeout) => (
@@ -715,7 +884,7 @@ impl SubagentExecutor {
                         .with_metadata(completion.metadata);
 
                         let persisted = event.into_persisted(
-                            parent_user_id.clone(),
+                            parent_principal_id.clone(),
                             actor,
                             Some(ch_name.clone()),
                             Some(parent_thread_id.clone()),
@@ -757,114 +926,41 @@ impl SubagentExecutor {
                         let completion = subagent_routine_completion(&subagent_result);
                         let run_status = completion.run_status;
                         let summary = Some(completion.summary.clone());
-
-                        if let Some(ref store) = store_for_task
-                            && let Ok(run_id) = run_id_str.parse::<Uuid>()
-                        {
-                            if let Err(e) = store
-                                .complete_routine_run(run_id, run_status, summary.as_deref(), None)
-                                .await
-                            {
-                                tracing::error!(
-                                    routine = %routine_name,
-                                    run_id = %run_id_str,
-                                    "Failed to finalize routine run from subagent: {}", e
-                                );
-                            } else {
-                                tracing::info!(
-                                    routine = %routine_name,
-                                    run_id = %run_id_str,
-                                    success = %subagent_result.success,
-                                    "Finalized routine run from subagent"
-                                );
-                            }
-
-                            let routine_actor = subagent_routine_actor(
-                                parent_identity
-                                    .as_ref()
-                                    .map(|identity| identity.actor_id.as_str()),
-                                actor_id.as_deref(),
-                                &parent_user_id,
-                            );
-                            let routine = ch_meta
-                                .get("routine_id")
-                                .and_then(|value| value.as_str())
-                                .and_then(|value| Uuid::parse_str(value).ok());
-                            let mut resolved_routine = None;
-                            if let Some(routine_id) = routine
-                                && let Ok(Some(found)) = store.get_routine(routine_id).await
-                                && found.user_id == parent_user_id
-                                && found.owner_actor_id() == routine_actor
-                            {
-                                resolved_routine = Some(found);
-                            }
-                            if resolved_routine.is_none()
-                                && let Ok(Some(found)) = store
-                                    .get_routine_by_name_for_actor(
-                                        &parent_user_id,
-                                        &routine_actor,
-                                        routine_name,
-                                    )
-                                    .await
-                            {
-                                resolved_routine = Some(found);
-                            }
-                            if let Some(routine) = resolved_routine {
-                                let completed_at = chrono::Utc::now();
-                                let runtime_already_advanced =
-                                    routine_state_has_runtime_advance_for_run(
-                                        &routine.state,
-                                        run_id,
-                                    );
-                                let next_fire_at = if runtime_already_advanced {
-                                    routine.next_fire_at
-                                } else {
-                                    crate::agent::routine::next_fire_for_routine(
-                                        &routine,
-                                        None,
-                                        completed_at,
-                                    )
-                                    .unwrap_or(routine.next_fire_at)
-                                };
-                                let run_count = if runtime_already_advanced {
-                                    routine.run_count
-                                } else {
-                                    routine.run_count + 1
-                                };
-                                let consecutive_failures =
-                                    if run_status == crate::agent::routine::RunStatus::Failed {
-                                        routine.consecutive_failures + 1
-                                    } else {
-                                        0
-                                    };
-                                let state = routine_state_with_runtime_advance(
-                                    &routine.state,
-                                    run_id,
-                                    completed_at,
-                                );
-                                if let Err(error) = persist_routine_runtime_update(
+                        let won_terminal_transition =
+                            match (store_for_task.as_ref(), run_id_str.parse::<Uuid>()) {
+                                (Some(store), Ok(run_id)) => match finalize_routine_run_record(
                                     store,
-                                    routine.id,
-                                    completed_at,
-                                    next_fire_at,
-                                    run_count,
-                                    consecutive_failures,
-                                    &state,
+                                    run_id,
+                                    run_status,
+                                    summary.as_deref(),
+                                    None,
                                 )
                                 .await
                                 {
-                                    tracing::error!(
-                                        routine = %routine.name,
-                                        run_id = %run_id_str,
-                                        "Failed to update routine runtime after subagent finalization: {}",
-                                        error
-                                    );
-                                }
-                            }
-                        }
+                                    Ok(true) => {
+                                        tracing::info!(
+                                            routine = %routine_name,
+                                            run_id = %run_id_str,
+                                            success = %subagent_result.success,
+                                            "Finalized routine run from subagent"
+                                        );
+                                        true
+                                    }
+                                    Ok(false) => false,
+                                    Err(e) => {
+                                        tracing::error!(
+                                            routine = %routine_name,
+                                            run_id = %run_id_str,
+                                            "Failed to finalize routine run from subagent: {}", e
+                                        );
+                                        false
+                                    }
+                                },
+                                _ => false,
+                            };
 
                         // Emit SSE lifecycle event
-                        if let Some(ref sse_tx) = sse_tx_for_task {
+                        if won_terminal_transition && let Some(ref sse_tx) = sse_tx_for_task {
                             let _ = sse_tx.send(SseEvent::RoutineLifecycle {
                                 routine_name: routine_name.to_string(),
                                 event: completion.lifecycle_event.to_string(),
@@ -877,15 +973,23 @@ impl SubagentExecutor {
 
                 let _ = tokio::join!(learning, routine_finalization);
             };
-            if tokio::time::timeout(SUBAGENT_FINALIZATION_GRACE, finalization)
-                .await
-                .is_err()
+            match tokio::time::timeout(
+                SUBAGENT_FINALIZATION_GRACE,
+                std::panic::AssertUnwindSafe(finalization).catch_unwind(),
+            )
+            .await
             {
-                tracing::warn!(
-                    agent_id = %id,
-                    timeout_secs = SUBAGENT_FINALIZATION_GRACE.as_secs(),
-                    "Sub-agent optional finalization exceeded its deadline"
-                );
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    tracing::error!(agent_id = %id, "Sub-agent optional finalization panicked");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        agent_id = %id,
+                        timeout_secs = SUBAGENT_FINALIZATION_GRACE.as_secs(),
+                        "Sub-agent optional finalization exceeded its deadline"
+                    );
+                }
             }
 
             let ledger_status = subagent_status_from_result(&subagent_result);
@@ -895,7 +999,6 @@ impl SubagentExecutor {
                 if let Some(handle) = active.get_mut(&id) {
                     handle.status = ledger_status.clone();
                     handle.completed_at = Some(chrono::Utc::now());
-                    handle.join_handle = None;
                 }
             };
             if tokio::time::timeout(SUBAGENT_STATE_PERSIST_TIMEOUT, active_update)
@@ -939,7 +1042,7 @@ impl SubagentExecutor {
                 let reinject = result_tx.send(SubagentResultMessage {
                     result: subagent_result.clone(),
                     channel_name: ch_name,
-                    parent_user_id,
+                    parent_user_id: parent_delivery_user_id,
                     parent_identity,
                     channel_metadata: ch_meta,
                     parent_thread_id,
@@ -964,6 +1067,7 @@ impl SubagentExecutor {
                 handle.join_handle = Some(join_handle);
             }
         }
+        drop(lifecycle_guard);
 
         if wait_for_completion {
             completion_rx.await.map_err(|_| {
@@ -1004,53 +1108,80 @@ impl SubagentExecutor {
     /// The task is hard-aborted only if it fails to exit within the grace
     /// period, since an abort skips all of that.
     pub async fn cancel(&self, agent_id: Uuid) -> bool {
-        let mut active = self.active.write().await;
-        if let Some(handle) = active.get_mut(&agent_id)
-            && should_cancel_subagent(&handle.status)
-        {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        let pending = {
+            let mut active = self.active.write().await;
+            let Some(handle) = active.get_mut(&agent_id) else {
+                return false;
+            };
+            if !should_cancel_subagent(&handle.status) {
+                return false;
+            }
             let _ = handle.cancel_tx.send(true);
             handle.status = subagent_cancelled_status();
             handle.completed_at = Some(chrono::Utc::now());
-            if let Some(jh) = handle.join_handle.take() {
-                let abort_handle = jh.abort_handle();
-                let ledger_store = self.store.clone();
-                tokio::spawn(async move {
-                    tokio::select! {
-                        _ = jh => {}
-                        _ = tokio::time::sleep(SUBAGENT_CANCEL_GRACE) => {
-                            tracing::warn!(
-                                agent_id = %agent_id,
-                                grace_secs = SUBAGENT_CANCEL_GRACE.as_secs(),
-                                "Sub-agent did not exit within cancel grace period — aborting"
-                            );
-                            abort_handle.abort();
-                            // The abort skips the task's finalization block,
-                            // so close the ledger row here — otherwise it
-                            // stays 'running' until the next restart's
-                            // reconciliation sweep.
-                            if let Some(store) = ledger_store
-                                && let Err(e) = store
-                                    .complete_subagent_run(
-                                        agent_id,
-                                        "cancelled",
-                                        Some("aborted after cancel grace period"),
-                                    )
-                                    .await
-                            {
-                                tracing::debug!(
-                                    agent_id = %agent_id,
-                                    "Failed to close subagent ledger row after abort: {}",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                });
-            }
-            tracing::info!(agent_id = %agent_id, "Sub-agent cancelled");
-            return true;
+            handle
+                .join_handle
+                .take()
+                .map(|join_handle| (join_handle, handle.routine_run_id))
+        };
+
+        if let Some((join_handle, routine_run_id)) = pending {
+            await_owned_subagent(
+                self.store.clone(),
+                agent_id,
+                routine_run_id,
+                SubagentStatus::Cancelled,
+                join_handle,
+            )
+            .await;
         }
-        false
+        tracing::info!(agent_id = %agent_id, "Sub-agent cancelled");
+        true
+    }
+
+    /// Close admission, cooperatively cancel every running sub-agent, and wait
+    /// for their bounded finalization tails. No child task survives this call.
+    pub async fn shutdown(&self) {
+        self.accepting.store(false, Ordering::Release);
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        let pending = {
+            let mut active = self.active.write().await;
+            active
+                .iter_mut()
+                .filter_map(|(agent_id, handle)| {
+                    let fallback_status = if should_cancel_subagent(&handle.status) {
+                        let _ = handle.cancel_tx.send(true);
+                        handle.status = subagent_cancelled_status();
+                        handle.completed_at = Some(chrono::Utc::now());
+                        SubagentStatus::Cancelled
+                    } else {
+                        handle.status.clone()
+                    };
+                    handle.join_handle.take().map(|join_handle| {
+                        (
+                            *agent_id,
+                            handle.routine_run_id,
+                            fallback_status,
+                            join_handle,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        join_all(pending.into_iter().map(
+            |(agent_id, routine_run_id, fallback_status, join_handle)| {
+                await_owned_subagent(
+                    self.store.clone(),
+                    agent_id,
+                    routine_run_id,
+                    fallback_status,
+                    join_handle,
+                )
+            },
+        ))
+        .await;
     }
 
     /// List all sub-agents (active and finished).
@@ -1153,14 +1284,14 @@ pub async fn reconcile_orphaned_subagent_runs(store: Arc<dyn crate::db::Database
             continue;
         };
 
-        if let Err(e) = store
-            .complete_routine_run(
-                routine_run_uuid,
-                crate::agent::routine::RunStatus::Failed,
-                Some(SUBAGENT_RUN_ORPHANED_REASON),
-                None,
-            )
-            .await
+        if let Err(e) = finalize_routine_run_record(
+            &store,
+            routine_run_uuid,
+            crate::agent::routine::RunStatus::Failed,
+            Some(SUBAGENT_RUN_ORPHANED_REASON),
+            None,
+        )
+        .await
         {
             tracing::warn!(
                 subagent_run_id = %run.id,
@@ -1213,7 +1344,7 @@ async fn run_subagent_loop(
     agent_id: &str,
     activity_tx: watch::Sender<Instant>,
     cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
-    cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
+    _cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
 ) -> Result<(String, usize), Error> {
     let mut context_messages = vec![ChatMessage::user(format!(
         "## Delegated Task Packet\n\n{}\n\n## Original Delegated Task\n\n{}",
@@ -1251,9 +1382,11 @@ async fn run_subagent_loop(
     let provider_tool_extensions = if let Some(store) = store {
         let orchestrator =
             LearningOrchestrator::new(store, workspace.clone(), skill_registry.clone());
-        let active_tools = orchestrator
-            .provider_tool_extensions(&job_ctx.user_id)
-            .await;
+        let active_tools = match crate::agent::learning::provider_access_context_from_job(&job_ctx)
+        {
+            Ok(access) => orchestrator.provider_tool_extensions(&access).await,
+            Err(_) => Vec::new(),
+        };
         match (memory_mode, allowed_tools) {
             (SubagentMemoryMode::GrantedToolsOnly, Some(allowed_tools)) => active_tools
                 .into_iter()
@@ -1283,7 +1416,6 @@ async fn run_subagent_loop(
         skill_mode,
         tool_profile,
         &safety,
-        agent_id,
     )
     .await;
     let model_name = llm.active_model_name();
@@ -1303,19 +1435,9 @@ async fn run_subagent_loop(
             return Err(subagent_cancelled_error());
         }
 
-        // Enforce the shared cost guardrails before every LLM call, exactly
-        // like the main dispatcher loop (dispatcher/loop.rs). Without this,
-        // delegated sub-agent work was an unmetered side channel around the
-        // operator's daily-budget/hourly-rate limits.
-        if let Some(ref guard) = cost_guard
-            && let Err(limit) = guard.check_allowed().await
-        {
-            return Err(crate::error::LlmError::InvalidResponse {
-                provider: "subagent".to_string(),
-                reason: limit.to_string(),
-            }
-            .into());
-        }
+        // The shared UsageTrackingProvider performs atomic budget admission
+        // for every LLM API shape. A second guard check here would double-count
+        // each sub-agent request against the hourly cap.
 
         // Renew the routine run's DB lease (time-gated inside the helper) so
         // a long-running subagent-executed routine isn't falsely reaped by
@@ -1620,7 +1742,6 @@ async fn build_subagent_system_prompt(
     skill_mode: &SubagentSkillMode,
     tool_profile: ToolProfile,
     safety: &SafetyLayer,
-    agent_id: &str,
 ) -> String {
     let workspace_prompt = build_subagent_workspace_prompt(
         workspace,
@@ -1630,7 +1751,6 @@ async fn build_subagent_system_prompt(
         actor_id,
         agent_workspace_id,
         safety,
-        agent_id,
     )
     .await;
     let skill_context = build_subagent_skill_context(
@@ -1663,7 +1783,6 @@ async fn build_subagent_workspace_prompt(
     actor_id: &str,
     agent_workspace_id: Option<Uuid>,
     safety: &SafetyLayer,
-    agent_id: &str,
 ) -> Option<String> {
     let base_workspace = workspace?;
     let effective_workspace = if let Some(workspace_id) = agent_workspace_id {
@@ -1672,19 +1791,38 @@ async fn build_subagent_workspace_prompt(
         base_workspace
     };
 
-    let conversation_kind = ConversationKind::Group;
-    let thread_key = channel_metadata
-        .get("thread_id")
+    let conversation_kind = match channel_metadata
+        .get("conversation_kind")
         .and_then(|value| value.as_str())
-        .unwrap_or(agent_id);
-    let external_key = format!("subagent:{channel_name}:{thread_key}:{actor_id}");
-    let identity = ResolvedIdentity {
-        principal_id: principal_id.to_string(),
-        actor_id: actor_id.to_string(),
-        conversation_scope_id: scope_id_from_key(&external_key),
+        .and_then(thinclaw_identity::parse_conversation_kind_hint)
+    {
+        Some(kind) => kind,
+        None => ConversationKind::Direct,
+    };
+    let explicit_scope = channel_metadata
+        .get("conversation_scope_id")
+        .and_then(|value| value.as_str())
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let external_key = channel_metadata
+        .get("stable_external_conversation_key")
+        .and_then(|value| value.as_str());
+    let identity = match thinclaw_identity::resolved_identity_from_carried_context(
+        principal_id,
+        actor_id,
         conversation_kind,
-        raw_sender_id: actor_id.to_string(),
-        stable_external_conversation_key: external_key,
+        explicit_scope,
+        external_key,
+    ) {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::warn!(
+                principal_id,
+                actor_id,
+                %error,
+                "Refusing to assemble sub-agent workspace context from incomplete identity"
+            );
+            return None;
+        }
     };
 
     match effective_workspace

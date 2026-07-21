@@ -18,7 +18,7 @@
 //! - `rpc_experiments_learning`: Experiment and learning review surfaces
 
 use tauri::{AppHandle, Manager};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use super::config::ThinClawConfig;
 
@@ -40,6 +40,7 @@ pub(crate) mod rpc_session_search;
 pub(crate) mod rpc_skills;
 pub(crate) mod rpc_trajectory;
 mod sessions;
+mod skill_repo;
 pub mod types;
 
 // Re-export all public command functions
@@ -72,6 +73,10 @@ pub struct ThinClawManager {
     pub(crate) app: AppHandle,
     /// Configuration manager
     pub(crate) config: RwLock<Option<ThinClawConfig>>,
+    /// Global deployment lease. Deployment progress is broadcast through a
+    /// single event channel, so overlapping runs would mix output and could
+    /// associate one run's credential result with another target.
+    pub(crate) deploy_lock: Mutex<()>,
 }
 
 impl ThinClawManager {
@@ -79,6 +84,7 @@ impl ThinClawManager {
         Self {
             app,
             config: RwLock::new(None),
+            deploy_lock: Mutex::new(()),
         }
     }
 
@@ -86,7 +92,7 @@ impl ThinClawManager {
     pub async fn init_config(&self) -> Result<ThinClawConfig, String> {
         let app_data_dir = self.app.path().app_data_dir().map_err(|e| e.to_string())?;
 
-        let config = ThinClawConfig::new(app_data_dir);
+        let config = ThinClawConfig::new(app_data_dir)?;
         config.ensure_dirs().map_err(|e| e.to_string())?;
 
         *self.config.write().await = Some(config.clone());

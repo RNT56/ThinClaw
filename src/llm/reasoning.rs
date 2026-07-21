@@ -567,7 +567,8 @@ impl Reasoning {
         request: CompletionRequest,
     ) -> Result<(String, TokenUsage), LlmError> {
         // Try cache first for non-tool completions
-        let cache_key = Self::make_cache_key(&request.messages, &request.context_documents);
+        let cache_model = self.llm.effective_model_name(request.model.as_deref());
+        let cache_key = self.make_cache_key(&request);
         if let Some(ref cache) = self.response_cache {
             // CachedResponseStore::get() takes &mut self (updates last_accessed for LRU),
             // so we need a write() guard rather than read(). Pre-existing bug fixed.
@@ -599,8 +600,14 @@ impl Reasoning {
 
         let cleaned = clean_response(&response.content);
 
-        // Store in cache
-        if let Some(ref cache) = self.response_cache {
+        // Store only complete responses; truncated/max-token results are not
+        // semantically reusable. The servicing model must be explicit and
+        // match the pre-call route; an absent model cannot prove that a
+        // failover/cascade did not service the request.
+        if response.finish_reason == crate::llm::FinishReason::Stop
+            && response.provider_model.as_deref() == Some(cache_model.as_str())
+            && let Some(ref cache) = self.response_cache
+        {
             let model = response
                 .provider_model
                 .clone()
@@ -611,22 +618,16 @@ impl Reasoning {
         Ok((cleaned, usage))
     }
 
-    /// Build a simple cache key from the last 2 messages (role + content hash).
-    ///
-    /// Uses `DefaultHasher` (guaranteed to be SipHasher13 since Rust 1.71).
-    /// The cache is process-local so cross-version stability is not required.
-    fn make_cache_key(messages: &[ChatMessage], context_documents: &[String]) -> String {
-        use std::hash::{DefaultHasher, Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        // Use last 2 messages to keep the key short but distinctive
-        for msg in messages.iter().rev().take(2) {
-            msg.content.hash(&mut hasher);
-            format!("{:?}", msg.role).hash(&mut hasher);
-        }
-        for document in context_documents {
-            document.hash(&mut hasher);
-        }
-        format!("llm:{:016x}", hasher.finish())
+    /// Build a collision-resistant key from the full effective request. Model,
+    /// complete message structures (including attachments), context documents,
+    /// generation parameters, thinking budget, and request metadata all affect
+    /// the response and therefore all participate in the key.
+    fn make_cache_key(&self, request: &CompletionRequest) -> String {
+        let model = self.llm.effective_model_name(request.model.as_deref());
+        format!(
+            "llm:{}",
+            crate::llm::completion_request_cache_key(&model, request)
+        )
     }
 
     /// Record token usage + cost into the shared CostTracker (fire-and-forget).
@@ -1133,6 +1134,24 @@ Respond in JSON format:
             request.metadata = context.metadata.clone();
             self.mark_request_metadata(&mut request.metadata);
 
+            let cache_model = self.llm.effective_model_name(request.model.as_deref());
+            let cache_key = self.make_cache_key(&request);
+            if let Some(cache) = self.response_cache.as_ref() {
+                let mut cache = cache.write().await;
+                if cache.is_cacheable(false, false)
+                    && let Some(cached) = cache.get(&cache_key)
+                {
+                    return Ok(RespondOutput {
+                        result: RespondResult::Text(cached),
+                        usage: TokenUsage::default(),
+                        routed_model_name: Some(cache_model.clone()),
+                        finish_reason: crate::llm::FinishReason::Stop,
+                        thinking_content: None,
+                        token_capture: None,
+                    });
+                }
+            }
+
             let response = self.llm.complete(request).await?;
             let usage = TokenUsage {
                 input_tokens: response.input_tokens,
@@ -1158,6 +1177,19 @@ Respond in JSON format:
             } else {
                 cleaned
             };
+            if response.finish_reason == crate::llm::FinishReason::Stop
+                && response.provider_model.as_deref() == Some(cache_model.as_str())
+                && let Some(cache) = self.response_cache.as_ref()
+            {
+                let model = response
+                    .provider_model
+                    .as_deref()
+                    .unwrap_or_else(|| self.llm.model_name());
+                cache
+                    .write()
+                    .await
+                    .set(&cache_key, final_text.clone(), model);
+            }
             Ok(RespondOutput {
                 result: RespondResult::Text(final_text),
                 usage,
@@ -1516,6 +1548,18 @@ Respond with a JSON plan in this format:
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 
         let mut budget = contract.budget;
+        if let Some(model) =
+            thinclaw_config::model_compat::find_model(&self.llm.active_model_name())
+            && model.context_window > 0
+        {
+            // The configured prompt window remains an optional conservative
+            // ceiling, but a routed/swap target with a smaller real window
+            // always wins. This is recomputed for every request, including
+            // mid-loop `llm_select` changes.
+            budget.context_window_tokens = budget
+                .context_window_tokens
+                .min(model.context_window as usize);
+        }
         budget.history_tokens = context
             .messages
             .iter()

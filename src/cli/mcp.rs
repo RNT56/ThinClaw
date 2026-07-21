@@ -387,10 +387,8 @@ async fn add_server(
     use crate::tools::mcp::config::McpTransport;
 
     let is_stdio = command.is_some();
-
-    let mut config = if is_stdio {
+    let mut config = if let Some(cmd) = command {
         // Stdio transport: command is required, url is ignored
-        let cmd = command.expect("guarded by is_stdio = command.is_some()");
         let cmd_args = args.unwrap_or_default();
         let mut cfg = McpServerConfig::new_stdio(&name, &cmd, cmd_args);
 

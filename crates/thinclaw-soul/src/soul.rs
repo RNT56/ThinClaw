@@ -243,7 +243,7 @@ pub fn render_canonical_prompt_block(content: &str) -> String {
     match parse_canonical_soul(content) {
         Ok(soul) => {
             let mut out = format!(
-                "## Soul\n\n- Seed pack: {}\n- Full canonical soul: `memory_read SOUL.md`\n",
+                "## Soul\n\n- Seed pack: {}\n- The canonical soul is runtime-managed and loaded as trusted context.\n",
                 soul.seed_pack
             );
             for section in [
@@ -260,7 +260,7 @@ pub fn render_canonical_prompt_block(content: &str) -> String {
             out
         }
         Err(_) => format!(
-            "## Soul\n\nLegacy canonical soul loaded from `memory_read SOUL.md`.\n\n{}",
+            "## Soul\n\nLegacy canonical soul loaded by the runtime.\n\n{}",
             content.trim()
         ),
     }
@@ -269,7 +269,7 @@ pub fn render_canonical_prompt_block(content: &str) -> String {
 pub fn render_local_prompt_block(content: &str) -> Result<String, String> {
     let overlay = parse_local_soul_overlay(content)?;
     let mut out =
-        "## Workspace Soul Overlay\n\n- This workspace is using the global soul plus a local overlay.\n- Full overlay: `memory_read SOUL.local.md`\n"
+        "## Workspace Soul Overlay\n\n- This workspace is using the global soul plus a runtime-managed local overlay.\n"
             .to_string();
     for section in LOCAL_SECTIONS {
         if let Some(body) = overlay.sections.get(*section) {

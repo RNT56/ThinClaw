@@ -92,6 +92,7 @@ pub mod profile;
 pub mod profile_evolution;
 pub mod registry;
 pub mod repo_projects;
+pub mod runtime_lease;
 pub mod safety;
 pub mod sandbox;
 pub mod sandbox_jobs;
@@ -124,6 +125,7 @@ pub mod testing;
 
 pub use config::Config;
 pub use error::{Error, Result};
+pub use thinclaw_types::http_response;
 
 /// Re-export commonly used types.
 pub mod prelude {

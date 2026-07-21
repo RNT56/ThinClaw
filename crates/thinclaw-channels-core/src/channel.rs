@@ -68,6 +68,22 @@ impl IncomingMessage {
         self
     }
 
+    /// Resolve and attach an explicit principal/actor identity while retaining
+    /// this message's channel and conversation metadata. Intended for trusted
+    /// local surfaces and scheduled/system events that already know their
+    /// owner; native external endpoints should be resolved through the actor
+    /// registry at ingress instead.
+    pub fn with_actor_identity(
+        mut self,
+        principal_id: impl Into<String>,
+        actor_id: impl Into<String>,
+    ) -> Self {
+        let identity =
+            ResolvedIdentity::from_message_with_actor(&self, principal_id.into(), actor_id.into());
+        self.identity = Some(identity);
+        self
+    }
+
     /// Resolve the message identity, deriving stable defaults when needed.
     pub fn resolved_identity(&self) -> ResolvedIdentity {
         ResolvedIdentity::from_message(self)

@@ -63,9 +63,10 @@ impl Agent {
             provider_tool_extensions,
             mut reasoning,
             prompt_context_documents,
+            context_budget,
         } = self
             .prepare_prompt_context(message, session.clone(), thread_id)
-            .await;
+            .await?;
 
         // Per-turn mutable state (context messages, stuck-loop tracking,
         // memory-flush/model-override flags, advisor state) bundled into a
@@ -110,11 +111,33 @@ impl Agent {
             "chat",
             "Interactive chat session",
         );
+        let effective_timezone = if let Some(workspace) = self.workspace() {
+            Some(
+                workspace
+                    .effective_timezone_for_identity(&identity)
+                    .await
+                    .to_string(),
+            )
+        } else {
+            None
+        };
         job_ctx.metadata = message.metadata.clone();
         if !job_ctx.metadata.is_object() {
             job_ctx.metadata = serde_json::json!({});
         }
         if let Some(metadata) = job_ctx.metadata.as_object_mut() {
+            // Routed-agent authority is derived from the persisted thread
+            // owner below. Never retain transport-supplied workspace IDs or
+            // allowlists when the thread has no such route.
+            for key in [
+                "agent_id",
+                "agent_workspace_id",
+                "allowed_tools",
+                "allowed_skills",
+                "tool_profile",
+            ] {
+                metadata.remove(key);
+            }
             metadata.insert(
                 "channel".to_string(),
                 serde_json::json!(message.channel.clone()),
@@ -132,6 +155,10 @@ impl Agent {
                 serde_json::json!(identity.conversation_scope_id.to_string()),
             );
             metadata.insert(
+                "stable_external_conversation_key".to_string(),
+                serde_json::json!(identity.stable_external_conversation_key.clone()),
+            );
+            metadata.insert(
                 "principal_id".to_string(),
                 serde_json::json!(identity.principal_id.clone()),
             );
@@ -139,6 +166,9 @@ impl Agent {
                 "actor_id".to_string(),
                 serde_json::json!(identity.actor_id.clone()),
             );
+            if let Some(timezone) = effective_timezone {
+                metadata.insert("user_timezone".to_string(), serde_json::json!(timezone));
+            }
             if let Some(agent) = routed_agent.as_ref() {
                 metadata.insert(
                     "agent_id".to_string(),
@@ -327,22 +357,19 @@ impl Agent {
                 }
             }
 
-            // Enforce cost guardrails before the LLM call
-            if let Err(limit) = self.cost_guard().check_allowed().await {
-                return Err(crate::error::LlmError::InvalidResponse {
-                    provider: "agent".to_string(),
-                    reason: limit.to_string(),
-                }
-                .into());
-            }
+            // Budget admission is centralized in UsageTrackingProvider, which
+            // wraps every completion/streaming entry point. Keeping a second
+            // check here would reserve two hourly slots for one provider call.
 
             // Context monitor for this iteration, derived from the active
             // model's context window. Reused below for both the memory-flush
             // trigger and the hard context cap so token estimation only
             // happens once per iteration.
-            let context_monitor = self.effective_context_monitor();
+            let active_model_name = reasoning.current_llm().active_model_name();
+            let context_monitor = self.context_monitor_for_model(&active_model_name);
             let estimated_context_tokens = context_monitor.estimate_tokens(&turn.context_messages);
             let context_token_limit = context_monitor.limit();
+            let history_token_budget = context_budget.history_token_limit(context_token_limit);
 
             // ── Pre-compaction memory flush ──────────────────────────────
             // When the conversation crosses 80% of the model's token budget,
@@ -353,7 +380,7 @@ impl Agent {
             {
                 if memory_flush_due(
                     estimated_context_tokens,
-                    context_token_limit,
+                    history_token_budget,
                     turn.memory_flush_fired,
                 ) {
                     turn.memory_flush_fired = true;
@@ -472,33 +499,6 @@ impl Agent {
                 }
             }
 
-            // ── Canvas action drain ────────────────────────────────────
-            // Drain any pending user interactions from canvas panels
-            // (button clicks, form submissions) and inject them as
-            // context messages so the LLM can respond to UI actions.
-            if let Some(ref store) = self.deps.canvas_store {
-                let actions = store.drain_actions().await;
-                for action in actions {
-                    let values_json =
-                        serde_json::to_string(&action.values).unwrap_or_else(|_| "{}".to_string());
-                    let msg = format!(
-                        "[Canvas Interaction] The user interacted with canvas panel \"{}\": \
-                         action=\"{}\", values={}",
-                        action.panel_id, action.action, values_json
-                    );
-                    tracing::info!(
-                        panel_id = %action.panel_id,
-                        action = %action.action,
-                        "Injecting canvas action into context"
-                    );
-                    turn.context_messages.push(ChatMessage::untrusted_context(
-                        "canvas_interaction",
-                        "canvas",
-                        msg,
-                    ));
-                }
-            }
-
             // Inject a nudge message when approaching the iteration limit so the
             // LLM is aware it should produce a final answer on the next turn.
             if iteration_decision.inject_nudge {
@@ -519,9 +519,10 @@ impl Agent {
             // dropped first until the estimated token count is back under
             // the trim target.
             let max_ctx = self.config.max_context_messages;
-            match context_cap_decision(
+            match context_cap_decision_with_history_budget(
                 estimated_context_tokens,
                 context_token_limit,
+                history_token_budget,
                 turn.context_messages.len(),
                 max_ctx,
             ) {
@@ -621,6 +622,16 @@ impl Agent {
                         }
                     }
                 }
+            }
+
+            let bounded_history_tokens = context_monitor.estimate_tokens(&turn.context_messages);
+            if history_token_budget == 0 || bounded_history_tokens > history_token_budget {
+                loop_metrics.stop_with(LoopStopReason::IterationBudgetExceeded);
+                return Err(crate::error::LlmError::ContextLengthExceeded {
+                    used: bounded_history_tokens,
+                    limit: history_token_budget,
+                }
+                .into());
             }
 
             // Refresh tool definitions each iteration so newly built tools become visible
@@ -751,6 +762,7 @@ impl Agent {
                     &mut turn.context_messages,
                     tool_defs,
                     thread_id,
+                    &session,
                     message,
                     &persistent_draft,
                     &original_llm,
@@ -811,6 +823,7 @@ impl Agent {
                                         &mut synthesis_messages,
                                         Vec::new(),
                                         thread_id,
+                                        &session,
                                         message,
                                         &persistent_draft,
                                         &cheap_llm,
@@ -891,6 +904,7 @@ impl Agent {
                                         &mut turn.context_messages,
                                         &prompt_context_documents,
                                         thread_id,
+                                        &session,
                                         message,
                                         &persistent_draft,
                                         &original_llm,
@@ -999,6 +1013,7 @@ impl Agent {
                                     &mut turn.context_messages,
                                     &prompt_context_documents,
                                     thread_id,
+                                    &session,
                                     message,
                                     &persistent_draft,
                                     &original_llm,

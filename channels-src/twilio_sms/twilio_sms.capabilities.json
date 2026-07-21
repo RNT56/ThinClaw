@@ -41,6 +41,26 @@
           "host_patterns": [
             "api.twilio.com"
           ]
+        },
+        "twilio_account_sid": {
+          "secret_name": "twilio_account_sid",
+          "location": {
+            "type": "url_path",
+            "placeholder": "{TWILIO_ACCOUNT_SID}"
+          },
+          "host_patterns": [
+            "api.twilio.com"
+          ]
+        },
+        "twilio_from_number": {
+          "secret_name": "twilio_from_number",
+          "location": {
+            "type": "body",
+            "placeholder": "{TWILIO_FROM_NUMBER}"
+          },
+          "host_patterns": [
+            "api.twilio.com"
+          ]
         }
       },
       "rate_limit": {

@@ -13,8 +13,11 @@ use crate::agent::session::{Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::error::Error;
+use thinclaw_agent::session::{TurnContextEvidence, bounded_turn_context_evidence};
 use thinclaw_agent::thread_ops::ThreadInputAdmission;
 use uuid::Uuid;
+
+const MAX_ATTACHMENT_EVIDENCE_CHARS: usize = 64 * 1024;
 
 impl Agent {
     pub(in crate::agent) async fn process_user_input(
@@ -26,7 +29,9 @@ impl Agent {
     ) -> Result<SubmissionResult, Error> {
         // ── Media attachment handling ────────────────────────────────
         // Images/audio/video → multimodal: attached to ChatMessage for vision/audio LLMs
-        // PDFs/documents/unknown → text extraction: prepended to the user content
+        // PDFs/documents/unknown → bounded, typed untrusted evidence. Extracted
+        // text must never be concatenated with the user's instruction: doing so
+        // silently upgrades document prompt injection to user authority.
         let (multimodal_attachments, text_extract_attachments): (Vec<_>, Vec<_>) =
             message.attachments.iter().cloned().partition(|a| {
                 matches!(
@@ -37,20 +42,44 @@ impl Agent {
                 )
             });
 
-        let content = if !text_extract_attachments.is_empty() {
+        let attachment_evidence = if !text_extract_attachments.is_empty() {
             let pipeline = crate::media::MediaPipeline::new();
-            let mut media_context = String::new();
+            let mut evidence = Vec::new();
+            let mut remaining_chars = MAX_ATTACHMENT_EVIDENCE_CHARS;
             for (idx, attachment) in text_extract_attachments.iter().enumerate() {
+                if remaining_chars == 0 {
+                    tracing::warn!(
+                        max_chars = MAX_ATTACHMENT_EVIDENCE_CHARS,
+                        skipped_attachments = text_extract_attachments.len().saturating_sub(idx),
+                        "Attachment evidence budget exhausted"
+                    );
+                    break;
+                }
                 match pipeline.extract(attachment) {
                     Ok(extracted) => {
-                        if !media_context.is_empty() {
-                            media_context.push_str("\n\n");
+                        let content = extracted.chars().take(remaining_chars).collect::<String>();
+                        let content_chars = content.chars().count();
+                        remaining_chars = remaining_chars.saturating_sub(content_chars);
+                        if content.trim().is_empty() {
+                            continue;
                         }
-                        media_context.push_str(&extracted);
+                        let source = attachment
+                            .filename
+                            .clone()
+                            .or_else(|| attachment.source_url.clone())
+                            .unwrap_or_else(|| {
+                                format!("attachment {} ({})", idx + 1, attachment.mime_type)
+                            });
+                        evidence.push(TurnContextEvidence {
+                            segment_id: format!("attachment_evidence_{}", idx + 1),
+                            source,
+                            content,
+                        });
                         tracing::debug!(
                             attachment = idx,
                             media_type = %attachment.media_type,
                             size = attachment.size(),
+                            extracted_chars = content_chars,
                             "Extracted text from media attachment"
                         );
                     }
@@ -65,15 +94,10 @@ impl Agent {
                 }
             }
 
-            if media_context.is_empty() {
-                content.to_string()
-            } else {
-                format!("{}\n\n{}", media_context, content)
-            }
+            bounded_turn_context_evidence(&evidence)
         } else {
-            content.to_string()
+            Vec::new()
         };
-        let content = content.as_str();
 
         if !multimodal_attachments.is_empty() {
             tracing::info!(
@@ -144,138 +168,277 @@ impl Agent {
         // Job tools (create_job, list_jobs, etc.) are in the tool registry
 
         // Auto-compact if needed BEFORE adding new turn
-        let mut auto_compaction_fragment: Option<Option<String>> = None;
-        {
-            let mut sess = session.lock().await;
+        let auto_compaction_plan = {
+            let sess = session.lock().await;
             let thread = sess
                 .threads
-                .get_mut(&thread_id)
+                .get(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-
             let messages = thread.messages();
             let monitor = self.effective_context_monitor();
-            if let Some(strategy) = monitor.suggest_compaction(&messages) {
-                let pct = monitor.usage_percent(&messages);
-                tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
+            monitor.suggest_compaction(&messages).map(|strategy| {
+                (
+                    thread.clone(),
+                    thread.updated_at,
+                    thread.persisted_message_count() as i64,
+                    monitor.usage_percent(&messages),
+                    strategy,
+                )
+            })
+        };
 
-                if let Some(store) = self.store().map(Arc::clone) {
-                    let identity = &resolved_identity;
-                    let event = LearningEvent::new(
-                        "thread_ops::pre_compaction_nudge",
-                        ImprovementClass::Memory,
-                        RiskTier::Low,
-                        "Context nearing limit; compaction nudge emitted before turn",
-                    )
-                    .with_target("context_compaction")
-                    .with_metadata(json!({
-                        "thread_id": thread_id.to_string(),
-                        "channel": message.channel,
-                        "usage_percent": pct,
-                        "strategy": format!("{:?}", strategy),
-                    }))
-                    .into_persisted(
-                        identity.principal_id.clone(),
-                        Some(identity.actor_id.clone()),
-                        Some(message.channel.clone()),
-                        Some(thread_id.to_string()),
-                        Some(thread_id),
-                        None,
-                        None,
-                    );
+        if let Some((
+            mut compacted_thread,
+            snapshot_updated_at,
+            persisted_rows_before,
+            pct,
+            strategy,
+        )) = auto_compaction_plan
+        {
+            tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
 
-                    if store.insert_learning_event(&event).await.is_ok()
-                        // Reuse the agent's shared orchestrator instead of
-                        // constructing a fresh LearningOrchestrator (and
-                        // MemoryProviderManager) on every compaction nudge.
-                        && let Some(orchestrator) = self.learning_orchestrator()
-                    {
-                        let _ = orchestrator
-                            .handle_event("pre_compaction_memory_nudge", &event)
-                            .await;
-                    }
-                }
+            if let Some(store) = self.store().map(Arc::clone) {
+                let identity = &resolved_identity;
+                let event = LearningEvent::new(
+                    "thread_ops::pre_compaction_nudge",
+                    ImprovementClass::Memory,
+                    RiskTier::Low,
+                    "Context nearing limit; compaction nudge emitted before turn",
+                )
+                .with_target("context_compaction")
+                .with_metadata(json!({
+                    "thread_id": thread_id.to_string(),
+                    "channel": message.channel,
+                    "usage_percent": pct,
+                    "strategy": format!("{:?}", strategy),
+                }))
+                .into_persisted(
+                    identity.principal_id.clone(),
+                    Some(identity.actor_id.clone()),
+                    Some(message.channel.clone()),
+                    Some(thread_id.to_string()),
+                    Some(thread_id),
+                    None,
+                    None,
+                );
 
-                // Notify the user that compaction is happening
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Status(format!(
-                            "Context at {:.0}% capacity, compacting...",
-                            pct
-                        )),
-                        &message.metadata,
-                    )
-                    .await;
-
-                let mut compactor = ContextCompactor::new(self.llm().clone());
-                if let Some(ref tracker) = self.deps.cost_tracker {
-                    compactor = compactor.with_cost_tracker(std::sync::Arc::clone(tracker));
-                }
-                match compactor
-                    .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
-                    .await
+                if store.insert_learning_event(&event).await.is_ok()
+                    && let Some(orchestrator) = self.learning_orchestrator()
                 {
-                    Err(e) => {
-                        tracing::warn!("Auto-compaction failed: {}", e);
-                    }
-                    Ok(result) => {
-                        // Fold the generated summary into the post-compaction
-                        // fragment so the model keeps the gist of the dropped
-                        // turns. The fragment is persisted into thread runtime
-                        // and rehydrated, so the summary also survives restart.
-                        let base_fragment = self
-                            .build_post_compaction_context_fragment(
-                                Some(&message.content),
-                                Some(&resolved_identity),
+                    let _ = orchestrator
+                        .handle_event("pre_compaction_memory_nudge", &event)
+                        .await;
+                }
+            }
+
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::Status(format!("Context at {:.0}% capacity, compacting...", pct)),
+                    &message.metadata,
+                )
+                .await;
+
+            let mut compactor = ContextCompactor::new(self.llm().clone());
+            if let Some(ref tracker) = self.deps.cost_tracker {
+                compactor = compactor.with_cost_tracker(std::sync::Arc::clone(tracker));
+            }
+            let compaction_workspace = self
+                .authorized_compaction_workspace(thread_id, &resolved_identity, &message.channel)
+                .await;
+            match tokio::time::timeout(
+                self.config.job_timeout,
+                compactor.compact(
+                    &mut compacted_thread,
+                    strategy,
+                    compaction_workspace.as_ref(),
+                ),
+            )
+            .await
+            {
+                Err(_) => tracing::warn!(
+                    timeout_secs = self.config.job_timeout.as_secs(),
+                    "Auto-compaction timed out"
+                ),
+                Ok(Err(e)) => tracing::warn!("Auto-compaction failed: {}", e),
+                Ok(Ok(result)) => {
+                    let persisted_rows_after = compacted_thread.persisted_message_count() as i64;
+                    let base_fragment = self
+                        .build_post_compaction_context_fragment(
+                            Some(&message.content),
+                            Some(&resolved_identity),
+                        )
+                        .await;
+                    let fragment = merge_summary_into_fragment(result.summary, base_fragment);
+                    let original_thread = {
+                        let mut sess = session.lock().await;
+                        let current = sess.threads.get_mut(&thread_id).ok_or_else(|| {
+                            Error::from(crate::error::JobError::NotFound { id: thread_id })
+                        })?;
+                        if current.updated_at != snapshot_updated_at {
+                            None
+                        } else {
+                            let original = current.clone();
+                            *current = compacted_thread;
+                            Some(original)
+                        }
+                    };
+                    if let Some(original_thread) = original_thread {
+                        if let Err(error) = self
+                            .advance_active_history_window(
+                                thread_id,
+                                persisted_rows_before.saturating_sub(persisted_rows_after),
+                                persisted_rows_after,
+                                fragment,
                             )
-                            .await;
-                        auto_compaction_fragment =
-                            Some(merge_summary_into_fragment(result.summary, base_fragment));
+                            .await
+                        {
+                            let mut sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                                thinclaw_agent::thread_ops::restore_thread_after_failed_persistence(
+                                    thread,
+                                    original_thread,
+                                );
+                            }
+                            tracing::warn!(
+                                thread = %thread_id,
+                                %error,
+                                "Auto-compaction durability commit failed; restored original context"
+                            );
+                        } else {
+                            self.session_manager
+                                .get_undo_manager(thread_id)
+                                .await
+                                .lock()
+                                .await
+                                .clear();
+                        }
+                    } else {
+                        tracing::warn!(
+                            thread = %thread_id,
+                            "Discarding stale auto-compaction result"
+                        );
                     }
                 }
             }
         }
-        if let Some(fragment) = auto_compaction_fragment {
-            self.update_post_compaction_context(thread_id, fragment)
-                .await;
-        }
 
         // Create checkpoint before turn and start the in-memory turn.
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
-        let mut turn_messages = {
+        let (mut turn_messages, pre_turn_thread, pre_turn_undo) = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
             let mut mgr = undo_mgr.lock().await;
+            let pre_turn_thread = thread.clone();
+            let pre_turn_undo = mgr.clone();
             // Tag filesystem checkpoints created during this turn with the same
-            // turn number the undo checkpoint uses (captured before the bump
-            // inside start_user_turn), so `/rewind <n>` restores both together.
-            crate::agent::checkpoint::new_turn(thread_id.to_string(), Some(thread.turn_number()));
-            thinclaw_agent::thread_ops::start_user_turn(
+            // turn number the undo checkpoint uses. Capture it before the
+            // mutation, but only create the filesystem checkpoint after atomic
+            // admission succeeds.
+            let checkpoint_turn = thread.turn_number();
+            match thinclaw_agent::thread_ops::try_start_user_turn(
                 thread,
                 &mut mgr,
                 content,
                 &message.metadata,
-            )
+            ) {
+                Ok(_) => {}
+                Err(reason) => return Ok(SubmissionResult::error(reason)),
+            }
+            if let Some(turn) = thread.last_turn_mut() {
+                turn.untrusted_contexts = attachment_evidence.clone();
+            }
+            crate::agent::checkpoint::new_turn(thread_id.to_string(), Some(checkpoint_turn));
+            (thread.messages(), pre_turn_thread, pre_turn_undo)
         };
-        self.begin_turn_cancellation(thread_id).await;
+        let _turn_cancellation_guard = self.begin_turn_cancellation_guard(thread_id).await;
+
+        // Put the current turn's evidence before its instruction at provider
+        // transport time. The durable Turn representation keeps evidence
+        // attached to the turn, while this ordering makes the user's actual
+        // request the most recent user-role message seen by the model.
+        if !attachment_evidence.is_empty()
+            && let Some(user_index) = turn_messages
+                .iter()
+                .rposition(|message| message.is_user_instruction())
+        {
+            let trailing_evidence = turn_messages[user_index + 1..]
+                .iter()
+                .all(|message| message.untrusted_context_identity().is_some());
+            if trailing_evidence {
+                let mut evidence_messages = turn_messages.split_off(user_index + 1);
+                if let Some(user_message) = turn_messages.pop() {
+                    turn_messages.append(&mut evidence_messages);
+                    turn_messages.push(user_message);
+                }
+            }
+        }
 
         // Attach multimodal media to the last user message for LLM processing.
         // The rig adapter converts these to provider-native base64 content blocks.
         if !multimodal_attachments.is_empty()
-            && let Some(last_user) = turn_messages
-                .iter_mut()
-                .rev()
-                .find(|m| m.role == crate::llm::Role::User)
+            && let Some(last_user) = turn_messages.iter_mut().rev().find(|m| {
+                m.role == crate::llm::Role::User && m.untrusted_context_identity().is_none()
+            })
         {
             last_user.attachments = multimodal_attachments;
         }
 
-        // Persist user message to DB immediately so it survives crashes
-        self.persist_user_message(thread_id, message, content).await;
+        // Persist user message to DB immediately so it survives crashes.
+        // Attachment evidence is passed as a typed internal value rather than
+        // copied from ingress metadata, so a channel sender cannot forge it.
+        let persisted_user_message_id = match self
+            .persist_user_message(thread_id, message, content, &attachment_evidence)
+            .await
+        {
+            Ok(message_id) => message_id,
+            Err(error) => {
+                // Admission is not complete until the durable user row exists. Put
+                // both the thread and its undo/redo stacks back exactly as they were
+                // before `try_start_user_turn`; otherwise a storage outage leaves an
+                // unpersisted failed turn in future prompts and consumes an undo
+                // checkpoint. Preserve an interrupt that raced the database call as
+                // a visible thread state, but never retain the ephemeral turn.
+                let mut sess = session.lock().await;
+                let mut mgr = undo_mgr.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    thinclaw_agent::thread_ops::restore_thread_after_failed_persistence(
+                        thread,
+                        pre_turn_thread,
+                    );
+                }
+                *mgr = pre_turn_undo;
+                drop(mgr);
+                drop(sess);
+                crate::agent::checkpoint::new_turn(thread_id.to_string(), None);
+                tracing::error!(
+                    thread = %thread_id,
+                    %error,
+                    "User turn rejected because it could not be persisted"
+                );
+                return Ok(SubmissionResult::error(
+                    "Your message could not be saved, so the turn was not started. Please retry.",
+                ));
+            }
+        };
+        if let Some(message_id) = persisted_user_message_id {
+            let mut sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            let turn = thread.last_turn_mut().ok_or_else(|| {
+                Error::from(crate::error::JobError::ContextError {
+                    id: thread_id,
+                    reason: "Persisted user row has no owning in-memory turn".to_string(),
+                })
+            })?;
+            turn.durable_user_message_id = Some(message_id);
+        }
         self.persist_thread_runtime_snapshot(message, &session, thread_id)
             .await;
 
@@ -309,7 +472,24 @@ impl Agent {
             .run_agentic_loop(message, session.clone(), thread_id, turn_messages)
             .await;
 
-        // Re-acquire lock and check if interrupted
+        // Response transforms can execute hooks and must not hold the session
+        // mutex. Once they finish, the state check and terminal mutation below
+        // happen under one short critical section, so an interrupt either wins
+        // before finalization or observes the completed turn afterward.
+        let result = match result {
+            Ok(AgenticLoopResult::Response(mut payload)) => {
+                self.transform_response_payload(message, thread_id, &mut payload)
+                    .await;
+                Ok(AgenticLoopResult::Response(payload))
+            }
+            Ok(AgenticLoopResult::Streamed(mut payload)) => {
+                self.transform_response_payload(message, thread_id, &mut payload)
+                    .await;
+                Ok(AgenticLoopResult::Streamed(payload))
+            }
+            other => other,
+        };
+
         let mut sess = session.lock().await;
         let session_id = sess.id;
         let thread = sess
@@ -318,7 +498,7 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
         if thread.state == ThreadState::Interrupted {
-            self.finish_turn_cancellation(thread_id).await;
+            drop(sess);
             let _ = self
                 .channels
                 .send_status(
@@ -345,35 +525,16 @@ impl Agent {
         // Complete, fail, or request approval
         let was_streamed = matches!(&result, Ok(AgenticLoopResult::Streamed(_)));
         match result {
-            Ok(AgenticLoopResult::Response(mut payload))
-            | Ok(AgenticLoopResult::Streamed(mut payload)) => {
-                // Hook: TransformResponse — allow hooks to modify or reject the final response
-                let response = {
-                    let event = crate::hooks::HookEvent::ResponseTransform {
-                        user_id: message.user_id.clone(),
-                        thread_id: thread_id.to_string(),
-                        response: payload.content.clone(),
-                    };
-                    match self.hooks().run(&event).await {
-                        Err(crate::hooks::HookError::Rejected { reason }) => {
-                            payload.attachments.clear();
-                            format!("[Response filtered: {}]", reason)
-                        }
-                        Err(err) => {
-                            payload.attachments.clear();
-                            format!("[Response blocked by hook policy: {}]", err)
-                        }
-                        Ok(crate::hooks::HookOutcome::Continue {
-                            modified: Some(new_response),
-                        }) => new_response,
-                        _ => payload.content.clone(), // fail-open: use original
-                    }
-                };
-                payload.content = response;
-
+            Ok(AgenticLoopResult::Response(payload)) | Ok(AgenticLoopResult::Streamed(payload)) => {
                 let (turn_number, messages) =
                     thinclaw_agent::thread_ops::complete_thread_response(thread, &payload.content);
+                let tool_calls = thread
+                    .last_turn()
+                    .map(|turn| turn.tool_calls.clone())
+                    .unwrap_or_default();
                 let usage_percent = self.effective_context_monitor().usage_percent(&messages);
+                drop(sess);
+
                 let _ = self
                     .channels
                     .send_status(
@@ -384,15 +545,20 @@ impl Agent {
                     .await;
 
                 // Persist assistant response (user message already persisted at turn start)
-                self.persist_assistant_response(
-                    thread_id,
-                    message,
-                    &payload.content,
-                    session_id,
-                    turn_number,
-                )
-                .await;
-                drop(sess);
+                if let Err(error) = self
+                    .persist_assistant_response(
+                        thread_id,
+                        message,
+                        &payload.content,
+                        &tool_calls,
+                        session_id,
+                        turn_number,
+                    )
+                    .await
+                {
+                    self.report_response_persistence_failure(message, thread_id, &error)
+                        .await;
+                }
                 self.sync_context_pressure_warning(message, thread_id, usage_percent)
                     .await;
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
@@ -412,10 +578,8 @@ impl Agent {
                     .await;
 
                 if was_streamed {
-                    self.finish_turn_cancellation(thread_id).await;
                     Ok(SubmissionResult::Streamed(payload))
                 } else {
-                    self.finish_turn_cancellation(thread_id).await;
                     Ok(SubmissionResult::Response { payload })
                 }
             }
@@ -427,6 +591,8 @@ impl Agent {
                 let parameters = pending.parameters.clone();
                 let messages = thinclaw_agent::thread_ops::await_thread_approval(thread, pending);
                 let usage_percent = self.effective_context_monitor().usage_percent(&messages);
+                drop(sess);
+
                 let _ = self
                     .channels
                     .send_status(
@@ -435,12 +601,10 @@ impl Agent {
                         &message.metadata,
                     )
                     .await;
-                drop(sess);
                 self.sync_context_pressure_warning(message, thread_id, usage_percent)
                     .await;
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
-                self.finish_turn_cancellation(thread_id).await;
                 Ok(SubmissionResult::NeedApproval {
                     request_id,
                     tool_name,
@@ -451,6 +615,8 @@ impl Agent {
             Err(e) => {
                 let messages = thinclaw_agent::thread_ops::fail_thread_turn(thread, &e.to_string());
                 let usage_percent = self.effective_context_monitor().usage_percent(&messages);
+                drop(sess);
+
                 // User message already persisted at turn start; nothing else to save
                 // Lifecycle end: error
                 let _ = self
@@ -464,15 +630,44 @@ impl Agent {
                         &message.metadata,
                     )
                     .await;
-                drop(sess);
                 self.sync_context_pressure_warning(message, thread_id, usage_percent)
                     .await;
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
-                self.finish_turn_cancellation(thread_id).await;
                 Ok(SubmissionResult::error(e.to_string()))
             }
         }
+    }
+
+    pub(in crate::agent) async fn transform_response_payload(
+        &self,
+        message: &IncomingMessage,
+        thread_id: Uuid,
+        payload: &mut thinclaw_agent::submission::AgentResponsePayload,
+    ) {
+        if payload.response_transform_applied() {
+            return;
+        }
+        let event = crate::hooks::HookEvent::ResponseTransform {
+            user_id: message.user_id.clone(),
+            thread_id: thread_id.to_string(),
+            response: payload.content.clone(),
+        };
+        payload.content = match self.hooks().run(&event).await {
+            Err(crate::hooks::HookError::Rejected { reason }) => {
+                payload.attachments.clear();
+                format!("[Response filtered: {}]", reason)
+            }
+            Err(err) => {
+                payload.attachments.clear();
+                format!("[Response blocked by hook policy: {}]", err)
+            }
+            Ok(crate::hooks::HookOutcome::Continue {
+                modified: Some(new_response),
+            }) => new_response,
+            _ => payload.content.clone(),
+        };
+        payload.mark_response_transform_applied();
     }
 }
 

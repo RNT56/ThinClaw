@@ -67,7 +67,11 @@ impl SecretsConfig {
                             key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
                         (Some(SecretString::from(key_hex)), KeySource::Keychain)
                     }
-                    Err(_) if env_allowed => {
+                    Err(error) if env_allowed => {
+                        tracing::warn!(
+                            error = %error,
+                            "OS secure store master key is unavailable; considering the explicitly enabled environment fallback"
+                        );
                         if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
                             tracing::warn!(
                                 "Using SECRETS_MASTER_KEY fallback because OS secure store key is unavailable and env fallback is explicitly allowed"
@@ -77,7 +81,13 @@ impl SecretsConfig {
                             (None, KeySource::None)
                         }
                     }
-                    Err(_) => (None, KeySource::None),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "OS secure store master key is unavailable and no environment fallback is enabled"
+                        );
+                        (None, KeySource::None)
+                    }
                 }
             }
         };
@@ -85,11 +95,11 @@ impl SecretsConfig {
         let enabled = master_key.is_some();
 
         if let Some(ref key) = master_key
-            && key.expose_secret().len() < 32
+            && !(32..=4096).contains(&key.expose_secret().len())
         {
             return Err(ConfigError::InvalidValue {
                 key: "SECRETS_MASTER_KEY".to_string(),
-                message: "must be at least 32 bytes for AES-256-GCM".to_string(),
+                message: "must contain 32-4096 bytes for AES-256-GCM key derivation".to_string(),
             });
         }
 

@@ -94,22 +94,24 @@ impl DesktopAutonomyManager {
             }
         }
 
-        let runtime_snapshot = {
+        {
             let mut state = self.runtime_state.write().await;
-            state.bootstrap_passed = passed;
-            state.last_bootstrap_at = Some(Utc::now());
-            state.last_error = (!passed).then_some(
+            let mut snapshot = state.clone();
+            snapshot.bootstrap_passed = passed;
+            snapshot.last_bootstrap_at = Some(Utc::now());
+            snapshot.last_error = (!passed).then_some(
                 "desktop autonomy bootstrap reported missing permissions or bridge health issues"
                     .to_string(),
             );
             if !passed && self.config.pause_on_bootstrap_failure {
-                state.paused = true;
-                state.pause_reason =
+                snapshot.paused = true;
+                snapshot.pause_reason =
                     Some("bootstrap failed; desktop autonomy paused pending operator fix".into());
             }
-            state.clone()
+            self.persist_runtime_state(&snapshot).await?;
+            *state = snapshot.clone();
+            snapshot
         };
-        self.persist_runtime_state(&runtime_snapshot).await?;
         let report = AutonomyBootstrapReport {
             passed,
             health,

@@ -9,13 +9,22 @@
 //! This replaces `CameraCommands.swift` from the companion app.
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::process::Command;
 
 use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};
 use thinclaw_types::JobContext;
+
+use super::capture_target::{CaptureFormat, CaptureTarget};
+use crate::execution::bounded_command_output;
+
+const CAMERA_HELPER_TIMEOUT: Duration = Duration::from_secs(45);
+const CAMERA_STDOUT_LIMIT: usize = 256 * 1024;
+const CAMERA_STDERR_LIMIT: usize = 512 * 1024;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const MAX_CAMERA_DEVICE_NAME_BYTES: usize = 512;
 
 /// Camera capture tool.
 pub struct CameraCaptureTool;
@@ -44,9 +53,10 @@ fn capture_path(custom: Option<&str>) -> PathBuf {
         PathBuf::from(p)
     } else {
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-        thinclaw_platform::state_paths()
-            .camera_dir
-            .join(format!("capture_{ts}.jpg"))
+        thinclaw_platform::state_paths().camera_dir.join(format!(
+            "capture_{ts}_{}.jpg",
+            uuid::Uuid::new_v4().simple()
+        ))
     }
 }
 
@@ -60,12 +70,20 @@ async fn capture_camera(path: &std::path::Path, warmup_secs: f32) -> Result<Stri
     }
 
     // Try imagesnap first (most reliable on macOS)
-    let imagesnap = Command::new("imagesnap")
+    let deadline = tokio::time::Instant::now() + CAMERA_HELPER_TIMEOUT;
+    let mut imagesnap_command = Command::new("imagesnap");
+    imagesnap_command
         .arg("-w")
         .arg(format!("{warmup_secs}"))
-        .arg(path.to_string_lossy().as_ref())
-        .output()
-        .await;
+        .arg(path);
+    let imagesnap = bounded_command_output(
+        &mut imagesnap_command,
+        CAMERA_HELPER_TIMEOUT,
+        CAMERA_STDOUT_LIMIT,
+        CAMERA_STDERR_LIMIT,
+        "imagesnap camera capture",
+    )
+    .await;
 
     if let Ok(output) = imagesnap
         && output.status.success()
@@ -75,7 +93,9 @@ async fn capture_camera(path: &std::path::Path, warmup_secs: f32) -> Result<Stri
     }
 
     // Fallback to ffmpeg
-    let ffmpeg = Command::new("ffmpeg")
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let mut ffmpeg_command = Command::new("ffmpeg");
+    ffmpeg_command
         .args([
             "-f",
             "avfoundation",
@@ -88,10 +108,16 @@ async fn capture_camera(path: &std::path::Path, warmup_secs: f32) -> Result<Stri
             "-frames:v",
             "1",
             "-y",
-            &path.to_string_lossy(),
         ])
-        .output()
-        .await;
+        .arg(path);
+    let ffmpeg = bounded_command_output(
+        &mut ffmpeg_command,
+        remaining,
+        CAMERA_STDOUT_LIMIT,
+        CAMERA_STDERR_LIMIT,
+        "ffmpeg camera capture",
+    )
+    .await;
 
     if let Ok(output) = ffmpeg
         && output.status.success()
@@ -116,6 +142,32 @@ fn linux_camera_device(device_name: Option<&str>) -> String {
 }
 
 #[cfg(target_os = "linux")]
+fn validate_linux_camera_device(device: &str) -> Result<(), ToolError> {
+    use std::os::unix::fs::FileTypeExt;
+
+    if device.is_empty()
+        || device.len() > MAX_CAMERA_DEVICE_NAME_BYTES
+        || device.chars().any(char::is_control)
+    {
+        return Err(ToolError::InvalidParameters(
+            "camera device path is malformed or oversized".to_string(),
+        ));
+    }
+    let canonical = std::fs::canonicalize(device).map_err(|error| {
+        ToolError::InvalidParameters(format!("camera device cannot be resolved: {error}"))
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|error| {
+        ToolError::InvalidParameters(format!("camera device cannot be inspected: {error}"))
+    })?;
+    if !canonical.starts_with("/dev") || !metadata.file_type().is_char_device() {
+        return Err(ToolError::InvalidParameters(
+            "Linux camera device must resolve to a character device beneath /dev".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 async fn capture_camera(
     path: &std::path::Path,
     _warmup_secs: f32,
@@ -128,19 +180,22 @@ async fn capture_camera(
     }
 
     let device = linux_camera_device(device_name);
+    validate_linux_camera_device(&device)?;
+    let deadline = tokio::time::Instant::now() + CAMERA_HELPER_TIMEOUT;
 
     // Try fswebcam first
-    let fswebcam = Command::new("fswebcam")
-        .args([
-            "-d",
-            &device,
-            "-r",
-            "1280x720",
-            "--no-banner",
-            &path.to_string_lossy(),
-        ])
-        .output()
-        .await;
+    let mut fswebcam_command = Command::new("fswebcam");
+    fswebcam_command
+        .args(["-d", &device, "-r", "1280x720", "--no-banner"])
+        .arg(path);
+    let fswebcam = bounded_command_output(
+        &mut fswebcam_command,
+        CAMERA_HELPER_TIMEOUT,
+        CAMERA_STDOUT_LIMIT,
+        CAMERA_STDERR_LIMIT,
+        "fswebcam camera capture",
+    )
+    .await;
 
     if let Ok(output) = fswebcam
         && output.status.success()
@@ -150,7 +205,9 @@ async fn capture_camera(
     }
 
     // Fallback to ffmpeg
-    let ffmpeg = Command::new("ffmpeg")
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let mut ffmpeg_command = Command::new("ffmpeg");
+    ffmpeg_command
         .args([
             "-f",
             "v4l2",
@@ -161,10 +218,16 @@ async fn capture_camera(
             "-frames:v",
             "1",
             "-y",
-            &path.to_string_lossy(),
         ])
-        .output()
-        .await;
+        .arg(path);
+    let ffmpeg = bounded_command_output(
+        &mut ffmpeg_command,
+        remaining,
+        CAMERA_STDOUT_LIMIT,
+        CAMERA_STDERR_LIMIT,
+        "ffmpeg camera capture",
+    )
+    .await;
 
     if let Ok(output) = ffmpeg
         && output.status.success()
@@ -181,19 +244,24 @@ async fn capture_camera(
 /// Capture from camera on Windows.
 #[cfg(target_os = "windows")]
 async fn list_windows_video_devices() -> Result<Vec<String>, ToolError> {
-    let output = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-list_devices",
-            "true",
-            "-f",
-            "dshow",
-            "-i",
-            "dummy",
-        ])
-        .output()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("ffmpeg: {e}")))?;
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-hide_banner",
+        "-list_devices",
+        "true",
+        "-f",
+        "dshow",
+        "-i",
+        "dummy",
+    ]);
+    let output = bounded_command_output(
+        &mut command,
+        CAMERA_HELPER_TIMEOUT,
+        CAMERA_STDOUT_LIMIT,
+        CAMERA_STDERR_LIMIT,
+        "ffmpeg camera enumeration",
+    )
+    .await?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let mut devices = Vec::new();
@@ -243,8 +311,14 @@ async fn capture_camera(
         let mut devices = list_windows_video_devices().await?;
         devices.remove(0)
     };
+    if device.len() > MAX_CAMERA_DEVICE_NAME_BYTES || device.chars().any(char::is_control) {
+        return Err(ToolError::InvalidParameters(
+            "camera device name is malformed or oversized".to_string(),
+        ));
+    }
 
-    let ffmpeg = Command::new("ffmpeg")
+    let mut command = Command::new("ffmpeg");
+    command
         .args([
             "-f",
             "dshow",
@@ -255,11 +329,16 @@ async fn capture_camera(
             "-frames:v",
             "1",
             "-y",
-            &path.to_string_lossy(),
         ])
-        .output()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("ffmpeg: {e}")))?;
+        .arg(path);
+    let ffmpeg = bounded_command_output(
+        &mut command,
+        CAMERA_HELPER_TIMEOUT,
+        CAMERA_STDOUT_LIMIT,
+        CAMERA_STDERR_LIMIT,
+        "ffmpeg camera capture",
+    )
+    .await?;
 
     if ffmpeg.status.success() && path.exists() {
         return Ok("ffmpeg".to_string());
@@ -317,25 +396,23 @@ impl Tool for CameraCaptureTool {
         let warmup = params
             .get("warmup_seconds")
             .and_then(|v| v.as_f64())
-            .map(|w| w.min(10.0) as f32)
+            .map(|w| w.clamp(0.0, 10.0) as f32)
             .unwrap_or(1.0);
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         let device_name = params.get("device_name").and_then(|v| v.as_str());
 
-        let path = capture_path(custom_path);
+        let requested_path = capture_path(custom_path);
+        let target = CaptureTarget::prepare(&requested_path, CaptureFormat::Jpeg).await?;
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        let tool_used = capture_camera(&path, warmup, device_name).await?;
+        let tool_used = capture_camera(target.staging_path(), warmup, device_name).await?;
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-        let tool_used = capture_camera(&path, warmup).await?;
-
-        let metadata = tokio::fs::metadata(&path)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Read capture metadata: {e}")))?;
+        let tool_used = capture_camera(target.staging_path(), warmup).await?;
+        let (path, size_bytes) = target.publish().await?;
 
         Ok(ToolOutput::success(
             serde_json::json!({
                 "path": path.to_string_lossy(),
-                "size_bytes": metadata.len(),
+                "size_bytes": size_bytes,
                 "tool_used": tool_used,
             }),
             start.elapsed(),
@@ -352,6 +429,10 @@ impl Tool for CameraCaptureTool {
 
     fn domain(&self) -> ToolDomain {
         ToolDomain::Orchestrator
+    }
+
+    fn execution_timeout(&self) -> Duration {
+        Duration::from_secs(60)
     }
 }
 

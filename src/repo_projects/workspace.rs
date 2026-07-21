@@ -107,15 +107,17 @@ impl RepoWorkspaceProvisioner {
             tokio::fs::create_dir_all(&self.base_dir)
                 .await
                 .map_err(|error| RepoWorkspaceError::Io(error.to_string()))?;
+            let clone_dir_name = repo_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    RepoWorkspaceError::Io(
+                        "generated repository path has no valid UTF-8 file name".to_string(),
+                    )
+                })?;
             run_git(
                 &self.base_dir,
-                &[
-                    "clone",
-                    "--origin",
-                    "origin",
-                    remote_url,
-                    repo_dir.file_name().unwrap().to_str().unwrap(),
-                ],
+                &["clone", "--origin", "origin", remote_url, clone_dir_name],
             )
             .await?;
         }
@@ -307,12 +309,21 @@ fn validate_remote_name(value: &str) -> Result<(), ()> {
 }
 
 async fn run_git(cwd: &Path, args: &[&str]) -> Result<(), RepoWorkspaceError> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(args)
         .current_dir(cwd)
-        .output()
-        .await
-        .map_err(|error| RepoWorkspaceError::Io(error.to_string()))?;
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never")
+        .env("GIT_PAGER", "cat");
+    let output = thinclaw_platform::bounded_command_output(
+        &mut command,
+        std::time::Duration::from_secs(10 * 60),
+        1024 * 1024,
+        1024 * 1024,
+    )
+    .await
+    .map_err(|error| RepoWorkspaceError::Io(error.to_string()))?;
     if output.status.success() {
         return Ok(());
     }

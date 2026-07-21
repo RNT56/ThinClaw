@@ -25,6 +25,8 @@ use crate::wasm::{
     WasmToolRuntime, WasmToolStore, WasmToolWrapper,
 };
 use thinclaw_llm_core::{LlmProvider, ToolDefinition};
+#[cfg(feature = "wasm-runtime")]
+use thinclaw_secrets::CredentialLocation;
 use thinclaw_secrets::SecretsStore;
 use thinclaw_tools_core::{
     ApprovalRequirement, RateLimiter, Tool, ToolDescriptor, ToolDomain, ToolExecutionLane,
@@ -184,31 +186,32 @@ impl ToolRegistry {
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a built-in name.
-    pub async fn register(&self, tool: Arc<dyn Tool>) {
+    pub async fn register(&self, tool: Arc<dyn Tool>) -> bool {
         let name = tool.name().to_string();
-        if self.builtin_names.read().await.contains(&name)
-            || PROTECTED_TOOL_NAMES.contains(&name.as_str())
-        {
-            return;
+        let builtin_names = self.builtin_names.read().await;
+        if builtin_names.contains(&name) || PROTECTED_TOOL_NAMES.contains(&name.as_str()) {
+            return false;
         }
         self.tools.write().await.insert(name.clone(), tool);
+        true
     }
 
     /// Register a tool as built-in using async locks.
     pub async fn register_builtin(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
+        let mut builtin_names = self.builtin_names.write().await;
         self.tools.write().await.insert(name.clone(), tool);
-        self.builtin_names.write().await.insert(name.clone());
+        builtin_names.insert(name);
     }
 
     /// Register a tool (sync version for startup, marks as built-in).
     pub fn register_sync(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
-        if let Ok(mut tools) = self.tools.try_write() {
+        if let Ok(mut builtins) = self.builtin_names.try_write()
+            && let Ok(mut tools) = self.tools.try_write()
+        {
             tools.insert(name.clone(), tool);
-            if let Ok(mut builtins) = self.builtin_names.try_write() {
-                builtins.insert(name.clone());
-            }
+            builtins.insert(name);
         }
     }
 
@@ -461,17 +464,35 @@ impl ToolRegistry {
     where
         I: HostToolInvoker + 'static,
     {
-        let prepared = reg
-            .runtime
-            .prepare(reg.name, reg.wasm_bytes, reg.limits)
-            .await?;
-
         let credential_mappings = reg
             .capabilities
             .http
             .as_ref()
-            .map(|http| http.credentials.values().cloned().collect::<Vec<_>>())
+            .map(|http| {
+                http.credentials
+                    .values()
+                    .filter(|mapping| {
+                        matches!(
+                            mapping.location,
+                            CredentialLocation::AuthorizationBearer
+                                | CredentialLocation::AuthorizationBasic { .. }
+                                | CredentialLocation::Header { .. }
+                                | CredentialLocation::QueryParam { .. }
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
+        if credential_registry.is_some() {
+            SharedCredentialRegistry::validate_source_mappings(reg.name, &credential_mappings)
+                .map_err(|error| WasmError::ConfigError(error.to_string()))?;
+        }
+
+        let prepared = reg
+            .runtime
+            .prepare(reg.name, reg.wasm_bytes, reg.limits)
+            .await?;
 
         let mut wrapper = WasmToolWrapper::new(Arc::clone(reg.runtime), prepared, reg.capabilities);
 
@@ -491,13 +512,21 @@ impl ToolRegistry {
             wrapper = wrapper.with_tool_invoker(invoker);
         }
 
-        self.register(Arc::new(wrapper)).await;
+        if !self.register(Arc::new(wrapper)).await {
+            return Err(WasmError::ConfigError(format!(
+                "WASM tool '{}' conflicts with a protected or built-in tool name",
+                reg.name
+            )));
+        }
 
-        if let Some(registry) = credential_registry
-            && !credential_mappings.is_empty()
-        {
+        if let Some(registry) = credential_registry {
             let count = credential_mappings.len();
-            registry.add_mappings(credential_mappings);
+            if let Err(error) = registry.replace_source_mappings(reg.name, credential_mappings) {
+                let _ = self.unregister(reg.name).await;
+                return Err(WasmError::ConfigError(format!(
+                    "failed to publish WASM credential mappings: {error}"
+                )));
+            }
             tracing::debug!(
                 name = reg.name,
                 credential_count = count,
@@ -529,10 +558,12 @@ impl ToolRegistry {
             .map_err(WasmRegistrationError::Storage)?;
 
         let capabilities = store
-            .get_capabilities(tool_with_binary.tool.id)
+            .get_capabilities(user_id, tool_with_binary.tool.id)
             .await
             .map_err(WasmRegistrationError::Storage)?
             .map(|capabilities| capabilities.to_capabilities())
+            .transpose()
+            .map_err(WasmRegistrationError::Storage)?
             .unwrap_or_default();
 
         self.register_wasm_tool(
@@ -565,6 +596,9 @@ impl ToolRegistry {
 
     /// Unregister a tool.
     pub async fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        if self.builtin_names.read().await.contains(name) {
+            return None;
+        }
         self.tools.write().await.remove(name)
     }
 
@@ -591,6 +625,40 @@ impl ToolRegistry {
     /// Get all tools.
     pub async fn all(&self) -> Vec<Arc<dyn Tool>> {
         self.tools.read().await.values().cloned().collect()
+    }
+
+    /// Ask every registered tool to release long-lived resources.
+    ///
+    /// The snapshot avoids holding the registry lock across tool-controlled
+    /// awaits. Shutdown is deterministic and bounded per tool so one faulty
+    /// extension cannot prevent the rest from draining.
+    pub async fn shutdown_all(&self) {
+        const TOOL_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let mut tools = self
+            .tools
+            .read()
+            .await
+            .iter()
+            .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
+            .collect::<Vec<_>>();
+        tools.sort_by(|left, right| left.0.cmp(&right.0));
+
+        for (name, tool) in tools {
+            match tokio::time::timeout(TOOL_SHUTDOWN_TIMEOUT, tool.shutdown()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(tool = %name, %error, "Tool shutdown failed");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        tool = %name,
+                        timeout_secs = TOOL_SHUTDOWN_TIMEOUT.as_secs(),
+                        "Tool shutdown timed out"
+                    );
+                }
+            }
+        }
     }
 
     /// Get tool descriptors for internal routing and policy decisions.

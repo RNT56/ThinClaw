@@ -31,7 +31,8 @@ use tokio::sync::{RwLock, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::manager::ChannelManager;
-use crate::wasm::loader::WasmChannelLoader;
+use crate::wasm::capabilities::is_valid_channel_name;
+use crate::wasm::loader::{LoadedChannel, WasmChannelLoader};
 use crate::wasm::router::WasmChannelRouter;
 use crate::wasm::{
     RegisteredWebhookAuth, SharedWasmChannel, WasmChannelHostConfig, apply_channel_host_config,
@@ -40,6 +41,7 @@ use crate::wasm::{
 use thinclaw_secrets::{SecretAccessContext, SecretsStore};
 
 const WATCHER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_WATCHED_CHANNELS: usize = 64;
 
 /// Configuration for the channel watcher.
 #[derive(Debug, Clone)]
@@ -62,10 +64,16 @@ impl Default for ChannelWatcherConfig {
 /// Tracks the state of a watched `.wasm` file.
 #[derive(Debug, Clone)]
 struct WatchedChannel {
-    /// Last known modification time.
-    mtime: SystemTime,
+    /// Last known WASM and capabilities sidecar modification state.
+    artifact: ChannelArtifactState,
     /// Last time we processed a change for this file.
     last_reload: SystemTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChannelArtifactState {
+    wasm_mtime: SystemTime,
+    capabilities_mtime: Option<SystemTime>,
 }
 
 /// Watches a channels directory and hot-reloads WASM channels.
@@ -141,7 +149,14 @@ impl ChannelWatcher {
 
     /// Set custom configuration.
     pub fn with_config(mut self, config: ChannelWatcherConfig) -> Self {
-        self.config = config;
+        self.config = ChannelWatcherConfig {
+            poll_interval: config
+                .poll_interval
+                .clamp(Duration::from_millis(250), Duration::from_secs(3600)),
+            debounce: config
+                .debounce
+                .clamp(Duration::from_millis(100), Duration::from_secs(3600)),
+        };
         self
     }
 
@@ -157,13 +172,29 @@ impl ChannelWatcher {
                     continue;
                 }
                 if let Some(name) = path.file_stem().and_then(|s| s.to_str())
-                    && let Ok(metadata) = tokio::fs::metadata(&path).await
+                    && is_valid_channel_name(name)
+                    && known.len() < MAX_WATCHED_CHANNELS
+                    && let Ok(metadata) = tokio::fs::symlink_metadata(&path).await
+                    && metadata.is_file()
+                    && !metadata.file_type().is_symlink()
                     && let Ok(mtime) = metadata.modified()
                 {
+                    let cap_path = path.with_extension("capabilities.json");
+                    let capabilities_mtime = match tokio::fs::symlink_metadata(&cap_path).await {
+                        Ok(metadata)
+                            if metadata.is_file() && !metadata.file_type().is_symlink() =>
+                        {
+                            metadata.modified().ok()
+                        }
+                        _ => None,
+                    };
                     known.insert(
                         name.to_string(),
                         WatchedChannel {
-                            mtime,
+                            artifact: ChannelArtifactState {
+                                wasm_mtime: mtime,
+                                capabilities_mtime,
+                            },
                             last_reload: SystemTime::UNIX_EPOCH,
                         },
                     );
@@ -254,7 +285,7 @@ impl ChannelWatcher {
         host_config: &WasmChannelHostConfig,
     ) -> Result<(), String> {
         // Scan current .wasm files
-        let mut current_files: HashMap<String, SystemTime> = HashMap::new();
+        let mut current_files: HashMap<String, ChannelArtifactState> = HashMap::new();
 
         if !dir.is_dir() {
             return Ok(());
@@ -270,10 +301,27 @@ impl ChannelWatcher {
                 continue;
             }
             if let Some(name) = path.file_stem().and_then(|s| s.to_str())
-                && let Ok(metadata) = tokio::fs::metadata(&path).await
+                && is_valid_channel_name(name)
+                && current_files.len() < MAX_WATCHED_CHANNELS
+                && let Ok(metadata) = tokio::fs::symlink_metadata(&path).await
+                && metadata.is_file()
+                && !metadata.file_type().is_symlink()
                 && let Ok(mtime) = metadata.modified()
             {
-                current_files.insert(name.to_string(), mtime);
+                let cap_path = path.with_extension("capabilities.json");
+                let capabilities_mtime = match tokio::fs::symlink_metadata(&cap_path).await {
+                    Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                        metadata.modified().ok()
+                    }
+                    _ => None,
+                };
+                current_files.insert(
+                    name.to_string(),
+                    ChannelArtifactState {
+                        wasm_mtime: mtime,
+                        capabilities_mtime,
+                    },
+                );
             }
         }
 
@@ -281,7 +329,7 @@ impl ChannelWatcher {
         let now = SystemTime::now();
 
         // Detect new and modified channels
-        for (name, mtime) in &current_files {
+        for (name, artifact) in &current_files {
             match known_guard.get(name) {
                 None => {
                     // New channel
@@ -302,7 +350,7 @@ impl ChannelWatcher {
                             known_guard.insert(
                                 name.clone(),
                                 WatchedChannel {
-                                    mtime: *mtime,
+                                    artifact: *artifact,
                                     last_reload: now,
                                 },
                             );
@@ -314,7 +362,7 @@ impl ChannelWatcher {
                     }
                 }
                 Some(watched) => {
-                    if *mtime != watched.mtime {
+                    if *artifact != watched.artifact {
                         // Modified — check debounce
                         let since_last = now
                             .duration_since(watched.last_reload)
@@ -333,13 +381,15 @@ impl ChannelWatcher {
                             loader.invalidate(name).await;
                             let wasm_path = dir.join(format!("{name}.wasm"));
                             let cap_path = dir.join(format!("{name}.capabilities.json"));
-                            let cap_ref = cap_path.exists().then_some(cap_path.as_path());
                             let reloaded = WatchedChannel {
-                                mtime: *mtime,
+                                artifact: *artifact,
                                 last_reload: now,
                             };
 
-                            match loader.load_from_files(name, &wasm_path, cap_ref).await {
+                            match loader
+                                .load_from_files(name, &wasm_path, Some(cap_path.as_path()))
+                                .await
+                            {
                                 Err(e) => {
                                     // Keep the previous version running. Record
                                     // mtime so we don't spin retrying until the
@@ -348,21 +398,14 @@ impl ChannelWatcher {
                                     tracing::error!(channel = %name, error = %e, "New WASM artifact failed to load; keeping the previous version running");
                                     known_guard.insert(name.clone(), reloaded);
                                 }
-                                Ok(_validated) => {
+                                Ok(validated) => {
                                     tracing::info!(channel = %name, "New WASM artifact validated, swapping in");
-                                    // Now safe to replace the old instance. The
-                                    // validated module is cached under `name`, so
-                                    // load_and_add reuses it (no re-invalidate).
-                                    if let Err(e) = channel_manager.hot_remove(name).await {
-                                        tracing::warn!(channel = %name, error = %e, "Error removing old channel during reload");
-                                    }
-                                    if let Some(router) = webhook_router {
-                                        router.unregister(name).await;
-                                    }
-                                    match Self::load_and_add(
-                                        dir,
-                                        name,
-                                        loader,
+                                    // ChannelManager::hot_add starts the new
+                                    // transport before atomically replacing and
+                                    // draining the old one. Never pre-remove the
+                                    // healthy transport here.
+                                    match Self::activate_loaded(
+                                        validated,
                                         channel_manager,
                                         webhook_router,
                                         secrets_store,
@@ -425,17 +468,32 @@ impl ChannelWatcher {
     ) -> Result<(), String> {
         let wasm_path = dir.join(format!("{}.wasm", name));
         let cap_path = dir.join(format!("{}.capabilities.json", name));
-        let cap_ref = if cap_path.exists() {
-            Some(cap_path.as_path())
-        } else {
-            None
-        };
 
         let loaded = loader
-            .load_from_files(name, &wasm_path, cap_ref)
+            .load_from_files(name, &wasm_path, Some(cap_path.as_path()))
             .await
             .map_err(|e| format!("load failed: {}", e))?;
 
+        Self::activate_loaded(
+            loaded,
+            channel_manager,
+            webhook_router,
+            secrets_store,
+            user_id,
+            host_config,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn activate_loaded(
+        loaded: LoadedChannel,
+        channel_manager: &Arc<ChannelManager>,
+        webhook_router: Option<&Arc<WasmChannelRouter>>,
+        secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
+        user_id: &str,
+        host_config: &WasmChannelHostConfig,
+    ) -> Result<(), String> {
         let secret_header = loaded.webhook_secret_header().map(str::to_string);
         let signature_secret_name = loaded.webhook_secret_name();
         let verify_token_secret_name = loaded.webhook_verify_token_secret_name();
@@ -518,21 +576,22 @@ impl ChannelWatcher {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        channel = %channel_name,
-                        error = %error,
-                        "Failed to inject credentials into hot-loaded channel"
-                    );
+                    return Err(format!("credential injection failed: {error}"));
                 }
             }
         }
 
-        if let Err(error) = channel_arc.prime_on_start_config().await {
-            tracing::warn!(
-                channel = %channel_name,
-                error = %error,
-                "Failed to prime hot-loaded channel on_start config before registration"
-            );
+        channel_arc
+            .prime_on_start_config()
+            .await
+            .map_err(|error| format!("on_start validation failed: {error}"))?;
+
+        let endpoints = channel_arc.endpoints().await;
+        if let Some(router) = webhook_router {
+            router
+                .validate_registration(&channel_name, &endpoints, &webhook_auth)
+                .await
+                .map_err(|error| format!("webhook registration is invalid: {error}"))?;
         }
 
         channel_manager
@@ -541,8 +600,10 @@ impl ChannelWatcher {
             .map_err(|e| format!("hot_add failed: {}", e))?;
 
         if let Some(router) = webhook_router {
-            let endpoints = channel_arc.endpoints().await;
-            router.register(channel_arc, endpoints, webhook_auth).await;
+            router
+                .register(channel_arc, endpoints, webhook_auth)
+                .await
+                .map_err(|error| format!("webhook registration failed: {error}"))?;
         }
 
         Ok(())

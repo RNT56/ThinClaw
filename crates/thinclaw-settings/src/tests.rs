@@ -1,6 +1,62 @@
 use crate::*;
 
 #[test]
+fn db_settings_ignore_malformed_paths_without_losing_valid_values() {
+    let mut map = std::collections::HashMap::new();
+    map.insert("".to_string(), serde_json::json!("ignored"));
+    map.insert("agent..name".to_string(), serde_json::json!("ignored"));
+    map.insert("agent.name".to_string(), serde_json::json!("safe-name"));
+
+    let restored = Settings::from_db_map(&map);
+    assert_eq!(restored.agent.name, "safe-name");
+}
+
+#[test]
+fn settings_debug_never_exposes_persisted_credentials_or_personal_allowlists() {
+    let mut settings = Settings {
+        database_url: Some("postgres://alice:database-password@db.example/thinclaw".into()),
+        tunnel: TunnelSettings {
+            cf_token: Some("cloudflare-secret".into()),
+            ngrok_token: Some("ngrok-secret".into()),
+            ..TunnelSettings::default()
+        },
+        ..Settings::default()
+    };
+    settings.channels.discord_bot_token = Some("discord-secret".into());
+    settings.channels.slack_bot_token = Some("slack-bot-secret".into());
+    settings.channels.slack_app_token = Some("slack-app-secret".into());
+    settings.channels.bluebubbles_password = Some("bluebubbles-secret".into());
+    settings.channels.gateway_auth_token = Some("gateway-secret".into());
+    settings.channels.signal_allow_from = Some("+49123456789".into());
+    settings
+        .channels
+        .gateway_principals
+        .push(GatewayPrincipalConfig {
+            token: "principal-secret".into(),
+            principal_id: "operator".into(),
+            actor_id: None,
+            role: GatewayRole::Operator,
+        });
+
+    let debug = format!("{settings:?}");
+    for sensitive in [
+        "database-password",
+        "cloudflare-secret",
+        "ngrok-secret",
+        "discord-secret",
+        "slack-bot-secret",
+        "slack-app-secret",
+        "bluebubbles-secret",
+        "gateway-secret",
+        "principal-secret",
+        "+49123456789",
+    ] {
+        assert!(!debug.contains(sensitive), "debug leaked {sensitive}");
+    }
+    assert!(debug.contains("[REDACTED]"));
+}
+
+#[test]
 fn test_db_map_round_trip() {
     let settings = Settings {
         selected_model: Some("claude-3-5-sonnet-20241022".to_string()),
@@ -595,9 +651,10 @@ fn test_provider_models_db_round_trip() {
 }
 
 #[test]
-fn test_learning_prompt_mutation_enabled_by_default() {
+fn test_learning_mutations_require_explicit_opt_in() {
     let settings = Settings::default();
-    assert!(settings.learning.prompt_mutation.enabled);
+    assert!(!settings.learning.prompt_mutation.enabled);
+    assert!(settings.learning.auto_apply_classes.is_empty());
 }
 
 #[test]

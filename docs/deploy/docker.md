@@ -107,9 +107,14 @@ On Pi OS Lite, prefer the published multi-arch image instead of building
 on-device:
 
 ```bash
-sudo bash deploy/setup.sh --mode docker --token replace-with-a-long-random-token \
-  --image ghcr.io/rnt56/thinclaw:latest
+printf '%s\n\n' "$(openssl rand -hex 32)" | \
+  sudo bash deploy/setup.sh --secrets-stdin --mode docker --allow-public-http \
+    --image ghcr.io/rnt56/thinclaw:latest
 ```
+
+`--allow-public-http` is an explicit unsafe opt-in. Prefer supplying a
+Tailscale auth key on the second stdin line as described in the remote-access
+guide.
 
 For the full Pi path, use [raspberry-pi-os-lite.md](raspberry-pi-os-lite.md).
 
@@ -161,7 +166,9 @@ instead of `deploy/.env`.
 The Linux setup script can create a systemd service for Docker Compose mode:
 
 ```bash
-sudo bash deploy/setup.sh --mode docker --token replace-with-a-long-random-token --systemd
+printf '%s\n\n' "$(openssl rand -hex 32)" | \
+  sudo bash deploy/setup.sh --secrets-stdin --mode docker \
+    --allow-public-http --systemd
 ```
 
 That script installs Docker when needed, configures UFW and Fail2ban when

@@ -145,6 +145,16 @@ pub struct AppBuilder {
 
     // Multi-provider cloud intelligence settings (from Settings)
     providers_settings: Option<crate::settings::ProvidersSettings>,
+
+    // Principal used for the base memory/knowledge workspace. The runtime
+    // default remains backward-compatible; embedding surfaces such as Tauri
+    // must bind this to the same canonical principal used at message ingress.
+    workspace_principal_id: String,
+    legacy_workspace_principal_id: Option<String>,
+
+    // Stable owner for every ephemeral sandbox container created by this
+    // runtime. Entrypoints holding a RuntimeLease override the fallback.
+    runtime_scope: String,
 }
 
 impl AppBuilder {
@@ -172,7 +182,31 @@ impl AppBuilder {
             #[cfg(feature = "libsql")]
             libsql_db: None,
             providers_settings: None,
+            workspace_principal_id: "default".to_string(),
+            legacy_workspace_principal_id: None,
+            runtime_scope: crate::runtime_lease::runtime_scope_id_for_path(
+                &crate::platform::resolve_data_dir(""),
+            ),
         }
+    }
+
+    /// Bind ephemeral sandbox resources to the same durable runtime identity
+    /// used for persistent jobs and crash cleanup.
+    pub fn with_runtime_scope(mut self, runtime_scope: impl Into<String>) -> Self {
+        self.runtime_scope = runtime_scope.into();
+        self
+    }
+
+    /// Bind the base workspace to a canonical runtime principal and optionally
+    /// copy missing documents from a legacy scope before seeding begins.
+    pub fn with_workspace_principal(
+        mut self,
+        principal_id: impl Into<String>,
+        legacy_principal_id: Option<String>,
+    ) -> Self {
+        self.workspace_principal_id = principal_id.into();
+        self.legacy_workspace_principal_id = legacy_principal_id;
+        self
     }
 
     /// Inject a pre-built secrets store (e.g. from ThinClaw Desktop's Keychain backend).
@@ -234,7 +268,8 @@ impl AppBuilder {
         &self,
         config: crate::sandbox::SandboxConfig,
     ) -> crate::sandbox::SandboxManager {
-        let manager = crate::sandbox::SandboxManager::new(config);
+        let manager = crate::sandbox::SandboxManager::new(config)
+            .with_runtime_scope(self.runtime_scope.clone());
         match self.secrets_store.as_ref() {
             Some(store) => manager.with_credential_store(Arc::clone(store), "default"),
             None => manager,
@@ -392,15 +427,26 @@ impl AppBuilder {
         // 'running' records and skip routines until the reaper eventually ran.
         {
             let db_cleanup = db.clone();
-            if let Err(e) = db_cleanup.cleanup_stale_sandbox_jobs().await {
-                tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
-            }
             match db_cleanup
                 .cleanup_stale_routine_runs(crate::db::DEFAULT_LEGACY_ROUTINE_RUN_TTL_SECS)
                 .await
             {
-                Ok(0) => {}
-                Ok(n) => tracing::info!("Cleaned up {} orphaned RUNNING routine runs", n),
+                Ok(result) => {
+                    for (routine_id, consecutive_failures) in &result.failure_streaks {
+                        crate::agent::routine_engine::apply_routine_failure_streak_policy(
+                            &db_cleanup,
+                            *routine_id,
+                            *consecutive_failures,
+                        )
+                        .await;
+                    }
+                    if result.reaped > 0 {
+                        tracing::info!(
+                            "Cleaned up {} orphaned RUNNING routine runs",
+                            result.reaped
+                        );
+                    }
+                }
                 Err(e) => tracing::warn!("Failed to cleanup stale routine runs: {}", e),
             }
         }
@@ -544,13 +590,15 @@ impl AppBuilder {
 
         // Initialize tool registry with credential injection support
         let credential_registry = Arc::new(SharedCredentialRegistry::new());
+        let tool_registry = ToolRegistry::new()
+            .with_runtime_scope(self.runtime_scope.clone())
+            .with_browser_relay_image(self.config.sandbox.image.clone());
         let tools = if let Some(ref ss) = self.secrets_store {
             Arc::new(
-                ToolRegistry::new()
-                    .with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
+                tool_registry.with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
             )
         } else {
-            Arc::new(ToolRegistry::new())
+            Arc::new(tool_registry)
         };
         tools.register_builtin_tools_with_browser_backend(
             &self.config.agent.browser_backend,
@@ -584,9 +632,29 @@ impl AppBuilder {
 
         // Register memory tools if database is available
         let workspace = if let Some(ref db) = self.db {
-            let mut ws = Workspace::new_with_db("default", db.clone());
+            let mut ws = Workspace::new_with_db(self.workspace_principal_id.clone(), db.clone());
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings(emb.clone());
+            }
+            if let Some(legacy_principal_id) = self.legacy_workspace_principal_id.as_deref() {
+                match ws
+                    .migrate_missing_principal_scope(legacy_principal_id)
+                    .await
+                {
+                    Ok(migrated) if migrated > 0 => tracing::info!(
+                        legacy_principal_id,
+                        principal_id = %self.workspace_principal_id,
+                        migrated,
+                        "Migrated legacy workspace principal into the canonical runtime scope"
+                    ),
+                    Err(error) => tracing::warn!(
+                        legacy_principal_id,
+                        principal_id = %self.workspace_principal_id,
+                        error = %error,
+                        "Failed to migrate the legacy workspace principal"
+                    ),
+                    _ => {}
+                }
             }
             let ws = Arc::new(ws);
             tools.register_memory_tools(
@@ -760,21 +828,29 @@ impl AppBuilder {
             let tools = Arc::clone(tools);
             let mcp_sm = Arc::clone(&mcp_session_manager);
             async move {
-                let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
-                    if let Some(ref secrets) = secrets_store {
-                        Arc::clone(secrets)
-                    } else {
-                        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
-                        let ephemeral_key = secrecy::SecretString::from(
-                            crate::platform::secure_store::generate_master_key_hex(),
-                        );
-                        let crypto =
-                            Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
-                        tracing::debug!(
-                            "Using ephemeral in-memory secrets store for startup MCP loading"
-                        );
-                        Arc::new(InMemorySecretsStore::new(crypto))
+                let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> = if let Some(
+                    ref secrets,
+                ) =
+                    secrets_store
+                {
+                    Arc::clone(secrets)
+                } else {
+                    use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+                    let ephemeral_key = secrecy::SecretString::from(
+                        crate::platform::secure_store::generate_master_key_hex(),
+                    );
+                    let crypto = match SecretsCrypto::new(ephemeral_key) {
+                        Ok(crypto) => Arc::new(crypto),
+                        Err(error) => {
+                            tracing::error!(%error, "failed to initialize ephemeral MCP secrets crypto");
+                            return;
+                        }
                     };
+                    tracing::debug!(
+                        "Using ephemeral in-memory secrets store for startup MCP loading"
+                    );
+                    Arc::new(InMemorySecretsStore::new(crypto))
+                };
 
                 let servers_result = if let Some(ref d) = db {
                     load_mcp_servers_from_db(d.as_ref(), "default").await
@@ -920,18 +996,21 @@ impl AppBuilder {
 
         // Create extension manager. Use ephemeral in-memory secrets if no
         // persistent store is configured (listing/install/activate still work).
-        let ext_secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
-            if let Some(ref s) = self.secrets_store {
-                Arc::clone(s)
-            } else {
-                use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
-                let ephemeral_key = secrecy::SecretString::from(
-                    crate::platform::secure_store::generate_master_key_hex(),
-                );
-                let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
-                tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
-                Arc::new(InMemorySecretsStore::new(crypto))
-            };
+        let ext_secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> = if let Some(ref s) =
+            self.secrets_store
+        {
+            Arc::clone(s)
+        } else {
+            use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+            let ephemeral_key = secrecy::SecretString::from(
+                crate::platform::secure_store::generate_master_key_hex(),
+            );
+            let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).map_err(|error| {
+                anyhow::anyhow!("failed to initialize ephemeral extension secrets crypto: {error}")
+            })?);
+            tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
+            Arc::new(InMemorySecretsStore::new(crypto))
+        };
         let extension_manager = {
             let manager = Arc::new(ExtensionManager::new(
                 Arc::clone(&mcp_session_manager),
@@ -1259,7 +1338,7 @@ impl AppBuilder {
         };
 
         if let Err(err) = crate::timezone::set_user_timezone_override(
-            "default",
+            &self.workspace_principal_id,
             self.config.heartbeat.user_timezone.as_deref(),
         ) {
             tracing::warn!("Failed to initialize live timezone override: {}", err);
@@ -1477,9 +1556,10 @@ impl AppBuilder {
             let user_md_tz = ws.extract_user_timezone().await;
             let effective_tz = user_md_tz.clone().or(configured_tz.clone());
 
-            if let Err(err) =
-                crate::timezone::set_user_timezone_override("default", effective_tz.as_deref())
-            {
+            if let Err(err) = crate::timezone::set_user_timezone_override(
+                &self.workspace_principal_id,
+                effective_tz.as_deref(),
+            ) {
                 tracing::warn!("Failed to refresh live timezone override: {}", err);
             }
 
@@ -1492,7 +1572,11 @@ impl AppBuilder {
                     match effective_tz.as_deref() {
                         Some(tz) => {
                             if let Err(err) = db
-                                .set_setting("default", "user_timezone", &serde_json::json!(tz))
+                                .set_setting(
+                                    &self.workspace_principal_id,
+                                    "user_timezone",
+                                    &serde_json::json!(tz),
+                                )
                                 .await
                             {
                                 tracing::warn!(
@@ -1502,7 +1586,10 @@ impl AppBuilder {
                             }
                         }
                         None => {
-                            if let Err(err) = db.delete_setting("default", "user_timezone").await {
+                            if let Err(err) = db
+                                .delete_setting(&self.workspace_principal_id, "user_timezone")
+                                .await
+                            {
                                 tracing::warn!("Failed to clear timezone setting: {}", err);
                             }
                         }
@@ -1512,7 +1599,7 @@ impl AppBuilder {
                 let preserve_due = user_md_tz.as_deref() == configured_tz.as_deref();
                 if let Err(err) = crate::timezone::refresh_user_routine_timezones(
                     db,
-                    "default",
+                    &self.workspace_principal_id,
                     effective_tz.as_deref(),
                     preserve_due,
                 )

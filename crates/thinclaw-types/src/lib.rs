@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod error;
+pub mod http_response;
 pub mod job;
 pub mod media;
 pub mod repair;

@@ -85,7 +85,7 @@ async fn check_agent(profile: crate::thinclaw::config::AgentProfile) -> AgentSta
                 capabilities: None,
                 run_status: None,
                 model: None,
-            }
+            };
         }
     };
 

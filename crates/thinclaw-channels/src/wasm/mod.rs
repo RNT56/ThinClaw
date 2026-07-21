@@ -47,7 +47,8 @@ pub use runtime_config::{
     WasmChannelHostConfig, apply_channel_host_config, inject_channel_credentials_from_secrets,
 };
 pub use schema::{
-    ChannelCapabilitiesFile, ChannelConfig, ProductionStatus, SecretSetupSchema, SetupSchema,
+    ChannelCapabilitiesFile, ChannelConfig, CredentialLocationSchema, ProductionStatus,
+    SecretSetupSchema, SetupSchema, SetupValidationEndpointSchema, SetupValidationRequestSchema,
     WebhookSchema, WebhookSecretValidation,
 };
 #[cfg(feature = "wasm-runtime")]

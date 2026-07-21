@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod chromium_resolver;
+pub mod http;
 pub mod llama_provider;
 pub mod orchestrator;
 pub mod router;
@@ -22,6 +23,9 @@ pub async fn agent_chat(
     engine_manager: tauri::State<'_, crate::engine::EngineManager>,
     request: String,
 ) -> Result<String, String> {
+    if request.trim().is_empty() || request.len() > 2 * 1024 * 1024 || request.contains('\0') {
+        return Err("Chat request is missing, malformed, or oversized".to_string());
+    }
     let snapshot = crate::engine::local_runtime_snapshot(&state, &engine_manager).await;
     let endpoint = snapshot.endpoint.as_ref().ok_or_else(|| {
         format!(

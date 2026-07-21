@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::StatusCode;
-use tokio::process::Command;
+use reqwest::Url;
 
 use crate::experiments::{
     ExperimentLeaseAuthentication, ExperimentRunnerBackend, ExperimentRunnerProfile,
-    ExperimentRunnerReadinessClass,
+    ExperimentRunnerReadinessClass, parse_secret_reference,
 };
 use crate::settings::Settings;
 use crate::tools::execution_backend::{
@@ -32,21 +32,35 @@ fn docker_sandbox_config(settings: &Settings) -> crate::sandbox::SandboxConfig {
         .to_sandbox_config()
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone)]
 pub struct RunnerLaunchOutcome {
     pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_template: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_job_id: Option<String>,
-    #[serde(default)]
     pub provider_job_metadata: serde_json::Value,
-    #[serde(default)]
     pub auto_launched: bool,
-    #[serde(default)]
     pub requires_operator_action: bool,
+}
+
+impl fmt::Debug for RunnerLaunchOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RunnerLaunchOutcome")
+            .field("message", &self.message)
+            .field(
+                "bootstrap_command",
+                &self.bootstrap_command.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "provider_template",
+                &self.provider_template.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("provider_job_id", &self.provider_job_id)
+            .field("provider_job_metadata", &"[OMITTED]")
+            .field("auto_launched", &self.auto_launched)
+            .field("requires_operator_action", &self.requires_operator_action)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +83,11 @@ const VAST_API_BASE: &str = "https://console.vast.ai";
 const LAMBDA_API_BASE: &str = "https://cloud.lambda.ai/api/v1";
 const DEFAULT_RESEARCH_RUNNER_IMAGE: &str = "ghcr.io/thinclaw/research-runner:latest";
 const REMOTE_ADAPTER_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_PROVIDER_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PROVIDER_ID_BYTES: usize = 128;
+const MAX_METADATA_STRING_BYTES: usize = 2 * 1024;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "benchmark", rename_all = "snake_case")]
@@ -272,7 +291,12 @@ pub async fn validate_runner_profile(
         | ExperimentRunnerBackend::Vast
         | ExperimentRunnerBackend::Lambda => {
             let secret_ok = gpu_cloud_secret_name(runner.backend)
-                .map(|name| runner.secret_references.iter().any(|entry| entry == name))
+                .map(|name| {
+                    runner.secret_references.iter().any(|reference| {
+                        parse_secret_reference(reference)
+                            .is_some_and(|(secret_name, _)| secret_name == name)
+                    })
+                })
                 .unwrap_or(false);
             let lambda_launch_payload_ok = runner.backend == ExperimentRunnerBackend::Lambda
                 && runner
@@ -348,13 +372,52 @@ pub async fn validate_runner_profile(
     }
 }
 
-pub fn build_bootstrap_command(gateway_url: &str, auth: &ExperimentLeaseAuthentication) -> String {
-    format!(
+pub fn validate_gateway_url(gateway_url: &str) -> Result<String, String> {
+    let trimmed = gateway_url.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "Experiment runner launch requires a non-empty gateway_url (set campaign.gateway_url)."
+                .to_string(),
+        );
+    }
+    let url = Url::parse(trimmed)
+        .map_err(|_| "Experiment gateway_url must be a valid absolute URL.".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(
+            "Experiment gateway_url must use HTTP or HTTPS and include a host.".to_string(),
+        );
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Experiment gateway_url must not contain embedded credentials.".to_string());
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("Experiment gateway_url must not contain a query or fragment.".to_string());
+    }
+    let loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if url.scheme() != "https" && !loopback {
+        return Err(
+            "Experiment gateway_url must use HTTPS unless it targets a loopback host.".to_string(),
+        );
+    }
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+pub fn build_bootstrap_command(
+    gateway_url: &str,
+    auth: &ExperimentLeaseAuthentication,
+) -> Result<String, String> {
+    let gateway_url = validate_gateway_url(gateway_url)?;
+    Ok(format!(
         "thinclaw experiment-runner --lease-id {} --gateway-url {} --token {}",
         auth.lease_id,
-        sh_single_quote(gateway_url),
+        sh_single_quote(&gateway_url),
         sh_single_quote(&auth.token)
-    )
+    ))
 }
 
 pub fn gpu_cloud_display_name(backend: ExperimentRunnerBackend) -> &'static str {
@@ -552,10 +615,8 @@ pub fn gpu_cloud_docs_url(backend: ExperimentRunnerBackend) -> Option<&'static s
 
 pub fn build_gpu_cloud_template(
     runner: &ExperimentRunnerProfile,
-    gateway_url: &str,
-    auth: &ExperimentLeaseAuthentication,
+    command: &str,
 ) -> Option<serde_json::Value> {
-    let command = build_bootstrap_command(gateway_url, auth);
     let image = runner
         .image_or_runtime
         .clone()
@@ -593,14 +654,8 @@ pub async fn try_auto_launch(
     auth: &ExperimentLeaseAuthentication,
     provider_api_key: Option<&str>,
 ) -> Result<RunnerLaunchOutcome, String> {
-    let gateway_url = gateway_url.unwrap_or_default().trim();
-    if gateway_url.is_empty() {
-        return Err(
-            "Experiment runner launch requires a non-empty gateway_url (set campaign.gateway_url)."
-                .to_string(),
-        );
-    }
-    let bootstrap_command = build_bootstrap_command(gateway_url, auth);
+    let gateway_url = validate_gateway_url(gateway_url.unwrap_or_default())?;
+    let bootstrap_command = build_bootstrap_command(&gateway_url, auth)?;
 
     match runner.backend {
         ExperimentRunnerBackend::GenericRemoteRunner => Ok(RunnerLaunchOutcome {
@@ -617,25 +672,25 @@ pub async fn try_auto_launch(
             let api_key = provider_api_key.ok_or_else(|| {
                 "RunPod launch requires a connected research_runpod_api_key secret.".to_string()
             })?;
-            launch_runpod_pod(runner, gateway_url, auth, &bootstrap_command, api_key).await
+            launch_runpod_pod(runner, auth, &bootstrap_command, api_key).await
         }
         ExperimentRunnerBackend::Vast => {
             let api_key = provider_api_key.ok_or_else(|| {
                 "Vast.ai launch requires a connected research_vast_api_key secret.".to_string()
             })?;
-            launch_vast_instance(runner, gateway_url, auth, &bootstrap_command, api_key).await
+            launch_vast_instance(runner, auth, &bootstrap_command, api_key).await
         }
         ExperimentRunnerBackend::Lambda => {
             let api_key = provider_api_key.ok_or_else(|| {
                 "Lambda launch requires a connected research_lambda_api_key secret.".to_string()
             })?;
             if lambda_launch_payload(runner, &bootstrap_command, auth).is_some() {
-                launch_lambda_instance(runner, gateway_url, auth, &bootstrap_command, api_key).await
+                launch_lambda_instance(runner, auth, &bootstrap_command, api_key).await
             } else {
                 Ok(RunnerLaunchOutcome {
                     message: "Lambda credentials are connected, but controller-managed launch requires backend_config.launch_payload matching the Lambda Cloud API launch schema.".to_string(),
-                    bootstrap_command: Some(bootstrap_command),
-                    provider_template: build_gpu_cloud_template(runner, gateway_url, auth),
+                    bootstrap_command: Some(bootstrap_command.clone()),
+                    provider_template: build_gpu_cloud_template(runner, &bootstrap_command),
                     provider_job_id: None,
                     provider_job_metadata: serde_json::json!({
                         "provider": "lambda",
@@ -662,14 +717,17 @@ pub async fn try_auto_launch(
                 .map_err(|err| format!("ssh launch failed: {err}"))?;
             Ok(RunnerLaunchOutcome {
                 message: "SSH runner launched.".to_string(),
-                bootstrap_command: Some(bootstrap_command),
+                bootstrap_command: None,
                 provider_template: None,
                 provider_job_id: Some(auth.lease_id.simple().to_string()),
-                provider_job_metadata: serde_json::json!({
-                    "provider": "ssh",
-                    "host": host,
-                    "pid_file": format!("~/.thinclaw-experiments/{}.pid", auth.lease_id.simple()),
-                }),
+                provider_job_metadata: sanitize_provider_job_metadata(
+                    ExperimentRunnerBackend::Ssh,
+                    &serde_json::json!({
+                        "provider": "ssh",
+                        "host": host,
+                        "pid_file": format!("~/.thinclaw-experiments/{}.pid", auth.lease_id.simple()),
+                    }),
+                ),
                 auto_launched: true,
                 requires_operator_action: false,
             })
@@ -688,16 +746,21 @@ pub async fn try_auto_launch(
             let output = run_local_cli_command("ssh", args, true)
                 .await
                 .map_err(|err| format!("slurm launch failed: {err}"))?;
+            let provider_job_id = parse_slurm_job_id(&output.stdout).ok_or_else(|| {
+                "Slurm submission succeeded but did not return a numeric job id.".to_string()
+            })?;
             Ok(RunnerLaunchOutcome {
-                message: format!("Slurm job submitted: {}", output.stdout.trim()),
-                bootstrap_command: Some(bootstrap_command),
+                message: format!("Slurm job {provider_job_id} submitted."),
+                bootstrap_command: None,
                 provider_template: None,
-                provider_job_id: parse_first_word(&output.stdout),
-                provider_job_metadata: serde_json::json!({
-                    "provider": "slurm",
-                    "login_host": host,
-                    "submission_output": output.stdout.trim(),
-                }),
+                provider_job_id: Some(provider_job_id),
+                provider_job_metadata: sanitize_provider_job_metadata(
+                    ExperimentRunnerBackend::Slurm,
+                    &serde_json::json!({
+                        "provider": "slurm",
+                        "login_host": host,
+                    }),
+                ),
                 auto_launched: true,
                 requires_operator_action: false,
             })
@@ -719,24 +782,22 @@ pub async fn try_auto_launch(
                 env_pairs(runner),
                 &runner.gpu_requirements,
             );
-            let output = run_command_with_stdin("kubectl", &["apply", "-f", "-"], &manifest)
+            run_command_with_stdin("kubectl", &["apply", "-f", "-"], &manifest)
                 .await
                 .map_err(|err| format!("failed to apply kubernetes job: {err}"))?;
             Ok(RunnerLaunchOutcome {
-                message: output.trim().to_string(),
-                bootstrap_command: Some(bootstrap_command),
-                provider_template: Some(serde_json::json!({
-                    "provider": "kubernetes",
-                    "job_name": job_name,
-                    "namespace": namespace,
-                    "manifest": manifest,
-                })),
+                message: format!("Kubernetes job {job_name} applied."),
+                bootstrap_command: None,
+                provider_template: None,
                 provider_job_id: Some(job_name.clone()),
-                provider_job_metadata: serde_json::json!({
-                    "provider": "kubernetes",
-                    "job_name": job_name,
-                    "namespace": namespace,
-                }),
+                provider_job_metadata: sanitize_provider_job_metadata(
+                    ExperimentRunnerBackend::Kubernetes,
+                    &serde_json::json!({
+                        "provider": "kubernetes",
+                        "job_name": job_name,
+                        "namespace": namespace,
+                    }),
+                ),
                 auto_launched: true,
                 requires_operator_action: false,
             })
@@ -899,14 +960,7 @@ pub async fn validate_gpu_cloud_credentials(
 }
 
 pub async fn command_exists(binary: &str) -> bool {
-    Command::new(binary)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|status| status.success())
-        .unwrap_or(false)
+    thinclaw_platform::find_executable_in_path(binary).is_some()
 }
 
 fn backend_string(runner: &ExperimentRunnerProfile, key: &str) -> Option<String> {
@@ -989,7 +1043,7 @@ async fn run_local_cli_command(
     args: Vec<String>,
     allow_network: bool,
 ) -> Result<ExecutionResult, String> {
-    local_cli_execution_backend()
+    let output = local_cli_execution_backend()
         .run_script(ScriptExecutionRequest {
             program: binary.to_string(),
             args,
@@ -999,7 +1053,13 @@ async fn run_local_cli_command(
             allow_network,
         })
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    if output.exit_code != 0 {
+        // Arguments can contain a live lease token, and subprocess output can
+        // echo those arguments. Keep the durable/API-visible failure generic.
+        return Err(format!("{binary} exited with status {}", output.exit_code));
+    }
+    Ok(output)
 }
 
 fn local_cli_execution_backend() -> Arc<dyn ExecutionBackend> {
@@ -1063,6 +1123,316 @@ fn value_to_string(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Number(number) => Some(number.to_string()),
         _ => None,
     }
+}
+
+fn looks_like_lease_token(text: &str) -> bool {
+    text.as_bytes().windows(49).any(|window| {
+        window.starts_with(b"exp_")
+            && window[4..16].iter().all(u8::is_ascii_hexdigit)
+            && window[16] == b'_'
+            && window[17..].iter().all(u8::is_ascii_hexdigit)
+    })
+}
+
+fn safe_metadata_value(value: &serde_json::Value) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::Null => Some(serde_json::Value::Null),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) => Some(value.clone()),
+        serde_json::Value::String(text)
+            if text.len() <= MAX_METADATA_STRING_BYTES
+                && !text.chars().any(char::is_control)
+                && !looks_like_lease_token(text) =>
+        {
+            Some(value.clone())
+        }
+        serde_json::Value::Array(items) if items.len() <= 32 => Some(
+            items
+                .iter()
+                .filter_map(safe_metadata_value)
+                .filter(|item| !item.is_object())
+                .collect::<Vec<_>>()
+                .into(),
+        ),
+        _ => None,
+    }
+}
+
+fn select_metadata_fields(source: &serde_json::Value, fields: &[&str]) -> serde_json::Value {
+    let mut selected = serde_json::Map::new();
+    for field in fields {
+        if let Some(value) = source.get(*field).and_then(safe_metadata_value) {
+            selected.insert((*field).to_string(), value);
+        }
+    }
+    serde_json::Value::Object(selected)
+}
+
+fn safe_cost_estimate(source: &serde_json::Value) -> Option<serde_json::Value> {
+    let value = select_metadata_fields(
+        source.get("cost_estimate")?,
+        &[
+            "estimated",
+            "usd",
+            "hourly_rate_usd",
+            "native_hourly_rate",
+            "native_currency",
+            "normalization",
+            "source",
+        ],
+    );
+    value
+        .as_object()
+        .is_some_and(|map| !map.is_empty())
+        .then_some(value)
+}
+
+fn provider_name(backend: ExperimentRunnerBackend) -> &'static str {
+    match backend {
+        ExperimentRunnerBackend::Runpod => "runpod",
+        ExperimentRunnerBackend::Vast => "vast",
+        ExperimentRunnerBackend::Lambda => "lambda",
+        ExperimentRunnerBackend::Ssh => "ssh",
+        ExperimentRunnerBackend::Slurm => "slurm",
+        ExperimentRunnerBackend::Kubernetes => "kubernetes",
+        ExperimentRunnerBackend::GenericRemoteRunner => "generic_remote_runner",
+        ExperimentRunnerBackend::LocalDocker => "local_docker",
+        ExperimentRunnerBackend::AgentEnv => "agent_env",
+    }
+}
+
+/// Reduce durable/API-visible provider metadata to the fields required for
+/// lifecycle control, operator status, and cost attribution. Launch commands,
+/// environment values, arbitrary provider echoes, and legacy lease tokens are
+/// deliberately excluded.
+pub fn sanitize_provider_job_metadata(
+    backend: ExperimentRunnerBackend,
+    metadata: &serde_json::Value,
+) -> serde_json::Value {
+    let mut result = serde_json::Map::new();
+    result.insert(
+        "provider".to_string(),
+        serde_json::Value::String(provider_name(backend).to_string()),
+    );
+    if let Some(status) = metadata.get("status").and_then(safe_metadata_value) {
+        result.insert("status".to_string(), status);
+    }
+
+    match backend {
+        ExperimentRunnerBackend::Runpod => {
+            for field in ["pod_id"] {
+                if let Some(value) = metadata.get(field).and_then(safe_metadata_value) {
+                    result.insert(field.to_string(), value);
+                }
+            }
+            let request = select_metadata_fields(
+                metadata
+                    .get("launch_request")
+                    .unwrap_or(&serde_json::Value::Null),
+                &[
+                    "name",
+                    "imageName",
+                    "computeType",
+                    "gpuCount",
+                    "cloudType",
+                    "gpuTypeIds",
+                    "dataCenterIds",
+                    "ports",
+                    "containerDiskInGb",
+                    "volumeInGb",
+                    "templateId",
+                    "interruptible",
+                    "supportPublicIp",
+                    "costPerHr",
+                ],
+            );
+            if request.as_object().is_some_and(|map| !map.is_empty()) {
+                result.insert("launch_request".to_string(), request);
+            }
+            let pod = select_metadata_fields(
+                metadata.get("pod").unwrap_or(&serde_json::Value::Null),
+                &[
+                    "id",
+                    "name",
+                    "desiredStatus",
+                    "status",
+                    "adjustedCostPerHr",
+                    "costPerHr",
+                    "gpuCount",
+                    "gpuTypeId",
+                    "dataCenterId",
+                ],
+            );
+            if pod.as_object().is_some_and(|map| !map.is_empty()) {
+                result.insert("pod".to_string(), pod);
+            }
+        }
+        ExperimentRunnerBackend::Vast => {
+            for field in ["instance_id", "ask_id"] {
+                if let Some(value) = metadata.get(field).and_then(safe_metadata_value) {
+                    result.insert(field.to_string(), value);
+                }
+            }
+            let mut offer = select_metadata_fields(
+                metadata
+                    .get("selected_offer")
+                    .unwrap_or(&serde_json::Value::Null),
+                &[
+                    "id",
+                    "source",
+                    "dph_total",
+                    "totalHour",
+                    "gpu_name",
+                    "gpu_name_array",
+                    "num_gpus",
+                    "gpu_ram",
+                    "geolocation",
+                    "reliability",
+                ],
+            );
+            if let Some(search) = metadata
+                .pointer("/selected_offer/search")
+                .map(|value| select_metadata_fields(value, &["totalHour"]))
+                .filter(|value| value.as_object().is_some_and(|map| !map.is_empty()))
+                && let Some(map) = offer.as_object_mut()
+            {
+                map.insert("search".to_string(), search);
+            }
+            if offer.as_object().is_some_and(|map| !map.is_empty()) {
+                result.insert("selected_offer".to_string(), offer);
+            }
+            let mut instance = select_metadata_fields(
+                metadata.get("instance").unwrap_or(&serde_json::Value::Null),
+                &["id", "status", "state", "dph_total", "totalHour"],
+            );
+            if let Some(search) = metadata
+                .pointer("/instance/search")
+                .map(|value| select_metadata_fields(value, &["totalHour"]))
+                .filter(|value| value.as_object().is_some_and(|map| !map.is_empty()))
+                && let Some(map) = instance.as_object_mut()
+            {
+                map.insert("search".to_string(), search);
+            }
+            if instance.as_object().is_some_and(|map| !map.is_empty()) {
+                result.insert("instance".to_string(), instance);
+            }
+        }
+        ExperimentRunnerBackend::Lambda => {
+            for field in ["instance_id", "instance_ids"] {
+                if let Some(value) = metadata.get(field).and_then(safe_metadata_value) {
+                    result.insert(field.to_string(), value);
+                }
+            }
+            let request = select_metadata_fields(
+                metadata
+                    .get("launch_request")
+                    .unwrap_or(&serde_json::Value::Null),
+                &[
+                    "instance_type_name",
+                    "region_name",
+                    "quantity",
+                    "ssh_key_names",
+                    "file_system_names",
+                    "hourly_cost_usd",
+                    "usd_per_hour",
+                    "price_usd_per_hour",
+                    "price_cents_per_hour",
+                ],
+            );
+            if request.as_object().is_some_and(|map| !map.is_empty()) {
+                result.insert("launch_request".to_string(), request);
+            }
+            let instance = select_metadata_fields(
+                metadata.get("instance").unwrap_or(&serde_json::Value::Null),
+                &[
+                    "id",
+                    "instance_id",
+                    "instance_type_name",
+                    "region_name",
+                    "status",
+                    "state",
+                    "hostname",
+                    "name",
+                    "public_ip",
+                    "ip",
+                    "ip_address",
+                    "private_ip",
+                    "private_ipv4",
+                    "ssh_key_names",
+                    "file_system_names",
+                    "jupyter_url",
+                    "ide_url",
+                    "hourly_cost_usd",
+                    "usd_per_hour",
+                    "price_usd_per_hour",
+                    "price_cents_per_hour",
+                ],
+            );
+            if instance.as_object().is_some_and(|map| !map.is_empty()) {
+                result.insert("instance".to_string(), instance);
+            }
+        }
+        ExperimentRunnerBackend::Ssh => {
+            for field in ["host", "pid_file"] {
+                if let Some(value) = metadata.get(field).and_then(safe_metadata_value) {
+                    result.insert(field.to_string(), value);
+                }
+            }
+        }
+        ExperimentRunnerBackend::Slurm => {
+            if let Some(value) = metadata.get("login_host").and_then(safe_metadata_value) {
+                result.insert("login_host".to_string(), value);
+            }
+        }
+        ExperimentRunnerBackend::Kubernetes => {
+            for field in ["job_name", "namespace"] {
+                if let Some(value) = metadata.get(field).and_then(safe_metadata_value) {
+                    result.insert(field.to_string(), value);
+                }
+            }
+        }
+        ExperimentRunnerBackend::GenericRemoteRunner
+        | ExperimentRunnerBackend::LocalDocker
+        | ExperimentRunnerBackend::AgentEnv => {}
+    }
+
+    if let Some(cost_estimate) = safe_cost_estimate(metadata) {
+        result.insert("cost_estimate".to_string(), cost_estimate);
+    }
+    serde_json::Value::Object(result)
+}
+
+fn validate_provider_id(label: &str, value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > MAX_PROVIDER_ID_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(format!("{label} returned an invalid provider job id."));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_numeric_provider_id(label: &str, value: &str) -> Result<String, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map(|value| value.to_string())
+        .map_err(|_| format!("{label} returned an invalid numeric provider job id."))
+}
+
+fn provider_url(base: &str, segments: &[&str]) -> Result<Url, String> {
+    let mut url = Url::parse(base).map_err(|_| "invalid built-in provider API URL".to_string())?;
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| "invalid built-in provider API URL".to_string())?;
+        for segment in segments {
+            path.push(segment);
+        }
+    }
+    Ok(url)
 }
 
 fn json_string_array(value: &serde_json::Value) -> Vec<String> {
@@ -1177,29 +1547,30 @@ fn short_launch_name(prefix: &str, auth: &ExperimentLeaseAuthentication) -> Stri
     format!("{}-{}", prefix, &auth.lease_id.simple().to_string()[..12])
 }
 
-fn parse_first_word(text: &str) -> Option<String> {
+fn parse_slurm_job_id(text: &str) -> Option<String> {
     text.split_whitespace()
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+        .rev()
+        .find(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| validate_numeric_provider_id("Slurm", value).ok())
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent(format!("ThinClaw/{}", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
+        .timeout(PROVIDER_REQUEST_TIMEOUT)
         .build()
         .map_err(|err| format!("failed to build HTTP client: {err}"))
 }
 
 async fn response_error(context: &str, response: reqwest::Response) -> String {
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if body.trim().is_empty() {
-        format!("{context}: HTTP {status}")
-    } else {
-        format!("{context}: HTTP {status} — {}", body.trim())
-    }
+    // Provider errors may echo submitted cloud-init, environment values, or the
+    // lease bootstrap command. Never reflect a remote body into durable campaign
+    // summaries or operator-visible errors.
+    format!("{context}: HTTP {status}")
 }
 
 async fn validate_runpod_credentials(api_key: &str) -> Result<String, String> {
@@ -1305,7 +1676,6 @@ fn lambda_response_instance_metadata(value: &serde_json::Value) -> serde_json::V
 
 async fn launch_lambda_instance(
     runner: &ExperimentRunnerProfile,
-    gateway_url: &str,
     auth: &ExperimentLeaseAuthentication,
     bootstrap_command: &str,
     api_key: &str,
@@ -1324,25 +1694,31 @@ async fn launch_lambda_instance(
     if !response.status().is_success() {
         return Err(response_error("Lambda launch failed", response).await);
     }
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|err| format!("failed to decode Lambda launch response: {err}"))?;
-    let instance_id = lambda_response_instance_id(&body).ok_or_else(|| {
-        "Lambda launch succeeded but response did not include an instance id.".to_string()
-    })?;
-    Ok(RunnerLaunchOutcome {
-        message: format!("Lambda instance {instance_id} launched."),
-        bootstrap_command: Some(bootstrap_command.to_string()),
-        provider_template: build_gpu_cloud_template(runner, gateway_url, auth),
-        provider_job_id: Some(instance_id.clone()),
-        provider_job_metadata: serde_json::json!({
+    let body: serde_json::Value =
+        crate::http_response::bounded_json(response, MAX_PROVIDER_RESPONSE_BYTES)
+            .await
+            .map_err(|err| format!("failed to decode Lambda launch response: {err}"))?;
+    let instance_id = validate_provider_id(
+        "Lambda launch",
+        &lambda_response_instance_id(&body).ok_or_else(|| {
+            "Lambda launch succeeded but response did not include an instance id.".to_string()
+        })?,
+    )?;
+    let provider_job_metadata = sanitize_provider_job_metadata(
+        ExperimentRunnerBackend::Lambda,
+        &serde_json::json!({
             "provider": "lambda",
             "instance_id": instance_id,
             "launch_request": payload,
             "instance": lambda_response_instance_metadata(&body),
-            "response": body,
         }),
+    );
+    Ok(RunnerLaunchOutcome {
+        message: format!("Lambda instance {instance_id} launched."),
+        bootstrap_command: None,
+        provider_template: None,
+        provider_job_id: Some(instance_id.clone()),
+        provider_job_metadata,
         auto_launched: true,
         requires_operator_action: false,
     })
@@ -1354,8 +1730,9 @@ async fn revoke_lambda_instance(
     instance_id: &str,
     _action: RemoteLaunchAction,
 ) -> Result<String, String> {
+    let instance_id = validate_provider_id("Lambda terminate", instance_id)?;
     let client = http_client()?;
-    let payload = lambda_terminate_payload(runner, instance_id);
+    let payload = lambda_terminate_payload(runner, &instance_id);
     let response = client
         .post(format!("{LAMBDA_API_BASE}/instances/terminate"))
         .bearer_auth(api_key)
@@ -1373,7 +1750,6 @@ async fn revoke_lambda_instance(
 
 async fn launch_runpod_pod(
     runner: &ExperimentRunnerProfile,
-    gateway_url: &str,
     auth: &ExperimentLeaseAuthentication,
     bootstrap_command: &str,
     api_key: &str,
@@ -1462,28 +1838,33 @@ async fn launch_runpod_pod(
     if !response.status().is_success() {
         return Err(response_error("RunPod launch failed", response).await);
     }
-    let pod: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|err| format!("failed to decode RunPod launch response: {err}"))?;
-    let pod_id = pod
-        .get("id")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            "RunPod launch succeeded but response did not include a pod id.".to_string()
-        })?
-        .to_string();
-    Ok(RunnerLaunchOutcome {
-        message: format!("RunPod pod {pod_id} launched."),
-        bootstrap_command: Some(bootstrap_command.to_string()),
-        provider_template: build_gpu_cloud_template(runner, gateway_url, auth),
-        provider_job_id: Some(pod_id.clone()),
-        provider_job_metadata: serde_json::json!({
+    let pod: serde_json::Value =
+        crate::http_response::bounded_json(response, MAX_PROVIDER_RESPONSE_BYTES)
+            .await
+            .map_err(|err| format!("failed to decode RunPod launch response: {err}"))?;
+    let pod_id = validate_provider_id(
+        "RunPod launch",
+        pod.get("id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                "RunPod launch succeeded but response did not include a pod id.".to_string()
+            })?,
+    )?;
+    let provider_job_metadata = sanitize_provider_job_metadata(
+        ExperimentRunnerBackend::Runpod,
+        &serde_json::json!({
             "provider": "runpod",
             "pod_id": pod_id,
             "launch_request": payload,
             "pod": pod,
         }),
+    );
+    Ok(RunnerLaunchOutcome {
+        message: format!("RunPod pod {pod_id} launched."),
+        bootstrap_command: None,
+        provider_template: None,
+        provider_job_id: Some(pod_id.clone()),
+        provider_job_metadata,
         auto_launched: true,
         requires_operator_action: false,
     })
@@ -1494,17 +1875,18 @@ async fn revoke_runpod_pod(
     pod_id: &str,
     action: RemoteLaunchAction,
 ) -> Result<String, String> {
+    let pod_id = validate_provider_id("RunPod revoke", pod_id)?;
     let client = http_client()?;
     let (request, label) = match action {
         RemoteLaunchAction::Cancel => (
             client
-                .delete(format!("{RUNPOD_API_BASE}/pods/{pod_id}"))
+                .delete(provider_url(RUNPOD_API_BASE, &["pods", &pod_id])?)
                 .bearer_auth(api_key),
             "RunPod pod deleted",
         ),
         RemoteLaunchAction::Pause | RemoteLaunchAction::Reissue => (
             client
-                .post(format!("{RUNPOD_API_BASE}/pods/{pod_id}/stop"))
+                .post(provider_url(RUNPOD_API_BASE, &["pods", &pod_id, "stop"])?)
                 .bearer_auth(api_key),
             "RunPod pod stopped",
         ),
@@ -1578,10 +1960,10 @@ async fn select_vast_offer(
     if !response.status().is_success() {
         return Err(response_error("Vast.ai offer search failed", response).await);
     }
-    let result: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|err| format!("failed to decode Vast.ai offer search response: {err}"))?;
+    let result: serde_json::Value =
+        crate::http_response::bounded_json(response, MAX_PROVIDER_RESPONSE_BYTES)
+            .await
+            .map_err(|err| format!("failed to decode Vast.ai offer search response: {err}"))?;
     let offer = result
         .get("offers")
         .and_then(|value| value.as_array())
@@ -1600,7 +1982,6 @@ async fn select_vast_offer(
 
 async fn launch_vast_instance(
     runner: &ExperimentRunnerProfile,
-    gateway_url: &str,
     auth: &ExperimentLeaseAuthentication,
     bootstrap_command: &str,
     api_key: &str,
@@ -1663,31 +2044,37 @@ async fn launch_vast_instance(
     if !response.status().is_success() {
         return Err(response_error("Vast.ai launch failed", response).await);
     }
-    let instance: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|err| format!("failed to decode Vast.ai launch response: {err}"))?;
-    let instance_id = instance
-        .get("new_contract")
-        .and_then(value_to_u64)
-        .map(|value| value.to_string())
-        .or_else(|| instance.get("instance_id").and_then(value_to_string))
-        .ok_or_else(|| {
-            "Vast.ai launch succeeded but response did not include an instance id.".to_string()
-        })?;
-    Ok(RunnerLaunchOutcome {
-        message: format!("Vast.ai instance {instance_id} launched."),
-        bootstrap_command: Some(bootstrap_command.to_string()),
-        provider_template: build_gpu_cloud_template(runner, gateway_url, auth),
-        provider_job_id: Some(instance_id.clone()),
-        provider_job_metadata: serde_json::json!({
+    let instance: serde_json::Value =
+        crate::http_response::bounded_json(response, MAX_PROVIDER_RESPONSE_BYTES)
+            .await
+            .map_err(|err| format!("failed to decode Vast.ai launch response: {err}"))?;
+    let instance_id = validate_numeric_provider_id(
+        "Vast.ai launch",
+        &instance
+            .get("new_contract")
+            .and_then(value_to_u64)
+            .map(|value| value.to_string())
+            .or_else(|| instance.get("instance_id").and_then(value_to_string))
+            .ok_or_else(|| {
+                "Vast.ai launch succeeded but response did not include an instance id.".to_string()
+            })?,
+    )?;
+    let provider_job_metadata = sanitize_provider_job_metadata(
+        ExperimentRunnerBackend::Vast,
+        &serde_json::json!({
             "provider": "vast",
             "instance_id": instance_id,
             "ask_id": ask_id,
             "selected_offer": selected_offer,
-            "launch_request": payload,
             "instance": instance,
         }),
+    );
+    Ok(RunnerLaunchOutcome {
+        message: format!("Vast.ai instance {instance_id} launched."),
+        bootstrap_command: None,
+        provider_template: None,
+        provider_job_id: Some(instance_id.clone()),
+        provider_job_metadata,
         auto_launched: true,
         requires_operator_action: false,
     })
@@ -1698,16 +2085,23 @@ async fn revoke_vast_instance(
     instance_id: &str,
     action: RemoteLaunchAction,
 ) -> Result<String, String> {
+    let instance_id = validate_numeric_provider_id("Vast.ai revoke", instance_id)?;
     let client = http_client()?;
     let response = match action {
         RemoteLaunchAction::Cancel => client
-            .delete(format!("{VAST_API_BASE}/api/v0/instances/{instance_id}/"))
+            .delete(provider_url(
+                VAST_API_BASE,
+                &["api", "v0", "instances", &instance_id, ""],
+            )?)
             .bearer_auth(api_key)
             .send()
             .await
             .map_err(|err| format!("Vast.ai destroy request failed: {err}"))?,
         RemoteLaunchAction::Pause | RemoteLaunchAction::Reissue => client
-            .put(format!("{VAST_API_BASE}/api/v0/instances/{instance_id}/"))
+            .put(provider_url(
+                VAST_API_BASE,
+                &["api", "v0", "instances", &instance_id, ""],
+            )?)
             .bearer_auth(api_key)
             .json(&serde_json::json!({ "state": "stopped" }))
             .send()
@@ -1737,7 +2131,7 @@ fn kubernetes_job_manifest(
     for (key, value) in env {
         env_lines.push_str(&format!(
             "        - name: {}\n          value: {}\n",
-            key,
+            serde_json::to_string(&key).unwrap_or_else(|_| "\"\"".to_string()),
             serde_json::to_string(&value).unwrap_or_else(|_| "\"\"".to_string())
         ));
     }
@@ -1747,6 +2141,9 @@ fn kubernetes_job_manifest(
         .unwrap_or(1);
     format!(
         "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: {job_name}\n  namespace: {namespace}\nspec:\n  template:\n    spec:\n      restartPolicy: Never\n      containers:\n      - name: runner\n        image: {image}\n        command:\n        - sh\n        - -lc\n        - {command}\n        env:\n{env_lines}        resources:\n          limits:\n            nvidia.com/gpu: {gpu_count}\n",
+        job_name = serde_json::to_string(job_name).unwrap_or_else(|_| "\"\"".to_string()),
+        namespace = serde_json::to_string(namespace).unwrap_or_else(|_| "\"\"".to_string()),
+        image = serde_json::to_string(image).unwrap_or_else(|_| "\"\"".to_string()),
         command = serde_json::to_string(bootstrap_command).unwrap_or_else(|_| "\"\"".to_string())
     )
 }
@@ -1782,6 +2179,7 @@ mod tests {
     fn runner_profile(backend: ExperimentRunnerBackend) -> ExperimentRunnerProfile {
         ExperimentRunnerProfile {
             id: Uuid::new_v4(),
+            owner_user_id: "default".to_string(),
             name: "runner".to_string(),
             backend,
             backend_config: serde_json::json!({}),
@@ -1868,5 +2266,122 @@ mod tests {
                 .message
                 .contains("Invalid AgentEnv benchmark config")
         );
+    }
+
+    fn lease_auth() -> ExperimentLeaseAuthentication {
+        ExperimentLeaseAuthentication {
+            lease_id: Uuid::new_v4(),
+            token: "exp_0123456789ab_0123456789abcdef0123456789abcdef".to_string(),
+        }
+    }
+
+    #[test]
+    fn gateway_urls_fail_closed_before_building_bootstrap_commands() {
+        let auth = lease_auth();
+        assert!(build_bootstrap_command("https://gateway.example/base", &auth).is_ok());
+        assert!(build_bootstrap_command("http://127.0.0.1:3001", &auth).is_ok());
+        for invalid in [
+            "",
+            "http://gateway.example",
+            "https://user:pass@gateway.example",
+            "https://gateway.example/?token=secret",
+            "https://gateway.example/#fragment",
+            "file:///tmp/gateway",
+        ] {
+            assert!(
+                build_bootstrap_command(invalid, &auth).is_err(),
+                "accepted {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_command_shell_quotes_every_variable_argument() {
+        let auth = ExperimentLeaseAuthentication {
+            lease_id: Uuid::new_v4(),
+            token: "safe'quoted".to_string(),
+        };
+        let command = build_bootstrap_command("https://gateway.example/base", &auth).unwrap();
+        assert!(command.contains("--gateway-url 'https://gateway.example/base'"));
+        assert!(command.contains("--token 'safe'\"'\"'quoted'"));
+    }
+
+    #[test]
+    fn durable_provider_metadata_excludes_bootstrap_env_and_provider_echoes() {
+        let token = "exp_0123456789ab_0123456789abcdef0123456789abcdef";
+        let raw = serde_json::json!({
+            "provider": "runpod",
+            "pod_id": "pod-123",
+            "launch_request": {
+                "gpuTypeIds": ["NVIDIA H100"],
+                "dataCenterIds": ["EU-1"],
+                "dockerStartCmd": [format!("thinclaw --token {token}")],
+                "env": { "API_KEY": "secret" }
+            },
+            "pod": {
+                "id": "pod-123",
+                "status": "RUNNING",
+                "costPerHr": 1.25,
+                "echo": token
+            },
+            "response": { "request": format!("--token {token}") }
+        });
+        let sanitized = sanitize_provider_job_metadata(ExperimentRunnerBackend::Runpod, &raw);
+        let encoded = sanitized.to_string();
+        assert!(!encoded.contains(token));
+        assert!(!encoded.contains("dockerStartCmd"));
+        assert!(!encoded.contains("API_KEY"));
+        assert!(!encoded.contains("response"));
+        assert_eq!(sanitized["pod_id"], "pod-123");
+        assert_eq!(sanitized["pod"]["costPerHr"], 1.25);
+        assert_eq!(sanitized["launch_request"]["gpuTypeIds"][0], "NVIDIA H100");
+    }
+
+    #[test]
+    fn provider_ids_and_slurm_output_are_strictly_parsed() {
+        assert_eq!(
+            validate_provider_id("RunPod", "pod_123-abc").unwrap(),
+            "pod_123-abc"
+        );
+        assert!(validate_provider_id("RunPod", "../../pods/other").is_err());
+        assert!(validate_provider_id("RunPod", "pod\nother").is_err());
+        assert_eq!(
+            parse_slurm_job_id("Submitted batch job 1842\n").as_deref(),
+            Some("1842")
+        );
+        assert_eq!(parse_slurm_job_id("submission accepted"), None);
+    }
+
+    #[test]
+    fn kubernetes_manifest_quotes_configured_yaml_scalars() {
+        let manifest = kubernetes_job_manifest(
+            "job\nkind: Secret",
+            "namespace\nmetadata: injected",
+            "image:latest\nprivileged: true",
+            "thinclaw experiment-runner",
+            BTreeMap::from([("KEY\nvalue: injected".to_string(), "value".to_string())]),
+            &serde_json::json!({ "gpu_count": 1 }),
+        );
+        assert!(!manifest.contains("\nkind: Secret\n"));
+        assert!(!manifest.contains("\nprivileged: true\n"));
+        assert!(manifest.contains("job\\nkind: Secret"));
+        assert!(manifest.contains("image:latest\\nprivileged: true"));
+    }
+
+    #[test]
+    fn launch_outcome_debug_never_renders_bootstrap_material() {
+        let token = lease_auth().token;
+        let outcome = RunnerLaunchOutcome {
+            message: "manual".to_string(),
+            bootstrap_command: Some(format!("run --token {token}")),
+            provider_template: Some(serde_json::json!({ "token": token })),
+            provider_job_id: None,
+            provider_job_metadata: serde_json::json!({ "echo": token }),
+            auto_launched: false,
+            requires_operator_action: true,
+        };
+        let debug = format!("{outcome:?}");
+        assert!(!debug.contains(&token));
+        assert!(debug.contains("[REDACTED]"));
     }
 }

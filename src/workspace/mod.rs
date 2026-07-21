@@ -58,8 +58,10 @@ pub use thinclaw_workspace::BedrockEmbeddings;
 #[cfg(feature = "postgres")]
 pub use thinclaw_workspace::Repository;
 pub use thinclaw_workspace::{
-    ChunkConfig, ChunkingStrategy, EmbeddingProvider, MemoryChunk, MemoryDocument, MockEmbeddings,
-    OllamaEmbeddings, OpenAiEmbeddings, RankedResult, SearchConfig, SearchResult, Workspace,
-    WorkspaceBackend, WorkspaceEntry, WorkspaceStore, apply_temporal_decay, chunk, chunk_document,
-    expand_query_keywords, mmr_rerank, paths, reciprocal_rank_fusion,
+    AuthorizedWorkspace, ChunkConfig, ChunkingStrategy, EmbeddingProvider, MemoryChunk,
+    MemoryDocument, MockEmbeddings, OllamaEmbeddings, OpenAiEmbeddings, RankedResult, SearchConfig,
+    SearchResult, Workspace, WorkspaceAccess, WorkspaceAccessRole, WorkspaceBackend,
+    WorkspaceEntry, WorkspaceOperation, WorkspaceStore, apply_temporal_decay, chunk,
+    chunk_document, expand_query_keywords, is_control_plane_path, mmr_rerank, paths,
+    reciprocal_rank_fusion,
 };

@@ -233,7 +233,7 @@ function SftpConfigForm({
     return (
         <form onSubmit={handleSubmit} className="space-y-4">
             <InputField label="Host:Port *" value={endpoint} onChange={setEndpoint}
-                placeholder="sftp://server.example.com:22" required />
+                placeholder="ssh://server.example.com:22" required />
             <InputField label="SSH Username" value={username} onChange={setUsername} placeholder="deploy" />
             <SecretField label="SSH Key Path" value={keyOrPassword} onChange={setKeyOrPassword}
                 show={showKey} onToggle={() => setShowKey(!showKey)} placeholder="~/.ssh/id_rsa"
@@ -262,7 +262,7 @@ function OAuthProviderCard({
     const handleSignIn = async () => {
         setLoading(true);
         try {
-            // Step 1: Start OAuth flow — get auth URL + code verifier
+            // Step 1: Start a backend-owned OAuth callback flow.
             const startResult = await invoke<OAuthStartResult>('cloud_oauth_start', { provider });
 
             // Step 2: Open auth URL in system browser
@@ -274,24 +274,13 @@ function OAuthProviderCard({
                 toast.info('Auth URL copied to clipboard. Please open it in your browser.');
             }
 
-            // Step 3: Prompt user for authorization code
-            // In production, this would use a localhost redirect listener.
-            // For now, use a prompt dialog.
-            const code = window.prompt(
-                `After authorizing in your browser, paste the authorization code here:`
-            );
+            toast.info(`Finish signing in with ${providerName} in your browser.`);
 
-            if (!code?.trim()) {
-                toast.info('Sign-in cancelled');
-                setLoading(false);
-                return;
-            }
-
-            // Step 4: Exchange code for tokens + test connection
+            // Step 3: The backend validates the loopback callback, exchanges
+            // the one-time code, and tests the provider connection.
             const result = await invoke<ConnectionTestResult>('cloud_oauth_complete', {
                 provider,
-                code: code.trim(),
-                codeVerifier: startResult.code_verifier,
+                flowId: startResult.flow_id,
             });
 
             onResult(result);
@@ -705,7 +694,11 @@ export function StorageTab() {
                                 </h2>
                                 <p className="text-sm text-muted-foreground">
                                     {isCloud
-                                        ? `Connected to ${status?.provider_name ?? 'cloud provider'}. Data is encrypted and synced.`
+                                        ? status?.sync_error
+                                            ? `Connected to ${status?.provider_name ?? 'cloud provider'}. Sync needs attention.`
+                                            : status?.sync_active
+                                                ? `Connected to ${status?.provider_name ?? 'cloud provider'}. Data is encrypted and syncing.`
+                                                : `Connected to ${status?.provider_name ?? 'cloud provider'}. Sync is inactive.`
                                         : 'All data stored on this device. Private and offline-capable.'
                                     }
                                 </p>
@@ -714,9 +707,14 @@ export function StorageTab() {
 
                         <div className="flex items-center gap-3">
                             {isCloud && (
-                                <div className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-full text-[10px] font-bold uppercase tracking-wider border border-emerald-500/20">
-                                    <Lock className="w-3 h-3" />
-                                    End-to-End Encrypted
+                                <div className={cn(
+                                    'flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider border',
+                                    status?.sync_error
+                                        ? 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20'
+                                        : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
+                                )}>
+                                    {status?.sync_error ? <XCircle className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
+                                    {status?.sync_error ? 'Sync Error' : 'End-to-End Encrypted'}
                                 </div>
                             )}
                             <button
@@ -753,6 +751,11 @@ export function StorageTab() {
                             </div>
                         )}
                     </div>
+                    {isCloud && status?.sync_error && (
+                        <div className="rounded-xl border border-rose-500/20 bg-rose-500/5 px-4 py-3 text-xs text-rose-600 dark:text-rose-400">
+                            {status.sync_error}
+                        </div>
+                    )}
                 </div>
             </div>
 

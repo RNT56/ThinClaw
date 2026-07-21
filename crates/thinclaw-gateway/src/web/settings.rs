@@ -15,6 +15,12 @@ pub const TELEGRAM_CHANNEL_NAME: &str = "telegram";
 pub const TELEGRAM_AUTO_TRANSPORT_MODE: &str = "auto";
 pub const TELEGRAM_SUBAGENT_SESSION_MODE_FIELD: &str = "subagent_session_mode";
 pub const TELEGRAM_DEFAULT_SUBAGENT_SESSION_MODE: &str = "temp_topic";
+const MAX_SETTING_KEY_BYTES: usize = 2_048;
+const MAX_SETTING_KEY_COMPONENTS: usize = 64;
+const MAX_SETTING_KEY_COMPONENT_BYTES: usize = 256;
+const MAX_SETTING_VALUE_BYTES: usize = 1024 * 1024;
+const MAX_SETTING_VALUE_DEPTH: usize = 64;
+const MAX_SETTING_VALUE_NODES: usize = 100_000;
 
 pub fn settings_store_unavailable_status() -> StatusCode {
     SETTINGS_STORE_UNAVAILABLE_STATUS
@@ -26,6 +32,85 @@ pub fn setting_not_found_status() -> StatusCode {
 
 pub fn sensitive_setting_write_forbidden_status() -> StatusCode {
     SENSITIVE_SETTING_WRITE_FORBIDDEN_STATUS
+}
+
+pub fn validate_settings_key(key: &str) -> Result<(), StatusCode> {
+    let mut component_count = 0usize;
+    if key.trim().is_empty() || key.len() > MAX_SETTING_KEY_BYTES || key.contains('\0') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    for component in key.split('.') {
+        component_count = component_count.saturating_add(1);
+        if component.is_empty()
+            || component.len() > MAX_SETTING_KEY_COMPONENT_BYTES
+            || component.chars().any(char::is_control)
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    if component_count > MAX_SETTING_KEY_COMPONENTS {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
+/// Bound a setting before it reaches either database backend. This is kept in
+/// the shared gateway crate so HTTP imports and non-HTTP settings ports cannot
+/// diverge on malformed keys, deep JSON, or oversized values.
+pub fn validate_setting_entry(key: &str, value: &serde_json::Value) -> Result<(), StatusCode> {
+    validate_settings_key(key)?;
+
+    let mut stack = vec![(value, 0usize)];
+    let mut nodes = 0usize;
+    let mut text_bytes = 0usize;
+    while let Some((current, depth)) = stack.pop() {
+        if depth > MAX_SETTING_VALUE_DEPTH {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        nodes = nodes.saturating_add(1);
+        if nodes > MAX_SETTING_VALUE_NODES {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        match current {
+            serde_json::Value::String(text) => {
+                if text.contains('\0') {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                text_bytes = text_bytes.saturating_add(text.len());
+            }
+            serde_json::Value::Array(values) => {
+                if values.len() > MAX_SETTING_VALUE_NODES.saturating_sub(nodes) {
+                    return Err(StatusCode::PAYLOAD_TOO_LARGE);
+                }
+                stack.extend(values.iter().map(|value| (value, depth.saturating_add(1))));
+            }
+            serde_json::Value::Object(values) => {
+                if values.len() > MAX_SETTING_VALUE_NODES.saturating_sub(nodes) {
+                    return Err(StatusCode::PAYLOAD_TOO_LARGE);
+                }
+                for (nested_key, nested_value) in values {
+                    if nested_key.contains('\0') {
+                        return Err(StatusCode::BAD_REQUEST);
+                    }
+                    text_bytes = text_bytes.saturating_add(nested_key.len());
+                    stack.push((nested_value, depth.saturating_add(1)));
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+        }
+        if text_bytes > MAX_SETTING_VALUE_BYTES {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+    }
+
+    let encoded_len = serde_json::to_vec(value)
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .len();
+    if encoded_len > MAX_SETTING_VALUE_BYTES {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,8 +152,12 @@ pub fn settings_export_response_from_map(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeCodeSettingsUpdate {
-    pub model: Option<String>,
-    pub max_turns: Option<u32>,
+    /// `None` means this setting was not part of the update. `Some(None)`
+    /// resets it to the process-start default.
+    pub model: Option<Option<String>>,
+    /// `None` means this setting was not part of the update. `Some(None)`
+    /// resets it to the process-start default.
+    pub max_turns: Option<Option<u32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,18 +167,21 @@ pub struct ChannelStreamModeUpdate {
 }
 
 pub fn is_sensitive_settings_key(key: &str) -> bool {
-    matches!(
-        key,
-        "database_url"
-            | "libsql_url"
-            | "tunnel.ngrok_token"
-            | "tunnel.cf_token"
-            | "channels.discord_bot_token"
-            | "channels.slack_bot_token"
-            | "channels.slack_app_token"
-            | "channels.gateway_auth_token"
-            | "channels.nostr_private_key"
-    )
+    key.starts_with("secret.")
+        || matches!(
+            key,
+            "database_url"
+                | "libsql_url"
+                | "tunnel.ngrok_token"
+                | "tunnel.cf_token"
+                | "channels.discord_bot_token"
+                | "channels.slack_bot_token"
+                | "channels.slack_app_token"
+                | "channels.bluebubbles_password"
+                | "channels.gateway_auth_token"
+                | "channels.gateway_principals"
+                | "channels.nostr_private_key"
+        )
 }
 
 pub fn redact_setting_value(key: &str, value: serde_json::Value) -> serde_json::Value {
@@ -147,13 +239,13 @@ pub fn claude_code_settings_update(
     value: &serde_json::Value,
 ) -> Option<ClaudeCodeSettingsUpdate> {
     match key {
-        "claude_code_model" => value.as_str().map(|model| ClaudeCodeSettingsUpdate {
-            model: Some(model.to_string()),
+        "claude_code_model" => Some(ClaudeCodeSettingsUpdate {
+            model: Some(value.as_str().map(str::to_string)),
             max_turns: None,
         }),
-        "claude_code_max_turns" => value.as_u64().map(|max_turns| ClaudeCodeSettingsUpdate {
+        "claude_code_max_turns" => Some(ClaudeCodeSettingsUpdate {
             model: None,
-            max_turns: Some(max_turns as u32),
+            max_turns: Some(value.as_u64().and_then(|value| u32::try_from(value).ok())),
         }),
         _ => None,
     }
@@ -163,6 +255,42 @@ pub fn codex_code_model_update(key: &str, value: &serde_json::Value) -> Option<O
     match key {
         "codex_code_model" => Some(value.as_str().map(str::to_string)),
         _ => None,
+    }
+}
+
+/// Validate persisted settings that are consumed as sandbox process command
+/// arguments. Keeping this check at the write boundary prevents malformed or
+/// oversized values from reaching either the live runtime cache or a later
+/// process restart.
+pub fn validate_sandbox_code_setting(
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), StatusCode> {
+    const MAX_MODEL_BYTES: usize = 256;
+    const MAX_TURNS: u64 = 1_000;
+
+    let valid_model = |model: &str| {
+        !model.trim().is_empty()
+            && model.len() <= MAX_MODEL_BYTES
+            && !model.chars().any(char::is_control)
+    };
+
+    match key {
+        "claude_code_model" | "codex_code_model" => match value {
+            serde_json::Value::Null => Ok(()),
+            serde_json::Value::String(model) if valid_model(model) => Ok(()),
+            _ => Err(StatusCode::BAD_REQUEST),
+        },
+        "claude_code_max_turns" => match value {
+            serde_json::Value::Null => Ok(()),
+            serde_json::Value::Number(number) => number
+                .as_u64()
+                .filter(|turns| (1..=MAX_TURNS).contains(turns))
+                .map(|_| ())
+                .ok_or(StatusCode::BAD_REQUEST),
+            _ => Err(StatusCode::BAD_REQUEST),
+        },
+        _ => Ok(()),
     }
 }
 
@@ -281,6 +409,9 @@ mod tests {
     #[test]
     fn sensitive_settings_are_redacted() {
         assert!(is_sensitive_settings_key("channels.gateway_auth_token"));
+        assert!(is_sensitive_settings_key("channels.gateway_principals"));
+        assert!(is_sensitive_settings_key("channels.bluebubbles_password"));
+        assert!(is_sensitive_settings_key("secret.OPENAI_API_KEY"));
         assert_eq!(
             redact_setting_value(
                 "channels.gateway_auth_token",
@@ -290,10 +421,39 @@ mod tests {
         );
         assert_eq!(
             redact_setting_value(
+                "channels.gateway_principals",
+                serde_json::json!([
+                    {"token": "principal-secret", "principal_id": "alice", "role": "operator"}
+                ])
+            ),
+            serde_json::Value::String(REDACTED_SETTING_VALUE.to_string())
+        );
+        assert_eq!(
+            redact_setting_value(
                 "display_name",
                 serde_json::Value::String("ThinClaw".to_string())
             ),
             serde_json::Value::String("ThinClaw".to_string())
+        );
+    }
+
+    #[test]
+    fn setting_entry_validation_rejects_malformed_and_oversized_values() {
+        assert!(validate_setting_entry("agent.name", &serde_json::json!("ok")).is_ok());
+        assert_eq!(
+            validate_setting_entry("agent..name", &serde_json::json!("bad")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            validate_setting_entry("agent.name", &serde_json::json!("\0bad")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            validate_setting_entry(
+                "agent.name",
+                &serde_json::Value::String("x".repeat(MAX_SETTING_VALUE_BYTES + 1))
+            ),
+            Err(StatusCode::PAYLOAD_TOO_LARGE)
         );
     }
 
@@ -374,12 +534,19 @@ mod tests {
                 serde_json::Value::String("secret".to_string()),
             ),
             (
+                "channels.gateway_principals".to_string(),
+                serde_json::json!([
+                    {"token": "principal-secret", "principal_id": "alice", "role": "operator"}
+                ]),
+            ),
+            (
                 "selected_model".to_string(),
                 serde_json::Value::String("gpt-test".to_string()),
             ),
         ]));
 
         assert!(!sanitized.contains_key("channels.slack_bot_token"));
+        assert!(!sanitized.contains_key("channels.gateway_principals"));
         assert_eq!(
             sanitized.get("selected_model"),
             Some(&serde_json::Value::String("gpt-test".to_string()))
@@ -438,7 +605,7 @@ mod tests {
                 &serde_json::Value::String("claude-test".to_string())
             ),
             Some(ClaudeCodeSettingsUpdate {
-                model: Some("claude-test".to_string()),
+                model: Some(Some("claude-test".to_string())),
                 max_turns: None
             })
         );
@@ -446,7 +613,14 @@ mod tests {
             claude_code_settings_update("claude_code_max_turns", &serde_json::json!(12)),
             Some(ClaudeCodeSettingsUpdate {
                 model: None,
-                max_turns: Some(12)
+                max_turns: Some(Some(12))
+            })
+        );
+        assert_eq!(
+            claude_code_settings_update("claude_code_model", &serde_json::Value::Null),
+            Some(ClaudeCodeSettingsUpdate {
+                model: Some(None),
+                max_turns: None,
             })
         );
         assert_eq!(
@@ -459,6 +633,34 @@ mod tests {
         assert_eq!(
             codex_code_model_update("codex_code_model", &serde_json::Value::Null),
             Some(None)
+        );
+    }
+
+    #[test]
+    fn sandbox_code_settings_are_validated_before_persistence() {
+        assert_eq!(
+            validate_sandbox_code_setting("claude_code_model", &serde_json::json!("claude-test")),
+            Ok(())
+        );
+        assert_eq!(
+            validate_sandbox_code_setting("claude_code_model", &serde_json::json!("\n")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            validate_sandbox_code_setting("codex_code_model", &serde_json::json!(42)),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            validate_sandbox_code_setting("claude_code_max_turns", &serde_json::json!(0)),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            validate_sandbox_code_setting("claude_code_max_turns", &serde_json::json!(1001)),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            validate_sandbox_code_setting("claude_code_max_turns", &serde_json::Value::Null),
+            Ok(())
         );
     }
 

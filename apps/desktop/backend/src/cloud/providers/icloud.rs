@@ -27,15 +27,20 @@
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info};
 
-use super::super::provider::{CloudEntry, CloudError, CloudProvider, CloudStatus};
+use super::super::provider::{
+    validate_object_key, validate_object_prefix, CloudEntry, CloudError, CloudProvider, CloudStatus,
+};
 
 /// Native iCloud container entitlement work is deferred for the alpha.
 const ICLOUD_CONTAINER_ID: &str = "iCloud~com~thinclaw~desktop";
 const LEGACY_ICLOUD_CONTAINER_ID: &str = "iCloud~com~scrappy~app";
 const ICLOUD_FOLDER: &str = "ThinClaw Desktop";
 const LEGACY_ICLOUD_FOLDER: &str = "Scrappy";
+const MAX_LIST_ENTRIES: usize = 100_000;
+const MAX_DIRECTORY_DEPTH: usize = 256;
 
 /// iCloud Drive storage provider.
 ///
@@ -106,12 +111,15 @@ impl ICloudProvider {
     }
 
     /// Resolve a cloud key to a local file path.
-    fn key_to_path(&self, key: &str) -> PathBuf {
-        self.container_dir.join(key)
+    fn key_to_path(&self, key: &str) -> Result<PathBuf, CloudError> {
+        validated_path_in_root(&self.container_dir, key)
     }
 
-    fn legacy_key_to_path(&self, key: &str) -> Option<PathBuf> {
-        self.legacy_dir.as_ref().map(|dir| dir.join(key))
+    fn legacy_key_to_path(&self, key: &str) -> Result<Option<PathBuf>, CloudError> {
+        self.legacy_dir
+            .as_ref()
+            .map(|dir| validated_path_in_root(dir, key))
+            .transpose()
     }
 }
 
@@ -146,7 +154,7 @@ impl CloudProvider for ICloudProvider {
     }
 
     async fn put(&self, key: &str, data: &[u8]) -> Result<(), CloudError> {
-        let path = self.key_to_path(key);
+        let path = self.key_to_path(key)?;
         debug!(
             "[cloud/icloud] PUT {} ({} bytes) → {}",
             key,
@@ -159,35 +167,41 @@ impl CloudProvider for ICloudProvider {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 CloudError::UploadFailed(format!("mkdir '{}': {}", parent.display(), e))
             })?;
+            // Re-resolve after directory creation so an existing symlink in
+            // any newly visible component cannot redirect the write.
+            let checked = self.key_to_path(key)?;
+            if checked != path {
+                return Err(CloudError::InvalidObjectPath(
+                    "object path changed during upload".to_string(),
+                ));
+            }
         }
 
-        tokio::fs::write(&path, data)
-            .await
-            .map_err(|e| CloudError::UploadFailed(format!("write '{}': {}", path.display(), e)))?;
+        atomic_write(&path, data).await?;
 
         Ok(())
     }
 
-    async fn get(&self, key: &str) -> Result<Vec<u8>, CloudError> {
-        let path = self.key_to_path(key);
+    async fn get_bounded(&self, key: &str, max_bytes: usize) -> Result<Vec<u8>, CloudError> {
+        let path = self.key_to_path(key)?;
         debug!("[cloud/icloud] GET {} ← {}", key, path.display());
 
-        if path.exists() {
-            return tokio::fs::read(&path).await.map_err(|e| {
-                CloudError::DownloadFailed(format!("read '{}': {}", path.display(), e))
-            });
+        match read_file_bounded(&path, max_bytes).await {
+            Ok(data) => return Ok(data),
+            Err(CloudError::NotFound(_)) => {}
+            Err(error) => return Err(error),
         }
 
-        if let Some(legacy_path) = self.legacy_key_to_path(key) {
-            if legacy_path.exists() {
-                debug!(
-                    "[cloud/icloud] GET {} falling back to legacy path {}",
-                    key,
-                    legacy_path.display()
-                );
-                return tokio::fs::read(&legacy_path).await.map_err(|e| {
-                    CloudError::DownloadFailed(format!("read '{}': {}", legacy_path.display(), e))
-                });
+        if let Some(legacy_path) = self.legacy_key_to_path(key)? {
+            debug!(
+                "[cloud/icloud] GET {} falling back to legacy path {}",
+                key,
+                legacy_path.display()
+            );
+            match read_file_bounded(&legacy_path, max_bytes).await {
+                Ok(data) => return Ok(data),
+                Err(CloudError::NotFound(_)) => {}
+                Err(error) => return Err(error),
             }
         }
 
@@ -198,20 +212,30 @@ impl CloudProvider for ICloudProvider {
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudError> {
-        let path = self.key_to_path(key);
+        let path = self.key_to_path(key)?;
         debug!("[cloud/icloud] DELETE {} → {}", key, path.display());
 
-        if path.exists() {
-            tokio::fs::remove_file(&path).await.map_err(|e| {
-                CloudError::DeleteFailed(format!("delete '{}': {}", path.display(), e))
-            })?;
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(CloudError::InvalidObjectPath(
+                    "delete target is not a regular file".to_string(),
+                ));
+            }
+            Ok(_) => {
+                tokio::fs::remove_file(&path).await.map_err(|e| {
+                    CloudError::DeleteFailed(format!("delete '{}': {}", path.display(), e))
+                })?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(CloudError::Io(error)),
         }
 
         Ok(())
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<CloudEntry>, CloudError> {
-        let prefix_path = self.container_dir.join(prefix);
+        validate_object_prefix(prefix)?;
+        let prefix_path = validated_prefix_path(&self.container_dir, prefix)?;
         debug!(
             "[cloud/icloud] LIST prefix={} → {}",
             prefix,
@@ -221,11 +245,11 @@ impl CloudProvider for ICloudProvider {
         let mut entries = Vec::new();
 
         if prefix_path.exists() {
-            collect_entries_recursive(&prefix_path, &self.container_dir, &mut entries).await?;
+            collect_entries_recursive(&prefix_path, &self.container_dir, &mut entries, 0).await?;
         }
 
         if let Some(legacy_dir) = &self.legacy_dir {
-            let legacy_prefix_path = legacy_dir.join(prefix);
+            let legacy_prefix_path = validated_prefix_path(legacy_dir, prefix)?;
             if legacy_prefix_path.exists() {
                 debug!(
                     "[cloud/icloud] LIST prefix={} includes legacy path {}",
@@ -233,7 +257,7 @@ impl CloudProvider for ICloudProvider {
                     legacy_prefix_path.display()
                 );
                 let mut legacy_entries = Vec::new();
-                collect_entries_recursive(&legacy_prefix_path, legacy_dir, &mut legacy_entries)
+                collect_entries_recursive(&legacy_prefix_path, legacy_dir, &mut legacy_entries, 0)
                     .await?;
                 merge_legacy_entries(&mut entries, legacy_entries);
             }
@@ -243,13 +267,13 @@ impl CloudProvider for ICloudProvider {
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudError> {
-        if self.key_to_path(key).exists() {
+        if is_regular_file(&self.key_to_path(key)?).await? {
             return Ok(true);
         }
-        Ok(self
-            .legacy_key_to_path(key)
-            .map(|path| path.exists())
-            .unwrap_or(false))
+        match self.legacy_key_to_path(key)? {
+            Some(path) => is_regular_file(&path).await,
+            None => Ok(false),
+        }
     }
 
     async fn usage(&self) -> Result<u64, CloudError> {
@@ -263,6 +287,145 @@ impl CloudProvider for ICloudProvider {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+fn validated_path_in_root(root: &Path, key: &str) -> Result<PathBuf, CloudError> {
+    validate_object_key(key)?;
+    validate_root(root)?;
+    let mut path = root.to_path_buf();
+    for segment in key.split('/') {
+        path.push(segment);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CloudError::InvalidObjectPath(
+                    "iCloud object paths cannot traverse symlinks".to_string(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(CloudError::Io(error)),
+        }
+    }
+    Ok(path)
+}
+
+fn validated_prefix_path(root: &Path, prefix: &str) -> Result<PathBuf, CloudError> {
+    validate_object_prefix(prefix)?;
+    if prefix.is_empty() {
+        validate_root(root)?;
+        return Ok(root.to_path_buf());
+    }
+    validated_path_in_root(root, prefix.trim_end_matches('/'))
+}
+
+fn validate_root(root: &Path) -> Result<(), CloudError> {
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(CloudError::InvalidObjectPath(
+                "iCloud storage root is not a real directory".to_string(),
+            ))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CloudError::Io(error)),
+    }
+}
+
+async fn read_file_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, CloudError> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CloudError::NotFound(format!(
+                "iCloud object not found: '{}'",
+                path.display()
+            )));
+        }
+        Err(error) => return Err(CloudError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(CloudError::InvalidObjectPath(
+            "iCloud object is not a regular file".to_string(),
+        ));
+    }
+    if metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+        return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+    }
+
+    let file = tokio::fs::File::open(path).await.map_err(|error| {
+        CloudError::DownloadFailed(format!("read '{}': {error}", path.display()))
+    })?;
+    let read_limit = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut limited = file.take(read_limit);
+    let mut data = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(max_bytes)
+            .min(max_bytes),
+    );
+    limited.read_to_end(&mut data).await.map_err(|error| {
+        CloudError::DownloadFailed(format!("read '{}': {error}", path.display()))
+    })?;
+    if data.len() > max_bytes {
+        return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+    }
+    Ok(data)
+}
+
+async fn atomic_write(path: &Path, data: &[u8]) -> Result<(), CloudError> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| CloudError::InvalidObjectPath("invalid iCloud filename".to_string()))?;
+    let staging_path =
+        path.with_file_name(format!(".{file_name}.{}.uploading", uuid::Uuid::new_v4()));
+    let mut staging = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging_path)
+        .await
+        .map_err(|error| {
+            CloudError::UploadFailed(format!("stage '{}': {error}", staging_path.display()))
+        })?;
+    #[cfg(unix)]
+    staging
+        .set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .await
+        .map_err(CloudError::Io)?;
+    if let Err(error) = staging.write_all(data).await {
+        let _ = tokio::fs::remove_file(&staging_path).await;
+        return Err(CloudError::UploadFailed(format!(
+            "write '{}': {error}",
+            staging_path.display()
+        )));
+    }
+    if let Err(error) = staging.sync_all().await {
+        let _ = tokio::fs::remove_file(&staging_path).await;
+        return Err(CloudError::UploadFailed(format!(
+            "sync '{}': {error}",
+            staging_path.display()
+        )));
+    }
+    drop(staging);
+    if let Err(error) = tokio::fs::rename(&staging_path, path).await {
+        let _ = tokio::fs::remove_file(&staging_path).await;
+        return Err(CloudError::UploadFailed(format!(
+            "publish '{}': {error}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+async fn is_regular_file(path: &Path) -> Result<bool, CloudError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CloudError::InvalidObjectPath(
+            "iCloud object is a symlink".to_string(),
+        )),
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(CloudError::Io(error)),
+    }
+}
 
 struct ICloudRoots {
     primary_dir: PathBuf,
@@ -323,15 +486,17 @@ async fn calculate_dir_size(dir: &Path) -> u64 {
     };
 
     while let Ok(Some(entry)) = entries.next_entry().await {
-        let metadata = match entry.metadata().await {
+        let metadata = match tokio::fs::symlink_metadata(entry.path()).await {
             Ok(m) => m,
             Err(_) => continue,
         };
 
-        if metadata.is_file() {
-            total += metadata.len();
+        if metadata.file_type().is_symlink() {
+            continue;
+        } else if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
         } else if metadata.is_dir() {
-            total += Box::pin(calculate_dir_size(&entry.path())).await;
+            total = total.saturating_add(Box::pin(calculate_dir_size(&entry.path())).await);
         }
     }
 
@@ -343,7 +508,13 @@ async fn collect_entries_recursive(
     dir: &Path,
     base: &Path,
     entries: &mut Vec<CloudEntry>,
+    depth: usize,
 ) -> Result<(), CloudError> {
+    if depth > MAX_DIRECTORY_DEPTH {
+        return Err(CloudError::Provider(format!(
+            "iCloud directory tree exceeds {MAX_DIRECTORY_DEPTH} levels"
+        )));
+    }
     let mut read_dir = tokio::fs::read_dir(dir)
         .await
         .map_err(|e| CloudError::Provider(format!("read_dir '{}': {}", dir.display(), e)))?;
@@ -354,12 +525,13 @@ async fn collect_entries_recursive(
         .map_err(|e| CloudError::Provider(format!("next_entry: {}", e)))?
     {
         let path = entry.path();
-        let metadata = entry
-            .metadata()
+        let metadata = tokio::fs::symlink_metadata(&path)
             .await
             .map_err(|e| CloudError::Provider(format!("metadata '{}': {}", path.display(), e)))?;
 
-        if metadata.is_file() {
+        if metadata.file_type().is_symlink() {
+            continue;
+        } else if metadata.is_file() {
             let key = path
                 .strip_prefix(base)
                 .unwrap_or(&path)
@@ -379,6 +551,11 @@ async fn collect_entries_recursive(
                 last_modified: modified,
                 checksum: None,
             });
+            if entries.len() > MAX_LIST_ENTRIES {
+                return Err(CloudError::Provider(format!(
+                    "iCloud listing exceeds {MAX_LIST_ENTRIES} files"
+                )));
+            }
         } else if metadata.is_dir() {
             // Skip hidden directories (e.g. .DS_Store parent)
             if path
@@ -388,7 +565,7 @@ async fn collect_entries_recursive(
             {
                 continue;
             }
-            Box::pin(collect_entries_recursive(&path, base, entries)).await?;
+            Box::pin(collect_entries_recursive(&path, base, entries, depth + 1)).await?;
         }
     }
 

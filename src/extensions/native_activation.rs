@@ -18,10 +18,11 @@
 //!   `libloading::Library::new` call. This module calls `load` and trusts those
 //!   gates rather than re-implementing or weakening them. If any gate fails, no
 //!   `dlopen` happens.
-//! - **Panic isolation.** The C-ABI boundary can panic/abort. Every
-//!   `invoke_json` call is wrapped in [`std::panic::catch_unwind`]; a caught
-//!   panic is recorded as a health failure and surfaced as an error, never a
-//!   host crash.
+//! - **Best-effort unwind handling.** Every `invoke_json` call is wrapped in
+//!   [`std::panic::catch_unwind`], so an unwind that reaches Rust is recorded as
+//!   a health failure. Native code still runs in-process: an abort, segfault, or
+//!   a panic crossing a non-unwind C ABI can terminate the host. Strong fault
+//!   isolation requires moving native plugins to a separate process.
 //! - **Health-tracked.** Each loaded plugin is registered with an
 //!   [`ExtensionHealthMonitor`]; successes/failures (including caught panics)
 //!   drive its state machine so a repeatedly-failing plugin becomes `Unhealthy`
@@ -181,10 +182,11 @@ impl NativePluginState {
         self.loaded.remove(contribution_id).is_some()
     }
 
-    /// Invoke a loaded native plugin operation with panic isolation.
+    /// Invoke a loaded native plugin operation with best-effort unwind handling.
     ///
-    /// A panic crossing the C-ABI boundary is caught, recorded as a health
-    /// failure, and converted into an error — it never unwinds into the host.
+    /// An unwind that reaches this Rust frame is caught, recorded as a health
+    /// failure, and converted into an error. Native aborts, faults, and panics
+    /// that cannot unwind across the C ABI can still terminate the process.
     pub fn invoke(
         &mut self,
         contribution_id: &str,
@@ -198,8 +200,8 @@ impl NativePluginState {
             ))
         })?;
 
-        // The C-ABI boundary may panic; contain it so a misbehaving plugin
-        // cannot take down the host. A caught panic is a health failure.
+        // Catch only unwinds that reach this Rust frame. Native aborts/faults
+        // remain process-fatal because plugins currently execute in-process.
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
             runtime.invoke_json(operation.to_string(), payload)
         }));
@@ -218,7 +220,7 @@ impl NativePluginState {
             Err(_panic) => {
                 self.health.record_failure(contribution_id, timestamp);
                 Err(ExtensionError::Other(format!(
-                    "native plugin '{contribution_id}' panicked during invocation and was contained"
+                    "native plugin '{contribution_id}' unwound during invocation"
                 )))
             }
         }
@@ -238,7 +240,8 @@ impl NativePluginState {
 /// Returns the parsed manifest only when it actually contributes native plugins,
 /// so non-native manifests are ignored by the native scan path.
 pub fn parse_native_manifest(path: &Path) -> Option<PluginManifest> {
-    let bytes = std::fs::read(path).ok()?;
+    let bytes =
+        thinclaw_platform::read_regular_file_bounded_single_link(path, 4 * 1024 * 1024).ok()?;
     let manifest: PluginManifest = serde_json::from_slice(&bytes).ok()?;
     if manifest.contributions.native_plugins.is_empty() {
         return None;

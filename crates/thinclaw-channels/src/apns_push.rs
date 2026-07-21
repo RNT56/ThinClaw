@@ -20,7 +20,8 @@ use serde_json::Value;
 use thinclaw_types::error::ChannelError;
 
 use crate::native_lifecycle_clients::{
-    ApnsNativeConfig, NativeHttpClient, NativeHttpRequest, apns_provider_token, ensure_success,
+    ApnsNativeConfig, NativeHttpClient, NativeHttpDestinationPolicy, NativeHttpRequest,
+    apns_provider_token, ensure_success,
 };
 
 /// APNs delivery category, mapped to the `apns-push-type` header.
@@ -232,6 +233,7 @@ impl ApnsPusher {
                 url: format!("{}/3/device/{device_token}", self.host()),
                 headers,
                 body: serde_json::to_vec(&spec.payload).unwrap_or_default(),
+                destination_policy: NativeHttpDestinationPolicy::PublicHttps,
             })
             .await?;
 

@@ -370,7 +370,14 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         )}
                     >
                         <button
-                            onClick={() => handleSaveGateway('remote', profile.url, profile.token)}
+                            onClick={() => {
+                                thinclaw.switchToProfile(profile.id)
+                                    .then(fetchStatus)
+                                    .then(() => toast.success(`Connected to ${profile.name}`))
+                                    .catch((error) => toast.error('Failed to switch agent', {
+                                        description: String(error),
+                                    }));
+                            }}
                             className="flex items-center gap-4 flex-1 text-left"
                         >
                             <div className="p-2.5 rounded-lg bg-indigo-500/10 text-indigo-500">
@@ -1215,7 +1222,14 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                         <span className="text-[10px] font-bold text-muted-foreground/60 uppercase">Handshake Token</span>
                                         <div className="flex items-center justify-between bg-muted/30 p-2.5 rounded-xl border border-border/50">
                                             <span className="text-[10px] font-mono">••••••••••••••••</span>
-                                            <button onClick={() => copyToClipboard(status.authToken, 'Access Token')} className="p-1 hover:bg-primary/10 rounded-lg transition-colors">
+                                            <button
+                                                onClick={() => thinclaw.copyGatewayToken()
+                                                    .then(() => toast.success('Access Token copied to clipboard'))
+                                                    .catch((error) => toast.error('Failed to copy Access Token', {
+                                                        description: String(error),
+                                                    }))}
+                                                className="p-1 hover:bg-primary/10 rounded-lg transition-colors"
+                                            >
                                                 <Copy className="w-3.5 h-3.5 text-primary" />
                                             </button>
                                         </div>

@@ -16,6 +16,38 @@ fn trim_failed_canaries_keeps_recent_entries() {
 }
 
 #[test]
+fn rollback_history_moves_back_without_oscillating_to_newer_build() {
+    let manifest = |build_id: &str, seconds: i64| BuildManifest {
+        build_id: build_id.to_string(),
+        user_id: "user".to_string(),
+        proposal_id: "proposal".to_string(),
+        title: build_id.to_string(),
+        created_at: Utc::now() + chrono::Duration::seconds(seconds),
+        promoted: true,
+        checks: Vec::new(),
+        metadata: serde_json::json!({}),
+    };
+    let manifests = vec![manifest("c", 3), manifest("b", 2), manifest("a", 1)];
+    let history = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+    let (target, history) =
+        super::rollout_helpers::rollback_target_and_history(&manifests, &history, Some("c"));
+    assert_eq!(target.as_deref(), Some("b"));
+    let (target, history) =
+        super::rollout_helpers::rollback_target_and_history(&manifests, &history, Some("b"));
+    assert_eq!(target.as_deref(), Some("a"));
+    assert_eq!(history, vec!["a"]);
+}
+
+#[test]
+fn build_identifiers_reject_path_components() {
+    assert!(super::rollout_helpers::valid_build_id("20260101-abcd_1234"));
+    assert!(!super::rollout_helpers::valid_build_id("../escape"));
+    assert!(!super::rollout_helpers::valid_build_id("name/child"));
+    assert!(!super::rollout_helpers::valid_build_id(""));
+}
+
+#[test]
 fn bootstrap_reason_helper_covers_dedicated_user_branches() {
     assert_eq!(
         dedicated_bootstrap_blocking_reason(false, false, false),
@@ -33,6 +65,34 @@ fn bootstrap_reason_helper_covers_dedicated_user_branches() {
 fn shell_single_quote_handles_embedded_quotes() {
     assert_eq!(shell_single_quote("plain"), "'plain'");
     assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");
+}
+
+#[test]
+fn bridge_and_permission_reports_fail_closed() {
+    assert!(!bridge_report_passed(&serde_json::json!({})));
+    assert!(!bridge_report_passed(&serde_json::Value::Null));
+    assert!(bridge_report_passed(&serde_json::json!({"ok": true})));
+
+    assert!(!permissions_report_passed(&serde_json::json!({})));
+    assert!(!permissions_report_passed(&serde_json::json!({
+        "platform": "macos",
+        "accessibility": true,
+        "screen_recording": false,
+        "calendar": "authorized",
+    })));
+    assert!(permissions_report_passed(&serde_json::json!({
+        "platform": "macos",
+        "accessibility": true,
+        "screen_recording": true,
+        "calendar": "authorized",
+    })));
+    assert!(!permissions_report_passed(&serde_json::json!({
+        "platform": "linux",
+        "accessibility": true,
+        "screen_recording": true,
+        "calendar": "missing",
+        "ocr": "available",
+    })));
 }
 
 #[test]
@@ -105,6 +165,22 @@ fn copy_fixture_path_supports_package_directories() {
             .expect("read copied nested file"),
         "hello"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn copy_fixture_path_rejects_symlinks() {
+    let temp = tempdir().expect("tempdir");
+    let source = temp.path().join("source.pages");
+    std::fs::create_dir(&source).expect("create source package");
+    let outside = temp.path().join("outside.txt");
+    std::fs::write(&outside, "secret").expect("write outside file");
+    std::os::unix::fs::symlink(&outside, source.join("payload.txt"))
+        .expect("create fixture symlink");
+
+    let error = copy_fixture_path(&source, &temp.path().join("copy.pages"))
+        .expect_err("fixture symlink must be rejected");
+    assert!(error.contains("symlink"));
 }
 
 #[test]
@@ -200,8 +276,32 @@ async fn shadow_canary_process_reads_fake_runner_output() {
     let report_path = temp.path().join("canary-report.json");
     let binary_path = temp.path().join("fake-runner.sh");
     let manifest_path = report_path.with_file_name("canary-manifest.json");
+    let fixture_paths = DesktopFixturePaths {
+        calendar_title: "ThinClaw Canary".to_string(),
+        ..Default::default()
+    };
+    let expected_report = DesktopCanaryReport {
+        build_id: "build-123".to_string(),
+        generated_at: Utc::now(),
+        passed: true,
+        fixture_paths: fixture_paths.clone(),
+        checks: [
+            "bridge_health",
+            "permissions",
+            "apps_list",
+            "calendar_crud",
+            "numbers_open_write_read_export",
+            "pages_open_insert_find_export",
+            "generic_ui_textedit_fallback",
+        ]
+        .into_iter()
+        .map(|name| passed_check(name, None, serde_json::json!({"ok": true})))
+        .collect(),
+    };
+    let report_json = serde_json::to_string(&expected_report).expect("serialize fake report");
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" != \"autonomy-shadow-canary\" ]; then exit 2; fi\ncat <<'JSON'\n{{\"build_id\":\"build-123\",\"generated_at\":\"2026-01-01T00:00:00Z\",\"passed\":true,\"fixture_paths\":{{\"calendar_title\":\"ThinClaw Canary\"}},\"checks\":[{{\"name\":\"bridge_health\",\"passed\":true,\"evidence\":{{\"ok\":true}}}}]}}\nJSON\n"
+        "#!/bin/sh\nif [ \"$1\" != \"autonomy-shadow-canary\" ]; then exit 2; fi\nprintf '%s\\n' {}\n",
+        shell_single_quote(&report_json),
     );
     std::fs::write(&binary_path, script).expect("write fake runner");
     use std::os::unix::fs::PermissionsExt;
@@ -217,10 +317,7 @@ async fn shadow_canary_process_reads_fake_runner_output() {
         report_path: report_path.clone(),
         shadow_home: temp.path().join("shadow-home"),
         session_id: "desktop-main-session".to_string(),
-        fixture_paths: DesktopFixturePaths {
-            calendar_title: "ThinClaw Canary".to_string(),
-            ..Default::default()
-        },
+        fixture_paths,
     };
     std::fs::write(
         &manifest_path,

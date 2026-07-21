@@ -62,7 +62,7 @@ pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     ProviderTokenCapture, Role, StreamChunk, StreamChunkStream, StreamPolicy, StreamSupport,
     ThinkingConfig, TokenCaptureSupport, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, ToolResult, sanitize_tool_messages,
+    ToolDefinition, ToolResult, completion_request_cache_key, sanitize_tool_messages,
 };
 pub use provider_factory::{build_provider_chain, create_llm_provider};
 pub use reasoning::{

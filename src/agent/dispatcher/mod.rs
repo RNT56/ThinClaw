@@ -13,10 +13,9 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::personality;
 use crate::agent::prompt_assembly::{
-    DispatcherPromptMaterials, assemble_dispatcher_prompt_materials,
-    assemble_dispatcher_prompt_materials_with_budget, dispatcher_prompt_assembly,
-    render_active_skill_block, render_active_skill_context, render_available_skill_index,
-    render_skill_index_context,
+    DispatcherPromptMaterials, assemble_dispatcher_prompt_materials_with_budget,
+    dispatcher_prompt_assembly, render_active_skill_block, render_active_skill_context,
+    render_available_skill_index, render_skill_index_context,
 };
 use crate::agent::prompt_sanitation::sanitize_project_context_for_channel;
 use crate::agent::session::{PendingApproval, Session, ThreadState};

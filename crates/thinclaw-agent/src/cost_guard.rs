@@ -153,10 +153,12 @@ impl CostGuard {
         }
     }
 
-    /// Check whether the next action is allowed under the configured limits.
+    /// Atomically admit and reserve the next LLM action.
     ///
-    /// Call this BEFORE making an LLM call. Does NOT record the action yet,
-    /// call `record_action` after the action completes.
+    /// Call exactly once immediately before dispatching a provider request.
+    /// Attempted calls (including provider failures/cancellation) consume an
+    /// hourly slot. Reserving while holding the sliding-window mutex prevents
+    /// concurrent callers from all observing the same last available slot.
     pub async fn check_allowed(&self) -> Result<(), CostLimitExceeded> {
         // Check daily budget. The day rollover must happen here as well as in
         // record_cost_internal: once the budget trips, no call completes, so
@@ -179,12 +181,13 @@ impl CostGuard {
             }
         }
 
-        // Check hourly rate
-        if let Some(limit) = self.config.max_actions_per_hour {
+        // Check and reserve the hourly action atomically. Keep recording even
+        // when no limit is configured so dashboards and restart hydration see
+        // the true attempted-call count.
+        {
             let mut window = self.action_window.lock().await;
             let now = Instant::now();
             let hourly_window = std::time::Duration::from_secs(3600);
-            // Drain expired entries
             while window
                 .front()
                 .is_some_and(|t| now.saturating_duration_since(*t) >= hourly_window)
@@ -192,12 +195,15 @@ impl CostGuard {
                 window.pop_front();
             }
             let count = window.len() as u64;
-            if count >= limit {
+            if let Some(limit) = self.config.max_actions_per_hour
+                && count >= limit
+            {
                 return Err(CostLimitExceeded::HourlyRate {
                     actions: count,
                     limit,
                 });
             }
+            window.push_back(now);
         }
 
         Ok(())
@@ -287,12 +293,6 @@ impl CostGuard {
             }
         }
 
-        // Record action in sliding window
-        {
-            let mut window = self.action_window.lock().await;
-            window.push_back(Instant::now());
-        }
-
         // Track per-model token usage
         {
             let mut tokens = self.model_tokens.lock().await;
@@ -353,6 +353,12 @@ impl CostGuard {
 
 #[async_trait]
 impl LlmBudgetRecorder for CostGuard {
+    async fn check_allowed(&self) -> Result<(), String> {
+        CostGuard::check_allowed(self)
+            .await
+            .map_err(|limit| limit.to_string())
+    }
+
     async fn record_llm_call_with_cost(
         &self,
         model: &str,
@@ -483,10 +489,33 @@ mod tests {
 
         assert_eq!(guard.actions_this_hour().await, 0);
 
+        guard.check_allowed().await.unwrap();
         guard.record_llm_call("gpt-4o", 10, 10, None).await;
+        guard.check_allowed().await.unwrap();
         guard.record_llm_call("gpt-4o", 10, 10, None).await;
 
         assert_eq!(guard.actions_this_hour().await, 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_admission_cannot_oversubscribe_hourly_limit() {
+        let guard = std::sync::Arc::new(CostGuard::new(CostGuardConfig {
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: Some(1),
+        }));
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let guard = std::sync::Arc::clone(&guard);
+            tasks.push(tokio::spawn(async move { guard.check_allowed().await }));
+        }
+        let mut admitted = 0;
+        for task in tasks {
+            if task.await.unwrap().is_ok() {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, 1);
+        assert_eq!(guard.actions_this_hour().await, 1);
     }
 
     #[test]

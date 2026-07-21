@@ -85,6 +85,41 @@ pub fn context_cap_decision(
     }
 }
 
+/// Apply the ordinary model-window cap plus an exact history budget that has
+/// already reserved prompt material, tool schemas, output tokens, and a safety
+/// margin. The lower target wins, so a large user turn cannot consume space
+/// promised to non-history request components and rely on a provider 400 for
+/// control flow.
+pub fn context_cap_decision_with_history_budget(
+    estimated_tokens: usize,
+    token_limit: usize,
+    history_token_budget: usize,
+    message_count: usize,
+    max_context_messages: usize,
+) -> ContextCapDecision {
+    let ordinary = context_cap_decision(
+        estimated_tokens,
+        token_limit,
+        message_count,
+        max_context_messages,
+    );
+    let history_exceeded = estimated_tokens >= history_token_budget;
+    if !history_exceeded && ordinary == ContextCapDecision::WithinBudget {
+        return ContextCapDecision::WithinBudget;
+    }
+
+    let ordinary_target = match ordinary {
+        ContextCapDecision::TrimToBudget { target_tokens } => target_tokens,
+        ContextCapDecision::WithinBudget => usize::MAX,
+    };
+    // Leave ten percent of the already-reserved history slice for estimator
+    // error and the next small loop-control message.
+    let history_target = history_token_budget.saturating_mul(9) / 10;
+    ContextCapDecision::TrimToBudget {
+        target_tokens: ordinary_target.min(history_target),
+    }
+}
+
 /// Decide whether the pre-compaction memory flush should fire this
 /// iteration. Fires at most once per compaction cycle (`already_fired`
 /// guards re-firing until the hard cap actually drops messages and resets
@@ -795,6 +830,20 @@ mod tests {
         // Exactly at the cap does not trigger (only strictly greater).
         assert_eq!(
             context_cap_decision(10, 100_000, 200, 200),
+            ContextCapDecision::WithinBudget
+        );
+    }
+
+    #[test]
+    fn context_cap_honors_reserved_history_budget_before_model_hard_cap() {
+        assert_eq!(
+            context_cap_decision_with_history_budget(21_800, 32_000, 21_800, 10, 200),
+            ContextCapDecision::TrimToBudget {
+                target_tokens: 19_620,
+            }
+        );
+        assert_eq!(
+            context_cap_decision_with_history_budget(20_000, 32_000, 21_800, 10, 200),
             ContextCapDecision::WithinBudget
         );
     }

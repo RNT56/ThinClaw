@@ -53,5 +53,72 @@ pub use providers::*;
 pub use trajectory::*;
 pub use types::*;
 
+/// Reconstruct the canonical external-memory access context from a tool job.
+/// Group jobs without a persisted scope fail closed because inventing a scope
+/// here would make recall/write behavior inconsistent across surfaces.
+pub fn provider_access_context_from_job(
+    ctx: &thinclaw_types::JobContext,
+) -> Result<thinclaw_identity::AccessContext, String> {
+    let conversation_kind = ctx
+        .metadata
+        .get("conversation_kind")
+        .and_then(|value| value.as_str())
+        .and_then(thinclaw_identity::parse_conversation_kind_hint)
+        .unwrap_or(thinclaw_identity::ConversationKind::Direct);
+    let explicit_scope = ctx
+        .metadata
+        .get("conversation_scope_id")
+        .and_then(|value| value.as_str())
+        .and_then(|value| uuid::Uuid::parse_str(value).ok());
+    let external_key = ctx
+        .metadata
+        .get("stable_external_conversation_key")
+        .and_then(|value| value.as_str());
+    let identity = thinclaw_identity::resolved_identity_from_carried_context(
+        &ctx.principal_id,
+        ctx.owner_actor_id(),
+        conversation_kind,
+        explicit_scope,
+        external_key,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(identity.access_context(
+        ctx.metadata
+            .get("channel")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown"),
+    ))
+}
+
+/// Recover the same access boundary from a persisted run artifact. Missing
+/// principal/actor/group-scope data is treated as non-exportable.
+pub fn provider_access_context_from_artifact(
+    artifact: &crate::agent::AgentRunArtifact,
+) -> Option<thinclaw_identity::AccessContext> {
+    let principal_id = artifact.user_id.as_deref()?;
+    let actor_id = artifact.actor_id.as_deref()?;
+    let conversation_kind = artifact
+        .conversation_kind
+        .as_deref()
+        .and_then(thinclaw_identity::parse_conversation_kind_hint)
+        .unwrap_or(thinclaw_identity::ConversationKind::Direct);
+    let identity = thinclaw_identity::resolved_identity_from_carried_context(
+        principal_id,
+        actor_id,
+        conversation_kind,
+        artifact.conversation_scope_id,
+        None,
+    )
+    .ok()?;
+    Some(
+        identity.access_context(
+            artifact
+                .channel
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests;

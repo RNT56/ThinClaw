@@ -24,7 +24,7 @@ use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 use thinclaw_tools::builtin::skill as skill_policy;
 use thinclaw_tools::builtin::skill::{
     SkillPackageFile, collect_skill_package_files, package_file_json, package_hash,
-    package_scan_content,
+    package_scan_content, read_skill_package_file,
 };
 use thinclaw_tools::ports::{
     SkillInstallToolHostPort, SkillPublishToolHostPort, SkillSearchToolHostPort,
@@ -39,6 +39,9 @@ use thinclaw_tools::ports::{
     ToolSkillTapRemoveRequest, ToolSkillTapTrust, ToolSkillTrust, ToolSkillTrustMutationRequest,
     ToolSkillTrustMutationResult, ToolSkillUpdateActionRequest, job_context_from_tool_scope,
 };
+
+const MAX_SKILL_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SKILL_PROVENANCE_BYTES: u64 = 1024 * 1024;
 
 fn restricted_skill_names(ctx: &JobContext) -> Option<std::collections::HashSet<String>> {
     skill_policy::restricted_skill_names(&ctx.metadata)
@@ -157,30 +160,33 @@ fn skill_content_for_scan(
 }
 
 async fn read_skill_provenance(skill_dir: &Path) -> Result<SkillProvenance, ToolError> {
-    let raw = tokio::fs::read_to_string(skill_dir.join(".thinclaw-skill-lock.json"))
-        .await
-        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+    let bytes = thinclaw_platform::read_regular_file_bounded_async(
+        skill_dir.join(".thinclaw-skill-lock.json"),
+        MAX_SKILL_PROVENANCE_BYTES,
+    )
+    .await
+    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+    let raw =
+        String::from_utf8(bytes).map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
     serde_json::from_str(&raw).map_err(|err| ToolError::ExecutionFailed(err.to_string()))
 }
 
-fn package_scan_files(files: &[SkillPackageFile]) -> Vec<SkillScanFile> {
+fn package_scan_files(files: &[SkillPackageFile]) -> Result<Vec<SkillScanFile>, ToolError> {
     files
         .iter()
-        .filter_map(|file| {
-            std::fs::read(&file.source_path)
-                .ok()
-                .map(|bytes| SkillScanFile {
-                    relative_path: file.relative_path.clone(),
-                    content: String::from_utf8_lossy(&bytes).into_owned(),
-                })
+        .map(|file| {
+            let bytes = read_skill_package_file(file)?;
+            Ok(SkillScanFile {
+                relative_path: file.relative_path.clone(),
+                content: String::from_utf8_lossy(&bytes).into_owned(),
+            })
         })
         .collect()
 }
 
-fn scan_files_for_source_path(path: &Path) -> Vec<SkillScanFile> {
-    collect_skill_package_files(path)
-        .map(|files| package_scan_files(&files))
-        .unwrap_or_default()
+fn scan_files_for_source_path(path: &Path) -> Result<Vec<SkillScanFile>, ToolError> {
+    let files = collect_skill_package_files(path)?;
+    package_scan_files(&files)
 }
 
 fn scan_report_for_content(
@@ -261,6 +267,7 @@ pub async fn inspect_skill_report(
         let package_files = source_path
             .as_ref()
             .map(|path| scan_files_for_source_path(path))
+            .transpose()?
             .unwrap_or_default();
         Some(scan_report_for_content(
             quarantine,
@@ -439,9 +446,12 @@ async fn resolve_skill_check_input(
 
     let path = input.source_ref();
     let skill_path = skill_policy::skill_check_path_for_read(&path);
-    let raw = tokio::fs::read_to_string(&skill_path)
-        .await
-        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+    let bytes =
+        thinclaw_platform::read_regular_file_bounded_async(skill_path, MAX_SKILL_DOCUMENT_BYTES)
+            .await
+            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+    let raw =
+        String::from_utf8(bytes).map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
     Ok((raw, input.source_kind().to_string(), path))
 }
 
@@ -469,9 +479,8 @@ async fn skill_check_output_for_input(
             } else {
                 source_path.clone()
             };
-        collect_skill_package_files(&package_root)
-            .map(|files| package_scan_files(&files))
-            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?
+        let files = collect_skill_package_files(&package_root)?;
+        package_scan_files(&files)?
     } else {
         Vec::new()
     };
@@ -547,15 +556,35 @@ pub fn validate_fetch_url(url_str: &str) -> Result<(), ToolError> {
 pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
     validate_fetch_url(url)?;
 
-    let client = reqwest::Client::builder()
+    let guarded = thinclaw_tools_core::validate_outbound_url_pinned_async(
+        url,
+        &thinclaw_tools_core::OutboundUrlGuardOptions {
+            require_https: true,
+            upgrade_http_to_https: false,
+            allowlist: Vec::new(),
+        },
+    )
+    .await?;
+    let host = guarded
+        .url
+        .host_str()
+        .ok_or_else(|| ToolError::ExecutionFailed("Skill URL has no host".to_string()))?;
+
+    let mut client_builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(5))
         .user_agent("thinclaw/0.1")
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if !guarded.pinned_addrs.is_empty() {
+        client_builder = client_builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+    }
+    let client = client_builder
         .build()
         .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {}", e)))?;
 
-    let response = client.get(url).send().await.map_err(|e| {
-        ToolError::ExecutionFailed(format!("Failed to fetch skill from {}: {}", url, e))
+    let response = client.get(guarded.url).send().await.map_err(|e| {
+        ToolError::ExecutionFailed(format!("Failed to fetch skill: {}", e.without_url()))
     })?;
 
     if !response.status().is_success() {
@@ -584,23 +613,15 @@ pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
 
     // Limit download size to prevent memory exhaustion from large responses.
     const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024; // 10 MB
-    let bytes = response
-        .bytes()
+    let bytes = crate::http_response::bounded_bytes(response, MAX_DOWNLOAD_BYTES)
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read response body: {}", e)))?;
-    if bytes.len() > MAX_DOWNLOAD_BYTES {
-        return Err(ToolError::ExecutionFailed(format!(
-            "Response too large: {} bytes (max {} bytes)",
-            bytes.len(),
-            MAX_DOWNLOAD_BYTES
-        )));
-    }
 
     // Detect ZIP archive (PK\x03\x04 magic) and extract SKILL.md
     let content = if bytes.starts_with(b"PK\x03\x04") {
         extract_skill_from_zip(&bytes)?
     } else {
-        String::from_utf8(bytes.to_vec()).map_err(|e| {
+        String::from_utf8(bytes).map_err(|e| {
             ToolError::ExecutionFailed(format!("Response is not valid UTF-8: {}", e))
         })?
     };
@@ -639,9 +660,9 @@ async fn audit_skills_for_registry(
         .filter(|skill| {
             target_name.is_none_or(|name| skill.manifest.name.eq_ignore_ascii_case(name))
         })
-        .map(|skill| {
+        .map(|skill| -> Result<serde_json::Value, ToolError> {
             let source_path = source_path_for_skill(skill).unwrap_or_else(|| PathBuf::from("."));
-            let package_files = scan_files_for_source_path(&source_path);
+            let package_files = scan_files_for_source_path(&source_path)?;
             let scan_report = scan_report_for_content(
                 quarantine,
                 &skill.manifest.name,
@@ -671,9 +692,9 @@ async fn audit_skills_for_registry(
                 skill_finding_json(&scan_report.findings),
             );
             add_scan_report_fields(&mut entry, &scan_report);
-            entry
+            Ok(entry)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
 
     if audited.is_empty() {
         return Err(ToolError::ExecutionFailed(
@@ -739,7 +760,7 @@ async fn remove_skill_from_registry(
     let skill_path = guard
         .validate_remove(name)
         .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
-    crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path)
+    crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path, name)
         .await
         .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
     guard

@@ -139,6 +139,7 @@ tailscale ip -4             # Get your Tailscale IP
 # Managed tunnel — ThinClaw starts/stops cloudflared automatically
 TUNNEL_PROVIDER=cloudflare
 TUNNEL_CF_TOKEN=your-tunnel-token-from-zero-trust-dashboard
+TUNNEL_CF_HOSTNAME=https://agent.example.com
 ```
 
 **ThinClaw configuration (manual):**
@@ -332,11 +333,23 @@ should use `BROWSER_EXECUTABLE`.
 # always: force Docker Chromium even if a local binary exists
 # never: disable Docker Chromium fallback
 BROWSER_DOCKER=auto
-CHROMIUM_IMAGE=chromedp/headless-shell:latest
+CHROMIUM_IMAGE=chromedp/headless-shell:150.0.7871.125@sha256:7f8ec4782f1b138c30900e65ae53795d5966fbf52168b8fc062843db3e6d5be5
+BROWSER_RELAY_IMAGE=thinclaw-worker:latest
 ```
 
 The default image is public and multi-arch (`linux/amd64` and `linux/arm64`).
-Set `CHROMIUM_IMAGE` only if you operate an internal CDP-capable Chromium image.
+Custom `CHROMIUM_IMAGE` values must be pinned with an `@sha256` digest. The
+isolated browser network also needs a trusted image containing ThinClaw's
+`network-relay` subcommand. Build it locally before enabling the fallback:
+
+```bash
+docker build -f Dockerfile.worker -t thinclaw-worker:latest .
+```
+
+Mutable relay tags are never pulled automatically; they must already exist in
+the local Docker image store. A remotely pullable `BROWSER_RELAY_IMAGE` must be
+digest-pinned. ThinClaw resolves both images to content-addressed local IDs
+before creating either container.
 The `BrowserTool` handles the container lifecycle automatically (pull, start,
 health-check, stop), and `thinclaw doctor` verifies that the image is local or
 pullable before reporting the fallback as ready.
@@ -394,8 +407,8 @@ sudo apt-get install -y build-essential curl git pkg-config ca-certificates
 sudo apt-get install -y docker.io docker-compose-plugin
 sudo systemctl enable --now docker
 
-# Optional private network access
-curl -fsSL https://tailscale.com/install.sh | sh
+# Optional private network access: follow the distribution-specific signed
+# package instructions at https://tailscale.com/docs/install/linux
 ```
 
 Important Linux env vars:
@@ -403,7 +416,8 @@ Important Linux env vars:
 ```env
 BROWSER_EXECUTABLE=/usr/bin/google-chrome-stable
 BROWSER_DOCKER=auto
-CHROMIUM_IMAGE=chromedp/headless-shell:latest
+CHROMIUM_IMAGE=chromedp/headless-shell:150.0.7871.125@sha256:7f8ec4782f1b138c30900e65ae53795d5966fbf52168b8fc062843db3e6d5be5
+BROWSER_RELAY_IMAGE=thinclaw-worker:latest
 SCREEN_CAPTURE_ENABLED=false
 CAMERA_CAPTURE_ENABLED=false
 TALK_MODE_ENABLED=false

@@ -18,6 +18,10 @@ use crate::settings::Settings;
 
 use super::ExtensionManager;
 
+const MAX_NATIVE_MANIFEST_DIRECTORY_ENTRIES: usize = 4_096;
+const MAX_NATIVE_MANIFESTS_PER_DIRECTORY: usize = 256;
+const MAX_NATIVE_PLUGIN_ALLOWLIST_DIRS: usize = 64;
+
 impl ExtensionManager {
     /// Load the live extension settings (DB-backed if available, else file).
     ///
@@ -52,14 +56,50 @@ impl ExtensionManager {
         let settings = self.current_extensions_settings().await;
 
         let mut registered_ids = Vec::new();
+        if !tokio::fs::symlink_metadata(plugins_dir)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        {
+            return registered_ids;
+        }
         let Ok(mut read_dir) = tokio::fs::read_dir(plugins_dir).await else {
             return registered_ids;
         };
 
-        while let Ok(Some(entry)) = read_dir.next_entry().await {
+        let mut scanned_entries = 0_usize;
+        let mut manifest_count = 0_usize;
+        loop {
+            let entry = match read_dir.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(directory = %plugins_dir.display(), %error, "Native manifest scan failed");
+                    break;
+                }
+            };
+            scanned_entries = scanned_entries.saturating_add(1);
+            if scanned_entries > MAX_NATIVE_MANIFEST_DIRECTORY_ENTRIES {
+                tracing::warn!(directory = %plugins_dir.display(), "Native manifest directory exceeds the scan limit");
+                break;
+            }
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
+            }
+            if !tokio::fs::symlink_metadata(&path)
+                .await
+                .is_ok_and(|metadata| {
+                    metadata.is_file()
+                        && !metadata.file_type().is_symlink()
+                        && metadata.len() <= 4 * 1024 * 1024
+                })
+            {
+                continue;
+            }
+            manifest_count = manifest_count.saturating_add(1);
+            if manifest_count > MAX_NATIVE_MANIFESTS_PER_DIRECTORY {
+                tracing::warn!(directory = %plugins_dir.display(), "Native manifest count exceeds the scan limit");
+                break;
             }
             let Some(manifest) = crate::extensions::native_activation::parse_native_manifest(&path)
             else {
@@ -135,12 +175,22 @@ impl ExtensionManager {
             return Vec::new();
         }
         let mut registered = Vec::new();
-        for dir in &settings.native_plugin_allowlist_dirs {
+        for dir in settings
+            .native_plugin_allowlist_dirs
+            .iter()
+            .take(MAX_NATIVE_PLUGIN_ALLOWLIST_DIRS)
+        {
+            if dir.is_empty() || dir.len() > 4_096 || dir.contains('\0') {
+                continue;
+            }
             let expanded = crate::platform::expand_home_dir(dir);
             registered.extend(
                 self.scan_and_register_plugin_manifests(std::path::Path::new(&expanded))
                     .await,
             );
+        }
+        if settings.native_plugin_allowlist_dirs.len() > MAX_NATIVE_PLUGIN_ALLOWLIST_DIRS {
+            tracing::warn!("Native plugin allowlist directory count exceeds the scan limit");
         }
         if !registered.is_empty() {
             tracing::info!(
@@ -164,8 +214,8 @@ impl ExtensionManager {
         self.native_plugins.write().await.activate(name, &settings)
     }
 
-    /// Invoke an operation on an active native plugin, with panic isolation and
-    /// health tracking.
+    /// Invoke an operation on an active native plugin, with best-effort unwind
+    /// handling and health tracking. Native aborts and faults remain process-fatal.
     ///
     /// A panic crossing the C-ABI boundary is caught and recorded as a health
     /// failure rather than crashing the host. Repeated failures drive the plugin

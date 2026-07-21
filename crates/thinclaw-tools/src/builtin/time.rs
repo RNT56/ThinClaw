@@ -17,6 +17,16 @@ struct ResolvedTimezone {
     label: String,
 }
 
+fn effective_context_timezone(ctx: &JobContext) -> Tz {
+    ctx.metadata
+        .get("user_timezone")
+        .and_then(|value| value.as_str())
+        .and_then(thinclaw_platform::timezone::parse_timezone)
+        .unwrap_or_else(|| {
+            thinclaw_platform::timezone::resolve_effective_timezone(Some(&ctx.user_id), None)
+        })
+}
+
 fn resolve_requested_timezone(
     params: &serde_json::Value,
     ctx: &JobContext,
@@ -27,8 +37,7 @@ fn resolve_requested_timezone(
                 || raw.eq_ignore_ascii_case("user")
                 || raw.eq_ignore_ascii_case("default") =>
         {
-            let tz =
-                thinclaw_platform::timezone::resolve_effective_timezone(Some(&ctx.user_id), None);
+            let tz = effective_context_timezone(ctx);
             Ok(ResolvedTimezone {
                 tz,
                 label: tz.to_string(),
@@ -46,8 +55,7 @@ fn resolve_requested_timezone(
             Ok(ResolvedTimezone { tz, label })
         }
         None => {
-            let tz =
-                thinclaw_platform::timezone::resolve_effective_timezone(Some(&ctx.user_id), None);
+            let tz = effective_context_timezone(ctx);
             Ok(ResolvedTimezone {
                 tz,
                 label: tz.to_string(),
@@ -219,5 +227,14 @@ mod tests {
         let resolved = resolve_requested_timezone(&serde_json::json!({"timezone": "local"}), &ctx)
             .expect("local should resolve");
         assert!(!resolved.label.is_empty());
+    }
+
+    #[test]
+    fn job_context_timezone_overrides_principal_default() {
+        let mut ctx = JobContext::with_identity("household", "actor-2", "chat", "time test");
+        ctx.metadata = serde_json::json!({"user_timezone": "Asia/Tokyo"});
+        let resolved = resolve_requested_timezone(&serde_json::json!({}), &ctx).unwrap();
+        assert_eq!(resolved.tz, chrono_tz::Asia::Tokyo);
+        assert_eq!(resolved.label, "Asia/Tokyo");
     }
 }

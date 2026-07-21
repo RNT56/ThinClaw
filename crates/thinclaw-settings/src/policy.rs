@@ -192,12 +192,17 @@ impl ToolPolicyManager {
     }
 
     fn load_toml_override(path: &Path) -> Result<Option<Self>, String> {
-        let raw = match std::fs::read_to_string(path) {
+        let raw = match thinclaw_platform::read_regular_file_bounded_single_link(
+            path,
+            16 * 1024 * 1024,
+        ) {
             Ok(raw) => raw,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(format!("failed to read {}: {err}", path.display())),
         };
-        let value = toml::from_str::<toml::Value>(&raw)
+        let raw = std::str::from_utf8(&raw)
+            .map_err(|_| format!("invalid UTF-8 in {}", path.display()))?;
+        let value = toml::from_str::<toml::Value>(raw)
             .map_err(|err| format!("invalid TOML in {}: {err}", path.display()))?;
         if value.get("tool_policies").is_none() {
             return Ok(None);

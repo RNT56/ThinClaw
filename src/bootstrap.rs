@@ -8,6 +8,8 @@
 
 use std::path::PathBuf;
 
+const MAX_BOOTSTRAP_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Path to the ThinClaw-specific `.env` file: `~/.thinclaw/.env`.
 pub fn thinclaw_env_path() -> PathBuf {
     crate::platform::state_paths().env_file
@@ -32,8 +34,10 @@ pub fn load_thinclaw_env() {
     // ONBOARD_COMPLETED during upgrades from older installs.
     migrate_bootstrap_json_to_env(&path);
 
-    if path.exists() {
-        let _ = dotenvy::from_path(&path);
+    if let Ok(bytes) =
+        thinclaw_platform::read_regular_file_bounded_single_link(&path, MAX_BOOTSTRAP_FILE_BYTES)
+    {
+        let _ = dotenvy::from_read(std::io::Cursor::new(bytes));
     }
 }
 
@@ -44,12 +48,14 @@ fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
         .unwrap_or_else(|| std::path::Path::new("."));
     let bootstrap_path = thinclaw_dir.join("bootstrap.json");
 
-    if !bootstrap_path.exists() {
-        return;
-    }
-
-    let content = match std::fs::read_to_string(&bootstrap_path) {
-        Ok(c) => c,
+    let content = match thinclaw_platform::read_regular_file_bounded_single_link(
+        &bootstrap_path,
+        MAX_BOOTSTRAP_FILE_BYTES,
+    ) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(content) => content,
+            Err(_) => return,
+        },
         Err(_) => return,
     };
 
@@ -78,7 +84,13 @@ fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
         return;
     }
 
-    let existing = std::fs::read_to_string(env_path).unwrap_or_default();
+    let existing = thinclaw_platform::read_regular_file_bounded_single_link(
+        env_path,
+        MAX_BOOTSTRAP_FILE_BYTES,
+    )
+    .ok()
+    .and_then(|bytes| String::from_utf8(bytes).ok())
+    .unwrap_or_default();
     let has_database_url = existing
         .lines()
         .any(|line| line.starts_with("DATABASE_URL="));
@@ -137,9 +149,7 @@ pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
         content.push_str(&format!("{}=\"{}\"\n", key, escaped));
     }
-    std::fs::write(&path, &content)?;
-    restrict_file_permissions(&path)?;
-    Ok(())
+    thinclaw_platform::write_private_file_atomic(&path, content.as_bytes(), true)
 }
 
 /// Update or add a single variable in `~/.thinclaw/.env`, preserving existing content.
@@ -163,7 +173,16 @@ fn upsert_bootstrap_var_at(path: &std::path::Path, key: &str, value: &str) -> st
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     let new_line = format!("{}=\"{}\"", key, escaped);
     let prefix = format!("{}=", key);
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let existing = match thinclaw_platform::read_regular_file_bounded_single_link(
+        path,
+        MAX_BOOTSTRAP_FILE_BYTES,
+    ) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
 
     let mut found = false;
     let mut result = String::new();
@@ -185,23 +204,7 @@ fn upsert_bootstrap_var_at(path: &std::path::Path, key: &str, value: &str) -> st
         result.push_str(&new_line);
         result.push('\n');
     }
-    std::fs::write(path, result)?;
-    restrict_file_permissions(path)?;
-    Ok(())
-}
-
-/// Set restrictive file permissions (0o600) on Unix systems.
-///
-/// The `.env` file may contain database credentials and API keys,
-/// so it should only be readable by the owner.
-fn restrict_file_permissions(_path: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(_path, perms)?;
-    }
-    Ok(())
+    thinclaw_platform::write_private_file_atomic(path, result.as_bytes(), true)
 }
 
 /// Write `DATABASE_URL` to `~/.thinclaw/.env`.
@@ -267,8 +270,11 @@ pub async fn migrate_disk_to_db(
     // 3. Migrate mcp-servers.json if it exists
     let mcp_path = thinclaw_dir.join("mcp-servers.json");
     if mcp_path.exists() {
-        match std::fs::read_to_string(&mcp_path) {
-            Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+        match thinclaw_platform::read_regular_file_bounded_single_link(
+            &mcp_path,
+            MAX_BOOTSTRAP_FILE_BYTES,
+        ) {
+            Ok(content) => match serde_json::from_slice::<serde_json::Value>(&content) {
                 Ok(value) => {
                     store
                         .set_setting(user_id, "mcp_servers", &value)
@@ -296,8 +302,11 @@ pub async fn migrate_disk_to_db(
     // 4. Migrate session.json if it exists
     let session_path = thinclaw_dir.join("session.json");
     if session_path.exists() {
-        match std::fs::read_to_string(&session_path) {
-            Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+        match thinclaw_platform::read_regular_file_bounded_single_link(
+            &session_path,
+            MAX_BOOTSTRAP_FILE_BYTES,
+        ) {
+            Ok(content) => match serde_json::from_slice::<serde_json::Value>(&content) {
                 Ok(value) => {
                     store
                         .set_setting(user_id, "nearai.session_token", &value)

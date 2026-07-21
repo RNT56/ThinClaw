@@ -82,6 +82,16 @@ pub trait ConversationStore: Send + Sync {
         raw_sender_id: Option<&str>,
         metadata: Option<&serde_json::Value>,
     ) -> Result<Uuid, DatabaseError>;
+    /// Record the exact user instruction sent to the model after trusted
+    /// `BeforeLlmInput` hooks have transformed it. The raw row content remains
+    /// unchanged for user-facing audit/history; implementations must update
+    /// only the identified user row in the identified conversation.
+    async fn set_effective_user_instruction(
+        &self,
+        conversation_id: Uuid,
+        message_id: Uuid,
+        effective_instruction: &str,
+    ) -> Result<(), DatabaseError>;
     async fn ensure_conversation(
         &self,
         id: Uuid,
@@ -119,6 +129,22 @@ pub trait ConversationStore: Send + Sync {
         conversation_kind: ConversationKind,
         stable_external_conversation_key: Option<&str>,
     ) -> Result<(), DatabaseError>;
+    /// Find the latest durable thread addressed by this ingress identity.
+    ///
+    /// Direct conversations are actor-private and, when an external thread is
+    /// supplied, additionally channel/thread scoped. Group conversations are
+    /// selected only by the exact principal + stable conversation scope. This
+    /// is used to restore native non-UUID channel threads after a restart.
+    #[allow(clippy::too_many_arguments)]
+    async fn find_latest_conversation_for_ingress(
+        &self,
+        principal_id: &str,
+        actor_id: &str,
+        conversation_scope_id: Uuid,
+        conversation_kind: ConversationKind,
+        channel: &str,
+        external_thread_id: Option<&str>,
+    ) -> Result<Option<Uuid>, DatabaseError>;
     async fn set_conversation_handoff_metadata(
         &self,
         id: Uuid,
@@ -151,6 +177,22 @@ pub trait ConversationStore: Send + Sync {
         &self,
         conversation_id: Uuid,
     ) -> Result<Vec<ConversationMessage>, DatabaseError>;
+    /// Load an exact bounded slice from the append-only message log.
+    ///
+    /// `start_row` is a zero-based offset in chronological order and `limit`
+    /// is the maximum number of rows returned. Conversation rows are never
+    /// physically removed by thread lifecycle operations, which makes this
+    /// window stable across undo, clear, compaction, and process restarts.
+    async fn list_conversation_messages_window(
+        &self,
+        conversation_id: Uuid,
+        start_row: i64,
+        limit: i64,
+    ) -> Result<Vec<ConversationMessage>, DatabaseError>;
+    async fn count_conversation_messages(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<i64, DatabaseError>;
     async fn search_conversation_messages(
         &self,
         user_id: &str,
@@ -339,6 +381,17 @@ pub trait ConversationStore: Send + Sync {
         principal_id: &str,
         actor_id: &str,
     ) -> Result<bool, DatabaseError>;
+    /// Authorize a conversation against the complete ingress identity.
+    /// Direct conversations are actor-owned; group conversations are shared
+    /// only within the exact stable conversation scope.
+    async fn conversation_belongs_to_identity(
+        &self,
+        conversation_id: Uuid,
+        principal_id: &str,
+        actor_id: &str,
+        conversation_scope_id: Uuid,
+        conversation_kind: ConversationKind,
+    ) -> Result<bool, DatabaseError>;
 
     /// Delete a conversation and all its messages (cascading).
     ///
@@ -462,7 +515,19 @@ pub trait SandboxStore: Send + Sync {
         started_at: Option<DateTime<Utc>>,
         completed_at: Option<DateTime<Utc>>,
     ) -> Result<(), DatabaseError>;
-    async fn cleanup_stale_sandbox_jobs(&self) -> Result<u64, DatabaseError>;
+    /// Atomically win a sandbox job's terminal transition and append its
+    /// durable result event. Returns `false` when another terminal transition
+    /// already won (or the job is not an active sandbox job).
+    async fn finalize_sandbox_job_status(
+        &self,
+        id: Uuid,
+        status: &str,
+        success: bool,
+        message: Option<&str>,
+        completed_at: DateTime<Utc>,
+        event_data: &serde_json::Value,
+    ) -> Result<bool, DatabaseError>;
+    async fn cleanup_stale_sandbox_jobs(&self, runtime_scope: &str) -> Result<u64, DatabaseError>;
     async fn sandbox_job_summary(&self) -> Result<SandboxJobSummary, DatabaseError>;
     async fn list_sandbox_jobs_for_user(
         &self,
@@ -541,6 +606,42 @@ pub trait SandboxStore: Send + Sync {
 /// more specific value (e.g. `AGENT_JOB_TIMEOUT_SECS`) should use this.
 pub const DEFAULT_LEGACY_ROUTINE_RUN_TTL_SECS: i64 = 3600;
 
+/// Result of atomically admitting a routine run against both the routine-local
+/// and process-global durable capacity limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutineRunAdmission {
+    Admitted,
+    /// An existing run already owns the same `(routine_id, trigger_key)`.
+    /// Returning its id makes retried trigger delivery idempotent.
+    Duplicate(Uuid),
+    RoutineCapacity,
+    GlobalCapacity,
+}
+
+/// Result of the terminal compare-and-set for a routine run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutineRunCompletion {
+    /// The run was already terminal (or no longer exists), so no runtime
+    /// counters were changed.
+    AlreadyTerminal,
+    /// This call won the terminal transition and atomically updated the
+    /// routine's consecutive-failure counter.
+    Completed {
+        routine_id: Uuid,
+        consecutive_failures: u32,
+    },
+}
+
+/// Durable effects produced while reaping expired routine-run leases.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoutineRunReapResult {
+    pub reaped: u64,
+    /// Final failure streak for each transitioned run. Repeated routine ids
+    /// are intentional when several expired concurrent runs are closed; policy
+    /// application is compare-and-set against each exact streak.
+    pub failure_streaks: Vec<(Uuid, u32)>,
+}
+
 #[async_trait]
 pub trait RoutineStore: Send + Sync {
     async fn create_routine(&self, routine: &Routine) -> Result<(), DatabaseError>;
@@ -584,15 +685,50 @@ pub trait RoutineStore: Send + Sync {
         consecutive_failures: u32,
         state: &serde_json::Value,
     ) -> Result<(), DatabaseError>;
+    /// Advance a run-less system-event routine without writing a stale full
+    /// routine snapshot over concurrent runtime updates.
+    async fn advance_routine_runtime(
+        &self,
+        id: Uuid,
+        last_run_at: DateTime<Utc>,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), DatabaseError>;
+    /// Move only the next-fire cursor (for catch-up collapse/skip paths).
+    async fn set_routine_next_fire_at(
+        &self,
+        id: Uuid,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), DatabaseError>;
     async fn delete_routine(&self, id: Uuid) -> Result<bool, DatabaseError>;
     async fn create_routine_run(&self, run: &RoutineRun) -> Result<(), DatabaseError>;
+    /// Atomically enforce durable routine/global capacity, deduplicate a
+    /// trigger key, create the run with its initial lease, and advance the
+    /// parent routine's schedule/counter exactly once.
+    async fn try_admit_routine_run(
+        &self,
+        run: &RoutineRun,
+        routine_limit: i64,
+        global_limit: i64,
+        initial_lease_expires_at: DateTime<Utc>,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<RoutineRunAdmission, DatabaseError>;
     async fn complete_routine_run(
         &self,
         id: Uuid,
         status: RunStatus,
         result_summary: Option<&str>,
         tokens_used: Option<i32>,
-    ) -> Result<(), DatabaseError>;
+    ) -> Result<RoutineRunCompletion, DatabaseError>;
+    /// Apply failure backoff/auto-disable only if the failure streak still
+    /// equals the value returned by `complete_routine_run`. This prevents a
+    /// stale failed finalizer from overriding a newer successful completion.
+    async fn apply_routine_failure_policy(
+        &self,
+        routine_id: Uuid,
+        expected_consecutive_failures: u32,
+        not_before: DateTime<Utc>,
+        disable: bool,
+    ) -> Result<bool, DatabaseError>;
     async fn list_routine_runs(
         &self,
         routine_id: Uuid,
@@ -639,7 +775,10 @@ pub trait RoutineStore: Send + Sync {
     /// instead of a fixed 10-minute cutoff.
     ///
     /// At startup, this is called to clean up runs from a previous process.
-    async fn cleanup_stale_routine_runs(&self, legacy_ttl_secs: i64) -> Result<u64, DatabaseError>;
+    async fn cleanup_stale_routine_runs(
+        &self,
+        legacy_ttl_secs: i64,
+    ) -> Result<RoutineRunReapResult, DatabaseError>;
 
     /// Delete all run records for a specific routine.
     async fn delete_routine_runs(&self, routine_id: Uuid) -> Result<u64, DatabaseError>;
@@ -969,12 +1108,26 @@ pub trait ExperimentStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<ExperimentProject>, DatabaseError>;
+    async fn get_experiment_project_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentProject>, DatabaseError>;
     async fn list_experiment_projects(&self) -> Result<Vec<ExperimentProject>, DatabaseError>;
+    async fn list_experiment_projects_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentProject>, DatabaseError>;
     async fn update_experiment_project(
         &self,
         project: &ExperimentProject,
     ) -> Result<(), DatabaseError>;
     async fn delete_experiment_project(&self, id: Uuid) -> Result<bool, DatabaseError>;
+    async fn delete_experiment_project_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<bool, DatabaseError>;
 
     async fn create_experiment_runner_profile(
         &self,
@@ -984,14 +1137,28 @@ pub trait ExperimentStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<ExperimentRunnerProfile>, DatabaseError>;
+    async fn get_experiment_runner_profile_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentRunnerProfile>, DatabaseError>;
     async fn list_experiment_runner_profiles(
         &self,
+    ) -> Result<Vec<ExperimentRunnerProfile>, DatabaseError>;
+    async fn list_experiment_runner_profiles_for_owner(
+        &self,
+        owner_user_id: &str,
     ) -> Result<Vec<ExperimentRunnerProfile>, DatabaseError>;
     async fn update_experiment_runner_profile(
         &self,
         profile: &ExperimentRunnerProfile,
     ) -> Result<(), DatabaseError>;
     async fn delete_experiment_runner_profile(&self, id: Uuid) -> Result<bool, DatabaseError>;
+    async fn delete_experiment_runner_profile_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<bool, DatabaseError>;
 
     async fn create_experiment_campaign(
         &self,

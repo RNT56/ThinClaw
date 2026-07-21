@@ -3,28 +3,44 @@
 //! Windows support is added through this layer so macOS/Linux behavior can
 //! remain stable while individual call sites move off ad-hoc platform checks.
 
+pub mod artifact_publish;
+pub mod fs;
 pub mod paths;
+pub mod process;
 pub mod shell;
 pub mod timezone;
 
+pub use artifact_publish::{
+    ArtifactReadGuard, ExistingPairPolicy, acquire_artifact_read_lock,
+    acquire_artifact_read_lock_sync, publish_file_pair, publish_file_pair_sync, recover_file_pair,
+    recover_file_pair_sync, remove_file_pair, remove_file_pair_sync,
+};
+pub use fs::{
+    append_private_file_locked, append_private_file_locked_async, read_regular_file_bounded,
+    read_regular_file_bounded_async, read_regular_file_bounded_single_link,
+    read_regular_file_bounded_single_link_async, rename_no_replace, replace_path_atomic,
+    write_private_file_atomic, write_private_file_atomic_async, write_regular_file_atomic,
+    write_regular_file_atomic_async,
+};
 pub use paths::{
     StatePaths, expand_home_dir, instance_id_path, read_instance_id, resolve_data_dir,
     resolve_temp_path, resolve_thinclaw_home, state_paths,
 };
+pub use process::{
+    BoundedProcessError, BoundedProcessOutput, OwnedChild, OwnedStdChild, bounded_command_output,
+    bounded_command_output_with_input, bounded_std_command_output,
+};
 pub use shell::{ShellFlavor, ShellLauncher, shell_launcher};
 
 fn command_available(command: &str) -> bool {
-    std::process::Command::new(command)
-        .arg("--version")
-        .output()
-        .is_ok()
+    executable_available(command)
 }
 
 fn any_command_available(commands: &[&str]) -> bool {
     commands.iter().any(|command| command_available(command))
 }
 
-fn executable_in_path(binary: &str) -> Option<std::path::PathBuf> {
+pub fn find_executable_in_path(binary: &str) -> Option<std::path::PathBuf> {
     let path_env = std::env::var_os("PATH")?;
     std::env::split_paths(&path_env)
         .map(|dir| dir.join(binary))
@@ -36,7 +52,7 @@ pub fn executable_available(binary: &str) -> bool {
     if path.is_absolute() || binary.contains(std::path::MAIN_SEPARATOR) {
         path.is_file()
     } else {
-        executable_in_path(binary).is_some()
+        find_executable_in_path(binary).is_some()
     }
 }
 
@@ -109,7 +125,7 @@ fn browser_env_override() -> Option<std::path::PathBuf> {
         }
         if !path.is_absolute()
             && !value.contains(std::path::MAIN_SEPARATOR)
-            && let Some(found) = executable_in_path(value)
+            && let Some(found) = find_executable_in_path(value)
         {
             return Some(found);
         }
@@ -192,7 +208,7 @@ pub fn find_browser_executable() -> Option<std::path::PathBuf> {
 
     browser_binary_names()
         .iter()
-        .find_map(|binary| executable_in_path(binary))
+        .find_map(|binary| find_executable_in_path(binary))
 }
 
 pub fn linux_screen_capture_commands() -> &'static [&'static str] {

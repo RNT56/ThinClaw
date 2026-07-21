@@ -412,7 +412,8 @@ impl IdentityRegistryStore for PgBackend {
                  a.last_active_direct_channel, a.last_active_direct_external_user_id, \
                  a.created_at, a.updated_at \
                  FROM actor_endpoints e JOIN actors a ON a.actor_id = e.actor_id \
-                 WHERE e.channel = $1 AND e.external_user_id = $2",
+                 WHERE e.channel = $1 AND e.external_user_id = $2 \
+                   AND e.approval_status = 'approved' AND a.status = 'active'",
                 &[&channel, &external_user_id],
             )
             .await

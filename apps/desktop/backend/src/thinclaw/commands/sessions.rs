@@ -12,6 +12,28 @@ use super::types::*;
 use super::ThinClawManager;
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
+const MAX_MEMORY_SEARCH_QUERY_BYTES: usize = 32 * 1024;
+const MAX_MEMORY_SEARCH_RESULTS: usize = 100;
+const MAX_SESSION_EXPORT_BYTES: usize = 64 * 1024 * 1024;
+
+fn validate_session_key(session_key: &str) -> Result<(), String> {
+    thinclaw_core::api::chat::validate_direct_session_key(session_key)
+        .map_err(|error| error.to_string())
+}
+
+pub(super) fn desktop_memory_identity() -> thinclaw_core::identity::ResolvedIdentity {
+    use thinclaw_core::identity::{direct_scope_id, ConversationKind, ResolvedIdentity};
+
+    ResolvedIdentity {
+        principal_id: "local_user".to_string(),
+        actor_id: "local_user".to_string(),
+        conversation_scope_id: direct_scope_id("local_user", "local_user"),
+        conversation_kind: ConversationKind::Direct,
+        raw_sender_id: "local_user".to_string(),
+        stable_external_conversation_key: "tauri://direct/local_user/memory".to_string(),
+    }
+}
+
 // ============================================================================
 // Batch 1: Chat Hot-Path (send, abort, approval)
 // ============================================================================
@@ -30,6 +52,8 @@ pub async fn thinclaw_send_message(
     text: String,
     deliver: bool,
 ) -> Result<ThinClawRpcResponse, String> {
+    thinclaw_core::api::chat::validate_direct_message_input(&session_key, &text)
+        .map_err(|error| error.to_string())?;
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.send_message(&session_key, &text).await?;
@@ -73,6 +97,7 @@ pub async fn thinclaw_abort_chat(
     session_key: String,
     _run_id: Option<String>,
 ) -> Result<ThinClawRpcResponse, String> {
+    validate_session_key(&session_key)?;
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.abort_chat(&session_key).await?;
@@ -106,6 +131,7 @@ pub async fn thinclaw_undo(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
 ) -> Result<ThinClawRpcResponse, String> {
+    validate_session_key(&session_key)?;
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.send_message(&session_key, "/undo").await?;
@@ -148,6 +174,7 @@ pub async fn thinclaw_redo(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
 ) -> Result<ThinClawRpcResponse, String> {
+    validate_session_key(&session_key)?;
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.send_message(&session_key, "/redo").await?;
@@ -209,27 +236,28 @@ pub async fn thinclaw_resolve_approval(
     let (ironclaw_approved, ironclaw_always) = decision.to_ironclaw_params();
 
     // Route through the ToolBridge for session permission caching
-    if let Ok(bridge) = ironclaw.tool_bridge().await {
-        bridge.resolve(&approval_id, decision).await;
+    let bridged_request_resolved = match ironclaw.tool_bridge().await {
+        Ok(bridge) => bridge.resolve(&approval_id, decision).await,
+        Err(_) => false,
+    };
+
+    // Hardware-bridge and agent-loop approvals are separate protocols that
+    // share one UI. A bridge request is already completed by its oneshot and
+    // must not also be submitted to the agent as a phantom approval. Agent
+    // approvals are routed by their globally unique request ID; the legacy
+    // session-key argument remains only for API compatibility.
+    if !bridged_request_resolved {
+        let agent = ironclaw.agent().await?;
+        thinclaw_core::api::chat::resolve_approval(
+            agent,
+            "",
+            &approval_id,
+            ironclaw_approved,
+            ironclaw_always,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
     }
-
-    // Use the assistant thread as default session for approval routing.
-    // The agent internally correlates the approval_id to the correct turn.
-    let session_key = "agent:main";
-
-    // Set session context so approval status events route correctly
-    ironclaw.set_session_context(session_key).await?;
-
-    let agent = ironclaw.agent().await?;
-    thinclaw_core::api::chat::resolve_approval(
-        agent,
-        session_key,
-        &approval_id,
-        ironclaw_approved,
-        ironclaw_always,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
 
     let message = match decision {
         ApprovalDecision::Deny => "Denied",
@@ -394,6 +422,7 @@ pub async fn thinclaw_delete_session(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
 ) -> Result<(), String> {
+    validate_session_key(&session_key)?;
     if session_key == "agent:main" {
         return Err("Cannot delete the core agent:main session.".to_string());
     }
@@ -446,6 +475,7 @@ pub async fn thinclaw_reset_session(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
 ) -> Result<(), String> {
+    validate_session_key(&session_key)?;
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         proxy.reset_session(&session_key).await?;
@@ -483,16 +513,25 @@ pub async fn thinclaw_get_history(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
     limit: u32,
-    _before: Option<String>,
+    before: Option<String>,
 ) -> Result<ThinClawHistoryResponse, String> {
+    validate_session_key(&session_key)?;
+    let limit = limit.clamp(1, 500);
+    if before.as_ref().is_some_and(|cursor| {
+        cursor.len() > 128 || chrono::DateTime::parse_from_rfc3339(cursor).is_err()
+    }) {
+        return Err("History cursor must be a valid RFC 3339 timestamp".to_string());
+    }
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        let raw = proxy.get_history(&session_key, limit).await?;
+        let raw = proxy
+            .get_history(&session_key, limit, before.as_deref())
+            .await?;
         // Remote gateway returns root HistoryResponse:
         // { thread_id, turns: [{ user_input, response, started_at, completed_at, tool_calls }], ... }
         let mut messages: Vec<ThinClawMessage> = Vec::new();
         if let Some(turns) = raw.get("turns").and_then(|v| v.as_array()) {
-            for (idx, turn) in turns.iter().enumerate() {
+            for (idx, turn) in turns.iter().take(limit as usize).enumerate() {
                 let started_ms = turn
                     .get("started_at")
                     .and_then(|v| v.as_str())
@@ -553,6 +592,7 @@ pub async fn thinclaw_get_history(
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
+                        .take(limit as usize * 3)
                         .filter_map(|m| {
                             let id = m.get("id")?.as_str()?.to_string();
                             let role = m.get("role")?.as_str()?.to_string();
@@ -596,7 +636,7 @@ pub async fn thinclaw_get_history(
         "local_user",
         Some(&session_key),
         Some(limit as usize),
-        _before.as_deref(),
+        before.as_deref(),
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -676,6 +716,7 @@ pub async fn thinclaw_subscribe_session(
     ironclaw: State<'_, ThinClawRuntimeState>,
     session_key: String,
 ) -> Result<ThinClawRpcResponse, String> {
+    validate_session_key(&session_key)?;
     // ── Remote mode ──────────────────────────────────────────────────────
     // The remote gateway pushes events over its own SSE connection; there is
     // no per-session subscribe RPC to proxy.  Record the session key locally
@@ -738,7 +779,13 @@ pub async fn thinclaw_get_memory(
 
     let agent = ironclaw.agent().await?;
     let workspace = agent.workspace().ok_or("Workspace not available")?;
-    match thinclaw_core::api::memory::get_file(workspace, "MEMORY.md").await {
+    match thinclaw_core::api::memory::get_file_for_identity(
+        workspace,
+        &desktop_memory_identity(),
+        "MEMORY.md",
+    )
+    .await
+    {
         Ok(resp) => Ok(resp.content),
         Err(_) => Ok(String::new()),
     }
@@ -757,9 +804,15 @@ pub async fn thinclaw_save_memory(
 
     let agent = ironclaw.agent().await?;
     let workspace = agent.workspace().ok_or("Workspace not available")?;
-    thinclaw_core::api::memory::write_file(workspace, "MEMORY.md", &content)
-        .await
-        .map_err(|e| e.to_string())
+    thinclaw_core::api::memory::write_file_for_identity(
+        workspace,
+        agent.store(),
+        &desktop_memory_identity(),
+        "MEMORY.md",
+        &content,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Get contents of a workspace file (e.g. SOUL.md) from ThinClaw's DB.
@@ -780,7 +833,13 @@ pub async fn thinclaw_get_file(
 
     let agent = ironclaw.agent().await?;
     let workspace = agent.workspace().ok_or("Workspace not available")?;
-    match thinclaw_core::api::memory::get_file(workspace, &path).await {
+    match thinclaw_core::api::memory::get_file_for_identity(
+        workspace,
+        &desktop_memory_identity(),
+        &path,
+    )
+    .await
+    {
         Ok(resp) => Ok(resp.content),
         Err(_) => Ok(format!("File {} not found.", path)),
     }
@@ -805,9 +864,15 @@ pub async fn thinclaw_write_file(
 
     let agent = ironclaw.agent().await?;
     let workspace = agent.workspace().ok_or("Workspace not available")?;
-    thinclaw_core::api::memory::write_file(workspace, &path, &content)
-        .await
-        .map_err(|e| e.to_string())
+    thinclaw_core::api::memory::write_file_for_identity(
+        workspace,
+        agent.store(),
+        &desktop_memory_identity(),
+        &path,
+        &content,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Delete a workspace file from ThinClaw's DB.
@@ -838,6 +903,7 @@ pub async fn thinclaw_delete_file(
         "HEARTBEAT.md",
         "BOOT.md",
         "TOOLS.md",
+        "actor/IDENTITY.md",
     ];
 
     if PROTECTED_FILES.contains(&path.as_str()) {
@@ -849,9 +915,47 @@ pub async fn thinclaw_delete_file(
 
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        proxy.delete_file(&path).await?;
-        tracing::info!("[thinclaw-runtime] Deleted remote workspace file: {}", path);
-        return Ok(());
+        match proxy.delete_file(&path).await {
+            Ok(()) => {
+                tracing::info!("[thinclaw-runtime] Deleted remote workspace file: {}", path);
+                return Ok(());
+            }
+            Err(direct_error) => {
+                let prefix = if path.ends_with('/') {
+                    path.clone()
+                } else {
+                    format!("{}/", path)
+                };
+                let children = proxy
+                    .list_files()
+                    .await?
+                    .into_iter()
+                    .filter(|candidate| candidate.starts_with(&prefix))
+                    .collect::<Vec<_>>();
+                if children.is_empty() {
+                    return Err(direct_error);
+                }
+                if let Some(protected) = children
+                    .iter()
+                    .find(|candidate| PROTECTED_FILES.contains(&candidate.as_str()))
+                {
+                    return Err(format!(
+                        "Cannot delete directory '{}' because it contains protected file '{}'",
+                        path, protected
+                    ));
+                }
+                let count = children.len();
+                for child in children {
+                    proxy.delete_file(&child).await?;
+                }
+                tracing::info!(
+                    "[thinclaw-runtime] Deleted {} remote workspace files under directory: {}",
+                    count,
+                    path
+                );
+                return Ok(());
+            }
+        }
     }
 
     // ── Local mode ────────────────────────────────────────────────────────
@@ -859,7 +963,13 @@ pub async fn thinclaw_delete_file(
     let workspace = agent.workspace().ok_or("Workspace not available")?;
 
     // Try direct file deletion first
-    match thinclaw_core::api::memory::delete_file(workspace, &path).await {
+    match thinclaw_core::api::memory::delete_file_for_identity(
+        workspace,
+        &desktop_memory_identity(),
+        &path,
+    )
+    .await
+    {
         Ok(()) => {
             tracing::info!("[thinclaw-runtime] Deleted workspace file: {}", path);
             return Ok(());
@@ -876,7 +986,10 @@ pub async fn thinclaw_delete_file(
         format!("{}/", path)
     };
 
-    let all_paths = workspace.list_all().await.map_err(|e| e.to_string())?;
+    let all_paths =
+        thinclaw_core::api::memory::list_files_for_identity(workspace, &desktop_memory_identity())
+            .await
+            .map_err(|e| e.to_string())?;
 
     let children: Vec<&String> = all_paths
         .iter()
@@ -899,7 +1012,13 @@ pub async fn thinclaw_delete_file(
 
     let count = children.len();
     for child_path in children {
-        if let Err(e) = thinclaw_core::api::memory::delete_file(workspace, child_path).await {
+        if let Err(e) = thinclaw_core::api::memory::delete_file_for_identity(
+            workspace,
+            &desktop_memory_identity(),
+            child_path,
+        )
+        .await
+        {
             tracing::warn!(
                 "[thinclaw-runtime] Failed to delete '{}': {}",
                 child_path,
@@ -932,7 +1051,72 @@ pub async fn thinclaw_list_workspace_files(
     // ── Local mode ────────────────────────────────────────────────────────
     let agent = ironclaw.agent().await?;
     let workspace = agent.workspace().ok_or("Workspace not available")?;
-    workspace.list_all().await.map_err(|e| e.to_string())
+    thinclaw_core::api::memory::list_files_for_identity(workspace, &desktop_memory_identity())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Remove a ThinClaw-owned directory only after resolving it beneath its
+/// expected owner root. This prevents factory reset from following a planted
+/// intermediate symlink into an unrelated project or home directory.
+fn reset_owned_directory(
+    path: &std::path::Path,
+    owner_root: &std::path::Path,
+    recreate: bool,
+) -> Result<bool, String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect reset target {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "Refusing to reset non-directory or symlink target {}",
+            path.display()
+        ));
+    }
+
+    let owner_metadata = std::fs::symlink_metadata(owner_root).map_err(|error| {
+        format!(
+            "Failed to inspect reset owner {}: {error}",
+            owner_root.display()
+        )
+    })?;
+    if owner_metadata.file_type().is_symlink() || !owner_metadata.is_dir() {
+        return Err(format!(
+            "Refusing to reset beneath non-directory or symlink owner {}",
+            owner_root.display()
+        ));
+    }
+
+    let canonical_owner = owner_root.canonicalize().map_err(|error| {
+        format!(
+            "Failed to resolve reset owner {}: {error}",
+            owner_root.display()
+        )
+    })?;
+    let canonical_target = path
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve reset target {}: {error}", path.display()))?;
+    if canonical_target == canonical_owner || !canonical_target.starts_with(&canonical_owner) {
+        return Err(format!(
+            "Refusing to reset target outside its owner root: {}",
+            path.display()
+        ));
+    }
+
+    std::fs::remove_dir_all(&canonical_target)
+        .map_err(|error| format!("Failed to remove {}: {error}", path.display()))?;
+    if recreate {
+        std::fs::create_dir(&canonical_target)
+            .map_err(|error| format!("Failed to recreate {}: {error}", path.display()))?;
+    }
+    Ok(true)
 }
 
 /// Clear memory or identity files in ThinClaw's workspace.
@@ -959,7 +1143,14 @@ pub async fn thinclaw_clear_memory(
             // ── Local mode ───────────────────────────────────────────
             let agent = ironclaw.agent().await?;
             let workspace = agent.workspace().ok_or("Workspace not available")?;
-            let _ = thinclaw_core::api::memory::write_file(workspace, "MEMORY.md", "").await;
+            let _ = thinclaw_core::api::memory::write_file_for_identity(
+                workspace,
+                agent.store(),
+                &desktop_memory_identity(),
+                "MEMORY.md",
+                "",
+            )
+            .await;
             info!("[thinclaw-runtime] Cleared MEMORY.md via workspace API");
             Ok(())
         }
@@ -969,15 +1160,23 @@ pub async fn thinclaw_clear_memory(
                 let _ = proxy.write_file("SOUL.md", "").await;
                 let _ = proxy.write_file("USER.md", "").await;
                 let _ = proxy.write_file("IDENTITY.md", "").await;
+                let _ = proxy.write_file("actor/IDENTITY.md", "").await;
                 info!("[thinclaw-runtime] Cleared identity files on remote agent");
                 return Ok(());
             }
             // ── Local mode ───────────────────────────────────────────
             let agent = ironclaw.agent().await?;
             let workspace = agent.workspace().ok_or("Workspace not available")?;
-            let _ = thinclaw_core::api::memory::write_file(workspace, "SOUL.md", "").await;
-            let _ = thinclaw_core::api::memory::write_file(workspace, "USER.md", "").await;
-            let _ = thinclaw_core::api::memory::write_file(workspace, "IDENTITY.md", "").await;
+            for path in ["SOUL.md", "USER.md", "IDENTITY.md", "actor/IDENTITY.md"] {
+                let _ = thinclaw_core::api::memory::write_file_for_identity(
+                    workspace,
+                    agent.store(),
+                    &desktop_memory_identity(),
+                    path,
+                    "",
+                )
+                .await;
+            }
             info!("[thinclaw-runtime] Cleared identity files via workspace API");
             Ok(())
         }
@@ -1026,76 +1225,60 @@ pub async fn thinclaw_clear_memory(
             };
 
             let workspace_path = cfg.workspace_dir();
-            if workspace_path.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&workspace_path) {
-                    error!("[thinclaw] Failed to wipe workspace: {}", e);
-                    // Non-fatal — the DB was the important part
-                }
-                let _ = std::fs::create_dir_all(&workspace_path);
-                info!(
+            match reset_owned_directory(&workspace_path, &cfg.base_dir, true) {
+                Ok(true) => info!(
                     "[thinclaw] Wiped legacy workspace directory: {:?}",
                     workspace_path
-                );
+                ),
+                Ok(false) => {}
+                Err(error) => error!("[thinclaw] Failed to wipe workspace safely: {error}"),
             }
 
             let sessions_dir = cfg.state_dir().join("agents").join("main").join("sessions");
-            if sessions_dir.exists() {
-                let _ = std::fs::remove_dir_all(&sessions_dir);
-                let _ = std::fs::create_dir_all(&sessions_dir);
+            if let Err(error) = reset_owned_directory(&sessions_dir, &cfg.base_dir, true) {
+                warn!("[thinclaw] Failed to wipe legacy sessions safely: {error}");
             }
 
             let logs_dir = cfg.base_dir.join("logs");
-            if logs_dir.exists() {
-                let _ = std::fs::remove_dir_all(&logs_dir);
-                let _ = std::fs::create_dir_all(&logs_dir);
+            if let Err(error) = reset_owned_directory(&logs_dir, &cfg.base_dir, true) {
+                warn!("[thinclaw] Failed to wipe logs safely: {error}");
             }
 
             // ── 4. Clean up agent workspace directories ──────────────────
             // Delete the legacy auto-generated agent_workspace if it exists
             let agent_workspace = cfg.base_dir.join("agent_workspace");
-            if agent_workspace.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&agent_workspace) {
-                    error!("[thinclaw] Failed to wipe agent_workspace: {}", e);
-                } else {
-                    info!("[thinclaw] Deleted agent_workspace directory");
+            match reset_owned_directory(&agent_workspace, &cfg.base_dir, false) {
+                Ok(true) => info!("[thinclaw] Deleted agent_workspace directory"),
+                Ok(false) => {}
+                Err(error) => {
+                    error!("[thinclaw] Failed to wipe agent_workspace safely: {error}")
                 }
             }
 
-            // If a custom workspace_root was set in config, clean that too
+            // A custom workspace can be a real user project. Factory reset owns
+            // ThinClaw state, not arbitrary project contents, so preserve it.
             if let Some(ref custom_root) = cfg.workspace_root {
-                let custom_path = std::path::Path::new(custom_root);
-                if custom_path.exists() && custom_path != agent_workspace {
-                    if let Err(e) = std::fs::remove_dir_all(custom_path) {
-                        error!(
-                            "[thinclaw] Failed to wipe custom workspace root {:?}: {}",
-                            custom_root, e
-                        );
-                    } else {
-                        info!(
-                            "[thinclaw] Deleted custom workspace root: {:?}",
-                            custom_root
-                        );
-                    }
-                }
+                info!(
+                    "[thinclaw] Preserved user-configured workspace root during reset: {:?}",
+                    custom_root
+                );
             }
 
             // ── 4b. Wipe default ThinClaw workspace ──────────────────────
             // The engine resolves this at runtime in build_inner() but never
             // persists it to cfg.workspace_root, so the block above misses it.
             // On factory reset we must wipe it so agents start clean.
-            let default_thinclaw = std::env::var("HOME")
-                .map(|h| {
-                    std::path::PathBuf::from(h)
-                        .join("ThinClaw")
-                        .join("agent_workspace")
-                })
-                .unwrap_or_else(|_| std::path::PathBuf::from("agent_workspace"));
-            if default_thinclaw.exists() && default_thinclaw != agent_workspace {
-                if let Err(e) = std::fs::remove_dir_all(&default_thinclaw) {
-                    tracing::warn!("[thinclaw] Failed to wipe ThinClaw workspace: {}", e);
-                } else {
-                    let _ = std::fs::create_dir_all(&default_thinclaw);
-                    info!("[thinclaw] Wiped ThinClaw workspace directory");
+            if let Ok(home) = std::env::var("HOME") {
+                let default_owner = std::path::PathBuf::from(home).join("ThinClaw");
+                let default_thinclaw = default_owner.join("agent_workspace");
+                if default_thinclaw != agent_workspace {
+                    match reset_owned_directory(&default_thinclaw, &default_owner, true) {
+                        Ok(true) => info!("[thinclaw] Wiped ThinClaw workspace directory"),
+                        Ok(false) => {}
+                        Err(error) => {
+                            warn!("[thinclaw] Failed to wipe ThinClaw workspace safely: {error}")
+                        }
+                    }
                 }
             }
 
@@ -1151,6 +1334,9 @@ pub async fn thinclaw_set_thinking(
     enabled: bool,
     budget_tokens: Option<u32>,
 ) -> Result<super::types::ThinkingConfig, String> {
+    if budget_tokens.is_some_and(|budget| !(1..=1_000_000).contains(&budget)) {
+        return Err("Thinking budget must be between 1 and 1,000,000 tokens".to_string());
+    }
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let _ = proxy
@@ -1229,7 +1415,15 @@ pub async fn thinclaw_memory_search(
     query: String,
     limit: Option<u32>,
 ) -> Result<super::types::MemorySearchResponse, String> {
-    let limit = limit.unwrap_or(20) as usize;
+    if query.trim().is_empty()
+        || query.len() > MAX_MEMORY_SEARCH_QUERY_BYTES
+        || query.contains('\0')
+    {
+        return Err(format!(
+            "Memory search query must be non-empty, contain no NUL, and be at most {MAX_MEMORY_SEARCH_QUERY_BYTES} bytes"
+        ));
+    }
+    let limit = (limit.unwrap_or(20) as usize).clamp(1, MAX_MEMORY_SEARCH_RESULTS);
 
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -1241,6 +1435,7 @@ pub async fn thinclaw_memory_search(
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
+                    .take(limit)
                     .filter_map(|item| {
                         Some(super::types::MemorySearchResult {
                             path: item.get("path")?.as_str()?.to_string(),
@@ -1270,7 +1465,14 @@ pub async fn thinclaw_memory_search(
     let agent = ironclaw.agent().await.ok();
     if let Some(ref agent) = agent {
         if let Some(workspace) = agent.workspace() {
-            match thinclaw_core::api::memory::search(workspace, &query, Some(limit)).await {
+            match thinclaw_core::api::memory::search_for_identity(
+                workspace,
+                &desktop_memory_identity(),
+                &query,
+                Some(limit),
+            )
+            .await
+            {
                 Ok(resp) => {
                     let results: Vec<super::types::MemorySearchResult> = resp
                         .results
@@ -1302,21 +1504,23 @@ pub async fn thinclaw_memory_search(
     // do simple text search over workspace files via the API
     if let Some(ref agent) = agent {
         if let Some(workspace) = agent.workspace() {
-            let files = thinclaw_core::api::memory::list_files(workspace, None)
-                .await
-                .map(|resp| {
-                    resp.entries
-                        .iter()
-                        .map(|e| e.path.clone())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let files = thinclaw_core::api::memory::list_files_for_identity(
+                workspace,
+                &desktop_memory_identity(),
+            )
+            .await
+            .unwrap_or_default();
 
             let query_lower = query.to_lowercase();
             let mut results = Vec::new();
 
-            for file_path in &files {
-                let content = match thinclaw_core::api::memory::get_file(workspace, file_path).await
+            for file_path in files.iter().take(10_000) {
+                let content = match thinclaw_core::api::memory::get_file_for_identity(
+                    workspace,
+                    &desktop_memory_identity(),
+                    file_path,
+                )
+                .await
                 {
                     Ok(resp) => resp.content,
                     Err(_) => continue,
@@ -1327,6 +1531,14 @@ pub async fn thinclaw_memory_search(
                     if let Some(pos) = lower.find(&query_lower) {
                         let start = pos.saturating_sub(80);
                         let end = (pos + query_lower.len() + 80).min(content.len());
+                        let mut start = start;
+                        while start > 0 && !content.is_char_boundary(start) {
+                            start -= 1;
+                        }
+                        let mut end = end;
+                        while end > start && !content.is_char_boundary(end) {
+                            end -= 1;
+                        }
                         let snippet = content[start..end].to_string();
 
                         results.push(super::types::MemorySearchResult {
@@ -1364,6 +1576,36 @@ pub async fn thinclaw_memory_search(
 /// Supported formats: `md` (default), `json`, `txt`, `csv`, `html`.
 /// The `format` parameter is optional — `None` defaults to markdown
 /// for backward compatibility with existing frontend callers.
+fn escape_export_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn export_csv_cell(value: &str) -> String {
+    let mut flattened = value.replace(['\r', '\n'], " ");
+    if flattened
+        .trim_start()
+        .chars()
+        .next()
+        .is_some_and(|character| matches!(character, '=' | '+' | '-' | '@'))
+    {
+        // Spreadsheet applications may execute cells beginning with these
+        // characters as formulas even when the CSV field is quoted.
+        flattened.insert(0, '\'');
+    }
+    format!("\"{}\"", flattened.replace('"', "\"\""))
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_export_session(
@@ -1371,21 +1613,34 @@ pub async fn thinclaw_export_session(
     session_key: String,
     format: Option<String>,
 ) -> Result<super::types::SessionExportResponse, String> {
-    let fmt = format.as_deref().unwrap_or("md");
+    validate_session_key(&session_key)?;
+    let fmt = match format.as_deref().unwrap_or("md") {
+        "md" | "markdown" => "md",
+        "json" => "json",
+        "txt" => "txt",
+        "csv" => "csv",
+        "html" => "html",
+        _ => return Err("Unsupported export format".to_string()),
+    };
 
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.export_session(&session_key, fmt).await?;
 
         let transcript = raw
-            .get("transcript")
+            .get("content")
+            .or_else(|| raw.get("transcript"))
             .and_then(|v| v.as_str())
-            .unwrap_or("")
+            .ok_or_else(|| "Remote session export omitted its content".to_string())?
             .to_string();
+        if transcript.len() > MAX_SESSION_EXPORT_BYTES {
+            return Err("Remote session export exceeds the 64 MiB limit".to_string());
+        }
         let message_count = raw
             .get("message_count")
             .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0);
 
         return Ok(super::types::SessionExportResponse {
             transcript,
@@ -1408,6 +1663,35 @@ pub async fn thinclaw_export_session(
     )
     .await
     .map_err(|e| format!("Failed to fetch history: {}", e))?;
+
+    let source_bytes = history.turns.iter().try_fold(
+        session_key.len(),
+        |total, turn| -> Result<usize, String> {
+            let mut total = total
+                .checked_add(turn.started_at.len())
+                .and_then(|value| value.checked_add(turn.user_input.len()))
+                .ok_or_else(|| "Session export size overflow".to_string())?;
+            if let Some(completed_at) = &turn.completed_at {
+                total = total
+                    .checked_add(completed_at.len())
+                    .ok_or_else(|| "Session export size overflow".to_string())?;
+            }
+            if let Some(response) = &turn.response {
+                total = total
+                    .checked_add(response.len())
+                    .ok_or_else(|| "Session export size overflow".to_string())?;
+            }
+            for tool_call in &turn.tool_calls {
+                total = total
+                    .checked_add(tool_call.name.len())
+                    .ok_or_else(|| "Session export size overflow".to_string())?;
+            }
+            Ok(total)
+        },
+    )?;
+    if source_bytes > MAX_SESSION_EXPORT_BYTES / 8 {
+        return Err("Session is too large to export safely".to_string());
+    }
 
     let message_count = history.turns.len() as u32;
     let now = chrono::Utc::now()
@@ -1439,21 +1723,26 @@ pub async fn thinclaw_export_session(
                 "message_count": message_count,
                 "turns": turns_json,
             }))
-            .unwrap_or_default()
+            .map_err(|error| format!("Failed to encode session export: {error}"))?
         }
         "csv" => {
             // Tabular CSV export
             let mut csv = String::from("timestamp,role,content\n");
             for turn in &history.turns {
                 let ts = &turn.started_at;
-                let user_text = turn.user_input.replace('"', "\"\"").replace('\n', " ");
-                csv.push_str(&format!("\"{}\",\"user\",\"{}\"\n", ts, user_text));
+                csv.push_str(&format!(
+                    "{},{},{}\n",
+                    export_csv_cell(ts),
+                    export_csv_cell("user"),
+                    export_csv_cell(&turn.user_input)
+                ));
                 if let Some(ref response) = turn.response {
                     let resp_ts = turn.completed_at.as_deref().unwrap_or(ts);
-                    let resp_text = response.replace('"', "\"\"").replace('\n', " ");
                     csv.push_str(&format!(
-                        "\"{}\",\"assistant\",\"{}\"\n",
-                        resp_ts, resp_text
+                        "{},{},{}\n",
+                        export_csv_cell(resp_ts),
+                        export_csv_cell("assistant"),
+                        export_csv_cell(response)
                     ));
                 }
             }
@@ -1461,23 +1750,30 @@ pub async fn thinclaw_export_session(
         }
         "html" => {
             // Basic styled HTML export
+            let safe_session_key = escape_export_html(&session_key);
             let mut html = format!(
-                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Session {}</title>\
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
+                <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\">\
+                <title>Session {}</title>\
                 <style>body{{font-family:system-ui;max-width:800px;margin:0 auto;padding:2rem}}\
-                .user{{background:#f0f4ff;padding:1rem;border-radius:8px;margin:0.5rem 0}}\
-                .assistant{{background:#f0fff4;padding:1rem;border-radius:8px;margin:0.5rem 0}}\
+                .user{{background:#f0f4ff;padding:1rem;border-radius:8px;margin:0.5rem 0;white-space:pre-wrap}}\
+                .assistant{{background:#f0fff4;padding:1rem;border-radius:8px;margin:0.5rem 0;white-space:pre-wrap}}\
                 .ts{{color:#888;font-size:0.8rem}}</style></head><body>\
                 <h1>Session: {}</h1><p class=\"ts\">Exported: {}</p><hr>",
-                session_key, session_key, now
+                safe_session_key, safe_session_key, now
             );
             for turn in &history.turns {
-                let ts = &turn.started_at;
+                let ts = escape_export_html(&turn.started_at);
+                let user_input = escape_export_html(&turn.user_input);
                 html.push_str(&format!(
                     "<div class=\"user\"><strong>User</strong> <span class=\"ts\">{}</span><p>{}</p></div>",
-                    ts, turn.user_input
+                    ts, user_input
                 ));
                 if let Some(ref response) = turn.response {
-                    let resp_ts = turn.completed_at.as_deref().unwrap_or(ts);
+                    let resp_ts = escape_export_html(
+                        turn.completed_at.as_deref().unwrap_or(&turn.started_at),
+                    );
+                    let response = escape_export_html(response);
                     html.push_str(&format!(
                         "<div class=\"assistant\"><strong>Assistant</strong> <span class=\"ts\">{}</span><p>{}</p></div>",
                         resp_ts, response
@@ -1507,7 +1803,7 @@ pub async fn thinclaw_export_session(
             }
             txt
         }
-        _ => {
+        "md" => {
             // Default: markdown
             let mut md = String::new();
             md.push_str(&format!("# Session Export: {}\n\n", session_key));
@@ -1538,11 +1834,70 @@ pub async fn thinclaw_export_session(
             }
             md
         }
+        _ => unreachable!("export format was validated above"),
     };
+
+    if transcript.len() > MAX_SESSION_EXPORT_BYTES {
+        return Err("Rendered session export exceeds the 64 MiB limit".to_string());
+    }
 
     Ok(super::types::SessionExportResponse {
         transcript,
         session_key,
         message_count,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{escape_export_html, export_csv_cell, reset_owned_directory};
+
+    #[test]
+    fn html_export_escapes_active_content() {
+        assert_eq!(
+            escape_export_html("<script>alert('x') & more</script>"),
+            "&lt;script&gt;alert(&#39;x&#39;) &amp; more&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn csv_export_neutralizes_spreadsheet_formulas() {
+        assert_eq!(
+            export_csv_cell(" =HYPERLINK(\"x\")"),
+            "\"' =HYPERLINK(\"\"x\"\")\""
+        );
+        assert_eq!(export_csv_cell("ordinary"), "\"ordinary\"");
+    }
+
+    #[test]
+    fn factory_reset_helper_recreates_only_owned_target() {
+        let owner = tempfile::tempdir().unwrap();
+        let target = owner.path().join("workspace");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("state.txt"), b"state").unwrap();
+
+        assert!(reset_owned_directory(&target, owner.path(), true).unwrap());
+        assert!(target.is_dir());
+        assert!(!target.join("state.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn factory_reset_helper_rejects_intermediate_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let owner = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::create_dir(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), b"keep").unwrap();
+        symlink(outside.path(), owner.path().join("redirect")).unwrap();
+
+        let error =
+            reset_owned_directory(&owner.path().join("redirect/victim"), owner.path(), false)
+                .unwrap_err();
+
+        assert!(error.contains("outside its owner root"));
+        assert_eq!(std::fs::read(victim.join("keep.txt")).unwrap(), b"keep");
+    }
 }

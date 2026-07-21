@@ -14,19 +14,11 @@ use serde::Deserialize;
 use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
 
 /// Handles online discovery of MCP servers.
-pub struct OnlineDiscovery {
-    http_client: reqwest::Client,
-}
+pub struct OnlineDiscovery;
 
 impl OnlineDiscovery {
     pub fn new() -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .user_agent("ThinClaw/1.0")
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-
-        Self { http_client }
+        Self
     }
 
     /// Run the full discovery pipeline for a query.
@@ -35,7 +27,10 @@ impl OnlineDiscovery {
     /// and returns only confirmed MCP servers.
     pub async fn discover(&self, query: &str) -> Vec<RegistryEntry> {
         let query_clean = query.trim().to_lowercase();
-        if query_clean.is_empty() {
+        if query_clean.is_empty()
+            || query_clean.len() > 256
+            || query_clean.chars().any(char::is_control)
+        {
             return Vec::new();
         }
 
@@ -79,6 +74,12 @@ impl OnlineDiscovery {
             .next()
             .unwrap_or(query)
             .replace('-', "");
+        if service.is_empty()
+            || service.len() > 128
+            || !service.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Vec::new();
+        }
 
         let patterns = vec![
             format!("https://mcp.{}.com", service),
@@ -91,12 +92,12 @@ impl OnlineDiscovery {
         let futures: Vec<_> = patterns
             .into_iter()
             .map(|url| {
-                let client = self.http_client.clone();
                 let query_owned = query.to_string();
+                let service_name = service.clone();
                 async move {
-                    if validate_mcp_url_with_client(&client, &url).await {
+                    if validate_mcp_url_guarded(&url).await {
                         Some(RegistryEntry {
-                            name: query_owned.replace(' ', "-"),
+                            name: service_name,
                             display_name: titlecase(&query_owned),
                             kind: ExtensionKind::McpServer,
                             description: format!("MCP server discovered at {}", url),
@@ -131,7 +132,7 @@ impl OnlineDiscovery {
             urlencoding::encode(query)
         );
 
-        let response = match self.http_client.get(&search_url).send().await {
+        let response = match public_https_get(&search_url).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!("GitHub search failed: {}", e);
@@ -144,32 +145,40 @@ impl OnlineDiscovery {
             return Vec::new();
         }
 
-        let body: GitHubSearchResponse = match response.json().await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::debug!("Failed to parse GitHub search response: {}", e);
-                return Vec::new();
-            }
-        };
+        let body: GitHubSearchResponse =
+            match crate::http_response::bounded_json(response, 4 * 1024 * 1024).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::debug!("Failed to parse GitHub search response: {}", e);
+                    return Vec::new();
+                }
+            };
 
-        body.items
+        let candidates = body
+            .items
             .into_iter()
+            .take(5)
             .filter_map(|item| {
                 // Only include repos that look like MCP servers
                 let has_mcp_topic = item
                     .topics
                     .iter()
                     .any(|t| t.contains("mcp") || t.contains("model-context-protocol"));
-                if !has_mcp_topic {
+                if !has_mcp_topic || !valid_github_item(&item) {
                     return None;
                 }
 
-                // Try to extract a homepage URL (which might be the MCP endpoint)
-                let url = item.homepage.filter(|h| !h.is_empty()).unwrap_or_else(|| {
-                    // Fall back to repo URL as a reference
-                    item.html_url.clone()
-                });
-
+                let homepage = item
+                    .homepage
+                    .as_ref()
+                    .filter(|homepage| !homepage.trim().is_empty())?
+                    .clone();
+                Some((item, homepage))
+            })
+            .map(|(item, url)| async move {
+                if !validate_mcp_url_guarded(&url).await {
+                    return None;
+                }
                 Some(RegistryEntry {
                     name: item.name.clone(),
                     display_name: titlecase(&item.name.replace('-', " ")),
@@ -183,12 +192,18 @@ impl OnlineDiscovery {
                     auth_hint: AuthHint::Dcr,
                 })
             })
+            .collect::<Vec<_>>();
+
+        futures::future::join_all(candidates)
+            .await
+            .into_iter()
+            .flatten()
             .collect()
     }
 
     /// Validate a URL is a real MCP server.
     pub async fn validate_mcp_url(&self, url: &str) -> bool {
-        validate_mcp_url_with_client(&self.http_client, url).await
+        validate_mcp_url_guarded(url).await
     }
 }
 
@@ -203,27 +218,71 @@ impl Default for OnlineDiscovery {
 /// Tries:
 /// 1. GET {origin}/.well-known/oauth-protected-resource -> 200 with JSON = confirmed
 /// 2. Fallback: HEAD/GET the URL itself to check if it's alive
-async fn validate_mcp_url_with_client(client: &reqwest::Client, url: &str) -> bool {
+async fn public_https_get(url: &str) -> Result<reqwest::Response, String> {
+    let guarded = thinclaw_tools_core::validate_outbound_url_pinned_async(
+        url,
+        &thinclaw_tools_core::OutboundUrlGuardOptions {
+            require_https: true,
+            upgrade_http_to_https: false,
+            allowlist: Vec::new(),
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let host = guarded
+        .url
+        .host_str()
+        .ok_or_else(|| "discovery URL has no host".to_string())?;
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(5))
+        .user_agent("ThinClaw/1.0")
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if !guarded.pinned_addrs.is_empty() {
+        builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+    }
+    builder
+        .build()
+        .map_err(|error| error.to_string())?
+        .get(guarded.url)
+        .send()
+        .await
+        .map_err(|error| error.without_url().to_string())
+}
+
+async fn validate_mcp_url_guarded(url: &str) -> bool {
     let parsed = match reqwest::Url::parse(url) {
-        Ok(u) => u,
-        Err(_) => return false,
+        Ok(url)
+            if url.as_str().len() <= 16 * 1024
+                && url.scheme() == "https"
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.fragment().is_none() =>
+        {
+            url
+        }
+        _ => return false,
     };
-    let origin = parsed.origin().ascii_serialization();
 
     // Check .well-known/oauth-protected-resource
-    let well_known_url = format!("{}/.well-known/oauth-protected-resource", origin);
-    match client.get(&well_known_url).send().await {
+    let mut well_known_url = parsed.clone();
+    well_known_url.set_path("/.well-known/oauth-protected-resource");
+    well_known_url.set_query(None);
+    match public_https_get(well_known_url.as_str()).await {
         Ok(resp) if resp.status().is_success() => {
             // Try to parse as JSON to confirm it's a real MCP endpoint
-            if let Ok(text) = resp.text().await {
+            if let Ok(text) = crate::http_response::bounded_text(resp, 1024 * 1024).await {
                 return serde_json::from_str::<serde_json::Value>(&text).is_ok();
             }
         }
         _ => {}
     }
 
-    // Fallback: try a HEAD request on the URL itself to check if it's alive
-    match client.head(url).send().await {
+    // Fallback: request the URL itself to check if it is alive. The body is
+    // dropped without being buffered.
+    match public_https_get(url).await {
         Ok(resp) => {
             // Accept various status codes that indicate the server exists
             let status = resp.status().as_u16();
@@ -232,6 +291,11 @@ async fn validate_mcp_url_with_client(client: &reqwest::Client, url: &str) -> bo
         }
         Err(_) => false,
     }
+}
+
+#[cfg(test)]
+async fn validate_mcp_url_with_client(_client: &reqwest::Client, url: &str) -> bool {
+    validate_mcp_url_guarded(url).await
 }
 
 /// Run a future with a timeout, returning None if it times out.
@@ -274,12 +338,37 @@ struct GitHubSearchResponse {
 struct GitHubRepo {
     name: String,
     full_name: String,
-    html_url: String,
     description: Option<String>,
     #[serde(default)]
     homepage: Option<String>,
     #[serde(default)]
     topics: Vec<String>,
+}
+
+fn valid_github_item(item: &GitHubRepo) -> bool {
+    !item.name.is_empty()
+        && item.name.len() <= 128
+        && item
+            .name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && !item.full_name.is_empty()
+        && item.full_name.len() <= 256
+        && !item.full_name.chars().any(char::is_control)
+        && item.description.as_ref().is_none_or(|description| {
+            description.len() <= 4096
+                && !description.chars().any(|character| {
+                    character.is_control() && !matches!(character, '\n' | '\r' | '\t')
+                })
+        })
+        && item.homepage.as_ref().is_none_or(|homepage| {
+            homepage.len() <= 16 * 1024 && !homepage.chars().any(char::is_control)
+        })
+        && item.topics.len() <= 32
+        && item
+            .topics
+            .iter()
+            .all(|topic| topic.len() <= 128 && !topic.chars().any(char::is_control))
 }
 
 #[cfg(test)]

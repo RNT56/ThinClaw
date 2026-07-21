@@ -13,6 +13,14 @@
 
 use std::collections::HashMap;
 
+const MAX_CONFIGURED_MEDIA_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+fn megabytes_to_bounded_bytes(megabytes: u64) -> u64 {
+    megabytes
+        .saturating_mul(1024 * 1024)
+        .min(MAX_CONFIGURED_MEDIA_BYTES)
+}
+
 /// Per-channel media size limits (in bytes).
 #[derive(Debug, Clone)]
 pub struct MediaLimits {
@@ -54,12 +62,12 @@ impl MediaLimits {
             if let Ok(val) = std::env::var(&env_key)
                 && let Ok(mb) = val.parse::<u64>()
             {
-                overrides.insert(channel.to_string(), mb * 1024 * 1024);
+                overrides.insert(channel.to_string(), megabytes_to_bounded_bytes(mb));
             }
         }
 
         Self {
-            default_max_bytes: default_mb * 1024 * 1024,
+            default_max_bytes: megabytes_to_bounded_bytes(default_mb),
             channel_overrides: overrides,
         }
     }

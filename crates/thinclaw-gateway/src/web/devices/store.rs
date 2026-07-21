@@ -1,12 +1,12 @@
 //! Persisted device store: `~/.thinclaw/devices.json`.
 //!
-//! Mirrors `crates/thinclaw-channels/src/pairing.rs` mechanics: fs4 file
-//! locking around read-modify-write, tmp+rename atomic writes, a versioned
-//! JSON envelope, and `with_base_dir` for tests.
+//! Uses a stable sidecar lock around read-modify-write, durable atomic data
+//! replacement, a bounded versioned JSON envelope, and `with_base_dir` for
+//! tests.
 
 use std::fs;
-use std::io::{Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
@@ -25,7 +25,15 @@ use super::types::{
 pub const DEVICE_TOKEN_PREFIX: &str = "tcd_";
 
 const DEVICES_FILE_NAME: &str = "devices.json";
+const DEVICES_LOCK_FILE_NAME: &str = "devices.lock";
 const DEVICES_FILE_VERSION: u8 = 1;
+const MAX_DEVICES_FILE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_DEVICE_RECORDS: usize = 4_096;
+const MAX_DEVICE_NAME_BYTES: usize = 256;
+const MAX_DEVICE_PLATFORM_BYTES: usize = 64;
+const MAX_DEVICE_PUBKEY_BYTES: usize = 3 * 1024;
+const MAX_DEVICE_IDENTIFIER_BYTES: usize = 256;
+const MAX_PUSH_TOKEN_BYTES: usize = 512;
 
 /// Error from device store operations.
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +49,9 @@ pub enum DeviceStoreError {
 
     #[error("device revoked: {0}")]
     Revoked(String),
+
+    #[error("invalid persisted device data: {0}")]
+    InvalidData(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -141,46 +152,130 @@ impl DeviceStore {
         self.base_dir.join(DEVICES_FILE_NAME)
     }
 
+    fn lock_path(&self) -> PathBuf {
+        self.base_dir.join(DEVICES_LOCK_FILE_NAME)
+    }
+
     fn read_locked(&self) -> Result<(fs::File, DevicesFile), DeviceStoreError> {
-        let path = self.path();
-        fs::create_dir_all(
-            path.parent()
-                .expect("devices.json path always has a parent"),
-        )?;
-        let mut file = fs::OpenOptions::new()
+        fs::create_dir_all(&self.base_dir)?;
+        let base_metadata = fs::symlink_metadata(&self.base_dir)?;
+        if base_metadata.file_type().is_symlink() || !base_metadata.is_dir() {
+            return Err(DeviceStoreError::InvalidData(
+                "device-store base path is not a real directory".to_string(),
+            ));
+        }
+
+        let mut lock_options = fs::OpenOptions::new();
+        lock_options
             .read(true)
             .write(true)
             .create(true)
-            .truncate(false)
-            .open(&path)?;
-        file.lock_exclusive()?;
-        let mut content = String::new();
-        use std::io::Read as _;
-        file.read_to_string(&mut content)?;
-        let data: DevicesFile = parse_json_or_default(&content)?;
-        Ok((file, data))
+            .truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            lock_options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let lock_file = lock_options.open(self.lock_path())?;
+        #[cfg(unix)]
+        lock_file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        lock_file.lock_exclusive()?;
+
+        let data = self.read_data_file()?;
+        validate_devices_file(&data)?;
+        Ok((lock_file, data))
     }
 
     fn write_locked(
         &self,
-        file: &mut fs::File,
+        _lock_file: &mut fs::File,
         data: &DevicesFile,
     ) -> Result<(), DeviceStoreError> {
+        validate_devices_file(data)?;
         let json = serde_json::to_string_pretty(data)?;
-        // Atomic tmp+rename, matching pairing.rs's approach for the primary
-        // store file (block-list/allow-list use tmp+rename too).
+        if json.len() > MAX_DEVICES_FILE_BYTES {
+            return Err(DeviceStoreError::InvalidData(format!(
+                "serialized device store exceeds the {MAX_DEVICES_FILE_BYTES}-byte limit"
+            )));
+        }
         let path = self.path();
-        let tmp_path = path.with_extension("json.tmp");
-        fs::write(&tmp_path, &json)?;
-        fs::rename(&tmp_path, &path)?;
-        // Keep the locked fd's view in sync in case callers reuse it before
-        // unlocking (mirrors pairing.rs write_pairing_file_locked, which
-        // truncates + rewrites the same fd rather than swapping files).
-        file.set_len(0)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(json.as_bytes())?;
-        file.sync_all()?;
+        validate_existing_regular_file(&path)?;
+        let tmp_path = self.base_dir.join(format!(
+            ".{DEVICES_FILE_NAME}.{}.tmp",
+            Uuid::new_v4().simple()
+        ));
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let write_result = (|| -> std::io::Result<()> {
+            let mut tmp = options.open(&tmp_path)?;
+            tmp.write_all(json.as_bytes())?;
+            tmp.sync_all()
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error.into());
+        }
+
+        if let Err(error) = replace_data_file(&tmp_path, &path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error.into());
+        }
+        sync_directory(&self.base_dir)?;
         Ok(())
+    }
+
+    fn read_data_file(&self) -> Result<DevicesFile, DeviceStoreError> {
+        let path = self.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DevicesFile::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > MAX_DEVICES_FILE_BYTES as u64
+        {
+            return Err(DeviceStoreError::InvalidData(format!(
+                "{DEVICES_FILE_NAME} must be a regular file no larger than {MAX_DEVICES_FILE_BYTES} bytes"
+            )));
+        }
+
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&path)?;
+        #[cfg(unix)]
+        file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        let opened_metadata = file.metadata()?;
+        if !opened_metadata.is_file() || opened_metadata.len() > MAX_DEVICES_FILE_BYTES as u64 {
+            return Err(DeviceStoreError::InvalidData(
+                "device store changed while it was being opened".to_string(),
+            ));
+        }
+        let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+        Read::by_ref(&mut file)
+            .take(MAX_DEVICES_FILE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_DEVICES_FILE_BYTES {
+            return Err(DeviceStoreError::InvalidData(format!(
+                "{DEVICES_FILE_NAME} exceeds the {MAX_DEVICES_FILE_BYTES}-byte limit"
+            )));
+        }
+        let content = String::from_utf8(bytes).map_err(|_| {
+            DeviceStoreError::InvalidData(format!("{DEVICES_FILE_NAME} is not valid UTF-8"))
+        })?;
+        parse_json_or_default(&content)
     }
 
     /// Load all devices (no filtering).
@@ -394,6 +489,9 @@ impl DeviceStore {
             .iter_mut()
             .find(|d| d.device_id == device_id)
             .ok_or_else(|| DeviceStoreError::NotFound(device_id.to_string()))?;
+        if record.revoked_at.is_some() {
+            return Err(DeviceStoreError::Revoked(device_id.to_string()));
+        }
         record.token_hash = issued.token_hash;
         record.token_prefix = issued.token_prefix;
         let updated = record.clone();
@@ -585,7 +683,9 @@ impl DeviceStore {
     pub fn delete(&self, device_id: &str) -> Result<bool, DeviceStoreError> {
         let (mut file, mut data) = self.read_locked()?;
         let original_len = data.devices.len();
-        data.devices.retain(|d| d.device_id != device_id);
+        data.devices.retain(|d| {
+            d.device_id != device_id && d.parent_device_id.as_deref() != Some(device_id)
+        });
         let removed = data.devices.len() != original_len;
         if removed {
             self.write_locked(&mut file, &data)?;
@@ -593,6 +693,236 @@ impl DeviceStore {
         FileExt::unlock(&file)?;
         Ok(removed)
     }
+}
+
+fn validate_devices_file(data: &DevicesFile) -> Result<(), DeviceStoreError> {
+    use base64::Engine as _;
+    use std::collections::HashSet;
+
+    if data.version != DEVICES_FILE_VERSION {
+        return Err(DeviceStoreError::InvalidData(format!(
+            "unsupported devices.json version {} (expected {DEVICES_FILE_VERSION})",
+            data.version
+        )));
+    }
+    if data.devices.len() > MAX_DEVICE_RECORDS {
+        return Err(DeviceStoreError::InvalidData(format!(
+            "device count exceeds the {MAX_DEVICE_RECORDS}-record limit"
+        )));
+    }
+
+    let mut ids = HashSet::with_capacity(data.devices.len());
+    let mut token_hashes = HashSet::with_capacity(data.devices.len());
+    for record in &data.devices {
+        if !uuid::Uuid::parse_str(&record.device_id)
+            .is_ok_and(|parsed| parsed.to_string() == record.device_id)
+            || !ids.insert(&record.device_id)
+        {
+            return Err(DeviceStoreError::InvalidData(
+                "device IDs must be unique UUIDs".to_string(),
+            ));
+        }
+        if record.token_hash.len() != 64
+            || !record
+                .token_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || !token_hashes.insert(&record.token_hash)
+        {
+            return Err(DeviceStoreError::InvalidData(
+                "device token hashes must be unique SHA-256 hex strings".to_string(),
+            ));
+        }
+        if !valid_bounded_text(&record.name, MAX_DEVICE_NAME_BYTES)
+            || !valid_bounded_text(record.platform.as_str(), MAX_DEVICE_PLATFORM_BYTES)
+            || record.token_prefix.len() != 8
+            || !record.token_prefix.starts_with(DEVICE_TOKEN_PREFIX)
+            || !record.token_prefix[DEVICE_TOKEN_PREFIX.len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            || record.live_activities.len() > MAX_LIVE_ACTIVITIES_PER_DEVICE
+        {
+            return Err(DeviceStoreError::InvalidData(
+                "device record contains invalid or unbounded display/token metadata".to_string(),
+            ));
+        }
+        let distinct_scopes: HashSet<_> = record.scopes.iter().copied().collect();
+        if distinct_scopes.len() != record.scopes.len()
+            || (record.parent_device_id.is_some()
+                && record
+                    .scopes
+                    .iter()
+                    .any(|scope| !matches!(scope, DeviceScope::Chat | DeviceScope::Approvals)))
+        {
+            return Err(DeviceStoreError::InvalidData(
+                "device record contains duplicated or over-privileged scopes".to_string(),
+            ));
+        }
+        if let Some(pubkey) = record.pubkey.as_deref() {
+            let decoded = if valid_bounded_text(pubkey, MAX_DEVICE_PUBKEY_BYTES) {
+                base64::engine::general_purpose::STANDARD
+                    .decode(pubkey)
+                    .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(pubkey))
+                    .ok()
+            } else {
+                None
+            };
+            if decoded
+                .as_deref()
+                .is_none_or(|der| der.is_empty() || der.len() > 2_048 || der.first() != Some(&0x30))
+            {
+                return Err(DeviceStoreError::InvalidData(
+                    "device public key is not bounded base64 SPKI DER".to_string(),
+                ));
+            }
+        }
+        if let Some(apns) = record.apns.as_ref()
+            && (!valid_bounded_text(&apns.device_token, MAX_PUSH_TOKEN_BYTES)
+                || !matches!(apns.environment.as_str(), "development" | "production")
+                || !valid_timestamp(&apns.updated_at))
+        {
+            return Err(DeviceStoreError::InvalidData(
+                "device APNs registration is invalid or unbounded".to_string(),
+            ));
+        }
+        if record
+            .live_activity_start_token
+            .as_deref()
+            .is_some_and(|token| !valid_bounded_text(token, MAX_PUSH_TOKEN_BYTES))
+        {
+            return Err(DeviceStoreError::InvalidData(
+                "device Live Activity start token is invalid or unbounded".to_string(),
+            ));
+        }
+        for (activity_id, activity) in &record.live_activities {
+            let invalid_association = match activity.kind {
+                DeviceLiveActivityKind::AgentRun => activity.job_id.is_some(),
+                DeviceLiveActivityKind::Job => activity.thread_id.is_some(),
+            };
+            if !valid_bounded_text(activity_id, MAX_DEVICE_IDENTIFIER_BYTES)
+                || !valid_bounded_text(&activity.push_token, MAX_PUSH_TOKEN_BYTES)
+                || activity
+                    .thread_id
+                    .as_deref()
+                    .is_some_and(|id| !valid_bounded_text(id, MAX_DEVICE_IDENTIFIER_BYTES))
+                || activity
+                    .job_id
+                    .as_deref()
+                    .is_some_and(|id| !valid_bounded_text(id, MAX_DEVICE_IDENTIFIER_BYTES))
+                || invalid_association
+                || !valid_timestamp(&activity.updated_at)
+            {
+                return Err(DeviceStoreError::InvalidData(
+                    "device Live Activity registration is invalid or unbounded".to_string(),
+                ));
+            }
+        }
+        for timestamp in [
+            Some(record.created_at.as_str()),
+            Some(record.last_seen_at.as_str()),
+            record.revoked_at.as_deref(),
+            record.expires_at.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !valid_timestamp(timestamp) {
+                return Err(DeviceStoreError::InvalidData(
+                    "device record contains an invalid timestamp".to_string(),
+                ));
+            }
+        }
+        if let Some(parent_id) = record.parent_device_id.as_deref()
+            && uuid::Uuid::parse_str(parent_id).is_err()
+        {
+            return Err(DeviceStoreError::InvalidData(
+                "companion parent device ID is not a UUID".to_string(),
+            ));
+        }
+    }
+    for record in &data.devices {
+        if let Some(parent_id) = record.parent_device_id.as_deref() {
+            let Some(parent) = data
+                .devices
+                .iter()
+                .find(|candidate| candidate.device_id == parent_id)
+            else {
+                return Err(DeviceStoreError::InvalidData(
+                    "companion device references a missing parent".to_string(),
+                ));
+            };
+            if parent.device_id == record.device_id
+                || parent.parent_device_id.is_some()
+                || (parent.revoked_at.is_some() && record.revoked_at.is_none())
+            {
+                return Err(DeviceStoreError::InvalidData(
+                    "companion device has an invalid or revoked parent relationship".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_bounded_text(value: &str, max_bytes: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
+}
+
+fn valid_timestamp(value: &str) -> bool {
+    value.len() <= 64 && chrono::DateTime::parse_from_rfc3339(value).is_ok()
+}
+
+fn validate_existing_regular_file(path: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
+            std::io::Error::other("device-store target is not a regular file"),
+        ),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn replace_data_file(staged: &Path, target: &Path) -> std::io::Result<()> {
+    fs::rename(staged, target)
+}
+
+#[cfg(windows)]
+fn replace_data_file(staged: &Path, target: &Path) -> std::io::Result<()> {
+    let backup = target.with_extension(format!("json.{}.bak", Uuid::new_v4().simple()));
+    let had_target = target.exists();
+    if had_target {
+        fs::rename(target, &backup)?;
+    }
+    if let Err(error) = fs::rename(staged, target) {
+        if had_target {
+            let _ = fs::rename(&backup, target);
+        }
+        return Err(error);
+    }
+    if had_target {
+        fs::remove_file(backup)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn replace_data_file(staged: &Path, target: &Path) -> std::io::Result<()> {
+    if target.exists() {
+        fs::remove_file(target)?;
+    }
+    fs::rename(staged, target)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 impl Default for DeviceStore {
@@ -1268,6 +1598,128 @@ mod tests {
                 .is_none(),
             "revoking a companion must not revoke its parent"
         );
+    }
+
+    #[test]
+    fn deleting_parent_also_deletes_companions() {
+        let (store, _dir) = test_store();
+        let parent = insert_phone(&store);
+        let (companion, _) = store
+            .insert_companion(
+                &parent.device_id,
+                "Watch".to_string(),
+                DevicePlatform::Watchos,
+                DeviceScope::companion_grant(),
+            )
+            .unwrap();
+
+        assert!(store.delete(&parent.device_id).unwrap());
+        assert!(store.get(&parent.device_id).unwrap().is_none());
+        assert!(store.get(&companion.device_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn concurrent_writers_do_not_lose_device_records() {
+        const WRITERS: usize = 16;
+        let (store, _dir) = test_store();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+        let mut workers = Vec::new();
+        for index in 0..WRITERS {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                store
+                    .insert(
+                        format!("Device {index}"),
+                        DevicePlatform::Ios,
+                        vec![DeviceScope::Chat],
+                        None,
+                    )
+                    .unwrap();
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let records = store.list().unwrap();
+        assert_eq!(records.len(), WRITERS);
+        let unique_ids: std::collections::HashSet<_> =
+            records.iter().map(|record| &record.device_id).collect();
+        assert_eq!(unique_ids.len(), WRITERS);
+    }
+
+    #[test]
+    fn unsupported_store_version_fails_closed() {
+        let (store, dir) = test_store();
+        fs::write(
+            dir.path().join(DEVICES_FILE_NAME),
+            r#"{"version":255,"devices":[]}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            store.list(),
+            Err(DeviceStoreError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn unbounded_persisted_push_metadata_fails_closed() {
+        let (store, dir) = test_store();
+        insert_phone(&store);
+        let path = dir.path().join(DEVICES_FILE_NAME);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["devices"][0]["live_activity_start_token"] =
+            serde_json::Value::String("x".repeat(MAX_PUSH_TOKEN_BYTES + 1));
+        fs::write(path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        assert!(matches!(
+            store.list(),
+            Err(DeviceStoreError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn overprivileged_persisted_companion_fails_closed() {
+        let (store, dir) = test_store();
+        let parent = insert_phone(&store);
+        store
+            .insert_companion(
+                &parent.device_id,
+                "Watch".to_string(),
+                DevicePlatform::Watchos,
+                DeviceScope::companion_grant(),
+            )
+            .unwrap();
+        let path = dir.path().join(DEVICES_FILE_NAME);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        value["devices"][1]["scopes"] = serde_json::json!(["chat", "jobs:read"]);
+        fs::write(path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        assert!(matches!(
+            store.list(),
+            Err(DeviceStoreError::InvalidData(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_device_store_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let (store, dir) = test_store();
+        let outside = dir.path().join("outside.json");
+        fs::write(&outside, r#"{"version":1,"devices":[]}"#).unwrap();
+        symlink(&outside, dir.path().join(DEVICES_FILE_NAME)).unwrap();
+
+        assert!(matches!(
+            store.list(),
+            Err(DeviceStoreError::InvalidData(_))
+        ));
     }
 
     #[test]

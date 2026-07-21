@@ -10,7 +10,7 @@ pub fn default_browser_profile_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("thinclaw")
-        .join("browser-profile")
+        .join("browser-sessions")
 }
 
 /// Browser launch configuration with custom arguments.
@@ -157,7 +157,7 @@ mod tests {
         let path = default_browser_profile_dir();
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
-            Some("browser-profile")
+            Some("browser-sessions")
         );
         assert!(
             path.components()

@@ -31,7 +31,7 @@ pub fn compact_post_plan(messages: &mut Vec<ChatMessage>, plan_goal: &str) {
             Role::System => {
                 compacted.push(msg.clone());
             }
-            Role::User if !first_user_seen => {
+            Role::User if !first_user_seen && msg.is_user_instruction() => {
                 compacted.push(msg.clone());
                 first_user_seen = true;
             }
@@ -170,14 +170,7 @@ pub fn heartbeat_completion_critique(
 }
 
 pub fn is_worker_terminal_state(state: JobState) -> bool {
-    matches!(
-        state,
-        JobState::Completed
-            | JobState::Failed
-            | JobState::Stuck
-            | JobState::Cancelled
-            | JobState::Abandoned
-    )
+    !matches!(state, JobState::Pending | JobState::InProgress)
 }
 
 /// Reorder joined parallel worker results into request order.
@@ -551,6 +544,13 @@ mod tests {
     #[test]
     fn completed_is_terminal_for_worker_cleanup() {
         assert!(is_worker_terminal_state(JobState::Completed));
+        assert!(is_worker_terminal_state(JobState::Submitted));
+        assert!(is_worker_terminal_state(JobState::Accepted));
+        assert!(is_worker_terminal_state(JobState::Failed));
+        assert!(is_worker_terminal_state(JobState::Stuck));
+        assert!(is_worker_terminal_state(JobState::Cancelled));
+        assert!(is_worker_terminal_state(JobState::Abandoned));
+        assert!(!is_worker_terminal_state(JobState::Pending));
         assert!(!is_worker_terminal_state(JobState::InProgress));
     }
 

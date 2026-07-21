@@ -234,6 +234,13 @@ const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const GMAIL_UNREAD_FALLBACK_DAYS: u32 = 7;
+const MAX_GMAIL_TOKEN_BYTES: usize = 64 * 1024;
+const MAX_GMAIL_OAUTH_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_GMAIL_LIST_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_GMAIL_MESSAGE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_GMAIL_API_ITEMS: usize = 1_000;
+const MAX_GMAIL_CONFIG_VALUE_BYTES: usize = 1024;
+const MAX_GMAIL_MESSAGE_SIZE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Refresh the access token this many seconds before it actually expires, so a
 /// request is never made with a token that lapses mid-flight.
@@ -242,7 +249,7 @@ const TOKEN_REFRESH_MARGIN_SECS: u64 = 300;
 const TOKEN_REFRESH_RETRY_SECS: u64 = 60;
 
 /// Response from Google's OAuth2 token endpoint on a refresh-token grant.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct GmailTokenRefreshResponse {
     access_token: String,
     #[serde(default = "default_token_lifetime")]
@@ -251,6 +258,145 @@ struct GmailTokenRefreshResponse {
 
 fn default_token_lifetime() -> u64 {
     3600
+}
+
+fn validate_gmail_secret(value: &str, label: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > MAX_GMAIL_TOKEN_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(format!("Gmail {label} is empty, malformed, or oversized"));
+    }
+    Ok(())
+}
+
+fn validate_gmail_config(config: &GmailConfig) -> Result<(), String> {
+    for (label, value) in [
+        ("project ID", config.project_id.as_str()),
+        ("subscription ID", config.subscription_id.as_str()),
+        ("topic ID", config.topic_id.as_str()),
+    ] {
+        if value.is_empty()
+            || value.len() > MAX_GMAIL_CONFIG_VALUE_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err(format!("Gmail {label} is malformed or oversized"));
+        }
+    }
+    if config.webhook_path.is_empty()
+        || config.webhook_path.len() > MAX_GMAIL_CONFIG_VALUE_BYTES
+        || !config.webhook_path.starts_with('/')
+        || config.webhook_path.contains(['?', '#'])
+        || config.max_message_size_bytes == 0
+        || config.max_message_size_bytes > MAX_GMAIL_MESSAGE_SIZE_BYTES
+        || config.label_filters.len() > 128
+        || config.label_filters.iter().any(|label| {
+            label.is_empty() || label.len() > 128 || label.chars().any(char::is_control)
+        })
+        || config.allowed_senders.len() > 1024
+        || config.allowed_senders.iter().any(|sender| {
+            sender.is_empty() || sender.len() > 320 || sender.chars().any(char::is_control)
+        })
+    {
+        return Err("Gmail channel configuration is malformed or exceeds limits".to_string());
+    }
+    if let Some(token) = config.oauth_token.as_deref() {
+        validate_gmail_secret(token, "access token")?;
+    }
+    if let Some(token) = config.refresh_token.as_deref() {
+        validate_gmail_secret(token, "refresh token")?;
+    }
+    if let Some(client_id) = config.client_id.as_deref()
+        && (client_id.is_empty()
+            || client_id.len() > MAX_GMAIL_CONFIG_VALUE_BYTES
+            || client_id.chars().any(char::is_control))
+    {
+        return Err("Gmail OAuth client ID is malformed or oversized".to_string());
+    }
+    if let Some(secret) = config.client_secret.as_deref() {
+        validate_gmail_secret(secret, "OAuth client secret")?;
+    }
+    Ok(())
+}
+
+fn valid_gmail_resource_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_GMAIL_CONFIG_VALUE_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
+}
+
+fn valid_gmail_text(value: &str, limit: usize) -> bool {
+    value.len() <= limit && !value.chars().any(|character| character == '\0')
+}
+
+fn validate_gmail_message_shape(message: &GmailMessage) -> bool {
+    if !valid_gmail_resource_id(&message.id)
+        || message
+            .thread_id
+            .as_ref()
+            .is_some_and(|id| !valid_gmail_resource_id(id))
+        || message
+            .snippet
+            .as_ref()
+            .is_some_and(|value| !valid_gmail_text(value, 64 * 1024))
+        || message.label_ids.as_ref().is_some_and(|labels| {
+            labels.len() > 256 || labels.iter().any(|label| !valid_gmail_text(label, 256))
+        })
+    {
+        return false;
+    }
+    let Some(payload) = message.payload.as_ref() else {
+        return true;
+    };
+    if payload.headers.as_ref().is_some_and(|headers| {
+        headers.len() > 512
+            || headers.iter().any(|header| {
+                !valid_gmail_text(&header.name, 256) || !valid_gmail_text(&header.value, 64 * 1024)
+            })
+    }) || payload
+        .mime_type
+        .as_ref()
+        .is_some_and(|value| !valid_gmail_text(value, 256))
+        || payload.body.as_ref().is_some_and(|body| {
+            body.data
+                .as_ref()
+                .is_some_and(|value| value.len() > MAX_GMAIL_MESSAGE_RESPONSE_BYTES)
+        })
+    {
+        return false;
+    }
+
+    let initial_parts = payload.parts.as_deref().unwrap_or_default();
+    if initial_parts.len() > MAX_GMAIL_API_ITEMS {
+        return false;
+    }
+    let mut stack = initial_parts.iter().collect::<Vec<_>>();
+    let mut parts_seen = 0usize;
+    while let Some(part) = stack.pop() {
+        parts_seen = parts_seen.saturating_add(1);
+        if parts_seen > MAX_GMAIL_API_ITEMS
+            || part
+                .mime_type
+                .as_ref()
+                .is_some_and(|value| !valid_gmail_text(value, 256))
+            || part.body.as_ref().is_some_and(|body| {
+                body.data
+                    .as_ref()
+                    .is_some_and(|value| value.len() > MAX_GMAIL_MESSAGE_RESPONSE_BYTES)
+            })
+        {
+            return false;
+        }
+        if let Some(nested) = part.parts.as_deref() {
+            if stack.len().saturating_add(nested.len()) > MAX_GMAIL_API_ITEMS {
+                return false;
+            }
+            stack.extend(nested);
+        }
+    }
+    true
 }
 
 impl GmailChannel {
@@ -265,12 +411,18 @@ impl GmailChannel {
                 ),
             });
         }
+        validate_gmail_config(&config).map_err(|reason| ChannelError::StartupFailed {
+            name: "gmail".into(),
+            reason,
+        })?;
 
         let access_token = config.oauth_token.clone().unwrap_or_default();
         let persisted_history_id = Self::load_persisted_history_id(&config);
 
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .user_agent("ThinClaw/1.0")
             .build()
             .map_err(|e| ChannelError::StartupFailed {
@@ -296,8 +448,15 @@ impl GmailChannel {
     }
 
     /// Update the OAuth access token (e.g., after a token refresh).
-    pub async fn set_access_token(&self, token: &str) {
+    pub async fn set_access_token(&self, token: &str) -> Result<(), ChannelError> {
+        validate_gmail_secret(token, "access token").map_err(|reason| {
+            ChannelError::AuthFailed {
+                name: "gmail".into(),
+                reason,
+            }
+        })?;
         *self.state.access_token.write().await = token.to_string();
+        Ok(())
     }
 
     /// Exchange the configured refresh token for a fresh access token and
@@ -312,28 +471,29 @@ impl GmailChannel {
         state: &Arc<GmailChannelState>,
         http: &Client,
     ) -> Result<u64, ChannelError> {
-        let (Some(refresh_token), Some(client_id), Some(client_secret)) = (
-            config.refresh_token.as_deref(),
-            config.client_id.as_deref(),
-            config.client_secret.as_deref(),
-        ) else {
+        let (Some(refresh_token), Some(client_id)) =
+            (config.refresh_token.as_deref(), config.client_id.as_deref())
+        else {
             return Err(ChannelError::AuthFailed {
                 name: "gmail".into(),
-                reason: "Cannot refresh Gmail token: refresh_token/client_id/client_secret \
-                         not configured (set GMAIL_REFRESH_TOKEN, GMAIL_CLIENT_ID, \
-                         GMAIL_CLIENT_SECRET)"
+                reason: "Cannot refresh Gmail token: refresh_token/client_id not configured \
+                         (set GMAIL_REFRESH_TOKEN and GMAIL_CLIENT_ID)"
                     .into(),
             });
         };
 
+        let mut form = vec![
+            ("client_id", client_id),
+            ("refresh_token", refresh_token),
+            ("grant_type", "refresh_token"),
+        ];
+        if let Some(client_secret) = config.client_secret.as_deref() {
+            form.push(("client_secret", client_secret));
+        }
+
         let resp = http
             .post("https://oauth2.googleapis.com/token")
-            .form(&[
-                ("client_id", client_id),
-                ("client_secret", client_secret),
-                ("refresh_token", refresh_token),
-                ("grant_type", "refresh_token"),
-            ])
+            .form(&form)
             .send()
             .await
             .map_err(|e| ChannelError::AuthFailed {
@@ -343,18 +503,31 @@ impl GmailChannel {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             return Err(ChannelError::AuthFailed {
                 name: "gmail".into(),
-                reason: format!("Gmail token refresh returned {status}: {body}"),
+                reason: format!("Gmail token refresh returned {status}"),
             });
         }
 
         let token: GmailTokenRefreshResponse =
-            resp.json().await.map_err(|e| ChannelError::AuthFailed {
+            crate::response::bounded_json(resp, MAX_GMAIL_OAUTH_RESPONSE_BYTES)
+                .await
+                .map_err(|e| ChannelError::AuthFailed {
+                    name: "gmail".into(),
+                    reason: format!("Invalid Gmail token refresh response: {e}"),
+                })?;
+        validate_gmail_secret(&token.access_token, "refreshed access token").map_err(|reason| {
+            ChannelError::AuthFailed {
                 name: "gmail".into(),
-                reason: format!("Invalid Gmail token refresh response: {e}"),
-            })?;
+                reason,
+            }
+        })?;
+        if token.expires_in == 0 || token.expires_in > 24 * 60 * 60 {
+            return Err(ChannelError::AuthFailed {
+                name: "gmail".into(),
+                reason: "Gmail token refresh returned an invalid expiry".to_string(),
+            });
+        }
 
         *state.access_token.write().await = token.access_token;
         *state.last_error.write().await = None;
@@ -427,7 +600,8 @@ impl GmailChannel {
 
         let url = format!(
             "https://pubsub.googleapis.com/v1/projects/{}/subscriptions/{}:pull",
-            self.config.project_id, self.config.subscription_id
+            urlencoding::encode(&self.config.project_id),
+            urlencoding::encode(&self.config.subscription_id)
         );
 
         let resp = self
@@ -446,20 +620,55 @@ impl GmailChannel {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             return Err(ChannelError::SendFailed {
                 name: "gmail".into(),
-                reason: format!("Pub/Sub pull returned {}: {}", status, body),
+                reason: format!("Pub/Sub pull returned {status}"),
             });
         }
 
         let pull_response: PubSubPullResponse =
-            resp.json().await.map_err(|e| ChannelError::SendFailed {
-                name: "gmail".into(),
-                reason: format!("Failed to parse Pub/Sub response: {}", e),
-            })?;
+            crate::response::bounded_json(resp, MAX_GMAIL_LIST_RESPONSE_BYTES)
+                .await
+                .map_err(|e| ChannelError::SendFailed {
+                    name: "gmail".into(),
+                    reason: format!("Failed to parse Pub/Sub response: {}", e),
+                })?;
 
-        Ok(pull_response.received_messages.unwrap_or_default())
+        let messages = pull_response.received_messages.unwrap_or_default();
+        if messages.len() > PUBSUB_MAX_MESSAGES as usize
+            || messages.iter().any(|message| {
+                message.ack_id.is_empty()
+                    || message.ack_id.len() > MAX_GMAIL_CONFIG_VALUE_BYTES
+                    || message.ack_id.chars().any(char::is_control)
+                    || message
+                        .message
+                        .data
+                        .as_ref()
+                        .is_some_and(|value| value.len() > 64 * 1024)
+                    || message
+                        .message
+                        .message_id
+                        .as_ref()
+                        .is_some_and(|value| !valid_gmail_resource_id(value))
+                    || message
+                        .message
+                        .attributes
+                        .as_ref()
+                        .is_some_and(|attributes| {
+                            attributes.len() > 128
+                                || attributes.iter().any(|(key, value)| {
+                                    !valid_gmail_text(key, 1024)
+                                        || !valid_gmail_text(value, 16 * 1024)
+                                })
+                        })
+            })
+        {
+            return Err(ChannelError::SendFailed {
+                name: "gmail".into(),
+                reason: "Pub/Sub pull returned malformed or excessive messages".to_string(),
+            });
+        }
+        Ok(messages)
     }
 
     /// Acknowledge Pub/Sub messages after processing.
@@ -471,7 +680,8 @@ impl GmailChannel {
         let token = self.state.access_token.read().await.clone();
         let url = format!(
             "https://pubsub.googleapis.com/v1/projects/{}/subscriptions/{}:acknowledge",
-            self.config.project_id, self.config.subscription_id
+            urlencoding::encode(&self.config.project_id),
+            urlencoding::encode(&self.config.subscription_id)
         );
 
         let resp = self
@@ -515,7 +725,8 @@ impl GmailChannel {
 
     fn load_persisted_history_id(config: &GmailConfig) -> Option<u64> {
         let path = Self::history_state_path(config);
-        let content = fs::read_to_string(path).ok()?;
+        let content = thinclaw_platform::read_regular_file_bounded(&path, 64).ok()?;
+        let content = std::str::from_utf8(&content).ok()?;
         content.trim().parse::<u64>().ok()
     }
 
@@ -527,7 +738,12 @@ impl GmailChannel {
                 reason: format!("Failed to create Gmail state directory: {}", e),
             })?;
         }
-        fs::write(&path, history_id.to_string()).map_err(|e| ChannelError::SendFailed {
+        thinclaw_platform::write_private_file_atomic(
+            &path,
+            history_id.to_string().as_bytes(),
+            true,
+        )
+        .map_err(|e| ChannelError::SendFailed {
             name: "gmail".into(),
             reason: format!("Failed to persist Gmail history ID: {}", e),
         })?;
@@ -587,11 +803,10 @@ impl GmailChannel {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            if status == reqwest::StatusCode::NOT_FOUND
-                || body.contains("startHistoryId")
-                || body.contains("historyId")
-            {
+            if matches!(
+                status,
+                reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND
+            ) {
                 return Err(ChannelError::SendFailed {
                     name: "gmail".into(),
                     reason: format!(
@@ -602,15 +817,17 @@ impl GmailChannel {
             }
             return Err(ChannelError::SendFailed {
                 name: "gmail".into(),
-                reason: format!("Gmail history returned {}: {}", status, body),
+                reason: format!("Gmail history returned {status}"),
             });
         }
 
         let history: GmailHistoryResponse =
-            resp.json().await.map_err(|e| ChannelError::SendFailed {
-                name: "gmail".into(),
-                reason: format!("Failed to parse Gmail history response: {}", e),
-            })?;
+            crate::response::bounded_json(resp, MAX_GMAIL_LIST_RESPONSE_BYTES)
+                .await
+                .map_err(|e| ChannelError::SendFailed {
+                    name: "gmail".into(),
+                    reason: format!("Failed to parse Gmail history response: {}", e),
+                })?;
         let latest_history_id = history
             .history_id
             .as_deref()
@@ -618,9 +835,27 @@ impl GmailChannel {
             .or(notification_history_id);
 
         let mut message_ids = std::collections::BTreeSet::new();
-        for entry in history.history.unwrap_or_default() {
-            for added in entry.messages_added.unwrap_or_default() {
-                message_ids.insert(added.message.id);
+        for entry in history
+            .history
+            .unwrap_or_default()
+            .into_iter()
+            .take(MAX_GMAIL_API_ITEMS)
+        {
+            for added in entry
+                .messages_added
+                .unwrap_or_default()
+                .into_iter()
+                .take(MAX_GMAIL_API_ITEMS)
+            {
+                if valid_gmail_resource_id(&added.message.id) {
+                    message_ids.insert(added.message.id);
+                }
+                if message_ids.len() >= MAX_GMAIL_API_ITEMS {
+                    break;
+                }
+            }
+            if message_ids.len() >= MAX_GMAIL_API_ITEMS {
+                break;
             }
         }
 
@@ -683,23 +918,28 @@ impl GmailChannel {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             return Err(ChannelError::SendFailed {
                 name: "gmail".into(),
-                reason: format!("Gmail list returned {}: {}", status, body),
+                reason: format!("Gmail list returned {status}"),
             });
         }
 
         let list: GmailMessageListResponse =
-            resp.json().await.map_err(|e| ChannelError::SendFailed {
-                name: "gmail".into(),
-                reason: format!("Failed to parse Gmail list: {}", e),
-            })?;
+            crate::response::bounded_json(resp, MAX_GMAIL_LIST_RESPONSE_BYTES)
+                .await
+                .map_err(|e| ChannelError::SendFailed {
+                    name: "gmail".into(),
+                    reason: format!("Failed to parse Gmail list: {}", e),
+                })?;
 
         let refs = list.messages.unwrap_or_default();
         let mut messages = Vec::new();
 
-        for msg_ref in refs.iter().take(10) {
+        for msg_ref in refs
+            .iter()
+            .filter(|message| valid_gmail_resource_id(&message.id))
+            .take(10)
+        {
             match self.fetch_message(&msg_ref.id, &token).await {
                 Ok(msg) => messages.push(msg),
                 Err(e) => {
@@ -716,9 +956,15 @@ impl GmailChannel {
 
     /// Fetch a single message by ID.
     async fn fetch_message(&self, id: &str, token: &str) -> Result<GmailMessage, ChannelError> {
+        if !valid_gmail_resource_id(id) {
+            return Err(ChannelError::SendFailed {
+                name: "gmail".into(),
+                reason: "Gmail returned a malformed message ID".to_string(),
+            });
+        }
         let url = format!(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages/{}?format=full",
-            id
+            urlencoding::encode(id)
         );
 
         let resp = self
@@ -734,25 +980,40 @@ impl GmailChannel {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             return Err(ChannelError::SendFailed {
                 name: "gmail".into(),
-                reason: format!("Gmail get returned {}: {}", status, body),
+                reason: format!("Gmail get returned {status}"),
             });
         }
 
-        resp.json().await.map_err(|e| ChannelError::SendFailed {
-            name: "gmail".into(),
-            reason: format!("Failed to parse Gmail message: {}", e),
-        })
+        let message: GmailMessage =
+            crate::response::bounded_json(resp, MAX_GMAIL_MESSAGE_RESPONSE_BYTES)
+                .await
+                .map_err(|e| ChannelError::SendFailed {
+                    name: "gmail".into(),
+                    reason: format!("Failed to parse Gmail message: {e}"),
+                })?;
+        if !validate_gmail_message_shape(&message) {
+            return Err(ChannelError::SendFailed {
+                name: "gmail".into(),
+                reason: "Gmail returned malformed message identifiers".to_string(),
+            });
+        }
+        Ok(message)
     }
 
     /// Mark a message as read by removing the UNREAD label.
     async fn mark_as_read(&self, message_id: &str) -> Result<(), ChannelError> {
+        if !valid_gmail_resource_id(message_id) {
+            return Err(ChannelError::SendFailed {
+                name: "gmail".into(),
+                reason: "Gmail message ID is malformed".to_string(),
+            });
+        }
         let token = self.state.access_token.read().await.clone();
         let url = format!(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages/{}/modify",
-            message_id
+            urlencoding::encode(message_id)
         );
 
         let body = serde_json::json!({
@@ -842,10 +1103,9 @@ impl GmailChannel {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             return Err(ChannelError::SendFailed {
                 name: "gmail".into(),
-                reason: format!("Gmail send returned {}: {}", status, body),
+                reason: format!("Gmail send returned {status}"),
             });
         }
 
@@ -963,6 +1223,9 @@ impl GmailChannel {
 
     /// Decode base64url-encoded string (Gmail API format).
     fn decode_base64url(data: &str) -> Option<String> {
+        if data.len() > MAX_GMAIL_MESSAGE_RESPONSE_BYTES {
+            return None;
+        }
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let bytes = URL_SAFE_NO_PAD.decode(data).ok()?;
@@ -1444,7 +1707,7 @@ mod tests {
     }
 
     #[test]
-    fn can_refresh_token_requires_all_three_credentials() {
+    fn can_refresh_token_requires_refresh_token_and_client_id() {
         let base = test_config();
         assert!(!base.can_refresh_token(), "no refresh creds yet");
 
@@ -1455,8 +1718,16 @@ mod tests {
             ..test_config()
         };
         assert!(full.can_refresh_token());
+        assert!(
+            GmailConfig {
+                client_secret: None,
+                ..full.clone()
+            }
+            .can_refresh_token()
+        );
 
-        // Any one missing/empty disables refresh.
+        // Refresh token and client id are mandatory; PKCE public clients do
+        // not necessarily have a client secret.
         for partial in [
             GmailConfig {
                 refresh_token: None,
@@ -1464,10 +1735,6 @@ mod tests {
             },
             GmailConfig {
                 client_id: Some(String::new()),
-                ..full.clone()
-            },
-            GmailConfig {
-                client_secret: None,
                 ..full.clone()
             },
         ] {
@@ -1876,7 +2143,7 @@ mod tests {
     async fn test_set_access_token() {
         let config = test_config();
         let channel = GmailChannel::new(config).unwrap();
-        channel.set_access_token("new-token").await;
+        channel.set_access_token("new-token").await.unwrap();
         let token = channel.state.access_token.read().await.clone();
         assert_eq!(token, "new-token");
     }

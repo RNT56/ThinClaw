@@ -6,11 +6,65 @@
 //! `setup/commands.rs` keeps resolving unchanged.
 
 use std::sync::atomic::Ordering;
+use std::sync::LazyLock;
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::core::SidecarManager;
 use super::types::{ChatServerConfig, ChatServerOptions, SidecarEvent, SidecarStatus};
+use crate::inference::embedding::{local::LocalEmbeddingBackend, EmbeddingBackend};
+
+static CHAT_START_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+static EMBEDDING_START_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+static SUMMARIZER_START_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+const MANAGED_STT_MARKER: &str = "THINCLAW_MANAGED_WHISPER_ENDPOINT";
+const STT_ENDPOINT_KEY: &str = "WHISPER_HTTP_ENDPOINT";
+const STT_TOKEN_KEY: &str = "WHISPER_HTTP_TOKEN";
+const STT_MODEL_KEY: &str = "WHISPER_HTTP_MODEL";
+
+fn clear_managed_stt_endpoint() {
+    let managed = thinclaw_config::helpers::optional_env(MANAGED_STT_MARKER)
+        .ok()
+        .flatten()
+        .is_some_and(|value| value == "1");
+    if managed {
+        thinclaw_config::helpers::remove_bridge_vars(&[
+            MANAGED_STT_MARKER,
+            STT_ENDPOINT_KEY,
+            STT_TOKEN_KEY,
+            STT_MODEL_KEY,
+        ]);
+    }
+}
+
+#[cfg(feature = "mlx")]
+fn install_managed_stt_endpoint(port: u16, token: String) {
+    let existing = thinclaw_config::helpers::optional_env(STT_ENDPOINT_KEY)
+        .ok()
+        .flatten();
+    let already_managed = thinclaw_config::helpers::optional_env(MANAGED_STT_MARKER)
+        .ok()
+        .flatten()
+        .is_some_and(|value| value == "1");
+    if existing.is_some() && !already_managed {
+        tracing::info!("Preserving the explicitly configured Whisper HTTP endpoint");
+        return;
+    }
+
+    thinclaw_config::helpers::inject_bridge_vars(std::collections::HashMap::from([
+        (MANAGED_STT_MARKER.to_string(), "1".to_string()),
+        (
+            STT_ENDPOINT_KEY.to_string(),
+            format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
+        ),
+        (STT_TOKEN_KEY.to_string(), token),
+        (STT_MODEL_KEY.to_string(), "thinclaw-whisper".to_string()),
+    ]));
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -27,6 +81,17 @@ pub async fn direct_runtime_start_chat_server(
     mlock: Option<bool>,
     quantize_kv: Option<bool>,
 ) -> Result<(), String> {
+    let _start_guard = CHAT_START_LOCK.lock().await;
+    if expose_network.unwrap_or(false) {
+        return Err(
+            "Direct model-server network exposure is disabled; use the authenticated ThinClaw gateway for remote access"
+                .to_string(),
+        );
+    }
+    if context_size == 0 || context_size > 1_048_576 {
+        return Err("Context size must be between 1 and 1,048,576 tokens".to_string());
+    }
+
     // Guard: this command starts the llama.cpp sidecar and is only meaningful
     // in llamacpp builds.  In MLX/vLLM builds the binary may still be on disk
     // from a previous install, but we must NOT launch it — the user should
@@ -53,7 +118,7 @@ pub async fn direct_runtime_start_chat_server(
     // The allow is needed because cfg(mlx/vllm) returns above make this unreachable in those builds.
     #[allow(unreachable_code)]
     let app_handle_for_closure = app.clone();
-    let (port, _) = state
+    let (port, token) = state
         .direct_runtime_start_chat_server(
             app.clone(),
             ChatServerOptions {
@@ -62,43 +127,53 @@ pub async fn direct_runtime_start_chat_server(
                 n_gpu: -1,
                 template,
                 mmproj,
-                expose: expose_network.unwrap_or(false),
+                expose: false,
                 mlock: mlock.unwrap_or(false),
                 quantize_kv: quantize_kv.unwrap_or(false),
             },
-            move |code| {
+            move |code, exited_port| {
                 // This callback runs when the process terminates
+                let manager = app_handle_for_closure.state::<SidecarManager>();
+                let is_current = manager
+                    .chat_process
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_ref()
+                    .is_some_and(|process| process.port == exited_port);
+                if !is_current {
+                    return;
+                }
+
                 if code != 0 {
-                    // Check if this was intentional
-                    let manager = app_handle_for_closure.state::<SidecarManager>();
-                    let intentional = *manager.is_chat_stop_intentional.lock().unwrap_or_else(|e| e.into_inner());
+                    eprintln!("[sidecar] Chat server crashed unexpectedly.");
 
-                    if intentional {
-                         println!("[sidecar] Chat server stopped intentionally (code {}). Suppressing crash alert.", code);
-                    } else {
-                        eprintln!("[sidecar] Chat server crashed unexpectedly.");
-
-                        // Clear the process from state
-                        if let Ok(mut guard) = manager.chat_process.lock() {
+                    if let Ok(mut guard) = manager.chat_process.lock() {
+                        if guard
+                            .as_ref()
+                            .is_some_and(|process| process.port == exited_port)
+                        {
                             *guard = None;
                         }
-
-                        // Emit event
-                        app_handle_for_closure
-                            .emit(
-                                "sidecar_event",
-                                SidecarEvent::Crashed {
-                                    service: "chat".into(),
-                                    code,
-                                },
-                            )
-                            .ok();
                     }
+
+                    app_handle_for_closure
+                        .emit(
+                            "sidecar_event",
+                            SidecarEvent::Crashed {
+                                service: "chat".into(),
+                                code,
+                            },
+                        )
+                        .ok();
                 } else {
                     // Clean exit (0) logic
-                    let manager = app_handle_for_closure.state::<SidecarManager>();
                     if let Ok(mut guard) = manager.chat_process.lock() {
-                        *guard = None;
+                        if guard
+                            .as_ref()
+                            .is_some_and(|process| process.port == exited_port)
+                        {
+                            *guard = None;
+                        }
                     }
                     // Emit stopped event
                     app_handle_for_closure
@@ -116,7 +191,12 @@ pub async fn direct_runtime_start_chat_server(
 
     // Wait for server to be ready (poll /health)
     let start = std::time::Instant::now();
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|error| format!("Could not create the local readiness client: {error}"))?;
     println!(
         "[sidecar] Waiting for chat server to be ready on port {}...",
         port
@@ -124,8 +204,8 @@ pub async fn direct_runtime_start_chat_server(
 
     loop {
         if start.elapsed().as_secs() > 120 {
-            eprintln!("[sidecar] Timeout waiting for chat server readiness.");
-            break;
+            let _ = state.direct_runtime_stop_chat_server();
+            return Err("Chat server startup exceeded its 2-minute deadline".to_string());
         }
 
         // Check if process died
@@ -140,6 +220,7 @@ pub async fn direct_runtime_start_chat_server(
 
         match client
             .get(format!("http://127.0.0.1:{}/health", port))
+            .bearer_auth(&token)
             .send()
             .await
         {
@@ -176,59 +257,83 @@ pub async fn start_embedding_server_core(
     vector_manager: &crate::vector_store::VectorStoreManager,
     model_path: String,
 ) -> Result<(), String> {
-    // Probe the actual embedding dimension from the model's config.json
-    let actual_dim: Option<usize> = (|| -> Option<usize> {
-        let p = std::path::Path::new(&model_path);
-        let cfg_path = if p.is_dir() {
-            p.join("config.json")
-        } else {
-            return None;
-        };
-        let content = std::fs::read_to_string(&cfg_path).ok()?;
-        let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-        v.get("hidden_size")
-            .or_else(|| v.get("d_model"))
-            .or_else(|| v.get("embedding_dim"))
-            .and_then(|x| x.as_u64())
-            .map(|n| n as usize)
-    })();
-
-    if let Some(dim) = actual_dim {
-        let current_dim = vector_manager.dimensions();
-        if dim != current_dim {
-            eprintln!(
-                "[embedding] Dimension changed: {} → {}. Purging stale vector indices.",
-                current_dim, dim
-            );
-            vector_manager.purge_by_dimension(current_dim);
-            vector_manager
-                .reinit(dim)
-                .map_err(|e| format!("Failed to reinit vector store: {}", e))?;
-            let config_mgr = app.state::<crate::config::ConfigManager>();
-            let mut cfg = config_mgr.get_config();
-            cfg.vector_dimensions = dim as u32;
-            config_mgr.save_config(&cfg);
-            println!(
-                "[embedding] Vector store reinitialized at dimension {}.",
-                dim
-            );
-        }
-    }
+    let _start_guard = EMBEDDING_START_LOCK.lock().await;
 
     #[cfg(feature = "mlx")]
-    {
-        state
-            .start_mlx_embedding_server(app.clone(), model_path)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())?;
-    }
+    let (port, token) = state
+        .start_mlx_embedding_server(app.clone(), model_path)
+        .await
+        .map_err(|e| e.to_string())?;
     #[cfg(not(feature = "mlx"))]
+    let (port, token) = state
+        .direct_runtime_start_embedding_server(app.clone(), model_path)
+        .map_err(|e| e.to_string())?;
+
+    let readiness_client = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|error| {
+            stop_embedding_process(app, state);
+            format!("Could not create the embedding readiness client: {error}")
+        })?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3 * 60);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            stop_embedding_process(app, state);
+            return Err("Embedding server startup exceeded its 3-minute deadline".to_string());
+        }
+        if state.get_embedding_config().is_none() {
+            return Err("Embedding server exited during startup".to_string());
+        }
+        if readiness_client
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    // Probe the serving API itself instead of trusting heterogeneous model
+    // config schemas. This also verifies response shape and finite values.
+    let probe_backend = LocalEmbeddingBackend {
+        port,
+        token,
+        model_name: "thinclaw-embedding".to_string(),
+        dimensions: 0,
+        profile_id: state
+            .get_embedding_snapshot()
+            .map(|(_, _, identity)| identity)
+            .ok_or_else(|| "Embedding server model identity is unavailable".to_string())?,
+    };
+    let model_identity = probe_backend.profile_id.clone();
+    let actual_dim = match probe_backend
+        .embed("ThinClaw dimension probe".to_string())
+        .await
     {
-        state
-            .direct_runtime_start_embedding_server(app.clone(), model_path)
-            .map(|_| ())
-            .map_err(|e| e.to_string())?;
+        Ok(vector) => vector.len(),
+        Err(error) => {
+            stop_embedding_process(app, state);
+            return Err(format!("Embedding server probe failed: {error}"));
+        }
+    };
+    let current_dim = vector_manager.dimensions();
+    let profile = format!("local:{model_identity}:{actual_dim}");
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::rag::activate_embedding_profile(pool.inner(), vector_manager, &profile, actual_dim)
+        .await
+        .map_err(|error| format!("Failed to activate embedding profile: {error}"))?;
+    if actual_dim != current_dim {
+        let config_manager = app.state::<crate::config::ConfigManager>();
+        let mut config = config_manager.get_config();
+        config.vector_dimensions = u32::try_from(actual_dim)
+            .map_err(|_| "Embedding dimension exceeds the supported range".to_string())?;
+        config_manager.save_config(&config)?;
     }
 
     app.emit(
@@ -239,6 +344,19 @@ pub async fn start_embedding_server_core(
     )
     .ok();
     Ok(())
+}
+
+fn stop_embedding_process(app: &AppHandle, state: &SidecarManager) {
+    let process = state
+        .embedding_process
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    if let Some(process) = process {
+        let _ = process.kill();
+    }
+    app.state::<crate::process_tracker::ProcessTracker>()
+        .cleanup_by_service("embedding");
 }
 
 #[tauri::command]
@@ -261,22 +379,62 @@ pub async fn direct_runtime_start_summarizer_server(
     model_path: String,
     context_size: u32,
 ) -> Result<(), String> {
-    let res = state
+    let _start_guard = SUMMARIZER_START_LOCK.lock().await;
+    let (port, token) = state
         .direct_runtime_start_summarizer_server(app.clone(), model_path, context_size, -1)
-        .map(|_| ())
-        .map_err(|e| e.to_string());
+        .map_err(|e| e.to_string())?;
 
-    if res.is_ok() {
-        app.emit(
-            "sidecar_event",
-            SidecarEvent::Started {
-                service: "summarizer".into(),
-            },
-        )
-        .ok();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|error| {
+            stop_summarizer_process(&app, state.inner());
+            format!("Could not create the summarizer readiness client: {error}")
+        })?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3 * 60);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            stop_summarizer_process(&app, state.inner());
+            return Err("Summarizer server startup exceeded its 3-minute deadline".to_string());
+        }
+        if state.get_summarizer_config().is_none() {
+            return Err("Summarizer server exited during startup".to_string());
+        }
+        if client
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    res
+    app.emit(
+        "sidecar_event",
+        SidecarEvent::Started {
+            service: "summarizer".into(),
+        },
+    )
+    .ok();
+    Ok(())
+}
+
+fn stop_summarizer_process(app: &AppHandle, state: &SidecarManager) {
+    let process = state
+        .summarizer_process
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    if let Some(process) = process {
+        let _ = process.kill();
+    }
+    app.state::<crate::process_tracker::ProcessTracker>()
+        .cleanup_by_service("summarizer");
 }
 
 #[tauri::command]
@@ -286,13 +444,16 @@ pub async fn direct_runtime_start_stt_server(
     state: State<'_, SidecarManager>,
     model_path: String,
 ) -> Result<(), String> {
+    clear_managed_stt_endpoint();
     // Route to MLX STT server when compiled with MLX feature
     #[cfg(feature = "mlx")]
-    let res = state
-        .start_mlx_stt_server(app.clone(), model_path)
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string());
+    let res = match state.start_mlx_stt_server(app.clone(), model_path).await {
+        Ok((port, token)) => {
+            install_managed_stt_endpoint(port, token);
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
+    };
 
     #[cfg(not(feature = "mlx"))]
     let res = state
@@ -344,9 +505,10 @@ pub fn direct_runtime_get_chat_server_config(
     state: State<'_, SidecarManager>,
 ) -> Option<ChatServerConfig> {
     state.get_chat_config().map(
-        |(port, token, context_size, model_family)| ChatServerConfig {
+        |(port, _token, context_size, model_family)| ChatServerConfig {
             port,
-            token,
+            // Runtime credentials are backend state and never renderer state.
+            token: String::new(),
             context_size,
             model_family,
         },
@@ -374,7 +536,9 @@ pub async fn direct_runtime_stop_chat_server(
     state: State<'_, SidecarManager>,
     _model_path: String,
 ) -> Result<(), String> {
-    state.stop_all().map_err(|e| e.to_string())?;
+    state
+        .direct_runtime_stop_chat_server()
+        .map_err(|e| e.to_string())?;
     app.emit(
         "sidecar_event",
         SidecarEvent::Stopped {

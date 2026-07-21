@@ -15,6 +15,10 @@
 
 use serde::{Deserialize, Serialize};
 
+const MAX_TTS_RESPONSE_BYTES: usize = 25 * 1024 * 1024;
+const MAX_TTS_ERROR_BYTES: usize = 16 * 1024;
+const MAX_TTS_ENDPOINT_BYTES: usize = 16 * 1024;
+
 /// Supported TTS providers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,7 +77,7 @@ impl std::fmt::Display for TtsOutputFormat {
 }
 
 /// Configuration for TTS synthesis.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TtsConfig {
     /// Active TTS provider.
     pub provider: TtsProvider,
@@ -89,6 +93,42 @@ pub struct TtsConfig {
     pub api_key: Option<String>,
     /// Maximum text length to synthesize in a single request.
     pub max_text_length: usize,
+}
+
+impl std::fmt::Debug for TtsConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TtsConfig")
+            .field("provider", &self.provider)
+            .field("voice", &self.voice)
+            .field("output_format", &self.output_format)
+            .field("speed", &self.speed)
+            .field(
+                "endpoint_url",
+                &self.endpoint_url.as_deref().map(redacted_tts_endpoint),
+            )
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("max_text_length", &self.max_text_length)
+            .finish()
+    }
+}
+
+fn redacted_tts_endpoint(raw: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return "<invalid-url>".to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return "<invalid-url>".to_string();
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
 }
 
 impl Default for TtsConfig {
@@ -108,18 +148,12 @@ impl Default for TtsConfig {
 /// TTS synthesis service.
 pub struct TtsSynthesizer {
     config: TtsConfig,
-    client: reqwest::Client,
 }
 
 impl TtsSynthesizer {
     /// Create a new TTS synthesizer with the given configuration.
     pub fn new(config: TtsConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .unwrap_or_default();
-
-        Self { config, client }
+        Self { config }
     }
 
     /// Synthesize text to audio bytes.
@@ -173,6 +207,62 @@ impl TtsSynthesizer {
 
     /// Call an OpenAI-compatible TTS API endpoint.
     async fn call_openai_tts_api(&self, url: &str, text: &str) -> Result<Vec<u8>, TtsError> {
+        if url.is_empty() || url.len() > MAX_TTS_ENDPOINT_BYTES {
+            return Err(TtsError::ProviderUnavailable(
+                "TTS endpoint is empty or oversized".to_string(),
+            ));
+        }
+        let endpoint = reqwest::Url::parse(url).map_err(|error| {
+            TtsError::ProviderUnavailable(format!("invalid TTS endpoint: {error}"))
+        })?;
+        let loopback = endpoint.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+        if endpoint.host_str().is_none()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+            || !(endpoint.scheme() == "https" || endpoint.scheme() == "http" && loopback)
+        {
+            return Err(TtsError::ProviderUnavailable(
+                "TTS endpoint must be public HTTPS or loopback HTTP(S), without credentials, query, or fragment"
+                    .to_string(),
+            ));
+        }
+        let (endpoint, pinned_addrs) = if loopback {
+            (endpoint, Vec::new())
+        } else {
+            let guarded = thinclaw_tools_core::validate_outbound_url_pinned_async(
+                endpoint.as_str(),
+                &thinclaw_tools_core::OutboundUrlGuardOptions {
+                    require_https: true,
+                    upgrade_http_to_https: false,
+                    allowlist: Vec::new(),
+                },
+            )
+            .await
+            .map_err(|error| TtsError::ProviderUnavailable(error.to_string()))?;
+            (guarded.url, guarded.pinned_addrs)
+        };
+        let host = endpoint
+            .host_str()
+            .ok_or_else(|| TtsError::ProviderUnavailable("TTS endpoint has no host".to_string()))?;
+        let mut client_builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if !pinned_addrs.is_empty() {
+            client_builder = client_builder.resolve_to_addrs(host, &pinned_addrs);
+        }
+        let client = client_builder.build().map_err(|error| {
+            TtsError::ProviderUnavailable(format!("TTS HTTP client is unavailable: {error}"))
+        })?;
         let body = serde_json::json!({
             "model": "tts-1",
             "input": text,
@@ -181,7 +271,7 @@ impl TtsSynthesizer {
             "speed": self.config.speed,
         });
 
-        let mut req = self.client.post(url).json(&body);
+        let mut req = client.post(endpoint).json(&body);
 
         if let Some(ref api_key) = self.config.api_key {
             req = req.header("Authorization", format!("Bearer {}", api_key));
@@ -194,22 +284,43 @@ impl TtsSynthesizer {
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
+            let mut error_body = Vec::new();
+            let mut stream = response.bytes_stream();
+            use futures::StreamExt as _;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|error| TtsError::NetworkError(error.to_string()))?;
+                let remaining = MAX_TTS_ERROR_BYTES.saturating_sub(error_body.len());
+                error_body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                if error_body.len() == MAX_TTS_ERROR_BYTES {
+                    break;
+                }
+            }
             return Err(TtsError::ApiError {
                 status,
-                body: error_body,
+                body: String::from_utf8_lossy(&error_body).into_owned(),
             });
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| TtsError::NetworkError(e.to_string()))?;
-
-        Ok(bytes.to_vec())
+        if response.content_length().is_some_and(|length| {
+            usize::try_from(length).map_or(true, |length| length > MAX_TTS_RESPONSE_BYTES)
+        }) {
+            return Err(TtsError::NetworkError(format!(
+                "TTS response exceeds {MAX_TTS_RESPONSE_BYTES} bytes"
+            )));
+        }
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        use futures::StreamExt as _;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| TtsError::NetworkError(error.to_string()))?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_TTS_RESPONSE_BYTES {
+                return Err(TtsError::NetworkError(format!(
+                    "TTS response exceeds {MAX_TTS_RESPONSE_BYTES} bytes"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
     }
 
     /// Get the current configuration.

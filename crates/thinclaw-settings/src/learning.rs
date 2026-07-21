@@ -39,11 +39,9 @@ pub struct WellKnownSkillRegistryConfig {
 }
 
 fn default_learning_auto_apply_classes() -> Vec<String> {
-    vec![
-        "memory".to_string(),
-        "skill".to_string(),
-        "prompt".to_string(),
-    ]
+    // Learning may collect and evaluate candidates by default, but durable
+    // memory, prompt, and skill mutations require an explicit review/action.
+    Vec::new()
 }
 
 fn default_learning_publish_mode() -> String {
@@ -249,17 +247,11 @@ impl LearningProvidersSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LearningPromptMutationSettings {
     /// Gate autonomous prompt mutation via prompt_manage.
     #[serde(default)]
     pub enabled: bool,
-}
-
-impl Default for LearningPromptMutationSettings {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

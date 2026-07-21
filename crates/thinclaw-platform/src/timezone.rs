@@ -129,9 +129,10 @@ pub fn normalized_timezone_value(value: &str) -> Option<String> {
 fn markdown_timezone_value(content: &str) -> Option<&str> {
     content.lines().find_map(|line| {
         let trimmed = line.trim();
-        trimmed
-            .strip_prefix("- **Timezone:**")
-            .or_else(|| trimmed.strip_prefix("- **Timezone**:"))
+        let field = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+        field
+            .strip_prefix("**Timezone:**")
+            .or_else(|| field.strip_prefix("**Timezone**:"))
             .map(str::trim)
     })
 }
@@ -333,6 +334,12 @@ mod tests {
     fn test_extract_markdown_timezone_valid() {
         let tz = extract_markdown_timezone("- **Timezone:** Europe/Berlin\n");
         assert_eq!(tz.as_deref(), Some("Europe/Berlin"));
+    }
+
+    #[test]
+    fn test_extract_markdown_timezone_accepts_non_list_field() {
+        let tz = extract_markdown_timezone("# User\n\n**Timezone:** Asia/Tokyo\n");
+        assert_eq!(tz.as_deref(), Some("Asia/Tokyo"));
     }
 
     #[test]

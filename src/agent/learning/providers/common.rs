@@ -15,10 +15,78 @@ pub(super) use thinclaw_agent::learning_provider_policy::{
 /// per-request timeout via `RequestBuilder::timeout` to preserve each call
 /// site's existing budget) lets `reqwest`/hyper pool connections across
 /// requests to the same provider host.
-pub(super) fn shared_http_client() -> &'static reqwest::Client {
-    static CLIENT: std::sync::LazyLock<reqwest::Client> =
-        std::sync::LazyLock::new(reqwest::Client::new);
-    &CLIENT
+pub(super) fn shared_http_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: std::sync::LazyLock<Result<reqwest::Client, String>> =
+        std::sync::LazyLock::new(|| {
+            reqwest::Client::builder()
+                // Authenticated provider requests must never replay custom or
+                // bearer headers to a redirect-selected origin.
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .no_proxy()
+                .build()
+                .map_err(|error| {
+                    format!("failed to initialize memory-provider HTTP client: {error}")
+                })
+        });
+    CLIENT.as_ref().map_err(Clone::clone)
+}
+
+pub(super) async fn provider_json_response(
+    response: reqwest::Response,
+) -> Result<serde_json::Value, String> {
+    const MAX_PROVIDER_JSON_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_PROVIDER_ERROR_BYTES: usize = 64 * 1024;
+    let status = response.status();
+    if !status.is_success() {
+        // Drain only a bounded error body. Do not reflect peer-controlled text
+        // into agent prompts, logs, or UI errors.
+        let _ = crate::http_response::bounded_bytes(response, MAX_PROVIDER_ERROR_BYTES).await;
+        return Err(format!("HTTP {status}"));
+    }
+    let body = crate::http_response::bounded_bytes(response, MAX_PROVIDER_JSON_BYTES)
+        .await
+        .map_err(|error| error.to_string())?;
+    if body.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    serde_json::from_slice(&body).map_err(|error| error.to_string())
+}
+
+pub(super) async fn provider_status_response(response: reqwest::Response) -> Result<(), String> {
+    const MAX_PROVIDER_STATUS_BYTES: usize = 1024 * 1024;
+    const MAX_PROVIDER_ERROR_BYTES: usize = 64 * 1024;
+    let status = response.status();
+    let limit = if status.is_success() {
+        MAX_PROVIDER_STATUS_BYTES
+    } else {
+        MAX_PROVIDER_ERROR_BYTES
+    };
+    crate::http_response::bounded_bytes(response, limit)
+        .await
+        .map_err(|error| error.to_string())?;
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("HTTP {status}"))
+    }
+}
+
+pub(super) fn validated_provider_request_url(url: &str) -> Result<reqwest::Url, String> {
+    if url.is_empty() || url.len() > 4096 || url.chars().any(char::is_control) {
+        return Err("provider URL is empty, malformed, or oversized".to_string());
+    }
+    let parsed =
+        reqwest::Url::parse(url).map_err(|error| format!("invalid provider URL: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("provider URL must be HTTP(S) without credentials or a fragment".to_string());
+    }
+    Ok(parsed)
 }
 
 pub(super) fn provider_token(config: &std::collections::HashMap<String, String>) -> Option<String> {
@@ -103,15 +171,43 @@ pub(super) async fn configured_provider_health(
         return provider_configured_skipped_health_status(provider_name, provider.enabled);
     }
 
-    let base_url = base_url.expect("checked above");
+    let Some(base_url) = base_url else {
+        return provider_missing_base_url_status(provider_name, provider.enabled);
+    };
+    let Some(default_health_path) = default_health_path else {
+        return provider_configured_skipped_health_status(provider_name, provider.enabled);
+    };
     let health_path = provider_config_value(&provider.config, "health_url")
         .or_else(|| provider_config_value(&provider.config, "health_path"))
-        .unwrap_or_else(|| default_health_path.unwrap_or("/health").to_string());
-    let health_url = provider_join_url(&base_url, &health_path);
+        .unwrap_or_else(|| default_health_path.to_string());
+    let health_url = match provider_join_url(&base_url, &health_path) {
+        Ok(url) => url,
+        Err(error) => {
+            return provider_http_request_error_status(
+                provider_name,
+                provider.enabled,
+                error,
+                0,
+                None,
+            );
+        }
+    };
 
     let started = std::time::Instant::now();
+    let client = match shared_http_client() {
+        Ok(client) => client,
+        Err(error) => {
+            return provider_http_request_error_status(
+                provider_name,
+                provider.enabled,
+                error,
+                0,
+                Some(&health_url),
+            );
+        }
+    };
     let request = apply_provider_auth(
-        shared_http_client()
+        client
             .get(&health_url)
             .timeout(std::time::Duration::from_secs(5)),
         &provider.config,
@@ -128,7 +224,7 @@ pub(super) async fn configured_provider_health(
         Err(err) => provider_http_request_error_status(
             provider_name,
             provider.enabled,
-            err.to_string(),
+            err.without_url().to_string(),
             started.elapsed().as_millis() as u64,
             Some(&health_url),
         ),
@@ -149,9 +245,21 @@ pub(super) async fn provider_health_request(
         return provider_missing_base_url_status(provider_name, enabled);
     };
 
+    let health_url = match provider_join_url(&base_url, "/health") {
+        Ok(url) => url,
+        Err(error) => {
+            return provider_http_request_error_status(provider_name, enabled, error, 0, None);
+        }
+    };
     let started = std::time::Instant::now();
-    let mut req = shared_http_client()
-        .get(format!("{}/health", base_url.trim_end_matches('/')))
+    let client = match shared_http_client() {
+        Ok(client) => client,
+        Err(error) => {
+            return provider_http_request_error_status(provider_name, enabled, error, 0, None);
+        }
+    };
+    let mut req = client
+        .get(health_url)
         .timeout(std::time::Duration::from_secs(5));
     if let Some(token) = token {
         req = req.bearer_auth(token);
@@ -168,7 +276,7 @@ pub(super) async fn provider_health_request(
         Err(err) => provider_http_request_error_status(
             provider_name,
             enabled,
-            err.to_string(),
+            err.without_url().to_string(),
             started.elapsed().as_millis() as u64,
             None,
         ),

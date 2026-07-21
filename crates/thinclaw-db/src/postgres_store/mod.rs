@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
 use crate::postgres::PgBackendConfig;
+#[cfg(feature = "postgres")]
+use crate::{RoutineRunAdmission, RoutineRunCompletion, RoutineRunReapResult};
 use thinclaw_types::SandboxJobSpec;
 #[cfg(feature = "postgres")]
 use thinclaw_types::error::DatabaseError;

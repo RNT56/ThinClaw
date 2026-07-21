@@ -7,16 +7,28 @@ impl DesktopAutonomyManager {
         let mut checks = Vec::new();
         checks.push(
             match self.bridge_call("health", serde_json::json!({})).await {
-                Ok(result) => {
+                Ok(result) if bridge_report_passed(&result) => {
                     self.runtime_passed_check("bridge_health", Some(result.clone()), result)
                 }
+                Ok(result) => self.runtime_failed_check(
+                    "bridge_health",
+                    "desktop bridge health response did not pass",
+                    result,
+                ),
                 Err(err) => {
                     self.runtime_failed_check("bridge_health", err, serde_json::Value::Null)
                 }
             },
         );
         checks.push(match self.desktop_permission_status().await {
-            Ok(result) => self.runtime_passed_check("permissions", Some(result.clone()), result),
+            Ok(result) if permissions_report_passed(&result) => {
+                self.runtime_passed_check("permissions", Some(result.clone()), result)
+            }
+            Ok(result) => self.runtime_failed_check(
+                "permissions",
+                "desktop permissions response did not pass",
+                result,
+            ),
             Err(err) => self.runtime_failed_check("permissions", err, serde_json::Value::Null),
         });
         checks.push(
@@ -39,7 +51,7 @@ impl DesktopAutonomyManager {
         };
         let raw = serde_json::to_string_pretty(&report)
             .map_err(|e| format!("failed to serialize canary report: {e}"))?;
-        tokio::fs::write(&manifest.report_path, raw)
+        write_autonomy_file(manifest.report_path.clone(), raw.into_bytes())
             .await
             .map_err(|e| format!("failed to write canary report: {e}"))?;
         Ok(report)

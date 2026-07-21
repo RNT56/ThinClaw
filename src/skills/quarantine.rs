@@ -8,6 +8,12 @@ use sha2::{Digest, Sha256};
 use crate::settings::SkillTapTrustLevel;
 
 pub const SKILL_SCANNER_VERSION: &str = "skill_quarantine_v2";
+const MAX_SCAN_FILES: usize = 2_048;
+const MAX_SCAN_FILE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SCAN_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SCAN_PATH_BYTES: usize = 1_024;
+const MAX_SCAN_METADATA_BYTES: usize = 16 * 1024;
+const MAX_SECURITY_FINDINGS: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -97,6 +103,9 @@ pub struct SkillProvenance {
     pub content_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finding_summary: Option<FindingSummary>,
+    /// Relative regular-file paths owned by the installed package.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_files: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -237,7 +246,7 @@ fn content_sha256(files: &[SkillScanFile], fallback_content: &str) -> String {
         hasher.update(fallback_content.as_bytes());
         hasher.update(b"\0");
     } else {
-        let mut sorted = files.to_vec();
+        let mut sorted = files.iter().collect::<Vec<_>>();
         sorted.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
         for file in sorted {
             hasher.update(file.relative_path.as_bytes());
@@ -247,6 +256,72 @@ fn content_sha256(files: &[SkillScanFile], fallback_content: &str) -> String {
         }
     }
     format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn validate_scan_payload(skill: &QuarantinedSkill) -> Result<(), &'static str> {
+    if skill.content.raw_content.len() > MAX_SCAN_FILE_BYTES {
+        return Err("SKILL.md exceeds the scanner file-size limit");
+    }
+    let metadata_fields = [
+        Some(skill.content.source_kind.as_str()),
+        Some(skill.content.source_adapter.as_str()),
+        Some(skill.content.source_ref.as_str()),
+        skill.content.source_repo.as_deref(),
+        skill.content.source_url.as_deref(),
+        skill.content.manifest_url.as_deref(),
+        skill.content.manifest_digest.as_deref(),
+        skill.content.path.as_deref(),
+        skill.content.branch.as_deref(),
+        skill.content.commit_sha.as_deref(),
+    ];
+    if metadata_fields
+        .into_iter()
+        .flatten()
+        .any(|value| value.len() > MAX_SCAN_METADATA_BYTES || value.chars().any(char::is_control))
+    {
+        return Err("skill provenance metadata is malformed or oversized");
+    }
+    if skill.package_files.len() > MAX_SCAN_FILES {
+        return Err("skill package contains too many files for the scanner");
+    }
+    let mut total_bytes = 0_usize;
+    for file in &skill.package_files {
+        if file.relative_path.is_empty()
+            || file.relative_path.len() > MAX_SCAN_PATH_BYTES
+            || file.relative_path.chars().any(char::is_control)
+            || file.content.len() > MAX_SCAN_FILE_BYTES
+        {
+            return Err("skill package contains a malformed or oversized file");
+        }
+        total_bytes = total_bytes
+            .checked_add(file.relative_path.len())
+            .and_then(|value| value.checked_add(file.content.len()))
+            .ok_or("skill package size overflow")?;
+        if total_bytes > MAX_SCAN_TOTAL_BYTES {
+            return Err("skill package exceeds the scanner total-size limit");
+        }
+    }
+    Ok(())
+}
+
+fn rejected_scan_report(reason: &str) -> SkillScanReport {
+    let finding = SecurityFinding {
+        kind: "scanner_limits".to_string(),
+        severity: FindingSeverity::Critical,
+        excerpt: excerpt(reason),
+        rule_id: Some("scanner_limits.001".to_string()),
+        file: None,
+        line: None,
+        recommendation: Some("Reject malformed or oversized skill packages.".to_string()),
+        scanner_version: Some(SKILL_SCANNER_VERSION.to_string()),
+    };
+    let findings = vec![finding];
+    SkillScanReport {
+        scanner_version: SKILL_SCANNER_VERSION.to_string(),
+        content_sha256: format!("sha256:{}", hex::encode(Sha256::digest(reason.as_bytes()))),
+        summary: finding_summary(&findings),
+        findings,
+    }
 }
 
 fn finding_summary(findings: &[SecurityFinding]) -> FindingSummary {
@@ -335,19 +410,46 @@ impl QuarantineManager {
         skill_name: &str,
         skill: &SkillContent,
     ) -> anyhow::Result<QuarantinedSkill> {
+        anyhow::ensure!(
+            crate::skills::validate_skill_name(skill_name),
+            "invalid skill name"
+        );
+        let candidate = QuarantinedSkill {
+            skill_name: skill_name.to_string(),
+            dir: PathBuf::new(),
+            content: skill.clone(),
+            package_files: Vec::new(),
+        };
+        validate_scan_payload(&candidate).map_err(anyhow::Error::msg)?;
         tokio::fs::create_dir_all(&self.quarantine_dir).await?;
+        ensure_real_directory(&self.quarantine_dir).await?;
         let dir = self.quarantine_dir.join(format!(
-            "{}-{}",
+            "{}-{}-{}",
             sanitize_name(skill_name),
-            Utc::now().timestamp_millis()
+            Utc::now().timestamp_millis(),
+            uuid::Uuid::new_v4().simple(),
         ));
-        tokio::fs::create_dir_all(&dir).await?;
-        tokio::fs::write(dir.join("SKILL.md"), &skill.raw_content).await?;
-        tokio::fs::write(
-            dir.join("provenance.json"),
-            serde_json::to_vec_pretty(skill)?,
-        )
-        .await?;
+        tokio::fs::create_dir(&dir).await?;
+        let write_result = async {
+            thinclaw_platform::write_private_file_atomic_async(
+                dir.join("SKILL.md"),
+                skill.raw_content.as_bytes().to_vec(),
+                false,
+            )
+            .await?;
+            thinclaw_platform::write_private_file_atomic_async(
+                dir.join("provenance.json"),
+                serde_json::to_vec_pretty(skill)?,
+                false,
+            )
+            .await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = write_result {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            return Err(error);
+        }
 
         Ok(QuarantinedSkill {
             skill_name: skill_name.to_string(),
@@ -365,6 +467,9 @@ impl QuarantineManager {
     }
 
     pub fn scan_report(&self, skill: &QuarantinedSkill) -> SkillScanReport {
+        if let Err(error) = validate_scan_payload(skill) {
+            return rejected_scan_report(error);
+        }
         let scan_files = if skill.package_files.is_empty() {
             vec![SkillScanFile {
                 relative_path: "SKILL.md".to_string(),
@@ -378,16 +483,43 @@ impl QuarantineManager {
         for file in &scan_files {
             for (line_idx, line) in file.content.lines().enumerate() {
                 for rule in SECURITY_RULES.iter() {
-                    findings.extend(rule.pattern.find_iter(line).map(|matched| SecurityFinding {
-                        kind: rule.category.to_string(),
-                        severity: rule.severity,
-                        excerpt: excerpt(matched.as_str()),
-                        rule_id: Some(rule.id.to_string()),
-                        file: Some(file.relative_path.clone()),
-                        line: Some(line_idx + 1),
-                        recommendation: Some(rule.recommendation.to_string()),
-                        scanner_version: Some(SKILL_SCANNER_VERSION.to_string()),
-                    }));
+                    for matched in rule.pattern.find_iter(line) {
+                        if findings.len() >= MAX_SECURITY_FINDINGS - 1 {
+                            findings.push(SecurityFinding {
+                                kind: "scanner_limits".to_string(),
+                                severity: FindingSeverity::Critical,
+                                excerpt: "additional findings were truncated".to_string(),
+                                rule_id: Some("scanner_limits.002".to_string()),
+                                file: None,
+                                line: None,
+                                recommendation: Some(
+                                    "Reject packages that deliberately flood scanner findings."
+                                        .to_string(),
+                                ),
+                                scanner_version: Some(SKILL_SCANNER_VERSION.to_string()),
+                            });
+                            let summary = finding_summary(&findings);
+                            return SkillScanReport {
+                                scanner_version: SKILL_SCANNER_VERSION.to_string(),
+                                content_sha256: content_sha256(
+                                    &scan_files,
+                                    &skill.content.raw_content,
+                                ),
+                                summary,
+                                findings,
+                            };
+                        }
+                        findings.push(SecurityFinding {
+                            kind: rule.category.to_string(),
+                            severity: rule.severity,
+                            excerpt: excerpt(matched.as_str()),
+                            rule_id: Some(rule.id.to_string()),
+                            file: Some(file.relative_path.clone()),
+                            line: Some(line_idx + 1),
+                            recommendation: Some(rule.recommendation.to_string()),
+                            scanner_version: Some(SKILL_SCANNER_VERSION.to_string()),
+                        });
+                    }
                 }
             }
         }
@@ -407,9 +539,23 @@ impl QuarantineManager {
         install_root: &Path,
         findings: &[SecurityFinding],
     ) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            crate::skills::validate_skill_name(&skill.skill_name),
+            "invalid skill name"
+        );
+        validate_scan_payload(skill).map_err(anyhow::Error::msg)?;
+        tokio::fs::create_dir_all(install_root).await?;
+        ensure_real_directory(install_root).await?;
         let target_dir = install_root.join(&skill.skill_name);
-        tokio::fs::create_dir_all(&target_dir).await?;
-        tokio::fs::write(target_dir.join("SKILL.md"), &skill.content.raw_content).await?;
+        let staging_root = install_root.join(".thinclaw-skill-staging");
+        match tokio::fs::create_dir(&staging_root).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        ensure_real_directory(&staging_root).await?;
+        let stage_dir = staging_root.join(uuid::Uuid::new_v4().simple().to_string());
+        tokio::fs::create_dir(&stage_dir).await?;
 
         let provenance = SkillProvenance {
             source_kind: skill.content.source_kind.clone(),
@@ -431,20 +577,74 @@ impl QuarantineManager {
                 &skill.content.raw_content,
             )),
             finding_summary: Some(finding_summary(findings)),
+            package_files: vec!["SKILL.md".to_string()],
         };
 
-        tokio::fs::write(
-            target_dir.join(".thinclaw-skill-lock.json"),
-            serde_json::to_vec_pretty(&provenance)?,
-        )
-        .await?;
+        let publish_result = async {
+            thinclaw_platform::write_private_file_atomic_async(
+                stage_dir.join("SKILL.md"),
+                skill.content.raw_content.as_bytes().to_vec(),
+                false,
+            )
+            .await?;
+            thinclaw_platform::write_private_file_atomic_async(
+                stage_dir.join(".thinclaw-skill-lock.json"),
+                serde_json::to_vec_pretty(&provenance)?,
+                false,
+            )
+            .await?;
+            let source = stage_dir.clone();
+            let destination = target_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                thinclaw_platform::rename_no_replace(&source, &destination)
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("skill installer task failed: {error}"))??;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = publish_result {
+            let _ = tokio::fs::remove_dir_all(&stage_dir).await;
+            return Err(error);
+        }
 
         Ok(target_dir)
     }
 
     pub async fn cleanup(&self, skill: &QuarantinedSkill) {
-        let _ = tokio::fs::remove_dir_all(&skill.dir).await;
+        let Ok(root_metadata) = tokio::fs::symlink_metadata(&self.quarantine_dir).await else {
+            return;
+        };
+        let Ok(target_metadata) = tokio::fs::symlink_metadata(&skill.dir).await else {
+            return;
+        };
+        if root_metadata.file_type().is_symlink()
+            || !root_metadata.is_dir()
+            || target_metadata.file_type().is_symlink()
+            || !target_metadata.is_dir()
+        {
+            return;
+        }
+        let (Ok(root), Ok(target)) = (
+            tokio::fs::canonicalize(&self.quarantine_dir).await,
+            tokio::fs::canonicalize(&skill.dir).await,
+        ) else {
+            return;
+        };
+        if target != root && target.starts_with(&root) {
+            let _ = tokio::fs::remove_dir_all(target).await;
+        }
     }
+}
+
+async fn ensure_real_directory(path: &Path) -> anyhow::Result<()> {
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "{} must be a real directory",
+        path.display()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -543,6 +743,73 @@ mod tests {
                 .any(|finding| finding.kind == "path_traversal"
                     && finding.file.as_deref() == Some(".thinclaw-skill-lock.json"))
         );
+    }
+
+    #[test]
+    fn scan_report_fails_closed_on_oversized_content() {
+        let manager = QuarantineManager::new(PathBuf::from("/tmp/q"));
+        let skill = QuarantinedSkill {
+            skill_name: "demo".to_string(),
+            dir: PathBuf::from("/tmp/q/demo"),
+            content: SkillContent {
+                raw_content: "x".repeat(MAX_SCAN_FILE_BYTES + 1),
+                source_kind: "test".to_string(),
+                source_adapter: "test".to_string(),
+                source_ref: "demo".to_string(),
+                source_repo: None,
+                source_url: None,
+                manifest_url: None,
+                manifest_digest: None,
+                path: None,
+                branch: None,
+                commit_sha: None,
+                trust_level: SkillTapTrustLevel::Community,
+            },
+            package_files: Vec::new(),
+        };
+
+        let report = manager.scan_report(&skill);
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].severity, FindingSeverity::Critical);
+        assert_eq!(report.findings[0].kind, "scanner_limits");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_refuses_intermediate_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let quarantine = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::create_dir(&victim).unwrap();
+        std::fs::write(victim.join("keep"), b"keep").unwrap();
+        symlink(outside.path(), quarantine.path().join("redirect")).unwrap();
+        let manager = QuarantineManager::new(quarantine.path().to_path_buf());
+        let skill = QuarantinedSkill {
+            skill_name: "demo".to_string(),
+            dir: quarantine.path().join("redirect/victim"),
+            content: SkillContent {
+                raw_content: "demo".to_string(),
+                source_kind: "test".to_string(),
+                source_adapter: "test".to_string(),
+                source_ref: "demo".to_string(),
+                source_repo: None,
+                source_url: None,
+                manifest_url: None,
+                manifest_digest: None,
+                path: None,
+                branch: None,
+                commit_sha: None,
+                trust_level: SkillTapTrustLevel::Community,
+            },
+            package_files: Vec::new(),
+        };
+
+        manager.cleanup(&skill).await;
+
+        assert_eq!(std::fs::read(victim.join("keep")).unwrap(), b"keep");
     }
 
     #[test]

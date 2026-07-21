@@ -34,6 +34,16 @@ interface HfModelCard {
     gated: boolean;
 }
 
+const MAX_REMOTE_DEPLOY_LOG_LINES = 2000;
+const MAX_REMOTE_DEPLOY_LOG_CHARS = 16_384;
+
+function appendRemoteDeployLog(previous: string[], line: string): string[] {
+    const next = [...previous, line.slice(0, MAX_REMOTE_DEPLOY_LOG_CHARS)];
+    return next.length > MAX_REMOTE_DEPLOY_LOG_LINES
+        ? next.slice(-MAX_REMOTE_DEPLOY_LOG_LINES)
+        : next;
+}
+
 interface HfFileInfo {
     filename: string;
     size: number;
@@ -80,7 +90,7 @@ function normaliseHttpUrl(raw: string): string {
     if (!/^https?:\/\//.test(url)) url = `http://${url}`;
     const withoutProto = url.replace(/^https?:\/\//, '');
     const hostPart = withoutProto.split('/')[0];
-    if (!hostPart.includes(':')) url = url.replace(hostPart, `${hostPart}:18789`);
+    if (!hostPart.includes(':')) url = url.replace(hostPart, `${hostPart}:3000`);
     return url;
 }
 
@@ -339,21 +349,23 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
     // Remote deploy handler
     const handleRemoteDeploy = async () => {
-        if (!remoteIp) return;
+        if (!remoteIp || !remoteTailscaleKey.trim()) return;
         setRemoteDeploying(true);
         setRemoteDeployLogs(['=== ThinClaw Remote Deploy ===', `Target: ${remoteUser}@${remoteIp}`]);
         setRemoteError('');
+        let unlistenLog: (() => void) | undefined;
+        let unlistenStatus: (() => void) | undefined;
         try {
-            const unlistenLog = await listen<string>('deploy-log', (event) => {
-                setRemoteDeployLogs((prev) => [...prev, event.payload]);
+            unlistenLog = await listen<string>('deploy-log', (event) => {
+                setRemoteDeployLogs((prev) => appendRemoteDeployLog(prev, event.payload));
             });
-            const unlistenStatus = await listen<string>('deploy-status', (event) => {
-                unlistenLog();
-                unlistenStatus();
+            unlistenStatus = await listen<string>('deploy-status', (event) => {
+                unlistenLog?.();
+                unlistenStatus?.();
                 try {
                     const result = JSON.parse(event.payload);
                     if (result.status === 'success') {
-                        setRemoteConnected(true);
+                        setRemoteConnected(result.reachable !== false);
                         // Auto-save the deployed agent
                         const newProfile: thinclaw.AgentProfile = {
                             id: crypto.randomUUID(),
@@ -365,7 +377,12 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                         };
                         thinclaw.addAgentProfile(newProfile).catch(console.error);
                         commands.thinclawSaveGatewaySettings('remote', result.url, result.token || '').catch(console.error);
-                        toast.success('Remote agent deployed and connected!');
+                        if (result.reachable === false) {
+                            setRemoteError(result.message || 'Agent deployed, but this desktop is not connected to the same tailnet.');
+                            toast.warning('Agent deployed; connect this desktop to the same tailnet to continue.');
+                        } else {
+                            toast.success('Remote agent deployed and connected!');
+                        }
                     } else {
                         setRemoteError(result.message || 'Deployment failed');
                     }
@@ -376,6 +393,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
             });
             await commands.thinclawDeployRemote(remoteIp, remoteUser, remoteTailscaleKey || null, remoteEnableSystemd);
         } catch (e: any) {
+            unlistenLog?.();
+            unlistenStatus?.();
             setRemoteError(typeof e === 'string' ? e : e.message);
             setRemoteDeploying(false);
         }
@@ -766,13 +785,13 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             <div className="relative">
                                                 <input type="text"
                                                     className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono pl-10 placeholder:text-muted-foreground/50"
-                                                    placeholder="192.168.1.50 or http://your-server.com:18789"
+                                                    placeholder="100.64.0.10 or https://your-server.example"
                                                     value={remoteExistingUrl}
                                                     onChange={(e) => setRemoteExistingUrl(e.target.value)}
                                                 />
                                                 <Server className="absolute left-3 top-3.5 w-4 h-4 text-muted-foreground" />
                                             </div>
-                                            <p className="text-[10px] text-muted-foreground font-medium">Port <code>18789</code> is added automatically if omitted.</p>
+                                            <p className="text-[10px] text-muted-foreground font-medium">Port <code>3000</code> is added automatically if omitted.</p>
                                         </div>
 
                                         <div className="space-y-2">
@@ -816,7 +835,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                 <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Server IP Address</label>
                                                 <input type="text"
                                                     className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
-                                                    placeholder="e.g. 192.168.1.50 or your-server.com"
+                                                    placeholder="e.g. 203.0.113.10"
                                                     value={remoteIp}
                                                     onChange={(e) => setRemoteIp(e.target.value)}
                                                 />
@@ -831,8 +850,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                 />
                                             </div>
                                             <div className="space-y-2">
-                                                <label className="text-xs font-semibold text-muted-foreground">Tailscale Auth Key <span className="text-muted-foreground/60">(optional)</span></label>
-                                                <input type="text"
+                                                <label className="text-xs font-semibold text-muted-foreground">Tailscale Auth Key <span className="text-rose-500">(required)</span></label>
+                                                <input type="password"
                                                     className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                                     placeholder="tskey-auth-..."
                                                     value={remoteTailscaleKey}
@@ -852,7 +871,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
                                         <button
                                             onClick={handleRemoteDeploy}
-                                            disabled={!remoteIp || remoteDeploying}
+                                            disabled={!remoteIp || !remoteTailscaleKey.trim() || remoteDeploying}
                                             className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-bold shadow-lg shadow-blue-500/20 transition-all flex items-center justify-center gap-2"
                                         >
                                             {remoteDeploying ? <><Loader2 className="w-4 h-4 animate-spin" /> Deploying...</> : <><Server className="w-4 h-4" /> Start Deployment</>}

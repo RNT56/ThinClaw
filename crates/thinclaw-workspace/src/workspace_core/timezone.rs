@@ -4,6 +4,8 @@
 //! the shared and actor-private `USER.md` documents in sync with the effective
 //! timezone.
 
+use chrono_tz::Tz;
+use thinclaw_identity::{AccessContext, ConversationKind, ResolvedIdentity};
 use thinclaw_types::error::WorkspaceError;
 
 use super::Workspace;
@@ -26,6 +28,45 @@ impl Workspace {
     pub async fn extract_user_timezone_from_path(&self, path: &str) -> Option<String> {
         let doc = self.read(path).await.ok()?;
         thinclaw_platform::timezone::extract_markdown_timezone(&doc.content)
+    }
+
+    async fn timezone_from_user_document(&self, path: &str) -> Option<Tz> {
+        self.extract_user_timezone_from_path(path)
+            .await
+            .and_then(|timezone| thinclaw_platform::timezone::parse_timezone(&timezone))
+    }
+
+    /// Resolve operational time for a canonical access scope. Direct actors
+    /// may have their own USER.md timezone; group timelines deliberately use
+    /// the principal/shared timezone so the same group log cannot switch dates
+    /// depending on which participant wrote the next entry.
+    pub async fn effective_timezone_for_access(&self, access: &AccessContext) -> Tz {
+        if access.conversation_kind == ConversationKind::Direct
+            && let Some(timezone) = self
+                .timezone_from_user_document(&paths::actor_user(&access.actor_id))
+                .await
+        {
+            return timezone;
+        }
+        if let Some(timezone) = self.timezone_from_user_document(paths::USER).await {
+            return timezone;
+        }
+        self.effective_timezone()
+    }
+
+    pub async fn effective_timezone_for_identity(&self, identity: &ResolvedIdentity) -> Tz {
+        self.effective_timezone_for_access(&identity.access_context("workspace"))
+            .await
+    }
+
+    pub async fn local_now_for_access(&self, access: &AccessContext) -> chrono::DateTime<Tz> {
+        chrono::Utc::now().with_timezone(&self.effective_timezone_for_access(access).await)
+    }
+
+    pub async fn local_today_for_identity(&self, identity: &ResolvedIdentity) -> chrono::NaiveDate {
+        chrono::Utc::now()
+            .with_timezone(&self.effective_timezone_for_identity(identity).await)
+            .date_naive()
     }
 
     async fn set_timezone_on_path(

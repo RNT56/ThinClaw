@@ -187,6 +187,9 @@ impl Clone for DecryptedSecret {
 /// Errors that can occur during secret operations.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SecretError {
+    #[error("Invalid secret input: {0}")]
+    InvalidInput(String),
+
     #[error("Secret not found: {0}")]
     NotFound(String),
 
@@ -252,6 +255,48 @@ impl CreateSecretParams {
     pub fn with_created_by(mut self, created_by: impl Into<String>) -> Self {
         self.created_by = Some(created_by.into());
         self
+    }
+
+    /// Validate caller-controlled metadata and plaintext before any backend
+    /// allocates encryption buffers or creates a durable credential row.
+    pub fn validate(&self, user_id: &str) -> Result<(), SecretError> {
+        const MAX_ID_BYTES: usize = 256;
+        const MAX_NAME_BYTES: usize = 256;
+        const MAX_VALUE_BYTES: usize = 1024 * 1024;
+        const MAX_METADATA_BYTES: usize = 256;
+
+        let valid_text = |value: &str, max: usize| {
+            !value.trim().is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+        };
+        if !valid_text(user_id, MAX_ID_BYTES) {
+            return Err(SecretError::InvalidInput(
+                "user id is empty, malformed, or oversized".to_string(),
+            ));
+        }
+        if !valid_text(&self.name, MAX_NAME_BYTES) || self.name.trim() != self.name {
+            return Err(SecretError::InvalidInput(
+                "secret name is empty, malformed, or oversized".to_string(),
+            ));
+        }
+        let plaintext = self.value.expose_secret();
+        if plaintext.is_empty() || plaintext.len() > MAX_VALUE_BYTES || plaintext.contains('\0') {
+            return Err(SecretError::InvalidInput(
+                "secret value is empty, malformed, or oversized".to_string(),
+            ));
+        }
+        for (label, value) in [
+            ("provider", self.provider.as_deref()),
+            ("created_by", self.created_by.as_deref()),
+        ] {
+            if let Some(value) = value
+                && !valid_text(value, MAX_METADATA_BYTES)
+            {
+                return Err(SecretError::InvalidInput(format!(
+                    "secret {label} metadata is malformed or oversized"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -329,8 +374,12 @@ pub enum CredentialLocation {
     },
     /// Inject as a query parameter
     QueryParam { name: String },
-    /// Inject by replacing a placeholder in URL or body templates
+    /// Inject by replacing a placeholder in a URL path.
     UrlPath { placeholder: String },
+    /// Inject a credential-free HTTPS base URL at the start of a URL template.
+    UrlBase { placeholder: String },
+    /// Inject by replacing a placeholder in the request body.
+    Body { placeholder: String },
 }
 
 /// Mapping from a secret name to where it should be injected.
@@ -401,5 +450,16 @@ mod tests {
         let params = CreateSecretParams::new("key", "value").with_provider("stripe");
         assert_eq!(params.name, "key");
         assert_eq!(params.provider, Some("stripe".to_string()));
+        assert!(params.validate("user-1").is_ok());
+        assert!(
+            CreateSecretParams::new(" bad ", "value")
+                .validate("user-1")
+                .is_err()
+        );
+        assert!(
+            CreateSecretParams::new("key", "bad\0value")
+                .validate("user-1")
+                .is_err()
+        );
     }
 }

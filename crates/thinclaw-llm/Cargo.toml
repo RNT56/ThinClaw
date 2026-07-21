@@ -8,23 +8,23 @@ publish = false
 [dependencies]
 async-stream = "0.3"
 async-trait = { workspace = true }
+bytes = "1"
 chrono = { workspace = true }
 futures = { workspace = true }
 rand = "0.10"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
 rig-core = { version = "0.33", default-features = false, features = ["reqwest-rustls"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
 rust_decimal_macros = "1"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.11"
-hex = "0.4"
 thinclaw-config = { version = "0.1.0", path = "../thinclaw-config" }
 thinclaw-experiments = { version = "0.1.0", path = "../thinclaw-experiments" }
 thinclaw-llm-core = { version = "0.1.0", path = "../thinclaw-llm-core" }
 thinclaw-settings = { version = "0.1.0", path = "../thinclaw-settings" }
+thinclaw-tools-core = { version = "0.1.0", path = "../thinclaw-tools-core" }
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
 tokio = { version = "1", features = ["sync", "time", "rt"] }
 tracing = { workspace = true }

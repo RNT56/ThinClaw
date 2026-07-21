@@ -794,11 +794,33 @@ pub async fn thinclaw_add_custom_secret(
     value: String,
     description: Option<String>,
 ) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty()
+        || name.len() > 256
+        || name.chars().any(char::is_control)
+        || value.is_empty()
+        || value.len() > 64 * 1024
+        || value.contains('\0')
+        || description.as_deref().is_some_and(|description| {
+            description.len() > 4_096
+                || description.contains('\0')
+                || description.chars().any(|character| {
+                    character.is_control() && !matches!(character, '\n' | '\r' | '\t')
+                })
+        })
+    {
+        return Err(
+            "custom secret metadata or value is empty, malformed, or oversized".to_string(),
+        );
+    }
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
         state.init_config().await?
     };
+    if cfg.custom_secrets.len() >= 128 {
+        return Err("custom secret limit of 128 has been reached".to_string());
+    }
 
     let id = format!("custom-{}", uuid::Uuid::new_v4());
 
@@ -814,7 +836,15 @@ pub async fn thinclaw_add_custom_secret(
         granted: false,
     });
 
-    cfg.save_identity().map_err(|e| e.to_string())?;
+    if let Err(error) = cfg.save_identity() {
+        let rollback = crate::thinclaw::config::keychain::set_key(&id, None);
+        return match rollback {
+            Ok(()) => Err(error.to_string()),
+            Err(rollback_error) => Err(format!(
+                "failed to persist custom secret ({error}); credential rollback also failed: {rollback_error}"
+            )),
+        };
+    }
 
     // Regenerate config to reflect changes
     let existing_thinclaw_engine = cfg.load_config().ok();
@@ -844,12 +874,27 @@ pub async fn thinclaw_remove_custom_secret(
         state.init_config().await?
     };
 
-    // Delete the secret value from the Keychain
-    let _ = crate::thinclaw::config::keychain::set_key(&id, None);
+    let secret_index = cfg
+        .custom_secrets
+        .iter()
+        .position(|secret| secret.id == id)
+        .ok_or_else(|| "Secret not found".to_string())?;
+    let old_value = crate::thinclaw::config::keychain::get_key(&id)
+        .or_else(|| Some(cfg.custom_secrets[secret_index].value.clone()))
+        .filter(|value| !value.is_empty());
+    crate::thinclaw::config::keychain::set_key(&id, None)
+        .map_err(|error| format!("failed to remove custom secret credential: {error}"))?;
+    cfg.custom_secrets.remove(secret_index);
 
-    cfg.custom_secrets.retain(|s| s.id != id);
-
-    cfg.save_identity().map_err(|e| e.to_string())?;
+    if let Err(error) = cfg.save_identity() {
+        let rollback = crate::thinclaw::config::keychain::set_key(&id, old_value.as_deref());
+        return match rollback {
+            Ok(()) => Err(error.to_string()),
+            Err(rollback_error) => Err(format!(
+                "failed to persist custom secret removal ({error}); credential rollback also failed: {rollback_error}"
+            )),
+        };
+    }
 
     // Regenerate config to reflect changes
     let existing_thinclaw_engine = cfg.load_config().ok();
@@ -1197,21 +1242,104 @@ pub async fn thinclaw_save_gateway_settings(
 #[specta::specta]
 pub async fn thinclaw_add_agent_profile(
     state: State<'_, ThinClawManager>,
-    profile: AgentProfile,
+    mut profile: AgentProfile,
 ) -> Result<(), String> {
+    profile.id = profile.id.trim().to_string();
+    profile.name = profile.name.trim().to_string();
+    profile.url = profile.url.trim().trim_end_matches('/').to_string();
+    if profile.id.is_empty()
+        || profile.id.len() > 64
+        || !profile
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(
+            "agent profile ID must be 1-64 ASCII letters, digits, '.', '_' or '-'".to_string(),
+        );
+    }
+    if profile.name.is_empty()
+        || profile.name.len() > 128
+        || profile.name.chars().any(char::is_control)
+    {
+        return Err("agent profile name must be 1-128 printable characters".to_string());
+    }
+    if !matches!(profile.mode.as_str(), "local" | "remote") {
+        return Err("agent profile mode must be 'local' or 'remote'".to_string());
+    }
+    if profile.url.len() > 2048 {
+        return Err("agent profile URL exceeds the 2048-byte limit".to_string());
+    }
+    if profile.url.chars().any(char::is_control) {
+        return Err("agent profile URL contains control characters".to_string());
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
         state.init_config().await?
     };
+    let replacing_existing = cfg
+        .profiles
+        .iter()
+        .any(|existing| existing.id == profile.id);
+    if !replacing_existing && cfg.profiles.len() >= 64 {
+        return Err("agent profile limit of 64 has been reached".to_string());
+    }
 
-    if let Some(existing) = cfg.profiles.iter_mut().find(|p| p.id == profile.id) {
+    let token_key = crate::thinclaw::config::keychain::profile_token_key(&profile.id);
+    let old_stored_token = crate::thinclaw::config::keychain::get_key(&token_key).or_else(|| {
+        cfg.profiles
+            .iter()
+            .find(|existing| existing.id == profile.id)
+            .and_then(|existing| existing.token.clone())
+    });
+    let supplied_token = profile.token.take();
+    let resolved_token = match supplied_token.as_deref() {
+        None => old_stored_token.clone(),
+        Some(token) if token.trim().is_empty() => None,
+        Some(token) => Some(token.trim().to_string()),
+    };
+    if resolved_token.as_deref().is_some_and(|token| {
+        token.is_empty() || token.len() > 8 * 1024 || token.chars().any(char::is_control)
+    }) {
+        return Err("agent profile token is malformed or exceeds 8192 bytes".to_string());
+    }
+
+    if profile.mode == "remote" {
+        let token = resolved_token
+            .as_deref()
+            .ok_or_else(|| "remote agent profiles require a bearer token".to_string())?;
+        crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&profile.url, token)
+            .map_err(|error| format!("invalid remote agent profile: {error}"))?;
+    }
+    profile.token = resolved_token.clone();
+
+    if supplied_token.is_some() || old_stored_token.is_none() && resolved_token.is_some() {
+        crate::thinclaw::config::keychain::set_key(&token_key, resolved_token.as_deref())
+            .map_err(|error| format!("failed to secure agent profile token: {error}"))?;
+    }
+
+    if let Some(existing) = cfg
+        .profiles
+        .iter_mut()
+        .find(|existing| existing.id == profile.id)
+    {
         *existing = profile;
     } else {
         cfg.profiles.push(profile);
     }
 
-    cfg.save_identity().map_err(|e| e.to_string())?;
+    if let Err(error) = cfg.save_identity() {
+        let rollback =
+            crate::thinclaw::config::keychain::set_key(&token_key, old_stored_token.as_deref());
+        return match rollback {
+            Ok(()) => Err(error.to_string()),
+            Err(rollback_error) => Err(format!(
+                "failed to persist agent profile ({error}); credential rollback also failed: {rollback_error}"
+            )),
+        };
+    }
     *state.config.write().await = Some(cfg);
     Ok(())
 }
@@ -1229,9 +1357,28 @@ pub async fn thinclaw_remove_agent_profile(
         state.init_config().await?
     };
 
-    cfg.profiles.retain(|p| p.id != id);
+    let profile_index = cfg
+        .profiles
+        .iter()
+        .position(|profile| profile.id == id)
+        .ok_or_else(|| "agent profile not found".to_string())?;
+    let token_key = crate::thinclaw::config::keychain::profile_token_key(&id);
+    let old_token = crate::thinclaw::config::keychain::get_key(&token_key)
+        .or_else(|| cfg.profiles[profile_index].token.clone());
+    crate::thinclaw::config::keychain::set_key(&token_key, None)
+        .map_err(|error| format!("failed to remove agent profile token: {error}"))?;
 
-    cfg.save_identity().map_err(|e| e.to_string())?;
+    cfg.profiles.remove(profile_index);
+
+    if let Err(error) = cfg.save_identity() {
+        let rollback = crate::thinclaw::config::keychain::set_key(&token_key, old_token.as_deref());
+        return match rollback {
+            Ok(()) => Err(error.to_string()),
+            Err(rollback_error) => Err(format!(
+                "failed to persist profile removal ({error}); credential rollback also failed: {rollback_error}"
+            )),
+        };
+    }
     *state.config.write().await = Some(cfg);
     Ok(())
 }

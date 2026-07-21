@@ -23,5 +23,7 @@ pub use tool::{
     ToolRouteIntent, ToolSchema, ToolSideEffectLevel, require_param, require_str,
 };
 pub use url_guard::{
-    GuardedUrl, OutboundUrlGuardOptions, validate_outbound_url, validate_outbound_url_pinned,
+    GuardedUrl, OutboundUrlGuardOptions, is_public_outbound_ip, validate_outbound_url,
+    validate_outbound_url_pinned, validate_outbound_url_pinned_async,
+    validate_outbound_url_structure,
 };

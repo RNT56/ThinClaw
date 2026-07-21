@@ -13,11 +13,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::Client;
 
 use thinclaw_tools_core::{
     OutboundUrlGuardOptions, Tool, ToolError, ToolMetadata, ToolOutput, require_str,
-    validate_outbound_url,
+    validate_outbound_url_pinned_async,
 };
 use thinclaw_types::JobContext;
 
@@ -29,6 +28,10 @@ const MAX_RESPONSE_SIZE: usize = 2 * 1024 * 1024;
 const DEFAULT_RESULTS: usize = 5;
 /// Hard ceiling on results, regardless of the requested count.
 const MAX_RESULTS: usize = 10;
+const MAX_QUERY_BYTES: usize = 8 * 1024;
+const MAX_RESULT_URL_BYTES: usize = 16 * 1024;
+const MAX_RESULT_TITLE_CHARS: usize = 512;
+const MAX_RESULT_SNIPPET_CHARS: usize = 4 * 1024;
 
 /// A single parsed search result.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -39,9 +42,7 @@ pub struct WebSearchResult {
 }
 
 /// Zero-config web search over DuckDuckGo's keyless endpoint.
-pub struct WebSearchTool {
-    client: Client,
-}
+pub struct WebSearchTool;
 
 impl Default for WebSearchTool {
     fn default() -> Self {
@@ -51,36 +52,49 @@ impl Default for WebSearchTool {
 
 impl WebSearchTool {
     pub fn new() -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(20))
-            // A browser-like UA; the HTML endpoint returns an empty page to some
-            // automated agents otherwise.
-            .user_agent("Mozilla/5.0 (compatible; ThinClaw/1.0; +https://thinclaw.dev) web_search")
-            .build()
-            .unwrap_or_default();
-        Self { client }
+        Self
     }
 
     async fn fetch(&self, query: &str) -> Result<String, ToolError> {
-        // Validate the *endpoint* host through the SSRF guard (defense in depth:
-        // the host is constant, but this keeps every outbound call on one policy
-        // path and blocks accidental future misconfiguration).
-        validate_outbound_url(
+        let guarded = validate_outbound_url_pinned_async(
             DDG_HTML_ENDPOINT,
             &OutboundUrlGuardOptions {
                 require_https: true,
                 upgrade_http_to_https: true,
-                allowlist: Vec::new(),
+                allowlist: vec!["html.duckduckgo.com".to_string()],
             },
-        )?;
+        )
+        .await?;
+        let host = guarded
+            .url
+            .host_str()
+            .ok_or_else(|| ToolError::ExternalService("search URL has no host".to_string()))?;
+        let mut builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            // A browser-like UA; the HTML endpoint returns an empty page to some
+            // automated agents otherwise.
+            .user_agent("Mozilla/5.0 (compatible; ThinClaw/1.0; +https://thinclaw.dev) web_search");
+        if !guarded.pinned_addrs.is_empty() {
+            builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+        }
+        let client = builder.build().map_err(|error| {
+            ToolError::ExternalService(format!("failed to build search client: {error}"))
+        })?;
 
-        let resp = self
-            .client
-            .post(DDG_HTML_ENDPOINT)
+        let resp = client
+            .post(guarded.url)
             .form(&[("q", query), ("kl", "wt-wt")])
             .send()
             .await
-            .map_err(|e| ToolError::ExternalService(format!("web search request failed: {e}")))?;
+            .map_err(|e| {
+                ToolError::ExternalService(format!(
+                    "web search request failed: {}",
+                    e.without_url()
+                ))
+            })?;
 
         if !resp.status().is_success() {
             return Err(ToolError::ExternalService(format!(
@@ -108,12 +122,15 @@ impl WebSearchTool {
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
             let chunk = chunk.map_err(|e| {
-                ToolError::ExternalService(format!("failed to read search body: {e}"))
+                ToolError::ExternalService(format!(
+                    "failed to read search body: {}",
+                    e.without_url()
+                ))
             })?;
             if body.len() + chunk.len() > MAX_RESPONSE_SIZE {
-                let take = MAX_RESPONSE_SIZE - body.len();
-                body.extend_from_slice(&chunk[..take]);
-                break;
+                return Err(ToolError::ExternalService(format!(
+                    "web search response exceeds {MAX_RESPONSE_SIZE} bytes"
+                )));
             }
             body.extend_from_slice(&chunk);
         }
@@ -154,7 +171,9 @@ pub fn parse_ddg_results(html: &str, limit: usize) -> Vec<WebSearchResult> {
         // The visible title is the text between '>' and the closing </a>.
         let after_tag = &html[tag_end + 1..];
         let title = match after_tag.find("</a>") {
-            Some(end) => strip_html(&after_tag[..end]),
+            Some(end) => {
+                bounded_result_text(&strip_html(&after_tag[..end]), MAX_RESULT_TITLE_CHARS)
+            }
             None => continue,
         };
         if title.is_empty() {
@@ -168,7 +187,12 @@ pub fn parse_ddg_results(html: &str, limit: usize) -> Vec<WebSearchResult> {
                 after_tag[start..]
                     .find("</a>")
                     .or_else(|| after_tag[start..].find("</div>"))
-                    .map(|end| strip_html(&after_tag[start..start + end]))
+                    .map(|end| {
+                        bounded_result_text(
+                            &strip_html(&after_tag[start..start + end]),
+                            MAX_RESULT_SNIPPET_CHARS,
+                        )
+                    })
             })
             .unwrap_or_default();
 
@@ -195,10 +219,37 @@ fn normalize_ddg_href(href: &str) -> String {
             .take_while(|&c| c != '&')
             .collect();
         if let Some(decoded) = percent_decode(&encoded) {
-            return decoded;
+            return validated_result_url(&decoded).unwrap_or_default();
         }
     }
-    candidate
+    validated_result_url(&candidate).unwrap_or_default()
+}
+
+fn validated_result_url(candidate: &str) -> Option<String> {
+    if candidate.is_empty()
+        || candidate.len() > MAX_RESULT_URL_BYTES
+        || candidate.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let url = reqwest::Url::parse(candidate).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    Some(url.to_string())
+}
+
+fn bounded_result_text(value: &str, max_chars: usize) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
+        .take(max_chars)
+        .collect()
 }
 
 /// Minimal application/x-www-form-urlencoded percent-decoder (no extra deps).
@@ -327,15 +378,19 @@ impl Tool for WebSearchTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let query = require_str(&params, "query")?.trim().to_string();
-        if query.is_empty() {
-            return Err(ToolError::InvalidParameters(
-                "query must not be empty".to_string(),
-            ));
+        if query.is_empty() || query.len() > MAX_QUERY_BYTES {
+            return Err(ToolError::InvalidParameters(format!(
+                "query must contain 1..={MAX_QUERY_BYTES} bytes"
+            )));
         }
         let count = params
             .get("count")
             .and_then(|v| v.as_u64())
-            .map(|n| (n as usize).clamp(1, MAX_RESULTS))
+            .map(|n| {
+                usize::try_from(n)
+                    .unwrap_or(MAX_RESULTS)
+                    .clamp(1, MAX_RESULTS)
+            })
             .unwrap_or(DEFAULT_RESULTS);
 
         let html = self.fetch(&query).await?;
@@ -414,5 +469,23 @@ mod tests {
             strip_html("  <b>Hello</b>&amp;   <i>world</i> "),
             "Hello& world"
         );
+    }
+
+    #[test]
+    fn result_links_reject_unsafe_schemes_and_credentials() {
+        assert!(normalize_ddg_href("javascript:alert(1)").is_empty());
+        assert!(normalize_ddg_href("https://user:secret@example.com/").is_empty());
+        assert_eq!(
+            normalize_ddg_href("https://example.com/path"),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn result_text_is_bounded_and_strips_controls() {
+        let text = format!("a\u{0}{}", "b".repeat(MAX_RESULT_TITLE_CHARS + 10));
+        let bounded = bounded_result_text(&text, MAX_RESULT_TITLE_CHARS);
+        assert_eq!(bounded.chars().count(), MAX_RESULT_TITLE_CHARS);
+        assert!(!bounded.contains('\u{0}'));
     }
 }

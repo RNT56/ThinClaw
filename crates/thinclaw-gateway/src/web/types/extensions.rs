@@ -95,9 +95,20 @@ pub struct SecretFieldInfo {
     pub auto_generate: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ExtensionSetupRequest {
     pub secrets: std::collections::HashMap<String, String>,
+}
+
+impl std::fmt::Debug for ExtensionSetupRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut secret_names = self.secrets.keys().collect::<Vec<_>>();
+        secret_names.sort_unstable();
+        formatter
+            .debug_struct("ExtensionSetupRequest")
+            .field("secret_names", &secret_names)
+            .finish()
+    }
 }
 
 // --- Registry ---
@@ -125,10 +136,20 @@ pub struct RegistrySearchQuery {
 // --- Auth Token ---
 
 /// Request to submit an auth token for an extension (dedicated endpoint).
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct AuthTokenRequest {
     pub extension_name: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for AuthTokenRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthTokenRequest")
+            .field("extension_name", &self.extension_name)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Request to cancel an in-progress auth flow.
@@ -137,8 +158,20 @@ pub struct AuthCancelRequest {
     pub extension_name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct NostrPrivateKeyRequest {
     #[serde(default)]
     pub private_key: Option<String>,
+}
+
+impl std::fmt::Debug for NostrPrivateKeyRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NostrPrivateKeyRequest")
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }

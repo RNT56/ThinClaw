@@ -26,6 +26,11 @@ const JOB_MONITOR_INJECT_TIMEOUT: Duration = if cfg!(test) {
 } else {
     Duration::from_secs(5)
 };
+const JOB_MONITOR_MAX_LIFETIME: Duration = if cfg!(test) {
+    Duration::from_millis(500)
+} else {
+    Duration::from_secs(24 * 60 * 60)
+};
 
 /// Portable job event consumed by the agent job monitor.
 #[derive(Debug, Clone)]
@@ -76,8 +81,22 @@ pub async fn run_job_monitor<E, F>(
 
     tracing::info!(job_id = %short_id, "Job monitor started successfully");
 
+    let lifetime = tokio::time::sleep(JOB_MONITOR_MAX_LIFETIME);
+    tokio::pin!(lifetime);
+
     loop {
-        match event_rx.recv().await {
+        let received = tokio::select! {
+            result = event_rx.recv() => result,
+            _ = &mut lifetime => {
+                tracing::warn!(
+                    job_id = %short_id,
+                    max_lifetime_secs = JOB_MONITOR_MAX_LIFETIME.as_secs(),
+                    "Job monitor reached its maximum lifetime and is stopping"
+                );
+                break;
+            }
+        };
+        match received {
             Ok((ev_job_id, event)) => {
                 if ev_job_id != job_id {
                     continue;
@@ -305,5 +324,19 @@ mod tests {
             result.is_err(),
             "should have timed out, no message expected"
         );
+    }
+
+    #[tokio::test]
+    async fn test_monitor_has_bounded_lifetime_without_terminal_event() {
+        let (event_tx, _) = broadcast::channel::<(Uuid, JobMonitorEvent)>(4);
+        let (inject_tx, _inject_rx) = mpsc::channel::<IncomingMessage>(4);
+        let job_id = Uuid::new_v4();
+        let handle = spawn_job_monitor(job_id, event_tx.subscribe(), inject_tx);
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("monitor should stop at its maximum lifetime")
+            .expect("monitor task should not panic");
+        assert_eq!(event_tx.receiver_count(), 0);
     }
 }

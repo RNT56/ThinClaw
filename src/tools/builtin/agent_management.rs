@@ -66,6 +66,7 @@ fn tool_record_to_db_record(record: &AgentToolRecord) -> AgentWorkspaceRecord {
 impl AgentManagementPort for AgentRegistry {
     async fn create_agent(
         &self,
+        principal_id: &str,
         agent_id: &str,
         display_name: &str,
         system_prompt: Option<&str>,
@@ -79,6 +80,7 @@ impl AgentManagementPort for AgentRegistry {
     ) -> Result<AgentToolRecord, String> {
         AgentRegistry::create_agent(
             self,
+            principal_id,
             agent_id,
             display_name,
             system_prompt,
@@ -147,9 +149,13 @@ impl AgentManagementPort for AgentRegistry {
             .map_err(|error| error.to_string())
     }
 
-    async fn agent_context(&self, record: &AgentToolRecord, user_id: &str) -> String {
+    async fn agent_context(
+        &self,
+        record: &AgentToolRecord,
+        ctx: &crate::context::JobContext,
+    ) -> String {
         let db_record = tool_record_to_db_record(record);
-        let target_workspace = self.build_workspace_for_agent(&db_record, user_id);
+        let target_workspace = self.build_workspace_for_agent(&db_record, &ctx.principal_id);
         let system_prompt = if let Some(ref prompt) = record.system_prompt {
             prompt.clone()
         } else if let Some(ref ws) = target_workspace {
@@ -162,12 +168,41 @@ impl AgentManagementPort for AgentRegistry {
         };
 
         let mut context_parts = vec![system_prompt];
-        if let Some(ref ws) = target_workspace
-            && let Ok(memory) = ws.read("MEMORY.md").await
-        {
-            let content = memory.content.trim();
-            if !content.is_empty() {
-                context_parts.push(format!("\n--- Your Memory (MEMORY.md) ---\n{}", content));
+        if let Some(ref ws) = target_workspace {
+            let conversation_kind = ctx
+                .metadata
+                .get("conversation_kind")
+                .and_then(|value| value.as_str())
+                .and_then(crate::identity::parse_conversation_kind_hint)
+                .unwrap_or(crate::identity::ConversationKind::Direct);
+            let conversation_scope_id = ctx
+                .metadata
+                .get("conversation_scope_id")
+                .and_then(|value| value.as_str())
+                .and_then(|value| uuid::Uuid::parse_str(value).ok());
+            let external_key = ctx
+                .metadata
+                .get("stable_external_conversation_key")
+                .and_then(|value| value.as_str());
+            if let Ok(identity) = crate::identity::resolved_identity_from_carried_context(
+                &ctx.principal_id,
+                ctx.owner_actor_id(),
+                conversation_kind,
+                conversation_scope_id,
+                external_key,
+            ) {
+                let memory_workspace = crate::workspace::AuthorizedWorkspace::conversation(
+                    ws,
+                    &identity,
+                    "agent_message",
+                );
+                if let Ok(memory) = memory_workspace.read("MEMORY.md").await {
+                    let content = memory.content.trim();
+                    if !content.is_empty() {
+                        context_parts
+                            .push(format!("\n--- Your Memory (MEMORY.md) ---\n{}", content));
+                    }
+                }
             }
         }
 

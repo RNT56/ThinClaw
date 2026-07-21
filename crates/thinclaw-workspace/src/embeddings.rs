@@ -6,6 +6,134 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+const MAX_EMBEDDING_BATCH_SIZE: usize = 2048;
+const MAX_EMBEDDING_REQUEST_CHARS: usize = 16 * 1024 * 1024;
+const MAX_EMBEDDING_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_EMBEDDING_ERROR_BYTES: usize = 64 * 1024;
+const MAX_EMBEDDING_SECRET_BYTES: usize = 64 * 1024;
+
+fn embedding_http_client() -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .ok()
+}
+
+fn embedding_client(client: &Option<reqwest::Client>) -> Result<&reqwest::Client, EmbeddingError> {
+    client.as_ref().ok_or_else(|| {
+        EmbeddingError::HttpError("Embedding HTTP client is unavailable".to_string())
+    })
+}
+
+fn validate_embedding_model(model: &str) -> Result<(), EmbeddingError> {
+    if model.is_empty() || model.len() > 512 || model.chars().any(char::is_control) {
+        return Err(EmbeddingError::InvalidResponse(
+            "Embedding model identifier is empty, oversized, or malformed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ollama_embed_url(base_url: &str) -> Result<reqwest::Url, EmbeddingError> {
+    if base_url.is_empty() || base_url.len() > 16 * 1024 {
+        return Err(EmbeddingError::HttpError(
+            "Ollama base URL is empty or oversized".to_string(),
+        ));
+    }
+    let mut url = reqwest::Url::parse(base_url)
+        .map_err(|error| EmbeddingError::HttpError(format!("Invalid Ollama base URL: {error}")))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| EmbeddingError::HttpError("Ollama base URL has no host".to_string()))?;
+    let explicit_local = host.eq_ignore_ascii_case("localhost")
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|address| {
+            !address.is_unspecified()
+                && !address.is_multicast()
+                && !thinclaw_tools_core::is_public_outbound_ip(address)
+        });
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !(url.scheme() == "https" || url.scheme() == "http" && explicit_local)
+    {
+        return Err(EmbeddingError::HttpError(
+            "Ollama base URL must use HTTPS or explicit local HTTP, without credentials, query, or fragment"
+                .to_string(),
+        ));
+    }
+    let path = format!("{}/api/embed", url.path().trim_end_matches('/'));
+    url.set_path(&path);
+    Ok(url)
+}
+
+fn validate_embedding_batch(texts: &[String], max_text_chars: usize) -> Result<(), EmbeddingError> {
+    if texts.len() > MAX_EMBEDDING_BATCH_SIZE {
+        return Err(EmbeddingError::InvalidResponse(format!(
+            "Embedding batch contains {} inputs; maximum is {MAX_EMBEDDING_BATCH_SIZE}",
+            texts.len()
+        )));
+    }
+    let mut total_chars = 0usize;
+    for text in texts {
+        if text.len() > max_text_chars {
+            return Err(EmbeddingError::TextTooLong {
+                length: text.len(),
+                max: max_text_chars,
+            });
+        }
+        total_chars = total_chars.checked_add(text.len()).ok_or_else(|| {
+            EmbeddingError::InvalidResponse("Embedding batch size overflowed".to_string())
+        })?;
+        if total_chars > MAX_EMBEDDING_REQUEST_CHARS {
+            return Err(EmbeddingError::TextTooLong {
+                length: total_chars,
+                max: MAX_EMBEDDING_REQUEST_CHARS,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_embeddings(
+    embeddings: &[Vec<f32>],
+    expected_count: usize,
+    expected_dimension: usize,
+    provider: &str,
+) -> Result<(), EmbeddingError> {
+    if expected_dimension == 0 || expected_dimension > 65_536 {
+        return Err(EmbeddingError::InvalidResponse(
+            "Configured embedding dimension is outside the supported range".to_string(),
+        ));
+    }
+    if embeddings.len() != expected_count {
+        return Err(EmbeddingError::InvalidResponse(format!(
+            "{provider} returned {} embeddings for {expected_count} inputs",
+            embeddings.len()
+        )));
+    }
+    for (index, embedding) in embeddings.iter().enumerate() {
+        if embedding.len() != expected_dimension {
+            return Err(EmbeddingError::InvalidResponse(format!(
+                "{provider} returned embedding dimension {}, expected {expected_dimension} at index {index}",
+                embedding.len()
+            )));
+        }
+        if embedding.iter().any(|value| !value.is_finite()) {
+            return Err(EmbeddingError::InvalidResponse(format!(
+                "{provider} returned a non-finite embedding value at index {index}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Error type for embedding operations.
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
@@ -62,7 +190,7 @@ pub trait EmbeddingProvider: Send + Sync {
 
 /// OpenAI embedding provider using text-embedding-ada-002 or text-embedding-3-small.
 pub struct OpenAiEmbeddings {
-    client: reqwest::Client,
+    client: Option<reqwest::Client>,
     api_key: String,
     model: String,
     dimension: usize,
@@ -74,7 +202,7 @@ impl OpenAiEmbeddings {
     /// Uses text-embedding-3-small which has 1536 dimensions.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: embedding_http_client(),
             api_key: api_key.into(),
             model: "text-embedding-3-small".to_string(),
             dimension: 1536,
@@ -84,7 +212,7 @@ impl OpenAiEmbeddings {
     /// Use text-embedding-ada-002 model.
     pub fn ada_002(api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: embedding_http_client(),
             api_key: api_key.into(),
             model: "text-embedding-ada-002".to_string(),
             dimension: 1536,
@@ -94,7 +222,7 @@ impl OpenAiEmbeddings {
     /// Use text-embedding-3-large model.
     pub fn large(api_key: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: embedding_http_client(),
             api_key: api_key.into(),
             model: "text-embedding-3-large".to_string(),
             dimension: 3072,
@@ -108,7 +236,7 @@ impl OpenAiEmbeddings {
         dimension: usize,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: embedding_http_client(),
             api_key: api_key.into(),
             model: model.into(),
             dimension,
@@ -167,14 +295,21 @@ impl EmbeddingProvider for OpenAiEmbeddings {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
+        validate_embedding_batch(texts, self.max_input_length())?;
+        validate_embedding_model(&self.model)?;
+        if self.api_key.is_empty()
+            || self.api_key.len() > MAX_EMBEDDING_SECRET_BYTES
+            || self.api_key.chars().any(char::is_control)
+        {
+            return Err(EmbeddingError::AuthFailed);
+        }
 
         let request = OpenAiEmbeddingRequest {
             model: &self.model,
             input: texts,
         };
 
-        let response = self
-            .client
+        let response = embedding_client(&self.client)?
             .post("https://api.openai.com/v1/embeddings")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&request)
@@ -198,18 +333,26 @@ impl EmbeddingProvider for OpenAiEmbeddings {
         }
 
         if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_default();
+            let error_text =
+                thinclaw_types::http_response::bounded_text(response, MAX_EMBEDDING_ERROR_BYTES)
+                    .await
+                    .unwrap_or_else(|error| format!("unreadable error response: {error}"));
             return Err(EmbeddingError::HttpError(format!(
                 "Status {}: {}",
                 status, error_text
             )));
         }
 
-        let result: OpenAiEmbeddingResponse = response.json().await.map_err(|e| {
-            EmbeddingError::InvalidResponse(format!("Failed to parse response: {}", e))
-        })?;
+        let result: OpenAiEmbeddingResponse =
+            thinclaw_types::http_response::bounded_json(response, MAX_EMBEDDING_RESPONSE_BYTES)
+                .await
+                .map_err(|e| {
+                    EmbeddingError::InvalidResponse(format!("Failed to parse response: {}", e))
+                })?;
 
-        Ok(result.data.into_iter().map(|d| d.embedding).collect())
+        let embeddings: Vec<Vec<f32>> = result.data.into_iter().map(|d| d.embedding).collect();
+        validate_embeddings(&embeddings, texts.len(), self.dimension, "OpenAI")?;
+        Ok(embeddings)
     }
 }
 
@@ -218,7 +361,7 @@ impl EmbeddingProvider for OpenAiEmbeddings {
 /// Ollama serves embedding models (e.g. `nomic-embed-text`, `mxbai-embed-large`)
 /// via a REST API, typically at `http://localhost:11434`.
 pub struct OllamaEmbeddings {
-    client: reqwest::Client,
+    client: Option<reqwest::Client>,
     base_url: String,
     model: String,
     dimension: usize,
@@ -230,7 +373,7 @@ impl OllamaEmbeddings {
     /// Defaults to `nomic-embed-text` (768 dimensions).
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: embedding_http_client(),
             base_url: base_url.into(),
             model: "nomic-embed-text".to_string(),
             dimension: 768,
@@ -290,42 +433,46 @@ impl EmbeddingProvider for OllamaEmbeddings {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
+        validate_embedding_batch(texts, self.max_input_length())?;
+        validate_embedding_model(&self.model)?;
 
         let request = OllamaEmbedRequest {
             model: &self.model,
             input: texts,
         };
 
-        let url = format!("{}/api/embed", self.base_url);
+        let url = ollama_embed_url(&self.base_url)?;
 
-        let response = self.client.post(&url).json(&request).send().await?;
+        let response = embedding_client(&self.client)?
+            .post(url)
+            .json(&request)
+            .send()
+            .await?;
 
         let status = response.status();
 
         if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_default();
+            let error_text =
+                thinclaw_types::http_response::bounded_text(response, MAX_EMBEDDING_ERROR_BYTES)
+                    .await
+                    .unwrap_or_else(|error| format!("unreadable error response: {error}"));
             return Err(EmbeddingError::HttpError(format!(
                 "Ollama returned HTTP {}: {}",
                 status, error_text
             )));
         }
 
-        let result: OllamaEmbedResponse = response.json().await.map_err(|e| {
-            EmbeddingError::InvalidResponse(format!("Failed to parse Ollama response: {}", e))
-        })?;
+        let result: OllamaEmbedResponse =
+            thinclaw_types::http_response::bounded_json(response, MAX_EMBEDDING_RESPONSE_BYTES)
+                .await
+                .map_err(|e| {
+                    EmbeddingError::InvalidResponse(format!(
+                        "Failed to parse Ollama response: {}",
+                        e
+                    ))
+                })?;
 
-        // Validate that returned embeddings match the configured dimension.
-        for (i, emb) in result.embeddings.iter().enumerate() {
-            if emb.len() != self.dimension {
-                return Err(EmbeddingError::InvalidResponse(format!(
-                    "Ollama returned embedding of dimension {}, expected {} at index {}",
-                    emb.len(),
-                    self.dimension,
-                    i
-                )));
-            }
-        }
-
+        validate_embeddings(&result.embeddings, texts.len(), self.dimension, "Ollama")?;
         Ok(result.embeddings)
     }
 }

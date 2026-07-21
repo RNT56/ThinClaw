@@ -13,7 +13,7 @@ fn default_telegram_transport_mode() -> String {
 }
 
 /// Channel-specific settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelSettings {
     /// Whether HTTP webhook channel is enabled.
     #[serde(default)]
@@ -291,6 +291,54 @@ pub struct ChannelSettings {
     /// Directory containing WASM channel modules.
     #[serde(default)]
     pub wasm_channels_dir: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for ChannelSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChannelSettings")
+            .field("http_enabled", &self.http_enabled)
+            .field("acp_enabled", &self.acp_enabled)
+            .field("http_port", &self.http_port)
+            .field("signal_enabled", &self.signal_enabled)
+            .field("matrix_enabled", &self.matrix_enabled)
+            .field("voice_call_enabled", &self.voice_call_enabled)
+            .field("apns_enabled", &self.apns_enabled)
+            .field("browser_push_enabled", &self.browser_push_enabled)
+            .field("discord_enabled", &self.discord_enabled)
+            .field(
+                "discord_bot_token",
+                &crate::redaction::RedactedOption(&self.discord_bot_token),
+            )
+            .field("slack_enabled", &self.slack_enabled)
+            .field(
+                "slack_bot_token",
+                &crate::redaction::RedactedOption(&self.slack_bot_token),
+            )
+            .field(
+                "slack_app_token",
+                &crate::redaction::RedactedOption(&self.slack_app_token),
+            )
+            .field("nostr_enabled", &self.nostr_enabled)
+            .field("gmail_enabled", &self.gmail_enabled)
+            .field("bluebubbles_enabled", &self.bluebubbles_enabled)
+            .field(
+                "bluebubbles_password",
+                &crate::redaction::RedactedOption(&self.bluebubbles_password),
+            )
+            .field("imessage_enabled", &self.imessage_enabled)
+            .field("apple_mail_enabled", &self.apple_mail_enabled)
+            .field("gateway_enabled", &self.gateway_enabled)
+            .field("gateway_port", &self.gateway_port)
+            .field(
+                "gateway_auth_token",
+                &crate::redaction::RedactedOption(&self.gateway_auth_token),
+            )
+            .field("gateway_principals", &self.gateway_principals)
+            .field("cli_enabled", &self.cli_enabled)
+            .field("wasm_channels_enabled", &self.wasm_channels_enabled)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for ChannelSettings {

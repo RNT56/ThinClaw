@@ -8,6 +8,8 @@ use clap::Subcommand;
 
 use crate::terminal_branding::TerminalBranding;
 
+const MAX_GATEWAY_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum MessageCommand {
     /// Send a message to the agent via the gateway
@@ -58,6 +60,8 @@ async fn send_message(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()?;
 
     let body = serde_json::json!({
@@ -83,12 +87,14 @@ async fn send_message(
                 base_url
             )
         } else {
-            anyhow::anyhow!("Request failed: {}", e)
+            anyhow::anyhow!("Request failed: {}", e.without_url())
         }
     })?;
 
     let status = response.status();
-    let body_text = response.text().await.unwrap_or_default();
+    let body_text = crate::http_response::bounded_text(response, MAX_GATEWAY_RESPONSE_BYTES)
+        .await
+        .map_err(|error| anyhow::anyhow!("Could not read the gateway response: {error}"))?;
 
     if status.is_success() {
         // Try to parse as JSON for pretty output

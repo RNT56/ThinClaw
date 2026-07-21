@@ -28,6 +28,16 @@ pub(super) fn collect_signal_attachments(attachments: &[SignalAttachment]) -> Ve
             continue;
         };
 
+        // Prevent path traversal and control-character log injection via
+        // malicious attachment IDs received from signal-cli SSE.
+        if !valid_signal_attachment_id(att_id) {
+            tracing::warn!(
+                id_bytes = att_id.len(),
+                "Signal: rejecting attachment with an invalid id"
+            );
+            continue;
+        }
+
         // Check size before reading
         if let Some(size) = att.size
             && size > MAX_SIGNAL_ATTACHMENT_SIZE
@@ -41,40 +51,13 @@ pub(super) fn collect_signal_attachments(attachments: &[SignalAttachment]) -> Ve
             continue;
         }
 
-        // Prevent path traversal via malicious attachment IDs.
-        // The att_id comes from signal-cli SSE (network input).
-        if att_id.contains('/')
-            || att_id.contains('\\')
-            || att_id.contains("..")
-            || att_id.is_empty()
-        {
-            tracing::warn!(
-                id = %att_id,
-                "Signal: rejecting attachment with suspicious path characters"
-            );
-            continue;
-        }
-
         let path = attachment_dir.join(att_id);
-        if !path.exists() {
-            tracing::debug!(
-                id = %att_id,
-                path = %path.display(),
-                "Signal: attachment file not found on disk"
-            );
-            continue;
-        }
 
-        match std::fs::read(&path) {
+        match thinclaw_platform::read_regular_file_bounded_single_link(
+            &path,
+            MAX_SIGNAL_ATTACHMENT_SIZE,
+        ) {
             Ok(data) => {
-                if data.len() as u64 > MAX_SIGNAL_ATTACHMENT_SIZE {
-                    tracing::warn!(
-                        id = %att_id,
-                        size = data.len(),
-                        "Signal: attachment file exceeds size limit"
-                    );
-                    continue;
-                }
                 let mime = att
                     .content_type
                     .as_deref()
@@ -85,7 +68,6 @@ pub(super) fn collect_signal_attachments(attachments: &[SignalAttachment]) -> Ve
                 }
                 tracing::debug!(
                     id = %att_id,
-                    mime = %mime,
                     size = mc.size(),
                     "Signal: loaded attachment from disk"
                 );
@@ -109,19 +91,50 @@ pub(super) async fn write_signal_temp_attachments(
 ) -> Result<Vec<std::path::PathBuf>, ChannelError> {
     let mut paths = Vec::new();
     for attachment in attachments {
+        if attachment.data.len() as u64 > MAX_SIGNAL_ATTACHMENT_SIZE {
+            return Err(ChannelError::SendFailed {
+                name: "signal".to_string(),
+                reason: "Signal attachment exceeds the configured size limit".to_string(),
+            });
+        }
         let filename = attachment.filename.as_deref().unwrap_or("attachment");
-        let safe_name = filename.replace(['/', '\\', ':'], "_");
+        let safe_name = filename
+            .chars()
+            .filter(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+            })
+            .take(128)
+            .collect::<String>();
+        let safe_name = if safe_name.is_empty() {
+            "attachment"
+        } else {
+            safe_name.as_str()
+        };
         let path =
             std::env::temp_dir().join(format!("thinclaw-signal-{}-{safe_name}", Uuid::new_v4()));
-        tokio::fs::write(&path, &attachment.data)
-            .await
-            .map_err(|e| ChannelError::SendFailed {
-                name: "signal".to_string(),
-                reason: format!("failed to write Signal attachment {}: {e}", path.display()),
-            })?;
+        thinclaw_platform::write_private_file_atomic_async(
+            path.clone(),
+            attachment.data.clone(),
+            false,
+        )
+        .await
+        .map_err(|e| ChannelError::SendFailed {
+            name: "signal".to_string(),
+            reason: format!("failed to write Signal attachment {}: {e}", path.display()),
+        })?;
         paths.push(path);
     }
     Ok(paths)
+}
+
+fn valid_signal_attachment_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && value != "."
+        && value != ".."
 }
 
 pub(super) async fn cleanup_signal_temp_attachments(paths: &[std::path::PathBuf]) {

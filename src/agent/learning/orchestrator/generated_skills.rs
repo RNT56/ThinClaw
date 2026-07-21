@@ -4,7 +4,7 @@ impl LearningOrchestrator {
         &self,
         session: &crate::agent::session::Session,
         thread_id: Uuid,
-        _incoming: &crate::channels::IncomingMessage,
+        incoming: &crate::channels::IncomingMessage,
         turn: &crate::agent::session::Turn,
     ) -> Result<Option<String>, String> {
         if turn.state != crate::agent::session::TurnState::Completed {
@@ -88,6 +88,12 @@ impl LearningOrchestrator {
                 created_at,
             )],
         });
+        let proposal = proposal_with_resolved_identity(
+            proposal,
+            &incoming.resolved_identity(),
+            &incoming.channel,
+            Some(thread_id),
+        );
         let candidate = DbLearningCandidate {
             id: Uuid::new_v4(),
             learning_event_id: None,
@@ -246,24 +252,6 @@ impl LearningOrchestrator {
                 .map_err(|err| err.to_string())?;
         quarantine.cleanup(&quarantined).await;
         let after_content = loaded_skill.prompt_content.clone();
-
-        let existing_remove_path = {
-            let guard = registry.read().await;
-            if guard.has(skill_name) {
-                Some(
-                    guard
-                        .validate_remove(skill_name)
-                        .map_err(|err| err.to_string())?,
-                )
-            } else {
-                None
-            }
-        };
-        if let Some(path) = existing_remove_path.as_ref() {
-            SkillRegistry::delete_skill_files(path)
-                .await
-                .map_err(|err| err.to_string())?;
-        }
 
         let mut guard = registry.write().await;
         if guard.has(skill_name) {

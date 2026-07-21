@@ -219,7 +219,11 @@ fn fixture_response(method: &str, path: &str, body: &str) -> String {
         ("GET", "/api/mcp/interactions") => serde_json::json!({ "interactions": [] }),
         ("POST", "/api/skills/install") => serde_json::json!({ "installed": true }),
         _ if method == "GET" && path.starts_with("/api/chat/thread/thread-1/export?") => {
-            serde_json::json!({ "format": "markdown", "content": "fixture transcript" })
+            serde_json::json!({
+                "format": "markdown",
+                "content": "fixture transcript",
+                "message_count": 2
+            })
         }
         _ => panic!("unexpected fixture route: {method} {path}"),
     }
@@ -236,13 +240,60 @@ fn unavailable_errors_are_explicitly_typed_by_prefix() {
 
 #[test]
 fn constructor_normalizes_trailing_slash() {
-    let proxy = RemoteGatewayProxy::new("http://127.0.0.1:18789/", "token");
+    let proxy = RemoteGatewayProxy::new("http://127.0.0.1:18789/", "token").unwrap();
     assert_eq!(proxy.base_url(), "http://127.0.0.1:18789");
+}
+
+#[test]
+fn constructor_restricts_plaintext_to_loopback_and_tailscale() {
+    for accepted in [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://[::1]:3000",
+        "http://100.64.0.1:3000",
+        "http://100.127.255.255:3000",
+        "http://[fd7a:115c:a1e0::1]:3000",
+        "https://gateway.example.com",
+    ] {
+        assert!(
+            RemoteGatewayProxy::new(accepted, "token").is_ok(),
+            "expected URL to be accepted: {accepted}"
+        );
+    }
+
+    for rejected in [
+        "http://192.168.1.2:3000",
+        "http://100.63.255.255:3000",
+        "http://100.128.0.0:3000",
+        "http://gateway.example.com",
+        "http://localhost.example.com",
+        "http://[fd7a:115c:a1e1::1]:3000",
+    ] {
+        assert!(
+            RemoteGatewayProxy::new(rejected, "token").is_err(),
+            "expected URL to be rejected: {rejected}"
+        );
+    }
+}
+
+#[test]
+fn constructor_rejects_ambiguous_urls_and_invalid_tokens() {
+    for rejected in [
+        "ftp://127.0.0.1:3000",
+        "http://user:password@127.0.0.1:3000",
+        "http://127.0.0.1:3000/api",
+        "http://127.0.0.1:3000/?next=elsewhere",
+        "http://127.0.0.1:3000/#fragment",
+    ] {
+        assert!(RemoteGatewayProxy::new(rejected, "token").is_err());
+    }
+    assert!(RemoteGatewayProxy::new("http://127.0.0.1:3000", "").is_err());
+    assert!(RemoteGatewayProxy::new("http://127.0.0.1:3000", "token\r\ninjected: yes").is_err());
 }
 
 #[tokio::test]
 async fn raw_secret_injection_is_unavailable_in_remote_mode() {
-    let proxy = RemoteGatewayProxy::new("http://127.0.0.1:18789", "token");
+    let proxy = RemoteGatewayProxy::new("http://127.0.0.1:18789", "token").unwrap();
     let error = proxy
         .inject_secrets(&std::collections::HashMap::new())
         .await
@@ -256,7 +307,7 @@ async fn raw_secret_injection_is_unavailable_in_remote_mode() {
 #[tokio::test]
 async fn fixture_gateway_covers_recent_remote_route_family() {
     let (base_url, recorded, server) = start_fixture_gateway(10).await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").unwrap();
 
     proxy.abort_chat("thread-1").await.expect("abort chat");
     proxy
@@ -329,7 +380,7 @@ async fn fixture_gateway_covers_recent_remote_route_family() {
 #[tokio::test]
 async fn fixture_gateway_covers_management_surface_routes() {
     let (base_url, recorded, server) = start_fixture_gateway(39).await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").unwrap();
 
     let providers = proxy.list_provider_status().await.expect("provider status");
     assert_eq!(providers["providers"][0]["slug"], "openai");

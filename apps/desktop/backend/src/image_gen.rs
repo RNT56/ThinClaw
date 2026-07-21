@@ -7,7 +7,113 @@ use tauri::Manager;
 use tauri::State;
 use tauri_plugin_shell::ShellExt;
 use tempfile::NamedTempFile;
-use uuid::Uuid;
+
+const MAX_LOCAL_IMAGE_PROMPT_BYTES: usize = 64 * 1024;
+const MAX_LOCAL_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_LOCAL_IMAGE_DIMENSION: u32 = 4_096;
+const MAX_LOCAL_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
+const LOCAL_IMAGE_GENERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+fn valid_engine_choice(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn validate_image_gen_params(params: &ImageGenParams) -> Result<(), String> {
+    if params.prompt.trim().is_empty()
+        || params.prompt.len() > MAX_LOCAL_IMAGE_PROMPT_BYTES
+        || params.prompt.contains('\0')
+    {
+        return Err("Image prompt is empty, too large, or contains NUL".to_string());
+    }
+    if params
+        .negative_prompt
+        .as_ref()
+        .is_some_and(|prompt| prompt.len() > MAX_LOCAL_IMAGE_PROMPT_BYTES || prompt.contains('\0'))
+    {
+        return Err("Negative image prompt is too large or contains NUL".to_string());
+    }
+    for path in [
+        params.model.as_deref(),
+        params.vae.as_deref(),
+        params.clip_l.as_deref(),
+        params.clip_g.as_deref(),
+        params.t5xxl.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if path.is_empty() || path.len() > 4_096 || path.chars().any(char::is_control) {
+            return Err("Image model path is invalid".to_string());
+        }
+    }
+    let width = params.width.unwrap_or(512);
+    let height = params.height.unwrap_or(512);
+    if !(64..=MAX_LOCAL_IMAGE_DIMENSION).contains(&width)
+        || !(64..=MAX_LOCAL_IMAGE_DIMENSION).contains(&height)
+        || !width.is_multiple_of(8)
+        || !height.is_multiple_of(8)
+        || u64::from(width).saturating_mul(u64::from(height)) > MAX_LOCAL_IMAGE_PIXELS
+    {
+        return Err("Image dimensions must be multiples of 8 within the supported limits".into());
+    }
+    if params
+        .steps
+        .is_some_and(|steps| !(1..=150).contains(&steps))
+    {
+        return Err("Image step count must be between 1 and 150".to_string());
+    }
+    if params
+        .cfg_scale
+        .is_some_and(|scale| !scale.is_finite() || !(0.0..=100.0).contains(&scale))
+    {
+        return Err("Image guidance scale must be finite and between 0 and 100".to_string());
+    }
+    if params
+        .schedule
+        .as_deref()
+        .is_some_and(|value| !valid_engine_choice(value))
+        || params
+            .sampling_method
+            .as_deref()
+            .is_some_and(|value| !valid_engine_choice(value))
+    {
+        return Err("Image sampler or scheduler identifier is invalid".to_string());
+    }
+    Ok(())
+}
+
+async fn read_and_normalize_generated_image(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let bytes = thinclaw_platform::read_regular_file_bounded_single_link_async(
+        path.to_path_buf(),
+        MAX_LOCAL_IMAGE_BYTES,
+    )
+    .await
+    .map_err(|error| format!("Image sidecar returned an invalid output file: {error}"))?;
+    let (normalized, _, _) = crate::inference::diffusion::normalize_image_to_png(&bytes)
+        .map_err(|error| error.to_string())?;
+    Ok(normalized)
+}
+
+fn resolve_diffusion_artifact(
+    app: &AppHandle,
+    path: &str,
+    purpose: &str,
+    allow_directory: bool,
+) -> Result<String, String> {
+    SidecarManager::validate_managed_model_path(
+        app,
+        path,
+        "Diffusion",
+        purpose,
+        allow_directory,
+        &["safetensors", "sft", "gguf", "ckpt"],
+    )
+    .map_err(|error| error.to_string())
+}
 
 /// Compute a normalized progress fraction `current / total`, guarding against a
 /// zero (or non-finite) denominator that would otherwise produce a `NaN`/`inf`
@@ -148,8 +254,8 @@ async fn run_mflux_inference(
 
     // Create a temporary Python script to run mflux
     // This is more reliable than CLI because we can pass the model path directly
-    // NOTE: The prompt is passed via SCRAPPY_PROMPT env var to avoid injection issues
-    // with triple-quote strings in Python.
+    // All strings are passed via the child environment. Interpolating a renderer-
+    // supplied path into Python source would turn a crafted filename into code.
     let script_content = format!(
         r#"
 import sys, os
@@ -158,9 +264,9 @@ try:
     model = Flux1(
         model_config=Flux1.ModelConfig.from_alias("{flux_alias}"),
         quantize={quantize},
-        local_path="{model_path}" if "{model_path}" != "" else None,
+        local_path=os.environ.get("THINCLAW_MFLUX_MODEL_PATH") or None,
     )
-    prompt_text = os.environ.get("SCRAPPY_PROMPT", "")
+    prompt_text = os.environ.get("THINCLAW_MFLUX_PROMPT", "")
     image = model.generate_image(
         seed={seed},
         prompt=prompt_text,
@@ -169,7 +275,7 @@ try:
         num_inference_steps={steps},
         guidance={cfg_scale},
     )
-    image.save("{output}")
+    image.save(os.environ["THINCLAW_MFLUX_OUTPUT_PATH"])
     print("mflux: generation complete", flush=True)
 except Exception as e:
     print(f"mflux error: {{e}}", file=sys.stderr, flush=True)
@@ -181,13 +287,11 @@ except Exception as e:
             "None".to_string()
         },
         flux_alias = flux_alias,
-        model_path = model_path.replace('\\', "\\\\").replace('"', "\\\""),
         seed = seed,
         width = width,
         height = height,
         steps = steps,
         cfg_scale = cfg_scale,
-        output = output_png.replace('\\', "\\\\").replace('"', "\\\""),
     );
 
     // Write script to temp file
@@ -235,67 +339,80 @@ except Exception as e:
         .shell()
         .command(python_path.to_string_lossy().as_ref())
         .args([&script_path])
-        .env("SCRAPPY_PROMPT", &params.prompt)
+        .env("THINCLAW_MFLUX_PROMPT", &params.prompt)
+        .env("THINCLAW_MFLUX_MODEL_PATH", model_path)
+        .env("THINCLAW_MFLUX_OUTPUT_PATH", &output_png)
         .spawn()
         .map_err(|e| format!("Failed to spawn mflux: {}", e))?;
 
-    let mut success = true;
     let app_clone = app.clone();
-
-    while let Some(event) = rx.recv().await {
-        match event {
-            tauri_plugin_shell::process::CommandEvent::Stdout(line)
-            | tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
-                let text = String::from_utf8_lossy(&line);
-                println!("[mflux] {}", text);
-
-                if text.contains("generation complete") {
-                    app_clone
-                        .emit(
-                            "image_gen_progress",
-                            serde_json::json!({
-                                "stage": "Saving",
-                                "progress": 1.0,
-                                "text": "Generation finished!"
-                            })
-                            .to_string(),
-                        )
-                        .ok();
-                } else if text.contains("error") {
-                    success = false;
-                }
-            }
-            tauri_plugin_shell::process::CommandEvent::Terminated(payload) => {
-                if let Some(code) = payload.code {
-                    if code != 0 {
+    let run_result = tokio::time::timeout(LOCAL_IMAGE_GENERATION_TIMEOUT, async {
+        let mut success = true;
+        let mut terminated = false;
+        while let Some(event) = rx.recv().await {
+            match event {
+                tauri_plugin_shell::process::CommandEvent::Stdout(line)
+                | tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
+                    let text = String::from_utf8_lossy(&line);
+                    tracing::debug!(bytes = line.len(), "[mflux] emitted a diagnostic line");
+                    if text.contains("generation complete") {
+                        app_clone
+                            .emit(
+                                "image_gen_progress",
+                                serde_json::json!({
+                                    "stage": "Saving",
+                                    "progress": 1.0,
+                                    "text": "Generation finished!"
+                                })
+                                .to_string(),
+                            )
+                            .ok();
+                    } else if text.to_ascii_lowercase().contains("error") {
                         success = false;
                     }
                 }
+                tauri_plugin_shell::process::CommandEvent::Terminated(payload) => {
+                    terminated = payload.code == Some(0);
+                    if !terminated {
+                        success = false;
+                    }
+                    break;
+                }
+                tauri_plugin_shell::process::CommandEvent::Error(error) => {
+                    return Err(format!("MLX image process error: {error}"));
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
-
+        if !terminated {
+            return Err("MLX image process ended without a clean exit".to_string());
+        }
+        if !success {
+            return Err("MLX image generation failed".to_string());
+        }
+        Ok(())
+    })
+    .await;
     let _ = child.kill();
-    if !success {
-        return Err("MLX image generation failed".to_string());
+    let run_result = run_result
+        .map_err(|_| "MLX image generation timed out".to_string())
+        .and_then(|result| result);
+    if let Err(error) = run_result {
+        let _ = std::fs::remove_file(&output_png);
+        return Err(error);
     }
 
-    // Copy to permanent location
+    let normalized_result =
+        read_and_normalize_generated_image(std::path::Path::new(&output_png)).await;
+    let _ = std::fs::remove_file(&output_png);
+    let normalized = normalized_result?;
     let images_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("images");
-    if !images_dir.exists() {
-        std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
-    }
-
-    let id = Uuid::new_v4().to_string();
-    let final_path = images_dir.join(format!("{}.png", id));
-
-    std::fs::copy(&output_png, &final_path).map_err(|e| format!("Failed to copy image: {}", e))?;
-    let _ = std::fs::remove_file(&output_png);
+    let (id, final_path) = crate::inference::diffusion::persist_png(&images_dir, &normalized)
+        .map_err(|error| error.to_string())?;
 
     app.emit(
         "image_gen_success",
@@ -507,11 +624,21 @@ async fn run_inference(
     // --- COMPONENT DISCOVERY ---
     let model_dir = std::path::Path::new(model_path).parent();
     let find_in_dir = |dir: &std::path::Path, keyword: &str| -> Option<String> {
+        if std::fs::symlink_metadata(dir)
+            .ok()
+            .is_none_or(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir())
+        {
+            return None;
+        }
         if let Ok(entries) = std::fs::read_dir(dir) {
             let mut matches = Vec::new();
-            for entry in entries.flatten() {
+            for entry in entries.take(4_096).flatten() {
                 let p = entry.path();
-                if p.is_file() {
+                if entry
+                    .file_type()
+                    .ok()
+                    .is_some_and(|file_type| file_type.is_file() && !file_type.is_symlink())
+                {
                     let name = p
                         .file_name()
                         .unwrap()
@@ -541,9 +668,22 @@ async fn run_inference(
                 .join("Diffusion")
                 .join("standard")
                 .join(category);
+            if std::fs::symlink_metadata(&standard_dir)
+                .ok()
+                .is_none_or(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir())
+            {
+                return None;
+            }
             if let Ok(entries) = std::fs::read_dir(standard_dir) {
-                for entry in entries.flatten() {
+                for entry in entries.take(4_096).flatten() {
                     let p = entry.path();
+                    if entry
+                        .file_type()
+                        .ok()
+                        .is_none_or(|file_type| !file_type.is_file() || file_type.is_symlink())
+                    {
+                        continue;
+                    }
                     let name = p
                         .file_name()
                         .unwrap_or_default()
@@ -648,7 +788,10 @@ async fn run_inference(
         }
     }
 
-    println!("[image_gen] Executing: sd-sidecar {}", args.join(" "));
+    tracing::debug!(
+        argument_count = args.len(),
+        "[image_gen] launching local diffusion sidecar"
+    );
 
     let mut command_runner = app.shell().sidecar("sd").map_err(|e| e.to_string())?;
 
@@ -695,18 +838,19 @@ async fn run_inference(
         .spawn()
         .map_err(|e| format!("Failed to spawn sd: {}", e))?;
 
-    let mut success = true;
-
     static PROGRESS_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let progress_re =
         PROGRESS_RE.get_or_init(|| regex::Regex::new(r"\|\s*([|=]+)\s*\|\s*(\d+)/(\d+)").unwrap());
 
-    while let Some(event) = rx.recv().await {
+    let run_result = tokio::time::timeout(LOCAL_IMAGE_GENERATION_TIMEOUT, async {
+        let mut success = true;
+        let mut terminated = false;
+        while let Some(event) = rx.recv().await {
         match event {
             tauri_plugin_shell::process::CommandEvent::Stdout(line)
             | tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
                 let text = String::from_utf8_lossy(&line);
-                println!("[image_gen] {}", text);
+                tracing::debug!(bytes = line.len(), "[image_gen] sidecar emitted a diagnostic line");
 
                 // Detect progress bars: |====>   | 28/795
                 if let Some(caps) = progress_re.captures(&text) {
@@ -760,45 +904,57 @@ async fn run_inference(
                     app.emit("image_gen_progress", serde_json::json!({"stage": "Engine Setup", "progress": 0.28, "text": "Compiling GPU shaders..."})).ok();
                 } else if text.contains("loading tensors completed") {
                     app.emit("image_gen_progress", serde_json::json!({"stage": "Generating", "progress": 0.35, "text": "Model ready, starting generation..."})).ok();
-                } else if text.trim().len() > 5 && !text.contains("|") {
-                    // Fallback for other interesting output
-                    app.emit("image_gen_progress", text.trim()).ok();
                 }
             }
             tauri_plugin_shell::process::CommandEvent::Terminated(payload) => {
-                if let Some(code) = payload.code {
-                    if code != 0 {
-                        success = false;
-                    }
+                terminated = payload.code == Some(0);
+                if !terminated {
+                    success = false;
                 }
+                break;
+            }
+            tauri_plugin_shell::process::CommandEvent::Error(error) => {
+                return Err(format!("Image sidecar process error: {error}"));
             }
             _ => {}
         }
-    }
+        }
+        if !terminated {
+            return Err("Image sidecar ended without a clean exit".to_string());
+        }
+        Ok(success)
+    })
+    .await;
 
     let _ = child.kill();
+    let success = match run_result
+        .map_err(|_| "Image generation timed out".to_string())
+        .and_then(|result| result)
+    {
+        Ok(success) => success,
+        Err(error) => {
+            let _ = std::fs::remove_file(&output_png);
+            return Err(error);
+        }
+    };
     if !success {
-        return Err("Image Generation Failed".to_string());
+        let _ = std::fs::remove_file(&output_png);
+        return Err("Image generation failed".to_string());
     }
 
+    let normalized_result =
+        read_and_normalize_generated_image(std::path::Path::new(&output_png)).await;
+    let _ = std::fs::remove_file(&output_png);
+    let normalized = normalized_result?;
     let images_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("images");
-    if !images_dir.exists() {
-        std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
-    }
-
-    let id = Uuid::new_v4().to_string();
-    let final_path = images_dir.join(format!("{}.png", id));
-
-    println!("[image_gen] Saving result to: {:?}", final_path);
-    std::fs::copy(&output_png, &final_path).map_err(|e| format!("Failed to copy image: {}", e))?;
-    let _ = std::fs::remove_file(&output_png);
+    let (id, final_path) = crate::inference::diffusion::persist_png(&images_dir, &normalized)
+        .map_err(|error| error.to_string())?;
 
     // Emit success event so UI can update immediately
-    println!("[image_gen] Emitting image_gen_success for ID: {}", id);
     app.emit(
         "image_gen_success",
         serde_json::json!({
@@ -822,6 +978,7 @@ pub async fn direct_media_generate_image(
     config: State<'_, ConfigManager>,
     params: ImageGenParams,
 ) -> Result<ImageResponse, String> {
+    validate_image_gen_params(&params)?;
     // 1. Try params first
     let mut model_path = params.model.clone().unwrap_or_default();
 
@@ -832,26 +989,29 @@ pub async fn direct_media_generate_image(
         }
     }
 
-    println!(
-        "[image_gen] Resolved model path: '{}' (Input was: '{:?}')",
-        model_path, params.model
-    );
-
     if model_path.is_empty() {
         return Err(
             "No model selected. Please select a model in Settings or the Chat interface.".into(),
         );
     }
+    let model_path = resolve_diffusion_artifact(&app, &model_path, "image", true)?;
 
     config.reload();
     #[allow(unused_variables)]
     let user_config = config.get_config();
-    let final_params = params;
+    let mut final_params = params;
+    for (purpose, path) in [
+        ("VAE", &mut final_params.vae),
+        ("CLIP-L", &mut final_params.clip_l),
+        ("CLIP-G", &mut final_params.clip_g),
+        ("T5/LLM", &mut final_params.t5xxl),
+    ] {
+        if let Some(value) = path.as_deref() {
+            *path = Some(resolve_diffusion_artifact(&app, value, purpose, false)?);
+        }
+    }
 
-    println!(
-        "[image_gen] Starting local generation for model: {}",
-        model_path
-    );
+    tracing::info!("[image_gen] starting bounded local generation");
 
     // Stop chat server to free GPU memory for heavy Flux models
     // This prevents "CPU backend" fallback and "Black Screen" GPU crashes

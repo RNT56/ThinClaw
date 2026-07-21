@@ -20,6 +20,11 @@ const DEFAULT_WEBHOOK_PRIORITY: u32 = 300;
 const DEFAULT_WEBHOOK_TIMEOUT_MS: u64 = 2000;
 const DEFAULT_WEBHOOK_MAX_IN_FLIGHT: usize = 32;
 const MAX_HOOK_TIMEOUT_MS: u64 = 30_000;
+const MAX_WEBHOOK_MAX_IN_FLIGHT: usize = 1024;
+const MAX_WEBHOOK_HEADERS: usize = 64;
+const MAX_WEBHOOK_HEADER_BYTES: usize = 64 * 1024;
+const MAX_WEBHOOK_PAYLOAD_BYTES: usize = 256 * 1024;
+const MAX_WEBHOOK_DNS_ADDRESSES: usize = 64;
 
 const ALL_HOOK_POINTS: [HookPoint; 11] = [
     HookPoint::BeforeInbound,
@@ -73,8 +78,8 @@ pub enum HookBundleError {
     #[error("Outbound webhook hook '{hook}' cannot set restricted header '{header}'")]
     ForbiddenWebhookHeader { hook: String, header: String },
 
-    #[error("Outbound webhook hook '{hook}' max_in_flight must be at least 1")]
-    InvalidWebhookMaxInFlight { hook: String },
+    #[error("Outbound webhook hook '{hook}' max_in_flight must be between 1 and {max}")]
+    InvalidWebhookMaxInFlight { hook: String, max: usize },
 }
 
 /// A declarative hook bundle loaded from workspace files or extension capabilities.
@@ -241,7 +246,7 @@ pub struct RegexReplacementConfig {
     pub replacement: String,
 }
 
-/// Declarative fire-and-forget outbound webhook hook.
+/// Declarative outbound webhook hook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutboundWebhookConfig {
     /// Stable webhook hook name (scoped with source during registration).
@@ -474,13 +479,18 @@ impl OutboundWebhookHook {
         let max_in_flight = config
             .max_in_flight
             .unwrap_or(DEFAULT_WEBHOOK_MAX_IN_FLIGHT);
-        if max_in_flight == 0 {
-            return Err(HookBundleError::InvalidWebhookMaxInFlight { hook: scoped_name });
+        if max_in_flight == 0 || max_in_flight > MAX_WEBHOOK_MAX_IN_FLIGHT {
+            return Err(HookBundleError::InvalidWebhookMaxInFlight {
+                hook: scoped_name,
+                max: MAX_WEBHOOK_MAX_IN_FLIGHT,
+            });
         }
 
         let client = reqwest::Client::builder()
             .timeout(timeout)
+            .connect_timeout(timeout.min(Duration::from_secs(5)))
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .build()
             .map_err(|e| HookBundleError::InvalidFormat(e.to_string()))?;
 
@@ -582,6 +592,13 @@ impl Hook for OutboundWebhookHook {
             event: summarize_webhook_event(event),
             metadata_present: !ctx.metadata.is_null(),
         };
+        if serde_json::to_vec(&payload)
+            .map_or(true, |encoded| encoded.len() > MAX_WEBHOOK_PAYLOAD_BYTES)
+        {
+            return Err(HookError::ExecutionFailed {
+                reason: "outbound webhook payload exceeds its size limit".to_string(),
+            });
+        }
 
         let permit = match self.semaphore.clone().try_acquire_owned() {
             Ok(permit) => permit,
@@ -594,37 +611,27 @@ impl Hook for OutboundWebhookHook {
             }
         };
 
-        let base_client = self.client.clone();
-        let url = self.url.clone();
-        let headers = self.headers.clone();
-        let hook_name = self.name.clone();
-        let timeout = self.timeout;
-
-        tokio::spawn(async move {
-            let _permit = permit;
-
-            let client = match dispatch_client_for_target(&base_client, &url, timeout).await {
-                Ok(client) => client,
-                Err(err) => {
-                    tracing::warn!(
-                        hook = %hook_name,
-                        error = %err,
-                        "Outbound webhook target blocked by runtime network policy"
-                    );
-                    return;
-                }
-            };
-
-            let request = client.post(url).headers(headers).json(&payload);
-
-            if let Err(err) = request.send().await {
-                tracing::warn!(
-                    hook = %hook_name,
-                    error = %err,
-                    "Outbound webhook delivery failed"
-                );
-            }
-        });
+        let _permit = permit;
+        let client = dispatch_client_for_target(&self.client, &self.url, self.timeout)
+            .await
+            .map_err(|reason| HookError::ExecutionFailed { reason })?;
+        let response = client
+            .post(&self.url)
+            .headers(self.headers.clone())
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|error| HookError::ExecutionFailed {
+                reason: format!("outbound webhook delivery failed: {}", error.without_url()),
+            })?;
+        if !response.status().is_success() {
+            return Err(HookError::ExecutionFailed {
+                reason: format!(
+                    "outbound webhook returned HTTP {}",
+                    response.status().as_u16()
+                ),
+            });
+        }
 
         Ok(HookOutcome::ok())
     }
@@ -719,9 +726,15 @@ fn summarize_webhook_event(event: &HookEvent) -> OutboundWebhookEventSummary {
 }
 
 fn validate_webhook_url(hook_name: &str, url: &str) -> Result<reqwest::Url, HookBundleError> {
+    if url.is_empty() || url.len() > 16 * 1024 || url.chars().any(char::is_control) {
+        return Err(HookBundleError::InvalidWebhookUrl {
+            hook: hook_name.to_string(),
+            url: "[REDACTED URL]".to_string(),
+        });
+    }
     let parsed = reqwest::Url::parse(url).map_err(|_| HookBundleError::InvalidWebhookUrl {
         hook: hook_name.to_string(),
-        url: url.to_string(),
+        url: "[REDACTED URL]".to_string(),
     })?;
 
     if parsed.scheme() != "https" {
@@ -731,10 +744,10 @@ fn validate_webhook_url(hook_name: &str, url: &str) -> Result<reqwest::Url, Hook
         });
     }
 
-    if !parsed.username().is_empty() || parsed.password().is_some() {
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
         return Err(HookBundleError::InvalidWebhookUrl {
             hook: hook_name.to_string(),
-            url: url.to_string(),
+            url: "[REDACTED URL]".to_string(),
         });
     }
 
@@ -781,13 +794,19 @@ async fn dispatch_client_for_target(
         .port_or_known_default()
         .ok_or_else(|| "Webhook URL has no valid port".to_string())?;
 
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((normalized_host, port))
-        .await
-        .map_err(|e| format!("DNS resolution failed: {e}"))?
-        .collect();
+    let addrs = tokio::time::timeout(
+        timeout.min(Duration::from_secs(5)),
+        tokio::net::lookup_host((normalized_host, port)),
+    )
+    .await
+    .map_err(|_| "DNS resolution timed out".to_string())?
+    .map_err(|e| format!("DNS resolution failed: {e}"))?;
+    let mut addrs: Vec<SocketAddr> = addrs.collect();
+    addrs.sort_unstable();
+    addrs.dedup();
 
-    if addrs.is_empty() {
-        return Err("DNS resolution returned no addresses".to_string());
+    if addrs.is_empty() || addrs.len() > MAX_WEBHOOK_DNS_ADDRESSES {
+        return Err("DNS resolution returned an unusable address set".to_string());
     }
 
     for addr in &addrs {
@@ -801,7 +820,9 @@ async fn dispatch_client_for_target(
 
     reqwest::Client::builder()
         .timeout(timeout)
+        .connect_timeout(timeout.min(Duration::from_secs(5)))
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .resolve_to_addrs(normalized_host, &addrs)
         .build()
         .map_err(|e| format!("Failed to build resolved webhook client: {e}"))
@@ -815,6 +836,16 @@ fn validate_webhook_headers(
     hook_name: &str,
     headers: &HashMap<String, String>,
 ) -> Result<HeaderMap, HookBundleError> {
+    let header_bytes = headers.iter().try_fold(0_usize, |total, (name, value)| {
+        total.checked_add(name.len())?.checked_add(value.len())
+    });
+    if headers.len() > MAX_WEBHOOK_HEADERS
+        || header_bytes.is_none_or(|bytes| bytes > MAX_WEBHOOK_HEADER_BYTES)
+    {
+        return Err(HookBundleError::InvalidFormat(
+            "outbound webhook headers exceed their count or size limit".to_string(),
+        ));
+    }
     let mut validated = HeaderMap::new();
 
     for (name, value) in headers {

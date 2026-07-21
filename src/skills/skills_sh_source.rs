@@ -5,6 +5,10 @@ use super::quarantine::SkillContent;
 use super::remote_source::{RemoteSkill, RemoteSkillSource};
 use crate::settings::SkillTapTrustLevel;
 
+const MAX_INDEX_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SKILLS_PER_INDEX: usize = 512;
+
 /// Read-only adapter for a `skills.sh`-style JSON index.
 ///
 /// ThinClaw intentionally does not execute installer shell scripts. Index
@@ -13,7 +17,6 @@ use crate::settings::SkillTapTrustLevel;
 /// pipeline handles the downloaded content.
 pub struct SkillsShSource {
     index_url: String,
-    client: reqwest::Client,
 }
 
 impl SkillsShSource {
@@ -22,11 +25,7 @@ impl SkillsShSource {
             !index_url.trim().is_empty(),
             "skills.sh index URL cannot be empty"
         );
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .user_agent(concat!("thinclaw/", env!("CARGO_PKG_VERSION")))
-            .build()?;
-        Ok(Self { index_url, client })
+        Ok(Self { index_url })
     }
 
     fn parse_index(&self, value: Value) -> Vec<RemoteSkill> {
@@ -40,6 +39,7 @@ impl SkillsShSource {
 
         entries
             .into_iter()
+            .take(MAX_SKILLS_PER_INDEX)
             .filter_map(|entry| self.skill_from_entry(entry))
             .collect()
     }
@@ -86,14 +86,12 @@ impl RemoteSkillSource for SkillsShSource {
     }
 
     async fn search(&self, query: &str) -> anyhow::Result<Vec<RemoteSkill>> {
-        let value = self
-            .client
-            .get(&self.index_url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Value>()
-            .await?;
+        let response = super::remote_http::get_public_https(
+            &self.index_url,
+            std::time::Duration::from_secs(15),
+        )
+        .await?;
+        let value = crate::http_response::bounded_json::<Value>(response, MAX_INDEX_BYTES).await?;
         let query = query.to_ascii_lowercase();
         Ok(self
             .parse_index(value)
@@ -122,14 +120,9 @@ impl RemoteSkillSource for SkillsShSource {
                 skill.name
             );
         };
-        let raw_content = self
-            .client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+        let response =
+            super::remote_http::get_public_https(url, std::time::Duration::from_secs(15)).await?;
+        let raw_content = crate::http_response::bounded_text(response, MAX_MANIFEST_BYTES).await?;
         Ok(SkillContent {
             raw_content,
             source_kind: "marketplace".to_string(),

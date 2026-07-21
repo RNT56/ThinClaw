@@ -4,12 +4,13 @@
 //! Supports PDF, DOCX, PPTX, XLSX, and plain text formats.
 
 use async_trait::async_trait;
+use futures::StreamExt as _;
 
 use thinclaw_media::document_extraction::extractors;
 use thinclaw_media::document_extraction::{MAX_DOCUMENT_SIZE, MAX_EXTRACTED_TEXT_LEN};
 use thinclaw_tools_core::{
-    OutboundUrlGuardOptions, Tool, ToolDomain, ToolError, ToolOutput, validate_outbound_url,
-    validate_outbound_url_pinned,
+    OutboundUrlGuardOptions, Tool, ToolDomain, ToolError, ToolOutput,
+    validate_outbound_url_pinned_async,
 };
 use thinclaw_types::JobContext;
 
@@ -126,69 +127,131 @@ impl Tool for ExtractDocumentTool {
 
 /// Fetch a document from a URL.
 async fn fetch_document(url: &str) -> Result<(Vec<u8>, String), ToolError> {
-    let guard_options = OutboundUrlGuardOptions {
-        require_https: false,
-        upgrade_http_to_https: false,
-        allowlist: Vec::new(),
-    };
-    let guarded = validate_outbound_url_pinned(url, &guard_options)?;
-    let guarded_url = guarded.url;
-    let pinned_addrs = guarded.pinned_addrs;
+    const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    const MAX_REDIRECTS: usize = 10;
+    const MAX_URL_BYTES: usize = 16 * 1024;
 
-    // Pin the connection to the addresses that passed SSRF validation so the
-    // host cannot rebind to a private IP between validation and connect time.
-    // For IP-literal hosts (empty pinned_addrs) no override is added and
-    // behavior is identical to before.
-    let host = guarded_url.host_str().unwrap_or_default().to_string();
-    let mut builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= 10 {
-                attempt.error("too many redirects")
-            } else if validate_outbound_url(attempt.url().as_str(), &guard_options).is_ok() {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        }));
-    if !pinned_addrs.is_empty() {
-        // reqwest ignores the port carried by the override addresses and uses
-        // the request URL's port, so the validated SocketAddrs can be passed
-        // as-is.
-        builder = builder.resolve_to_addrs(&host, &pinned_addrs);
-    }
-    let client = builder
-        .build()
-        .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {e}")))?;
-
-    let response = client
-        .get(guarded_url.clone())
-        .header("User-Agent", "ThinClaw/1.0")
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to fetch document: {e}")))?;
-
-    if !response.status().is_success() {
-        return Err(ToolError::ExecutionFailed(format!(
-            "HTTP {} fetching document",
-            response.status()
+    if url.len() > MAX_URL_BYTES {
+        return Err(ToolError::InvalidParameters(format!(
+            "Document URL exceeds the {MAX_URL_BYTES}-byte limit"
         )));
     }
-
-    // Get MIME type from Content-Type header
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
-        .unwrap_or_else(|| guess_mime_from_url(guarded_url.as_str()));
-
-    let bytes = response
-        .bytes()
+    let guard_options = OutboundUrlGuardOptions {
+        require_https: true,
+        upgrade_http_to_https: true,
+        allowlist: Vec::new(),
+    };
+    let deadline = tokio::time::Instant::now() + FETCH_TIMEOUT;
+    let mut current = url.to_string();
+    for redirect_count in 0..=MAX_REDIRECTS {
+        let guarded = tokio::time::timeout_at(
+            deadline,
+            validate_outbound_url_pinned_async(&current, &guard_options),
+        )
         .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read response body: {e}")))?;
+        .map_err(|_| ToolError::Timeout(FETCH_TIMEOUT))??;
+        let guarded_url = guarded.url;
+        let host = guarded_url
+            .host_str()
+            .ok_or_else(|| ToolError::InvalidParameters("Document URL has no host".to_string()))?
+            .to_string();
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .ok_or(ToolError::Timeout(FETCH_TIMEOUT))?;
+        let mut builder = reqwest::Client::builder()
+            .timeout(remaining)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if !guarded.pinned_addrs.is_empty() {
+            builder = builder.resolve_to_addrs(&host, &guarded.pinned_addrs);
+        }
+        let client = builder
+            .build()
+            .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {e}")))?;
+        let response = client
+            .get(guarded_url.clone())
+            .header("User-Agent", "ThinClaw/1.0")
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    ToolError::Timeout(FETCH_TIMEOUT)
+                } else {
+                    ToolError::ExecutionFailed(format!(
+                        "Failed to fetch document: {}",
+                        e.without_url()
+                    ))
+                }
+            })?;
 
-    Ok((bytes.to_vec(), content_type))
+        if response.status().is_redirection() {
+            if redirect_count == MAX_REDIRECTS {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Document fetch exceeded {MAX_REDIRECTS} redirects"
+                )));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(
+                        "Document redirect has no valid Location header".to_string(),
+                    )
+                })?;
+            let target = guarded_url.join(location).map_err(|error| {
+                ToolError::ExecutionFailed(format!("Invalid document redirect: {error}"))
+            })?;
+            if target.as_str().len() > MAX_URL_BYTES {
+                return Err(ToolError::ExecutionFailed(
+                    "Document redirect URL is oversized".to_string(),
+                ));
+            }
+            current = target.to_string();
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "HTTP {} fetching document",
+                response.status()
+            )));
+        }
+        if response.content_length().is_some_and(|length| {
+            usize::try_from(length).map_or(true, |length| length > MAX_DOCUMENT_SIZE)
+        }) {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Document exceeds maximum size of {MAX_DOCUMENT_SIZE} bytes"
+            )));
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.split(';').next().unwrap_or(value).trim().to_string())
+            .unwrap_or_else(|| guess_mime_from_url(guarded_url.as_str()));
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                ToolError::ExecutionFailed(format!(
+                    "Failed to read document body: {}",
+                    error.without_url()
+                ))
+            })?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_DOCUMENT_SIZE {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Document exceeds maximum size of {MAX_DOCUMENT_SIZE} bytes"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return Ok((bytes, content_type));
+    }
+
+    Err(ToolError::ExecutionFailed(
+        "Document redirect loop terminated unexpectedly".to_string(),
+    ))
 }
 
 /// Decode base64-encoded data.

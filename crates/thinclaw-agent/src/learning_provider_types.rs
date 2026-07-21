@@ -251,7 +251,7 @@ pub fn provider_http_response_status(
     let healthy = (200..300).contains(&status);
     let mut metadata = serde_json::json!({"status": status});
     if let Some(health_url) = health_url {
-        metadata["health_url"] = serde_json::json!(health_url);
+        metadata["health_url"] = serde_json::json!(redacted_health_url(health_url));
     }
     ProviderHealthStatus {
         provider: provider_name.to_string(),
@@ -283,7 +283,7 @@ pub fn provider_http_request_error_status(
 ) -> ProviderHealthStatus {
     let mut metadata = serde_json::json!({});
     if let Some(health_url) = health_url {
-        metadata["health_url"] = serde_json::json!(health_url);
+        metadata["health_url"] = serde_json::json!(redacted_health_url(health_url));
     }
     ProviderHealthStatus {
         provider: provider_name.to_string(),
@@ -295,6 +295,24 @@ pub fn provider_http_request_error_status(
         error: Some(error.into()),
         capabilities: Vec::new(),
         metadata,
+    }
+}
+
+fn redacted_health_url(raw: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return "<invalid-url>".to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return "<invalid-url>".to_string();
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
     }
 }
 
@@ -658,7 +676,7 @@ mod tests {
         let ok = provider_http_response_status("mem0", true, 204, 12, Some("https://api/health"));
         assert_eq!(ok.readiness, ProviderReadiness::Ready);
         assert_eq!(ok.metadata["status"], 204);
-        assert_eq!(ok.metadata["health_url"], "https://api/health");
+        assert_eq!(ok.metadata["health_url"], "https://api");
         assert_eq!(ok.error, None);
 
         let err = provider_http_response_status("mem0", true, 503, 13, None);
@@ -670,6 +688,15 @@ mod tests {
             provider_http_request_error_status("mem0", true, "connection refused", 14, None);
         assert_eq!(request_err.error.as_deref(), Some("connection refused"));
         assert_eq!(request_err.latency_ms, Some(14));
+
+        let signed = provider_http_response_status(
+            "mem0",
+            true,
+            200,
+            1,
+            Some("https://user:pass@api.example/private?token=secret#fragment"),
+        );
+        assert_eq!(signed.metadata["health_url"], "https://api.example");
     }
 
     #[test]

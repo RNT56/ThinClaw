@@ -77,13 +77,15 @@ pub struct ThreadRuntimeState {
     pub prompt_segment_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_context_refs: Vec<String>,
-    /// Watermark of how many oldest-first conversation rows in the DB are
-    /// still "active" for this thread. See
-    /// `thinclaw_agent::ports::ThreadRuntimeSnapshot::active_message_row_count`
-    /// for full semantics; this mirrors that field so both structs decode
-    /// the same `runtime` metadata JSON.
+    /// Zero-based start of the active append-only conversation-log window.
+    /// See `thinclaw_agent::ports::ThreadRuntimeSnapshot` for full semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_message_start_row: Option<i64>,
+    /// Length of the active append-only conversation-log window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_message_row_count: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inflight_tool_trace: Vec<TurnToolCall>,
     /// Capped snapshot of the undo stack (newest checkpoints only). Mirrors
     /// `thinclaw_agent::ports::ThreadRuntimeSnapshot::undo_checkpoints`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -152,7 +154,9 @@ impl ThreadRuntimeStateExt for Thread {
             prompt_manifest_digest: snapshot.prompt_manifest_digest,
             prompt_segment_order: snapshot.prompt_segment_order,
             provider_context_refs: snapshot.provider_context_refs,
+            active_message_start_row: snapshot.active_message_start_row,
             active_message_row_count: snapshot.active_message_row_count,
+            inflight_tool_trace: snapshot.inflight_tool_trace,
             undo_checkpoints: snapshot.undo_checkpoints,
             plan_mode: snapshot.plan_mode,
         }
@@ -183,7 +187,9 @@ impl ThreadRuntimeStateExt for Thread {
             prompt_manifest_digest: runtime.prompt_manifest_digest,
             prompt_segment_order: runtime.prompt_segment_order,
             provider_context_refs: runtime.provider_context_refs,
+            active_message_start_row: runtime.active_message_start_row,
             active_message_row_count: runtime.active_message_row_count,
+            inflight_tool_trace: runtime.inflight_tool_trace,
             undo_checkpoints: runtime.undo_checkpoints,
             plan_mode: runtime.plan_mode,
         });
@@ -260,7 +266,9 @@ pub(crate) fn thread_runtime_state_from_portable(
         prompt_manifest_digest: snapshot.prompt_manifest_digest,
         prompt_segment_order: snapshot.prompt_segment_order,
         provider_context_refs: snapshot.provider_context_refs,
+        active_message_start_row: snapshot.active_message_start_row,
         active_message_row_count: snapshot.active_message_row_count,
+        inflight_tool_trace: snapshot.inflight_tool_trace,
         undo_checkpoints: snapshot.undo_checkpoints,
         plan_mode: snapshot.plan_mode,
     }

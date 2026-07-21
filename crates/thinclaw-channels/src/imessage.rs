@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
@@ -26,7 +27,7 @@ use thinclaw_channels_core::{
 use thinclaw_media::MediaContent;
 use thinclaw_types::error::ChannelError;
 
-use crate::util::{floor_char_boundary, output_with_timeout};
+use crate::util::{decode_sqlite_hex, floor_char_boundary, output_with_timeout};
 
 /// Channel name constant.
 const NAME: &str = "imessage";
@@ -42,8 +43,32 @@ const MAX_MESSAGE_LENGTH: usize = 20_000;
 /// Maximum single attachment size we'll read from disk (20 MB).
 const MAX_IMESSAGE_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024;
 
+const MAX_OUTBOUND_ATTACHMENTS: usize = 10;
+const MAX_OUTBOUND_ATTACHMENTS_TOTAL_BYTES: usize = 50 * 1024 * 1024;
+const MAX_INBOUND_ATTACHMENTS: usize = 20;
+
 /// Maximum entries in the deduplication ring buffer.
 const DEDUP_RING_CAPACITY: usize = 1000;
+
+const SEND_MESSAGE_APPLESCRIPT: &str = r#"on run argv
+    set recipientAddress to item 1 of argv
+    set messageText to item 2 of argv
+    tell application "Messages"
+        set targetService to 1st account whose service type = iMessage
+        set targetBuddy to participant (my recipientAddress) of targetService
+        send (my messageText) to targetBuddy
+    end tell
+end run"#;
+
+const SEND_FILE_APPLESCRIPT: &str = r#"on run argv
+    set recipientAddress to item 1 of argv
+    set attachmentPath to item 2 of argv
+    tell application "Messages"
+        set targetService to 1st account whose service type = iMessage
+        set targetBuddy to participant (my recipientAddress) of targetService
+        send file (POSIX file (my attachmentPath)) to targetBuddy
+    end tell
+end run"#;
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -164,9 +189,9 @@ impl IMessageChannel {
         }
 
         // Check sqlite3
-        let sqlite3_available = tokio::process::Command::new("sqlite3")
-            .arg("--version")
-            .output()
+        let mut sqlite3_check = tokio::process::Command::new("sqlite3");
+        sqlite3_check.arg("--version");
+        let sqlite3_available = output_with_timeout(&mut sqlite3_check, "sqlite3 diagnostic")
             .await
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -175,10 +200,9 @@ impl IMessageChannel {
         }
 
         // Check osascript
-        let osascript_available = tokio::process::Command::new("osascript")
-            .arg("-e")
-            .arg("return \"ok\"")
-            .output()
+        let mut osascript_check = tokio::process::Command::new("osascript");
+        osascript_check.arg("-e").arg("return \"ok\"");
+        let osascript_available = output_with_timeout(&mut osascript_check, "osascript diagnostic")
             .await
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -187,10 +211,9 @@ impl IMessageChannel {
         }
 
         // Check Messages.app running
-        let messages_running = tokio::process::Command::new("pgrep")
-            .arg("-x")
-            .arg("Messages")
-            .output()
+        let mut pgrep = tokio::process::Command::new("pgrep");
+        pgrep.arg("-x").arg("Messages");
+        let messages_running = output_with_timeout(&mut pgrep, "pgrep Messages diagnostic")
             .await
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -200,12 +223,14 @@ impl IMessageChannel {
 
         // Get total message count
         let total_messages = if db_exists && sqlite3_available {
-            tokio::process::Command::new("sqlite3")
+            let mut count = tokio::process::Command::new("sqlite3");
+            count
                 .arg(&config.db_path)
-                .arg("SELECT COUNT(*) FROM message;")
-                .output()
+                .arg("SELECT COUNT(*) FROM message;");
+            output_with_timeout(&mut count, "sqlite3 Messages count diagnostic")
                 .await
                 .ok()
+                .filter(|output| output.status.success())
                 .and_then(|o| {
                     String::from_utf8_lossy(&o.stdout)
                         .trim()
@@ -331,10 +356,10 @@ impl IMessageChannel {
     ) -> Result<Vec<ChatDbMessage>, ChannelError> {
         let query = format!(
             "SELECT m.ROWID, \
-                    REPLACE(COALESCE(m.text,''), '|', ' '), \
+                    hex(CAST(COALESCE(m.text,'') AS TEXT)), \
                     m.is_from_me, \
-                    COALESCE(h.id, 'unknown'), \
-                    COALESCE(c.chat_identifier, 'unknown'), \
+                    hex(CAST(COALESCE(h.id, 'unknown') AS TEXT)), \
+                    hex(CAST(COALESCE(c.chat_identifier, 'unknown') AS TEXT)), \
                     (SELECT COUNT(*) FROM message_attachment_join maj WHERE maj.message_id = m.ROWID), \
                     CASE WHEN c.display_name IS NOT NULL AND c.display_name != '' THEN 1 ELSE 0 END \
              FROM message m \
@@ -377,10 +402,15 @@ impl IMessageChannel {
                 Ok(r) => r,
                 Err(_) => continue,
             };
-            let text = parts[1].to_string();
+            let (Some(text), Some(sender), Some(chat_id)) = (
+                decode_sqlite_hex(parts[1]),
+                decode_sqlite_hex(parts[3]),
+                decode_sqlite_hex(parts[4]),
+            ) else {
+                tracing::warn!(rowid, "iMessage: skipping row with malformed hex text");
+                continue;
+            };
             let is_from_me = parts[2] == "1";
-            let sender = parts[3].to_string();
-            let chat_id = parts[4].to_string();
             let attachment_count: i64 = parts[5].parse().unwrap_or(0);
             let is_group = parts[6] == "1";
 
@@ -405,26 +435,17 @@ impl IMessageChannel {
 
     /// Send a message via osascript (AppleScript).
     async fn send_via_osascript(recipient: &str, text: &str) -> Result<(), ChannelError> {
-        // Escape both text and recipient for AppleScript. The recipient is a
-        // chat identifier and must not be able to break out of the string
-        // literal (the file-send path already escapes it).
-        let escaped = escape_applescript(text);
-        let escaped_recipient = escape_applescript(recipient);
-
-        // Split long messages
-        let chunks = split_message(&escaped);
+        // Split the raw text, then pass each value through argv. No untrusted
+        // value is interpolated into executable AppleScript source.
+        let chunks = split_message(text);
 
         for chunk in chunks {
-            let script = format!(
-                r#"tell application "Messages"
-    set targetService to 1st account whose service type = iMessage
-    set targetBuddy to participant "{escaped_recipient}" of targetService
-    send "{chunk}" to targetBuddy
-end tell"#
-            );
-
             let mut cmd = tokio::process::Command::new("osascript");
-            cmd.arg("-e").arg(&script);
+            cmd.arg("-e")
+                .arg(SEND_MESSAGE_APPLESCRIPT)
+                .arg("--")
+                .arg(recipient)
+                .arg(chunk);
             let output = output_with_timeout(&mut cmd, "osascript send")
                 .await
                 .map_err(|reason| ChannelError::SendFailed {
@@ -497,17 +518,13 @@ end tell"#
         file_path: &Path,
     ) -> Result<bool, ChannelError> {
         let posix_path = file_path.to_string_lossy();
-        let escaped_recipient = escape_applescript(recipient);
-        let script = format!(
-            r#"tell application "Messages"
-    set targetService to 1st account whose service type = iMessage
-    set targetBuddy to participant "{escaped_recipient}" of targetService
-    send file (POSIX file "{posix_path}") to targetBuddy
-end tell"#
-        );
 
         let mut cmd = tokio::process::Command::new("osascript");
-        cmd.arg("-e").arg(&script);
+        cmd.arg("-e")
+            .arg(SEND_FILE_APPLESCRIPT)
+            .arg("--")
+            .arg(recipient)
+            .arg(posix_path.as_ref());
         let output = output_with_timeout(&mut cmd, "osascript file send")
             .await
             .map_err(|reason| ChannelError::SendFailed {
@@ -537,18 +554,52 @@ end tell"#
     /// it via AppleScript. Failures are logged but do not abort the response
     /// (best-effort delivery since `send file` is unreliable on macOS 14+).
     async fn send_attachments(recipient: &str, attachments: &[thinclaw_media::MediaContent]) {
-        for attachment in attachments {
-            let filename = attachment.filename.as_deref().unwrap_or("attachment");
-
-            // Write to a temp file so osascript can reference a POSIX path.
-            // Use async fs so a slow disk cannot block the runtime worker.
-            let tmp_dir = std::env::temp_dir().join("thinclaw_imessage");
-            if tokio::fs::create_dir_all(&tmp_dir).await.is_err() {
-                tracing::warn!("iMessage: failed to create temp dir for attachment");
+        if attachments.len() > MAX_OUTBOUND_ATTACHMENTS {
+            tracing::warn!(
+                supplied = attachments.len(),
+                retained = MAX_OUTBOUND_ATTACHMENTS,
+                "iMessage: outbound attachment count exceeds limit"
+            );
+        }
+        let mut total_bytes = 0_usize;
+        for attachment in attachments.iter().take(MAX_OUTBOUND_ATTACHMENTS) {
+            if attachment.data.len() as u64 > MAX_IMESSAGE_ATTACHMENT_SIZE {
+                tracing::warn!(
+                    size = attachment.data.len(),
+                    "iMessage: skipping oversized outbound attachment"
+                );
                 continue;
             }
-            let tmp_path = tmp_dir.join(filename);
-            if let Err(e) = tokio::fs::write(&tmp_path, &attachment.data).await {
+            let Some(next_total) = total_bytes.checked_add(attachment.data.len()) else {
+                tracing::warn!("iMessage: outbound attachment byte count overflowed");
+                break;
+            };
+            if next_total > MAX_OUTBOUND_ATTACHMENTS_TOTAL_BYTES {
+                tracing::warn!(
+                    limit = MAX_OUTBOUND_ATTACHMENTS_TOTAL_BYTES,
+                    "iMessage: outbound attachments exceed aggregate size limit"
+                );
+                break;
+            }
+            total_bytes = next_total;
+
+            let filename = attachment.filename.as_deref().unwrap_or("attachment");
+            let safe_name = safe_attachment_filename(filename);
+            let tmp_path = std::env::temp_dir().join(format!(
+                "thinclaw-imessage-{}-{safe_name}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            let mut options = tokio::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+            let write_result = async {
+                let mut file = options.open(&tmp_path).await?;
+                file.write_all(&attachment.data).await?;
+                file.sync_all().await
+            }
+            .await;
+            if let Err(e) = write_result {
                 tracing::warn!(
                     error = %e,
                     "iMessage: failed to write attachment to temp file"
@@ -859,12 +910,15 @@ async fn fetch_imessage_attachments(
 ) -> Vec<MediaContent> {
     // Query: get attachment filename and MIME type for this message
     let query = format!(
-        "SELECT a.filename, COALESCE(a.mime_type, 'application/octet-stream'), a.total_bytes \
+        "SELECT hex(CAST(a.filename AS TEXT)), \
+                hex(CAST(COALESCE(a.mime_type, 'application/octet-stream') AS TEXT)), \
+                a.total_bytes \
          FROM attachment a \
          INNER JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id \
          WHERE maj.message_id = {} \
-         ORDER BY a.ROWID ASC;",
-        message_rowid
+         ORDER BY a.ROWID ASC \
+         LIMIT {};",
+        message_rowid, MAX_INBOUND_ATTACHMENTS
     );
 
     let mut cmd = tokio::process::Command::new("sqlite3");
@@ -892,6 +946,12 @@ async fn fetch_imessage_attachments(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut result = Vec::new();
+    let canonical_attachments_root = match dirs::home_dir() {
+        Some(home) => tokio::fs::canonicalize(home.join("Library/Messages/Attachments"))
+            .await
+            .ok(),
+        None => None,
+    };
 
     for line in stdout.lines() {
         let parts: Vec<&str> = line.splitn(3, '|').collect();
@@ -899,14 +959,18 @@ async fn fetch_imessage_attachments(
             continue;
         }
 
-        let raw_path = parts[0];
-        let mime = parts[1];
+        let (Some(raw_path), Some(mime)) =
+            (decode_sqlite_hex(parts[0]), decode_sqlite_hex(parts[1]))
+        else {
+            tracing::warn!(rowid = message_rowid, "iMessage: malformed attachment row");
+            continue;
+        };
         let total_bytes: u64 = parts[2].parse().unwrap_or(0);
 
         // Skip oversized files
         if total_bytes > MAX_IMESSAGE_ATTACHMENT_SIZE {
             tracing::warn!(
-                path = %raw_path,
+                path = %redact(&raw_path),
                 size = total_bytes,
                 "iMessage: skipping oversized attachment"
             );
@@ -918,25 +982,73 @@ async fn fetch_imessage_attachments(
             let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
             home.join(rest)
         } else {
-            std::path::PathBuf::from(raw_path)
+            std::path::PathBuf::from(&raw_path)
         };
 
-        if !file_path.exists() {
-            tracing::debug!(
-                path = %file_path.display(),
-                "iMessage: attachment file not found on disk"
-            );
-            continue;
-        }
-
-        match tokio::fs::read(&file_path).await {
-            Ok(data) => {
+        let canonical_path = match tokio::fs::canonicalize(&file_path).await {
+            Ok(path)
+                if canonical_attachments_root
+                    .as_ref()
+                    .is_some_and(|root| path.starts_with(root)) =>
+            {
+                path
+            }
+            _ => {
+                tracing::warn!(
+                    path = %redact(&file_path.to_string_lossy()),
+                    "iMessage: refusing attachment path outside Messages storage"
+                );
+                continue;
+            }
+        };
+        let mut options = tokio::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW);
+        let file = match options.open(&canonical_path).await {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(
+                    path = %redact(&canonical_path.to_string_lossy()),
+                    error = %error,
+                    "iMessage: refusing attachment that cannot be opened safely"
+                );
+                continue;
+            }
+        };
+        let metadata = match file.metadata().await {
+            Ok(metadata)
+                if metadata.is_file() && metadata.len() <= MAX_IMESSAGE_ATTACHMENT_SIZE =>
+            {
+                metadata
+            }
+            _ => {
+                tracing::warn!("iMessage: refusing missing, non-file, or oversized attachment");
+                continue;
+            }
+        };
+        let mut data = Vec::with_capacity(metadata.len() as usize);
+        let read_result = file
+            .take(MAX_IMESSAGE_ATTACHMENT_SIZE + 1)
+            .read_to_end(&mut data)
+            .await;
+        match read_result {
+            Ok(_) if data.len() as u64 <= MAX_IMESSAGE_ATTACHMENT_SIZE => {
                 let filename = file_path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("attachment")
                     .to_string();
-                let mc = MediaContent::new(data, mime).with_filename(filename.clone());
+                let safe_mime = if mime.len() <= 255
+                    && mime
+                        .bytes()
+                        .all(|byte| byte.is_ascii_graphic() && byte != b';')
+                {
+                    mime.as_str()
+                } else {
+                    "application/octet-stream"
+                };
+                let mc = MediaContent::new(data, safe_mime).with_filename(filename.clone());
                 tracing::debug!(
                     filename = %filename,
                     mime = %mime,
@@ -944,6 +1056,9 @@ async fn fetch_imessage_attachments(
                     "iMessage: loaded attachment from disk"
                 );
                 result.push(mc);
+            }
+            Ok(_) => {
+                tracing::warn!("iMessage: attachment grew beyond the size limit while reading");
             }
             Err(e) => {
                 tracing::warn!(
@@ -956,6 +1071,30 @@ async fn fetch_imessage_attachments(
     }
 
     result
+}
+
+fn safe_attachment_filename(filename: &str) -> String {
+    let base = Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("attachment");
+    let sanitized = base
+        .chars()
+        .take(128)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim_matches('.');
+    if sanitized.is_empty() {
+        "attachment".to_string()
+    } else {
+        sanitized.to_string()
+    }
 }
 
 /// Split a long message into chunks, preferring line-break boundaries.
@@ -997,11 +1136,6 @@ fn redact(text: &str) -> String {
     });
     let s = phone_re.replace_all(text, "[REDACTED]");
     email_re.replace_all(&s, "[REDACTED]").to_string()
-}
-
-/// Escape text for safe inclusion in AppleScript strings.
-fn escape_applescript(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -1129,13 +1263,11 @@ mod tests {
         );
     }
 
-    // ── escape tests ───────────────────────────────────────────────
-
     #[test]
-    fn test_escape_applescript() {
-        assert_eq!(escape_applescript(r#"say "hello""#), r#"say \"hello\""#);
-        assert_eq!(escape_applescript("back\\slash"), "back\\\\slash");
-        assert_eq!(escape_applescript("normal"), "normal");
+    fn attachment_filename_is_confined_to_one_safe_segment() {
+        assert_eq!(safe_attachment_filename("../../secret.txt"), "secret.txt");
+        assert_eq!(safe_attachment_filename("a/b\\c:name"), "b_c_name");
+        assert_eq!(safe_attachment_filename(".."), "attachment");
     }
 
     // ── config tests ───────────────────────────────────────────────

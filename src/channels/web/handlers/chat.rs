@@ -28,10 +28,10 @@ use thinclaw_gateway::web::chat::{
     extension_manager_unavailable_error, history_response, normalize_chat_history_query,
     parse_approval_request_id, parse_chat_thread_delete_id, parse_chat_thread_path_id,
     pending_approvals_response, resolve_chat_history_thread_id, send_message_response,
-    session_manager_unavailable_error, thread_command_response, thread_export_content,
-    thread_export_response, thread_info, thread_list_response, thread_list_response_from_summaries,
-    thread_not_found_error, too_many_chat_connections_error, turn_info_from_session_turn,
-    turns_from_history_messages, unknown_approval_action_error,
+    session_manager_unavailable_error, supported_thread_export_format, thread_command_response,
+    thread_export_content, thread_export_response, thread_info, thread_list_response,
+    thread_list_response_from_summaries, thread_not_found_error, too_many_chat_connections_error,
+    turn_info_from_session_turn, turns_from_history_messages, unknown_approval_action_error,
 };
 use thinclaw_gateway::web::identity::DeviceContext;
 use thinclaw_gateway::web::ports::{
@@ -39,6 +39,9 @@ use thinclaw_gateway::web::ports::{
 };
 pub(crate) use thinclaw_gateway::web::submission::gateway_submission_error;
 use thinclaw_gateway::web::submission::{build_gateway_message, submit_gateway_message};
+
+const MAX_THREAD_EXPORT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_THREAD_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 
 #[utoipa::path(
     post,
@@ -57,9 +60,16 @@ pub(crate) async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
     request_identity: GatewayRequestIdentity,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
-    if !state.chat_rate_limiter.check() {
+    thinclaw_gateway::web::chat::validate_gateway_chat_content(&req.content)?;
+    if let Some(thread_id) = req.thread_id.as_deref() {
+        thinclaw_gateway::web::chat::parse_chat_thread_query_id(thread_id)?;
+    }
+
+    let rate_limit_key = request_identity.rate_limit_key(device_ctx.as_ref().map(|ctx| &ctx.0));
+    if !state.chat_rate_limiter.check_for(&rate_limit_key) {
         return Err(chat_rate_limit_error());
     }
 
@@ -105,6 +115,9 @@ pub(crate) async fn chat_approval_handler(
     device_ctx: Option<axum::Extension<DeviceContext>>,
     Json(req): Json<ApprovalRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
+    if let Some(thread_id) = req.thread_id.as_deref() {
+        thinclaw_gateway::web::chat::parse_chat_thread_query_id(thread_id)?;
+    }
     let (approved, always) = match req.action.as_str() {
         "approve" => (true, false),
         "always" => (true, true),
@@ -311,6 +324,18 @@ pub(crate) async fn chat_auth_token_handler(
     request_identity: GatewayRequestIdentity,
     Json(req): Json<AuthTokenRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    if req.extension_name.trim().is_empty()
+        || req.extension_name.len() > 128
+        || req.extension_name.chars().any(char::is_control)
+        || req.token.trim().is_empty()
+        || req.token.len() > 1024 * 1024
+        || req.token.contains('\0')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Extension authentication input is malformed or oversized".to_string(),
+        ));
+    }
     let ext_mgr = state
         .extension_manager
         .as_ref()
@@ -519,15 +544,20 @@ pub(crate) async fn chat_ws_handler(
         return Err((error.status_code(), error.to_string()));
     }
     let device_ctx = device_ctx.map(|ext| ext.0);
-    Ok(ws.on_upgrade(move |socket| {
-        crate::channels::web::ws::handle_ws_connection(
-            socket,
-            state,
-            request_identity,
-            browser_origin,
-            device_ctx,
-        )
-    }))
+    const MAX_WS_MESSAGE_BYTES: usize =
+        thinclaw_gateway::web::chat::MAX_GATEWAY_CHAT_CONTENT_BYTES + 64 * 1024;
+    Ok(ws
+        .max_message_size(MAX_WS_MESSAGE_BYTES)
+        .max_frame_size(MAX_WS_MESSAGE_BYTES)
+        .on_upgrade(move |socket| {
+            crate::channels::web::ws::handle_ws_connection(
+                socket,
+                state,
+                request_identity,
+                browser_origin,
+                device_ctx,
+            )
+        }))
 }
 
 #[utoipa::path(
@@ -608,9 +638,12 @@ pub(crate) async fn chat_history_handler(
     if let Some(thread) = sess.threads.get(&thread_id)
         && !thread.turns.is_empty()
     {
+        let first_turn = thread.turns.len().saturating_sub(history_options.limit);
+        let oldest_timestamp = thread.turns.get(first_turn).map(|turn| turn.started_at);
         let turns: Vec<TurnInfo> = thread
             .turns
             .iter()
+            .skip(first_turn)
             .map(|t| {
                 turn_info_from_session_turn(GatewaySessionTurnInfo {
                     turn_number: t.turn_number,
@@ -633,7 +666,12 @@ pub(crate) async fn chat_history_handler(
             })
             .collect();
 
-        return Ok(Json(history_response(thread_id, turns, false, None)));
+        return Ok(Json(history_response(
+            thread_id,
+            turns,
+            first_turn > 0,
+            oldest_timestamp,
+        )));
     }
 
     if let Some(ref store) = state.store {
@@ -782,6 +820,12 @@ pub(crate) async fn chat_thread_export_handler(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let format = query.format.unwrap_or_else(|| "markdown".to_string());
+        if !supported_thread_export_format(&format) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "unsupported export format".to_string(),
+            ));
+        }
         let export_messages = messages
             .into_iter()
             .map(|message| GatewayThreadExportMessage {
@@ -795,9 +839,45 @@ pub(crate) async fn chat_thread_export_handler(
                 created_at: message.created_at,
             })
             .collect::<Vec<_>>();
+        let source_bytes = export_messages.iter().try_fold(
+            0_usize,
+            |total, message| -> Result<usize, (StatusCode, String)> {
+                let metadata_bytes = serde_json::to_vec(&message.metadata)
+                    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+                    .len();
+                total
+                    .checked_add(message.role.len())
+                    .and_then(|value| value.checked_add(message.content.len()))
+                    .and_then(|value| value.checked_add(metadata_bytes))
+                    .ok_or_else(|| {
+                        (
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "session export size overflow".to_string(),
+                        )
+                    })
+            },
+        )?;
+        if source_bytes > MAX_THREAD_EXPORT_SOURCE_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "session is too large to export safely".to_string(),
+            ));
+        }
+        let message_count = export_messages.len();
         let content = thread_export_content(&format, &export_messages)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        return Ok(Json(thread_export_response(thread_id, format, content)));
+        if content.len() > MAX_THREAD_EXPORT_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "rendered session export is too large".to_string(),
+            ));
+        }
+        return Ok(Json(thread_export_response(
+            thread_id,
+            format,
+            content,
+            message_count,
+        )));
     }
 
     Err(chat_store_unavailable_error())
@@ -883,16 +963,19 @@ async fn persist_gateway_side_thread(
         .ensure_conversation(thread_id, "gateway", user_id, None)
         .await?;
 
+    let thread_key = thread_id.to_string();
     let stable_external_conversation_key =
-        format!("gateway://direct/{user_id}/actor/{actor_id}/thread/{thread_id}");
+        thinclaw_gateway::web::identity::gateway_direct_conversation_key(
+            user_id,
+            actor_id,
+            Some(("thread", &thread_key)),
+        );
     store
         .update_conversation_identity(
             thread_id,
             Some(user_id),
             Some(actor_id),
-            Some(crate::identity::scope_id_from_key(&format!(
-                "principal:{user_id}"
-            ))),
+            Some(crate::identity::direct_scope_id(user_id, actor_id)),
             crate::history::ConversationKind::Direct,
             Some(&stable_external_conversation_key),
         )
@@ -1238,7 +1321,14 @@ mod tests {
             .expect("metadata query should succeed")
             .expect("thread metadata should exist");
 
-        assert!(summaries.iter().any(|summary| summary.id == info.id));
+        let persisted = summaries
+            .iter()
+            .find(|summary| summary.id == info.id)
+            .expect("created thread summary");
+        assert_eq!(
+            persisted.conversation_scope_id,
+            Some(crate::identity::direct_scope_id("user-1", "actor-1"))
+        );
         assert_eq!(
             metadata.get("thread_type"),
             Some(&serde_json::json!("thread"))

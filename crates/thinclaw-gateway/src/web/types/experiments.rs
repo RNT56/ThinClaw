@@ -17,9 +17,18 @@ pub struct ExperimentsLimitQuery {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ExperimentGpuCloudConnectRequest {
     pub api_key: String,
+}
+
+impl std::fmt::Debug for ExperimentGpuCloudConnectRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExperimentGpuCloudConnectRequest")
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -31,6 +31,7 @@ tracing = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+chrono-tz = "0.10"
 tempfile = "3"
 
 [features]

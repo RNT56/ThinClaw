@@ -74,26 +74,9 @@ pub fn check_requirements_sync(requirements: &GatingRequirements) -> GatingResul
     }
 }
 
-/// Check if a binary exists on PATH using `std::process::Command`.
+/// Check if a binary exists on PATH without spawning a probe that can hang.
 fn binary_exists(name: &str) -> bool {
-    #[cfg(unix)]
-    {
-        std::process::Command::new("which")
-            .arg(name)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    }
-    #[cfg(windows)]
-    {
-        std::process::Command::new("where")
-            .arg(name)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    }
+    thinclaw_platform::find_executable_in_path(name).is_some()
 }
 
 #[cfg(test)]

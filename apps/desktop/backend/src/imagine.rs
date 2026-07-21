@@ -1,14 +1,93 @@
 use crate::config::ConfigManager;
 use crate::direct_assets::{DirectAssetStore, NewDirectAsset};
-use crate::images::ImageResponse;
 use crate::inference::diffusion::DiffusionRequest;
 use crate::inference::InferenceRouter;
 use crate::sidecar::SidecarManager;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use specta::Type;
 use sqlx::SqlitePool;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use thinclaw_runtime_contracts::{AssetKind, AssetOrigin};
+
+const MAX_IMAGINE_PROMPT_BYTES: usize = 64 * 1024;
+const MAX_IMAGINE_SOURCE_IMAGES: usize = 14;
+const MAX_IMAGINE_SOURCE_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+const MAX_GENERATED_IMAGE_BYTES: usize = 50 * 1024 * 1024;
+
+fn validate_image_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
+        Err("Generated image identifier is invalid".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_imagine_params(params: &ImagineParams) -> Result<(), String> {
+    if params.prompt.trim().is_empty()
+        || params.prompt.len() > MAX_IMAGINE_PROMPT_BYTES
+        || params.prompt.contains('\0')
+    {
+        return Err("Image prompt is empty, too large, or contains NUL".to_string());
+    }
+    if !matches!(
+        params.provider.as_str(),
+        "local"
+            | "nano-banana"
+            | "nano-banana-pro"
+            | "gemini"
+            | "openai"
+            | "stability"
+            | "fal"
+            | "together"
+    ) {
+        return Err("Image provider is unsupported".to_string());
+    }
+    if !matches!(
+        params.aspect_ratio.as_str(),
+        "1:1" | "16:9" | "9:16" | "4:3" | "3:2" | "21:9"
+    ) {
+        return Err("Image aspect ratio is unsupported".to_string());
+    }
+    if params
+        .resolution
+        .as_deref()
+        .is_some_and(|resolution| !matches!(resolution, "512" | "1K" | "2K" | "4K"))
+    {
+        return Err("Image resolution is unsupported".to_string());
+    }
+    if params
+        .steps
+        .is_some_and(|steps| !(1..=150).contains(&steps))
+    {
+        return Err("Image step count must be between 1 and 150".to_string());
+    }
+    for (label, value, max_bytes) in [
+        ("style identifier", params.style_id.as_deref(), 512_usize),
+        (
+            "style prompt",
+            params.style_prompt.as_deref(),
+            MAX_IMAGINE_PROMPT_BYTES,
+        ),
+        ("model", params.model.as_deref(), 4096),
+    ] {
+        if value.is_some_and(|value| value.len() > max_bytes || value.contains('\0')) {
+            return Err(format!("Image {label} is invalid"));
+        }
+    }
+    if let Some(images) = &params.source_images {
+        if images.len() > MAX_IMAGINE_SOURCE_IMAGES
+            || images.iter().any(|image| {
+                image.is_empty()
+                    || image.len() > MAX_IMAGINE_SOURCE_IMAGE_BYTES
+                    || image.contains('\0')
+            })
+        {
+            return Err("Image source inputs exceed the supported limits".to_string());
+        }
+    }
+    Ok(())
+}
 
 /// Image generation parameters for the Imagine mode
 #[derive(Debug, Deserialize, Type)]
@@ -48,21 +127,27 @@ pub struct GeneratedImage {
 /// Parse aspect ratio string to width and height
 fn parse_aspect_ratio(ratio: &str, resolution: Option<&str>) -> (u32, u32) {
     let base_size = match resolution {
-        Some("4K") => 2048,
-        Some("2K") => 1536,
+        Some("4K") => 4096,
+        Some("2K") => 2048,
         Some("1K") => 1024,
         _ => 512,
     };
 
     match ratio {
         "1:1" => (base_size, base_size),
-        "16:9" => ((base_size as f32 * 16.0 / 9.0) as u32, base_size),
-        "9:16" => (base_size, (base_size as f32 * 16.0 / 9.0) as u32),
-        "4:3" => ((base_size as f32 * 4.0 / 3.0) as u32, base_size),
-        "3:2" => ((base_size as f32 * 3.0 / 2.0) as u32, base_size),
-        "21:9" => ((base_size as f32 * 21.0 / 9.0) as u32, base_size),
+        "16:9" => (base_size, base_size * 9 / 16),
+        "9:16" => (base_size * 9 / 16, base_size),
+        "4:3" => (base_size, base_size * 3 / 4),
+        "3:2" => (base_size, base_size * 2 / 3),
+        "21:9" => (base_size, base_size * 9 / 21),
         _ => (base_size, base_size),
     }
+}
+
+struct GeneratedOutput {
+    id: String,
+    path: String,
+    seed: Option<i64>,
 }
 
 /// Generate image using a cloud diffusion backend via InferenceRouter.
@@ -75,10 +160,11 @@ async fn generate_with_cloud_backend(
     params: &ImagineParams,
     width: u32,
     height: u32,
-) -> Result<ImageResponse, String> {
-    let backend = router.diffusion_backend().await.ok_or(
-        "No cloud diffusion backend configured. Please select one in Settings > Inference Mode.",
-    )?;
+) -> Result<GeneratedOutput, String> {
+    let backend = router
+        .diffusion_backend_for(&params.provider, params.model.as_deref())
+        .await
+        .map_err(String::from)?;
 
     let info = backend.info();
     tracing::info!(
@@ -109,23 +195,24 @@ async fn generate_with_cloud_backend(
         result.path
     );
 
-    Ok(ImageResponse {
+    Ok(GeneratedOutput {
         id: result.id,
         path: result.path,
+        seed: result.seed,
     })
 }
 
 /// Main command to generate an image in Imagine mode.
 ///
-/// Routes through `InferenceRouter` for cloud diffusion backends (Imagen 3,
-/// DALL-E 3, Stability AI, fal.ai, Together AI).  Falls back to the local
+/// Routes through `InferenceRouter` for cloud diffusion backends (Gemini,
+/// OpenAI GPT Image, Stability AI, fal.ai, Together AI). Falls back to the local
 /// sd.cpp / mflux sidecar for `"local"` provider.
 ///
 /// Provider ID mapping (frontend → backend):
-///   - `"nano-banana"` / `"gemini"` → Imagen 3 Flash (via InferenceRouter)
-///   - `"nano-banana-pro"` → Imagen 3 Pro (via InferenceRouter)
-///   - `"openai"` → DALL-E 3 (via InferenceRouter)
-///   - `"stability"` → Stability AI SDXL (via InferenceRouter)
+///   - `"nano-banana"` / `"gemini"` → Gemini 3.1 Flash Image
+///   - `"nano-banana-pro"` → Gemini 3 Pro Image
+///   - `"openai"` → OpenAI GPT Image 2
+///   - `"stability"` → Stability AI Stable Image
 ///   - `"fal"` → fal.ai FLUX (via InferenceRouter)
 ///   - `"together"` → Together AI (via InferenceRouter)
 ///   - `"local"` / anything else → local sd.cpp / mflux sidecar
@@ -139,6 +226,7 @@ pub async fn direct_imagine_generate(
     router: State<'_, InferenceRouter>,
     params: ImagineParams,
 ) -> Result<GeneratedImage, String> {
+    validate_imagine_params(&params)?;
     tracing::info!(
         "[imagine] Generating image with provider: {}",
         params.provider
@@ -152,7 +240,7 @@ pub async fn direct_imagine_generate(
         "nano-banana" | "nano-banana-pro" | "gemini" | "openai" | "stability" | "fal"
         | "together" => generate_with_cloud_backend(&router, &params, width, height).await,
         // Local sd.cpp / mflux sidecar
-        _ => {
+        "local" => {
             let local_params = crate::image_gen::ImageGenParams {
                 prompt: if let Some(style_prompt) = &params.style_prompt {
                     format!("{}\n\n{}", params.prompt, style_prompt)
@@ -178,21 +266,89 @@ pub async fn direct_imagine_generate(
                 sampling_method: None,
             };
 
-            crate::image_gen::direct_media_generate_image(
+            let result = crate::image_gen::direct_media_generate_image(
                 app.clone(),
                 sidecar.clone(),
                 config.clone(),
                 local_params,
             )
-            .await
+            .await?;
+            Ok(GeneratedOutput {
+                id: result.id,
+                path: result.path,
+                seed: None,
+            })
         }
+        _ => Err("Image provider is unsupported".to_string()),
     }?;
+
+    validate_image_id(&result.id)?;
+    let file_store = app.state::<crate::file_store::FileStore>();
+    let result_path = std::path::Path::new(&result.path);
+    let expected_path = file_store
+        .resolve_path(&format!("images/{}.png", result.id))
+        .await
+        .map_err(|error| format!("Generated image identifier is invalid: {error}"))?;
+    if result_path != expected_path {
+        return Err("Image backend returned a path outside its assigned output file".to_string());
+    }
+    let result_exists = file_store
+        .exists_absolute(result_path)
+        .await
+        .map_err(|error| format!("Generated image path is outside managed storage: {error}"))?;
+    if !result_exists {
+        return Err("Image backend did not produce a managed output file".to_string());
+    }
+    let generated_bytes = match file_store
+        .read_absolute_bounded(result_path, MAX_GENERATED_IMAGE_BYTES)
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = file_store.discard_local_absolute(result_path).await;
+            return Err(format!("Generated image output is invalid: {error}"));
+        }
+    };
+    let normalized = tokio::task::spawn_blocking(move || {
+        let (png, width, height) =
+            crate::inference::diffusion::normalize_image_to_png(&generated_bytes)
+                .map_err(String::from)?;
+        Ok::<_, String>((png, width, height))
+    })
+    .await;
+    let (generated_bytes, actual_width, actual_height) = match normalized {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            let _ = file_store.discard_local_absolute(result_path).await;
+            return Err(error);
+        }
+        Err(error) => {
+            let _ = file_store.discard_local_absolute(result_path).await;
+            return Err(format!("Generated image validation task failed: {error}"));
+        }
+    };
+    let generated_size = u64::try_from(generated_bytes.len())
+        .map_err(|_| "Generated image size exceeds the supported range".to_string())?;
+    let generated_sha256 = hex::encode(Sha256::digest(&generated_bytes));
+    let actual_width_i32 = i32::try_from(actual_width)
+        .map_err(|_| "Generated image width exceeds the supported range".to_string())?;
+    let actual_height_i32 = i32::try_from(actual_height)
+        .map_err(|_| "Generated image height exceeds the supported range".to_string())?;
+    if let Err(error) = file_store
+        .write_absolute(result_path, &generated_bytes)
+        .await
+    {
+        let _ = file_store.discard_local_absolute(result_path).await;
+        return Err(format!(
+            "Generated image could not be published to managed storage: {error}"
+        ));
+    }
 
     // Save metadata to database
     let image_id = result.id.clone();
     let created_at = chrono::Utc::now().to_rfc3339();
 
-    DirectAssetStore::upsert(
+    let metadata_result = DirectAssetStore::upsert(
         pool.inner(),
         NewDirectAsset {
             id: image_id.clone(),
@@ -200,24 +356,27 @@ pub async fn direct_imagine_generate(
             origin: AssetOrigin::Generated,
             path: result.path.clone(),
             mime_type: Some("image/png".to_string()),
-            size_bytes: None,
-            sha256: None,
+            size_bytes: Some(generated_size),
+            sha256: Some(generated_sha256),
             prompt: Some(params.prompt.clone()),
             provider: Some(params.provider.clone()),
             style_id: params.style_id.clone(),
             aspect_ratio: Some(params.aspect_ratio.clone()),
             resolution: params.resolution.clone(),
-            width: Some(width),
-            height: Some(height),
-            seed: None,
+            width: Some(actual_width),
+            height: Some(actual_height),
+            seed: result.seed,
             thumbnail_path: None,
             is_favorite: false,
             tags: None,
             metadata: Default::default(),
         },
     )
-    .await
-    .map_err(|e| format!("Failed to save image metadata: {}", e))?;
+    .await;
+    if let Err(error) = metadata_result {
+        let _ = file_store.delete_absolute(result_path).await;
+        return Err(format!("Failed to save image metadata: {error}"));
+    }
 
     Ok(GeneratedImage {
         id: image_id,
@@ -226,9 +385,9 @@ pub async fn direct_imagine_generate(
         provider: params.provider,
         aspect_ratio: params.aspect_ratio,
         resolution: params.resolution,
-        width: Some(width as i32),
-        height: Some(height as i32),
-        seed: None,
+        width: Some(actual_width_i32),
+        height: Some(actual_height_i32),
+        seed: result.seed,
         file_path: result.path,
         thumbnail_path: None,
         created_at,
@@ -248,6 +407,9 @@ pub async fn direct_imagine_list_images(
 ) -> Result<Vec<GeneratedImage>, String> {
     let limit = limit.unwrap_or(50);
     let offset = offset.unwrap_or(0);
+    if !(1..=200).contains(&limit) || !(0..=1_000_000).contains(&offset) {
+        return Err("Image gallery pagination is invalid".to_string());
+    }
     let favorites_only = favorites_only.unwrap_or(false);
 
     let query = if favorites_only {
@@ -330,7 +492,14 @@ pub async fn direct_imagine_search_images(
     pool: State<'_, SqlitePool>,
     query: String,
 ) -> Result<Vec<GeneratedImage>, String> {
-    let search_pattern = format!("%{}%", query);
+    if query.trim().is_empty() || query.len() > 4096 || query.contains('\0') {
+        return Err("Image search query is invalid".to_string());
+    }
+    let escaped_query = query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let search_pattern = format!("%{escaped_query}%");
 
     let rows = sqlx::query_as::<
         _,
@@ -359,7 +528,7 @@ pub async fn direct_imagine_search_images(
         WHERE namespace = 'direct_workbench'
           AND kind = 'generated_image'
           AND status != 'deleted'
-          AND (prompt LIKE ? OR tags LIKE ?)
+          AND (prompt LIKE ? ESCAPE '\' OR tags LIKE ? ESCAPE '\')
         ORDER BY created_at DESC
         LIMIT 100
         "#,
@@ -398,6 +567,7 @@ pub async fn direct_imagine_toggle_favorite(
     pool: State<'_, SqlitePool>,
     image_id: String,
 ) -> Result<bool, String> {
+    validate_image_id(&image_id)?;
     // Get current status
     let current: Option<(i32,)> =
         sqlx::query_as("SELECT is_favorite FROM direct_assets WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image' AND status != 'deleted'")
@@ -413,13 +583,16 @@ pub async fn direct_imagine_toggle_favorite(
         None => return Err("Image not found".to_string()),
     };
 
-    sqlx::query("UPDATE direct_assets SET is_favorite = ?, updated_at = ? WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image'")
+    let result = sqlx::query("UPDATE direct_assets SET is_favorite = ?, updated_at = ? WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image' AND status != 'deleted'")
         .bind(new_status)
         .bind(chrono::Utc::now().to_rfc3339())
         .bind(&image_id)
         .execute(pool.inner())
         .await
         .map_err(|e| format!("Failed to update favorite: {}", e))?;
+    if result.rows_affected() != 1 {
+        return Err("Image disappeared while updating favorite status".to_string());
+    }
 
     Ok(new_status == 1)
 }
@@ -428,30 +601,46 @@ pub async fn direct_imagine_toggle_favorite(
 #[tauri::command]
 #[specta::specta]
 pub async fn direct_imagine_delete_image(
-    _app: AppHandle,
     pool: State<'_, SqlitePool>,
+    file_store: State<'_, crate::file_store::FileStore>,
     image_id: String,
 ) -> Result<(), String> {
-    // Get file path first
+    validate_image_id(&image_id)?;
+    let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
     let row: Option<(String,)> =
-        sqlx::query_as("SELECT path FROM direct_assets WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image'")
+        sqlx::query_as("SELECT path FROM direct_assets WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image' AND status != 'deleted'")
             .bind(&image_id)
-            .fetch_optional(pool.inner())
+            .fetch_optional(&mut *transaction)
             .await
             .map_err(|e| format!("Failed to get image: {}", e))?;
 
     if let Some((file_path,)) = row {
-        // Delete file
-        let file_path_buf = std::path::Path::new(&file_path);
-        let _ = tokio::fs::remove_file(file_path_buf).await;
-
-        // Delete from database
         sqlx::query("UPDATE direct_assets SET status = 'deleted', updated_at = ? WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image'")
             .bind(chrono::Utc::now().to_rfc3339())
             .bind(&image_id)
-            .execute(pool.inner())
+            .execute(&mut *transaction)
             .await
             .map_err(|e| format!("Failed to delete from database: {}", e))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("Failed to commit image deletion: {error}"))?;
+
+        let still_referenced: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM direct_assets WHERE path = ? AND status != 'deleted')",
+        )
+        .bind(&file_path)
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|error| format!("Failed to validate image file ownership: {error}"))?;
+        if !still_referenced {
+            file_store
+                .delete_absolute(std::path::Path::new(&file_path))
+                .await
+                .map_err(|error| {
+                    format!("Image metadata was deleted, but its backing file remains: {error}")
+                })?;
+        }
     }
 
     Ok(())
@@ -486,4 +675,51 @@ pub async fn direct_imagine_get_stats(
         "favorites": favorites.0,
         "byProvider": by_provider.into_iter().map(|(p, c)| serde_json::json!({"provider": p, "count": c})).collect::<Vec<_>>()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloud_default_resolution_is_accepted() {
+        let params = ImagineParams {
+            prompt: "A test image".to_string(),
+            provider: "nano-banana".to_string(),
+            aspect_ratio: "1:1".to_string(),
+            resolution: Some("512".to_string()),
+            style_id: None,
+            style_prompt: None,
+            source_images: None,
+            model: None,
+            steps: None,
+        };
+        assert!(validate_imagine_params(&params).is_ok());
+    }
+
+    #[test]
+    fn resolution_is_the_long_edge() {
+        assert_eq!(parse_aspect_ratio("1:1", Some("1K")), (1_024, 1_024));
+        assert_eq!(parse_aspect_ratio("16:9", Some("2K")), (2_048, 1_152));
+        assert_eq!(parse_aspect_ratio("9:16", Some("2K")), (1_152, 2_048));
+        assert_eq!(parse_aspect_ratio("21:9", Some("4K")), (4_096, 1_755));
+    }
+
+    #[test]
+    fn reference_count_is_bounded() {
+        let mut params = ImagineParams {
+            prompt: "A test image".to_string(),
+            provider: "nano-banana".to_string(),
+            aspect_ratio: "1:1".to_string(),
+            resolution: Some("1K".to_string()),
+            style_id: None,
+            style_prompt: None,
+            source_images: Some(vec!["a".to_string(); MAX_IMAGINE_SOURCE_IMAGES + 1]),
+            model: None,
+            steps: None,
+        };
+        assert!(validate_imagine_params(&params).is_err());
+        params.source_images = Some(vec!["a".to_string(); MAX_IMAGINE_SOURCE_IMAGES]);
+        assert!(validate_imagine_params(&params).is_ok());
+    }
 }

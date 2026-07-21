@@ -13,11 +13,19 @@ use thinclaw_tools_core::{
 };
 use thinclaw_types::JobContext;
 
+use super::file::effective_base_dir;
+
 /// Maximum results for filename search.
 const MAX_FILENAME_RESULTS: usize = 100;
 
 /// Maximum depth for filename search.
 const MAX_SEARCH_DEPTH: usize = 10;
+
+/// Maximum directory entries inspected even when nothing matches.
+const MAX_VISITED_ENTRIES: usize = 10_000;
+
+/// Bound attacker-controlled case-folding and result echoing work.
+const MAX_PATTERN_BYTES: usize = 1024;
 
 /// Directories to skip during filename search.
 const SKIP_DIRS: &[&str] = &[
@@ -114,17 +122,6 @@ fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, Too
     Ok(resolved)
 }
 
-fn metadata_base_dir(ctx: &JobContext) -> Option<PathBuf> {
-    ctx.metadata
-        .get("tool_base_dir")
-        .and_then(|value| value.as_str())
-        .map(PathBuf::from)
-}
-
-fn effective_base_dir(ctx: &JobContext, configured: Option<&Path>) -> Option<PathBuf> {
-    metadata_base_dir(ctx).or_else(|| configured.map(Path::to_path_buf))
-}
-
 /// Enhanced file search tool combining filename and content search.
 #[derive(Debug, Default)]
 pub struct SearchFilesTool {
@@ -155,13 +152,15 @@ impl SearchFilesTool {
         };
 
         let mut results = Vec::new();
-        self.search_filenames_inner(
+        let mut visited_entries = 0_usize;
+        Self::search_filenames_inner(
             search_path,
             search_path,
             &pattern_lower,
             case_insensitive,
             0,
             &mut results,
+            &mut visited_entries,
         )
         .await?;
 
@@ -169,15 +168,18 @@ impl SearchFilesTool {
     }
 
     async fn search_filenames_inner(
-        &self,
         base: &Path,
         dir: &Path,
         pattern: &str,
         case_insensitive: bool,
         depth: usize,
         results: &mut Vec<serde_json::Value>,
+        visited_entries: &mut usize,
     ) -> Result<(), ToolError> {
-        if depth > MAX_SEARCH_DEPTH || results.len() >= MAX_FILENAME_RESULTS {
+        if depth > MAX_SEARCH_DEPTH
+            || results.len() >= MAX_FILENAME_RESULTS
+            || *visited_entries >= MAX_VISITED_ENTRIES
+        {
             return Ok(());
         }
 
@@ -190,20 +192,27 @@ impl SearchFilesTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read entry: {}", e)))?
         {
-            if results.len() >= MAX_FILENAME_RESULTS {
+            if results.len() >= MAX_FILENAME_RESULTS || *visited_entries >= MAX_VISITED_ENTRIES {
                 break;
             }
+            *visited_entries = visited_entries.saturating_add(1);
 
             let entry_path = entry.path();
-            let metadata = match entry.metadata().await {
-                Ok(m) => m,
+            let file_type = match entry.file_type().await {
+                Ok(file_type) => file_type,
                 Err(_) => continue,
             };
+            // Never recurse through or report symlinks/special files. Besides
+            // containment escapes, a symlink loop could consume the complete
+            // traversal budget before useful results are reached.
+            if file_type.is_symlink() {
+                continue;
+            }
 
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
 
-            if metadata.is_dir() {
+            if file_type.is_dir() {
                 // Skip hidden and known non-essential directories
                 if SKIP_DIRS.contains(&name_str.as_ref()) || name_str.starts_with('.') {
                     continue;
@@ -230,16 +239,17 @@ impl SearchFilesTool {
                 }
 
                 // Recurse into subdirectories
-                Box::pin(self.search_filenames_inner(
+                Box::pin(Self::search_filenames_inner(
                     base,
                     &entry_path,
                     pattern,
                     case_insensitive,
                     depth + 1,
                     results,
+                    visited_entries,
                 ))
                 .await?;
-            } else if metadata.is_file() {
+            } else if file_type.is_file() {
                 let name_compare = if case_insensitive {
                     name_str.to_lowercase()
                 } else {
@@ -257,7 +267,6 @@ impl SearchFilesTool {
                         "path": relative,
                         "name": name_str,
                         "type": "file",
-                        "size_bytes": metadata.len(),
                     }));
                 }
             }
@@ -357,6 +366,13 @@ impl Tool for SearchFilesTool {
         let start = std::time::Instant::now();
 
         let pattern = require_str(&params, "pattern")?;
+        if pattern.len() > MAX_PATTERN_BYTES {
+            return Err(ToolError::InvalidParameters(format!(
+                "Filename pattern is too large ({} bytes). Maximum is {} bytes.",
+                pattern.len(),
+                MAX_PATTERN_BYTES
+            )));
+        }
         let path_str = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         let case_insensitive = params
             .get("case_insensitive")
@@ -364,7 +380,7 @@ impl Tool for SearchFilesTool {
             .unwrap_or(true);
 
         // Resolve the search path
-        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref())?;
         let search_path = validate_path(path_str, base_dir.as_deref())?;
 
         if !search_path.is_dir() {
@@ -392,7 +408,7 @@ impl Tool for SearchFilesTool {
     }
 
     fn requires_sanitization(&self) -> bool {
-        false // Filename listing is safe
+        true // Filenames and directory names are attacker-controlled text.
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
@@ -531,5 +547,27 @@ mod tests {
         assert!(
             suggestions.is_empty() || suggestions.iter().any(|path| path.ends_with("config.toml"))
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_does_not_follow_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret-match.txt"), "secret").unwrap();
+        symlink(outside.path(), root.path().join("linked-outside")).unwrap();
+
+        let tool = SearchFilesTool::new().with_base_dir(root.path().to_path_buf());
+        let result = tool
+            .execute(
+                serde_json::json!({"pattern": "secret-match", "path": "."}),
+                &JobContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.result["results"].as_array().unwrap().is_empty());
     }
 }

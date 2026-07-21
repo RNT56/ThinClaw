@@ -6,14 +6,14 @@
 //! already display-only) may appear.
 
 use std::fs;
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fs4::FileExt;
 use serde::Serialize;
 
 const AUDIT_FILE_NAME: &str = "device-audit.jsonl";
+const MAX_AUDIT_RECORD_BYTES: usize = 64 * 1024;
+const MAX_AUDIT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceAuditError {
@@ -127,12 +127,13 @@ impl DeviceAuditLog {
         detail: Option<serde_json::Value>,
     ) -> Result<(), DeviceAuditError> {
         let path = self.path();
-        fs::create_dir_all(path.parent().expect("audit path always has a parent"))?;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
-        file.lock_exclusive()?;
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "device audit path has no parent directory",
+            )
+        })?;
+        fs::create_dir_all(parent)?;
 
         let line = AuditLine {
             at: now_iso(),
@@ -141,11 +142,16 @@ impl DeviceAuditLog {
             token_prefix,
             detail,
         };
-        let json = serde_json::to_string(&line)?;
-        writeln!(file, "{json}")?;
-        file.sync_all()?;
-
-        FileExt::unlock(&file)?;
+        let mut json = serde_json::to_vec(&line)?;
+        json.push(b'\n');
+        if json.len() > MAX_AUDIT_RECORD_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "device audit record exceeds the size limit",
+            )
+            .into());
+        }
+        thinclaw_platform::append_private_file_locked(&path, &json, MAX_AUDIT_FILE_BYTES)?;
         Ok(())
     }
 
@@ -283,5 +289,23 @@ mod tests {
         let lines = log.read_lines();
         let parsed: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
         assert_eq!(parsed["detail"]["path"], "/api/settings");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn record_rejects_planted_log_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, "unchanged").unwrap();
+        symlink(&target, dir.path().join(AUDIT_FILE_NAME)).unwrap();
+        let log = DeviceAuditLog::with_base_dir(dir.path().to_path_buf());
+
+        assert!(
+            log.record(DeviceAuditEvent::DevicePaired, Some("device"), None, None)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "unchanged");
     }
 }

@@ -60,14 +60,14 @@ impl PolicyRule {
         pattern: &str,
         severity: Severity,
         action: PolicyAction,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, regex::Error> {
+        Ok(Self {
             id: id.into(),
             description: description.into(),
             severity,
-            pattern: Regex::new(pattern).expect("Invalid policy regex"),
+            pattern: Regex::new(pattern)?,
             action,
-        }
+        })
     }
 
     /// Check if content matches this rule.
@@ -133,31 +133,40 @@ impl Default for Policy {
         // Add default rules
 
         // Block attempts to access system files
-        policy.add_rule(PolicyRule::new(
-            "system_file_access",
-            "Attempt to access system files",
-            r"(?i)(/etc/passwd|/etc/shadow|\.ssh/|\.aws/credentials)",
-            Severity::Critical,
-            PolicyAction::Block,
-        ));
+        policy.add_rule(
+            PolicyRule::new(
+                "system_file_access",
+                "Attempt to access system files",
+                r"(?i)(/etc/passwd|/etc/shadow|\.ssh/|\.aws/credentials)",
+                Severity::Critical,
+                PolicyAction::Block,
+            )
+            .expect("built-in system-file policy regex must compile"),
+        );
 
         // Block cryptocurrency private key patterns
-        policy.add_rule(PolicyRule::new(
-            "crypto_private_key",
-            "Potential cryptocurrency private key",
-            r"(?i)(private.?key|seed.?phrase|mnemonic).{0,20}[0-9a-f]{64}",
-            Severity::Critical,
-            PolicyAction::Block,
-        ));
+        policy.add_rule(
+            PolicyRule::new(
+                "crypto_private_key",
+                "Potential cryptocurrency private key",
+                r"(?i)(private.?key|seed.?phrase|mnemonic).{0,20}[0-9a-f]{64}",
+                Severity::Critical,
+                PolicyAction::Block,
+            )
+            .expect("built-in private-key policy regex must compile"),
+        );
 
         // Warn on SQL-like patterns
-        policy.add_rule(PolicyRule::new(
-            "sql_pattern",
-            "SQL-like pattern detected",
-            r"(?i)(DROP\s+TABLE|DELETE\s+FROM|INSERT\s+INTO|UPDATE\s+\w+\s+SET)",
-            Severity::Medium,
-            PolicyAction::Warn,
-        ));
+        policy.add_rule(
+            PolicyRule::new(
+                "sql_pattern",
+                "SQL-like pattern detected",
+                r"(?i)(DROP\s+TABLE|DELETE\s+FROM|INSERT\s+INTO|UPDATE\s+\w+\s+SET)",
+                Severity::Medium,
+                PolicyAction::Warn,
+            )
+            .expect("built-in SQL policy regex must compile"),
+        );
 
         // Block shell command injection patterns.
         // Match dangerous command sequences whether or not they are prefixed by
@@ -166,40 +175,52 @@ impl Default for Policy {
         // false positives on benign mentions: `rm -rf` only triggers when
         // targeting a root/home/glob path, and the pipe-to-shell case requires an
         // actual `| sh`/`| bash`.
-        policy.add_rule(PolicyRule::new(
-            "shell_injection",
-            "Potential shell command injection",
-            r"(?i)(\brm\s+-rf\s+[/~$*]|\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba)?sh\b)",
-            Severity::Critical,
-            PolicyAction::Block,
-        ));
+        policy.add_rule(
+            PolicyRule::new(
+                "shell_injection",
+                "Potential shell command injection",
+                r"(?i)(\brm\s+-rf\s+[/~$*]|\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba)?sh\b)",
+                Severity::Critical,
+                PolicyAction::Block,
+            )
+            .expect("built-in shell policy regex must compile"),
+        );
 
         // Warn on excessive URLs
-        policy.add_rule(PolicyRule::new(
-            "excessive_urls",
-            "Excessive number of URLs detected",
-            r"(https?://[^\s]+\s*){10,}",
-            Severity::Low,
-            PolicyAction::Warn,
-        ));
+        policy.add_rule(
+            PolicyRule::new(
+                "excessive_urls",
+                "Excessive number of URLs detected",
+                r"(https?://[^\s]+\s*){10,}",
+                Severity::Low,
+                PolicyAction::Warn,
+            )
+            .expect("built-in URL policy regex must compile"),
+        );
 
         // Block encoded payloads that look like exploits
-        policy.add_rule(PolicyRule::new(
-            "encoded_exploit",
-            "Potential encoded exploit payload",
-            r"(?i)(base64_decode|eval\s*\(\s*base64|atob\s*\()",
-            Severity::High,
-            PolicyAction::Sanitize,
-        ));
+        policy.add_rule(
+            PolicyRule::new(
+                "encoded_exploit",
+                "Potential encoded exploit payload",
+                r"(?i)(base64_decode|eval\s*\(\s*base64|atob\s*\()",
+                Severity::High,
+                PolicyAction::Sanitize,
+            )
+            .expect("built-in encoded-payload policy regex must compile"),
+        );
 
         // Warn on very long strings without spaces (potential obfuscation)
-        policy.add_rule(PolicyRule::new(
-            "obfuscated_string",
-            "Potential obfuscated content",
-            r"[^\s]{500,}",
-            Severity::Medium,
-            PolicyAction::Warn,
-        ));
+        policy.add_rule(
+            PolicyRule::new(
+                "obfuscated_string",
+                "Potential obfuscated content",
+                r"[^\s]{500,}",
+                Severity::Medium,
+                PolicyAction::Warn,
+            )
+            .expect("built-in obfuscation policy regex must compile"),
+        );
 
         policy
     }
@@ -263,5 +284,12 @@ mod tests {
         assert!(Severity::Critical > Severity::High);
         assert!(Severity::High > Severity::Medium);
         assert!(Severity::Medium > Severity::Low);
+    }
+
+    #[test]
+    fn custom_policy_rejects_invalid_regex_without_panicking() {
+        assert!(
+            PolicyRule::new("invalid", "invalid", "(", Severity::Low, PolicyAction::Warn,).is_err()
+        );
     }
 }

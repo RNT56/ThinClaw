@@ -20,7 +20,7 @@ mod skill_tests {
             description = "A test skill"
             version = "1.0.0"
             tools_used = []
-            script_file = "test.rhai"
+            script_file = "test_skill.rhai"
             [[parameters]]
             name = "arg1"
             description = "An argument"
@@ -31,7 +31,7 @@ mod skill_tests {
 
         let skill_path = built_in_dir.path().join("test_skill.skill.toml");
         fs::write(&skill_path, manifest).unwrap();
-        fs::write(built_in_dir.path().join("test.rhai"), script).unwrap();
+        fs::write(built_in_dir.path().join("test_skill.rhai"), script).unwrap();
 
         // 2. List skills
         let skills = manager.list_skills().unwrap();
@@ -48,7 +48,7 @@ mod skill_tests {
         let prepared = manager.prepare_script("test_skill", &params).unwrap();
 
         println!("Prepared script:\n{}", prepared);
-        assert!(prepared.contains(r#"const arg1 = "World";"#));
+        assert!(prepared.contains(r#"const arg1 = parse_json("\"World\"");"#));
         assert!(prepared.contains(r#"print("Hello " + arg1);"#));
     }
 }

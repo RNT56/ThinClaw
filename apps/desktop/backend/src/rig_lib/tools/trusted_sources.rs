@@ -73,7 +73,15 @@ pub const METALS: &[&str] = &[
 ];
 
 pub fn is_trusted(url: &str) -> bool {
-    let lower_url = url.to_lowercase();
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
 
     // Check all lists
     NEWS.iter()
@@ -82,5 +90,22 @@ pub fn is_trusted(url: &str) -> bool {
         .chain(POLITICS.iter())
         .chain(CRYPTO.iter())
         .chain(METALS.iter())
-        .any(|domain| lower_url.contains(domain))
+        .any(|entry| {
+            let (domain, path_prefix) = entry.split_once('/').unwrap_or((entry, ""));
+            (host == domain || host.ends_with(&format!(".{domain}")))
+                && (path_prefix.is_empty()
+                    || url.path().trim_start_matches('/').starts_with(path_prefix))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_trusted;
+
+    #[test]
+    fn trust_requires_a_real_domain_boundary() {
+        assert!(is_trusted("https://www.reuters.com/world"));
+        assert!(!is_trusted("https://reuters.com.evil.example/world"));
+        assert!(!is_trusted("https://evilreuters.com/world"));
+    }
 }

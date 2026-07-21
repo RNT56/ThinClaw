@@ -12,6 +12,13 @@ pub use thinclaw_agent::learning_provider_types::{
 #[async_trait]
 pub trait MemoryProvider: Send + Sync {
     fn name(&self) -> &'static str;
+    /// Whether every recall and write is constrained by the opaque subject
+    /// ID supplied by ThinClaw. The secure default is `false`: newly added
+    /// adapters cannot join the prompt/export path until they explicitly
+    /// implement subject isolation.
+    fn supports_strict_subject_scoping(&self) -> bool {
+        false
+    }
     async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus;
     async fn system_prompt_block(
         &self,

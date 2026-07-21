@@ -24,6 +24,10 @@
         {
           "host": "smba.trafficmanager.net",
           "path_prefix": "/"
+        },
+        {
+          "host": "*.botframework.com",
+          "path_prefix": "/"
         }
       ],
       "credentials": {

@@ -2,10 +2,12 @@
 //! deriving the per-extension setup schema, enriching the domain setup-status,
 //! live validation, and saving setup secrets (with hot-activation).
 
-use std::time::Duration;
-
 use crate::extensions::{ExtensionError, ExtensionKind, InstalledExtension};
 use crate::secrets::CreateSecretParams;
+use crate::setup::validation::{
+    ValidationCredential, ValidationEndpointGrant, ensure_endpoint_is_granted,
+    validate_extension_credential,
+};
 use crate::tools::wasm::WasmToolOAuthFlow;
 use thinclaw_types::{
     IntegrationSetupStatus, SetupAction, SetupAuthMode, SetupSecretDescriptor, SetupState,
@@ -13,7 +15,8 @@ use thinclaw_types::{
 
 use super::ExtensionManager;
 use super::core::{
-    AuthRequestContext, ExtensionSetupSchema, SetupResult, setup_auth_mode_from_schema,
+    AuthRequestContext, ExtensionSetupSchema, SetupResult, lock_wasm_package,
+    setup_auth_mode_from_schema,
 };
 use crate::extensions::{ActivateResult, AuthResult};
 
@@ -27,76 +30,142 @@ impl ExtensionManager {
             ExtensionError::AuthFailed("Invalid or expired OAuth state".to_string())
         })?;
 
-        if pending.kind != ExtensionKind::WasmTool {
-            return Err(ExtensionError::AuthFailed(
-                "OAuth callback is only supported for WASM tools".to_string(),
-            ));
-        }
+        match pending.kind {
+            ExtensionKind::WasmTool => {
+                let auth = self
+                    .load_wasm_tool_auth(&pending.name)
+                    .await?
+                    .ok_or_else(|| {
+                        ExtensionError::AuthFailed("Tool has no OAuth configuration".to_string())
+                    })?;
+                let redirect_uri = pending.redirect_uri.clone().ok_or_else(|| {
+                    ExtensionError::AuthFailed("Missing callback redirect URI".to_string())
+                })?;
 
-        let auth = self
-            .load_wasm_tool_auth(&pending.name)
-            .await?
-            .ok_or_else(|| {
-                ExtensionError::AuthFailed("Tool has no OAuth configuration".to_string())
-            })?;
-        let redirect_uri = pending.redirect_uri.clone().ok_or_else(|| {
-            ExtensionError::AuthFailed("Missing callback redirect URI".to_string())
-        })?;
+                let flow = WasmToolOAuthFlow::new(
+                    self.secrets.as_ref(),
+                    &self.user_id,
+                    &self.wasm_tools_dir,
+                );
+                let token = flow
+                    .exchange_code(&auth, &redirect_uri, code, pending.code_verifier.as_deref())
+                    .await
+                    .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+                flow.store_token_exchange(&auth, &token)
+                    .await
+                    .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
 
-        let flow =
-            WasmToolOAuthFlow::new(self.secrets.as_ref(), &self.user_id, &self.wasm_tools_dir);
-        let token = flow
-            .exchange_code(&auth, &redirect_uri, code, pending.code_verifier.as_deref())
-            .await
-            .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-        flow.store_token_exchange(&auth, &token)
-            .await
-            .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+                let auth_check = flow
+                    .check_auth_status(&auth)
+                    .await
+                    .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+                let mut auth_result = self.auth_result(
+                    &pending.name,
+                    ExtensionKind::WasmTool,
+                    auth_check.auth_mode.as_str(),
+                    auth_check.auth_status.as_str(),
+                );
+                Self::apply_auth_check(&mut auth_result, &auth_check);
 
-        let auth_check = flow
-            .check_auth_status(&auth)
-            .await
-            .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-        let mut auth_result = self.auth_result(
-            &pending.name,
-            ExtensionKind::WasmTool,
-            auth_check.auth_mode.as_str(),
-            auth_check.auth_status.as_str(),
-        );
-        Self::apply_auth_check(&mut auth_result, &auth_check);
-
-        let activate_result = match self.activate_wasm_tool(&pending.name).await {
-            Ok(result) => result,
-            Err(error) => {
+                let activate_result = match self.activate_wasm_tool(&pending.name).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.broadcast_auth_completed(
+                            &pending.name,
+                            false,
+                            format!(
+                                "{} connected, but activation failed: {}",
+                                pending.name, error
+                            ),
+                            Some(&auth_result),
+                            pending.thread_id.clone(),
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                };
                 self.broadcast_auth_completed(
                     &pending.name,
-                    false,
-                    format!(
-                        "{} connected, but activation failed: {}",
-                        pending.name, error
-                    ),
+                    true,
+                    format!("{} connected and activated.", pending.name),
                     Some(&auth_result),
                     pending.thread_id.clone(),
                 )
                 .await;
-                return Err(error);
-            }
-        };
-        self.broadcast_auth_completed(
-            &pending.name,
-            true,
-            format!("{} connected and activated.", pending.name),
-            Some(&auth_result),
-            pending.thread_id.clone(),
-        )
-        .await;
 
-        Ok((
-            pending.name,
-            pending.thread_id,
-            auth_result,
-            activate_result,
-        ))
+                Ok((
+                    pending.name,
+                    pending.thread_id,
+                    auth_result,
+                    activate_result,
+                ))
+            }
+            ExtensionKind::McpServer => {
+                let _operation = self.mcp_operation_lock.lock().await;
+                let redirect_uri = pending.redirect_uri.as_deref().ok_or_else(|| {
+                    ExtensionError::AuthFailed("Missing callback redirect URI".to_string())
+                })?;
+                let prepared = pending.mcp_authorization.as_ref().ok_or_else(|| {
+                    ExtensionError::AuthFailed("Missing prepared MCP OAuth transaction".to_string())
+                })?;
+                let server = self
+                    .get_mcp_server(&pending.name)
+                    .await
+                    .map_err(|error| ExtensionError::AuthFailed(error.to_string()))?;
+                crate::tools::mcp::auth::complete_mcp_authorization(
+                    &server,
+                    &self.secrets,
+                    &self.user_id,
+                    prepared,
+                    code,
+                    redirect_uri,
+                )
+                .await
+                .map_err(|error| ExtensionError::AuthFailed(error.to_string()))?;
+
+                self.discard_mcp_client_unlocked(&pending.name).await;
+                let auth_result = self.auth_result(
+                    &pending.name,
+                    ExtensionKind::McpServer,
+                    "oauth",
+                    "authenticated",
+                );
+                let activate_result = match self.activate_mcp_unlocked(&pending.name).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.broadcast_auth_completed(
+                            &pending.name,
+                            false,
+                            format!(
+                                "{} connected, but activation failed: {}",
+                                pending.name, error
+                            ),
+                            Some(&auth_result),
+                            pending.thread_id.clone(),
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                };
+                self.broadcast_auth_completed(
+                    &pending.name,
+                    true,
+                    format!("{} connected and activated.", pending.name),
+                    Some(&auth_result),
+                    pending.thread_id.clone(),
+                )
+                .await;
+                Ok((
+                    pending.name,
+                    pending.thread_id,
+                    auth_result,
+                    activate_result,
+                ))
+            }
+            _ => Err(ExtensionError::AuthFailed(
+                "OAuth callback is not supported for this extension kind".to_string(),
+            )),
+        }
     }
 
     /// Get the setup/auth schema for an extension.
@@ -108,10 +177,8 @@ impl ExtensionManager {
         let kind = self.determine_installed_kind(name).await?;
         match kind {
             ExtensionKind::WasmChannel => {
-                let cap_path = self
-                    .wasm_channels_dir
-                    .join(format!("{}.capabilities.json", name));
-                if !cap_path.exists() {
+                let package = lock_wasm_package(&self.wasm_channels_dir, name).await?;
+                let Some(cap_bytes) = package.capabilities_bytes.as_deref() else {
                     return Ok(ExtensionSetupSchema {
                         mode: "none".to_string(),
                         auth_status: "no_auth_required".to_string(),
@@ -123,12 +190,9 @@ impl ExtensionManager {
                         shared_auth_provider: None,
                         missing_scopes: Vec::new(),
                     });
-                }
-                let cap_bytes = tokio::fs::read(&cap_path)
-                    .await
-                    .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                };
                 let cap_file =
-                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
+                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(cap_bytes)
                         .map_err(|e| ExtensionError::Other(e.to_string()))?;
 
                 let mut fields = Vec::new();
@@ -137,7 +201,7 @@ impl ExtensionManager {
                         .secrets
                         .exists(&self.user_id, &secret.name)
                         .await
-                        .unwrap_or(false);
+                        .map_err(|error| ExtensionError::AuthFailed(error.to_string()))?;
                     fields.push(crate::channels::web::types::SecretFieldInfo {
                         name: secret.name.clone(),
                         prompt: secret.prompt.clone(),
@@ -146,7 +210,9 @@ impl ExtensionManager {
                         auto_generate: secret.auto_generate.is_some(),
                     });
                 }
-                let (authenticated, _) = self.check_channel_auth_status(name).await;
+                let (authenticated, _) = self
+                    .check_channel_manifest_auth_status(Some(&cap_file))
+                    .await?;
                 Ok(ExtensionSetupSchema {
                     mode: "secrets".to_string(),
                     auth_status: if authenticated {
@@ -158,7 +224,11 @@ impl ExtensionManager {
                     auth_url: None,
                     instructions: None,
                     setup_url: None,
-                    validation_url: cap_file.setup.validation_endpoint.clone(),
+                    validation_url: cap_file
+                        .setup
+                        .validation_endpoint
+                        .as_ref()
+                        .map(|endpoint| endpoint.url().to_string()),
                     shared_auth_provider: None,
                     missing_scopes: Vec::new(),
                 })
@@ -291,84 +361,255 @@ impl ExtensionManager {
     pub async fn validate_setup(
         &self,
         name: &str,
-        context: AuthRequestContext,
+        _context: AuthRequestContext,
     ) -> Result<String, ExtensionError> {
-        let schema = self.get_setup_schema(name, context).await?;
-        let missing: Vec<String> = schema
-            .fields
-            .iter()
-            .filter(|field| !field.optional && !field.provided)
-            .map(|field| field.name.clone())
-            .collect();
-        if !missing.is_empty() {
-            return Err(ExtensionError::AuthFailed(format!(
-                "Missing required setup secrets for '{}': {}",
-                name,
-                missing.join(", ")
-            )));
-        }
-
-        let Some(mut validation_url) = schema.validation_url.clone() else {
-            return Ok(format!(
-                "Setup metadata for '{}' is complete; no live validation endpoint is declared.",
-                name
-            ));
-        };
-
-        for field in &schema.fields {
-            if !validation_url.contains(&format!("{{{}}}", field.name))
-                && !validation_url.contains(&format!("{{{{{}}}}}", field.name))
-            {
-                continue;
-            }
-            let value = self
-                .secrets
-                .get_for_injection(
-                    &self.user_id,
-                    &field.name,
-                    crate::secrets::SecretAccessContext::new(
-                        "extensions.manager",
-                        "extension_setup_validation",
-                    ),
+        match self.determine_installed_kind(name).await? {
+            ExtensionKind::WasmChannel => {
+                let package = lock_wasm_package(&self.wasm_channels_dir, name).await?;
+                let bytes = package.capabilities_bytes.as_deref().ok_or_else(|| {
+                    ExtensionError::Other(format!("Capabilities file not found for '{}'", name))
+                })?;
+                let capabilities =
+                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(bytes)
+                        .map_err(|error| ExtensionError::Other(error.to_string()))?;
+                let mut missing = Vec::new();
+                for required in &capabilities.setup.required_secrets {
+                    if !required.optional
+                        && !self
+                            .secrets
+                            .exists(&self.user_id, &required.name)
+                            .await
+                            .map_err(|error| ExtensionError::AuthFailed(error.to_string()))?
+                    {
+                        missing.push(required.name.clone());
+                    }
+                }
+                if !missing.is_empty() {
+                    return Err(ExtensionError::AuthFailed(format!(
+                        "Missing required setup secrets for '{}': {}",
+                        name,
+                        missing.join(", ")
+                    )));
+                }
+                let Some(endpoint) = capabilities.setup.validation_endpoint.as_ref() else {
+                    return Ok(format!(
+                        "Setup metadata for '{}' is complete; no live validation endpoint is declared.",
+                        name
+                    ));
+                };
+                let runtime = capabilities.to_capabilities();
+                let grants = runtime
+                    .tool_capabilities
+                    .http
+                    .as_ref()
+                    .map(|http| {
+                        http.allowlist
+                            .iter()
+                            .map(|grant| ValidationEndpointGrant {
+                                host: grant.host.clone(),
+                                path_prefix: grant.path_prefix.clone(),
+                                methods: grant.methods.clone(),
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let request = endpoint.request();
+                let method = request.map_or("GET", |request| request.method.as_str());
+                let expected_status = request.map_or(200, |request| request.success_status);
+                let secret = if let Some(secret_name) =
+                    request.and_then(|request| request.secret_name.as_deref())
+                {
+                    if !capabilities
+                        .setup
+                        .required_secrets
+                        .iter()
+                        .any(|required| required.name == secret_name)
+                    {
+                        return Err(ExtensionError::AuthFailed(
+                            "Validation credential is not declared as a setup secret".to_string(),
+                        ));
+                    }
+                    Some(
+                        self.secrets
+                            .get_for_injection(
+                                &self.user_id,
+                                secret_name,
+                                crate::secrets::SecretAccessContext::new(
+                                    "extensions.manager",
+                                    "extension_setup_validation",
+                                ),
+                            )
+                            .await
+                            .map_err(|error| ExtensionError::AuthFailed(error.to_string()))?,
+                    )
+                } else {
+                    None
+                };
+                let credential = match (
+                    request.and_then(|request| request.credential.as_ref()),
+                    secret.as_ref(),
+                ) {
+                    (None, None) => ValidationCredential::None,
+                    (
+                        None | Some(crate::channels::wasm::CredentialLocationSchema::Bearer),
+                        Some(secret),
+                    ) => ValidationCredential::Bearer(secret.expose()),
+                    (
+                        Some(crate::channels::wasm::CredentialLocationSchema::Basic { username }),
+                        Some(secret),
+                    ) => ValidationCredential::Basic {
+                        username,
+                        password: secret.expose(),
+                    },
+                    (
+                        Some(crate::channels::wasm::CredentialLocationSchema::Header {
+                            name,
+                            prefix,
+                        }),
+                        Some(secret),
+                    ) => ValidationCredential::Header {
+                        name,
+                        prefix: prefix.as_deref(),
+                        value: secret.expose(),
+                    },
+                    (
+                        Some(
+                            crate::channels::wasm::CredentialLocationSchema::QueryParam { .. }
+                            | crate::channels::wasm::CredentialLocationSchema::UrlPath { .. }
+                            | crate::channels::wasm::CredentialLocationSchema::UrlBase { .. }
+                            | crate::channels::wasm::CredentialLocationSchema::Body { .. },
+                        ),
+                        Some(_),
+                    ) => {
+                        return Err(ExtensionError::AuthFailed(
+                            "Validation credentials may not be placed in URLs".to_string(),
+                        ));
+                    }
+                    (Some(_), None) => {
+                        return Err(ExtensionError::AuthFailed(
+                            "Validation credential location requires a secret_name".to_string(),
+                        ));
+                    }
+                };
+                validate_extension_credential(
+                    endpoint.url(),
+                    method,
+                    expected_status,
+                    &grants,
+                    credential,
                 )
                 .await
-                .map_err(|e| {
-                    ExtensionError::AuthFailed(format!(
-                        "Unable to read setup secret '{}': {}",
-                        field.name, e
-                    ))
+                .map_err(|error| ExtensionError::AuthFailed(error.to_string()))?;
+            }
+            ExtensionKind::WasmTool => {
+                let package = lock_wasm_package(&self.wasm_tools_dir, name).await?;
+                let bytes = package.capabilities_bytes.as_deref().ok_or_else(|| {
+                    ExtensionError::Other(format!("Capabilities file not found for '{}'", name))
                 })?;
-            validation_url = validation_url
-                .replace(&format!("{{{}}}", field.name), value.expose())
-                .replace(&format!("{{{{{}}}}}", field.name), value.expose());
+                let capabilities = crate::tools::wasm::CapabilitiesFile::from_bytes(bytes)
+                    .map_err(|error| ExtensionError::Other(error.to_string()))?;
+                let auth = capabilities.auth.as_ref().ok_or_else(|| {
+                    ExtensionError::AuthFailed("Tool has no authentication schema".to_string())
+                })?;
+                let Some(endpoint) = auth.validation_endpoint.as_ref() else {
+                    return Ok(format!(
+                        "Setup metadata for '{}' is complete; no live validation endpoint is declared.",
+                        name
+                    ));
+                };
+                let secret = self
+                    .secrets
+                    .get_for_injection(
+                        &self.user_id,
+                        &auth.secret_name,
+                        crate::secrets::SecretAccessContext::new(
+                            "extensions.manager",
+                            "extension_setup_validation",
+                        ),
+                    )
+                    .await
+                    .map_err(|error| ExtensionError::AuthFailed(error.to_string()))?;
+                let runtime = capabilities.to_capabilities();
+                let http = runtime.http.as_ref().ok_or_else(|| {
+                    ExtensionError::AuthFailed(
+                        "Validation endpoint has no declared HTTP capability".to_string(),
+                    )
+                })?;
+                let grants = http
+                    .allowlist
+                    .iter()
+                    .map(|grant| ValidationEndpointGrant {
+                        host: grant.host.clone(),
+                        path_prefix: grant.path_prefix.clone(),
+                        methods: grant.methods.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let credential = if let Some(mapping) = http.credentials.get(&auth.secret_name) {
+                    if !mapping.host_patterns.is_empty() {
+                        let credential_grants = mapping
+                            .host_patterns
+                            .iter()
+                            .map(|host| ValidationEndpointGrant {
+                                host: host.clone(),
+                                path_prefix: None,
+                                methods: vec![endpoint.method.clone()],
+                            })
+                            .collect::<Vec<_>>();
+                        ensure_endpoint_is_granted(
+                            &endpoint.url,
+                            &endpoint.method,
+                            &credential_grants,
+                        )
+                        .map_err(|error| ExtensionError::AuthFailed(error.to_string()))?;
+                    }
+                    match &mapping.location {
+                        crate::secrets::CredentialLocation::AuthorizationBearer => {
+                            ValidationCredential::Bearer(secret.expose())
+                        }
+                        crate::secrets::CredentialLocation::AuthorizationBasic { username } => {
+                            ValidationCredential::Basic {
+                                username,
+                                password: secret.expose(),
+                            }
+                        }
+                        crate::secrets::CredentialLocation::Header { name, prefix } => {
+                            ValidationCredential::Header {
+                                name,
+                                prefix: prefix.as_deref(),
+                                value: secret.expose(),
+                            }
+                        }
+                        crate::secrets::CredentialLocation::QueryParam { .. }
+                        | crate::secrets::CredentialLocation::UrlPath { .. }
+                        | crate::secrets::CredentialLocation::UrlBase { .. }
+                        | crate::secrets::CredentialLocation::Body { .. } => {
+                            return Err(ExtensionError::AuthFailed(
+                                "Validation credentials may not be placed in URLs".to_string(),
+                            ));
+                        }
+                    }
+                } else {
+                    ValidationCredential::Bearer(secret.expose())
+                };
+                validate_extension_credential(
+                    &endpoint.url,
+                    &endpoint.method,
+                    endpoint.success_status,
+                    &grants,
+                    credential,
+                )
+                .await
+                .map_err(|error| ExtensionError::AuthFailed(error.to_string()))?;
+            }
+            _ => {
+                return Ok(format!(
+                    "Setup metadata for '{}' is complete; no live validation endpoint is declared.",
+                    name
+                ));
+            }
         }
 
-        let parsed = url::Url::parse(&validation_url)
-            .map_err(|e| ExtensionError::Other(format!("Invalid validation URL: {e}")))?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(ExtensionError::Other(
-                "Validation URL must use http or https".to_string(),
-            ));
-        }
-
-        let response = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| ExtensionError::Other(e.to_string()))?
-            .get(parsed)
-            .send()
-            .await
-            .map_err(|e| ExtensionError::Other(format!("Validation request failed: {e}")))?;
-
-        if response.status().is_success() {
-            Ok(format!("Setup validation passed for '{}'.", name))
-        } else {
-            Err(ExtensionError::AuthFailed(format!(
-                "Setup validation failed for '{}': HTTP {}",
-                name,
-                response.status()
-            )))
-        }
+        Ok(format!("Setup validation passed for '{}'.", name))
     }
 
     /// Save setup secrets for an extension, validating names against the capabilities schema.
@@ -431,19 +672,11 @@ impl ExtensionManager {
             ));
         }
 
-        let cap_path = self
-            .wasm_channels_dir
-            .join(format!("{}.capabilities.json", name));
-        if !cap_path.exists() {
-            return Err(ExtensionError::Other(format!(
-                "Capabilities file not found for '{}'",
-                name
-            )));
-        }
-        let cap_bytes = tokio::fs::read(&cap_path)
-            .await
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
-        let cap_file = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
+        let package = lock_wasm_package(&self.wasm_channels_dir, name).await?;
+        let cap_bytes = package.capabilities_bytes.as_deref().ok_or_else(|| {
+            ExtensionError::Other(format!("Capabilities file not found for '{}'", name))
+        })?;
+        let cap_file = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(cap_bytes)
             .map_err(|e| ExtensionError::Other(e.to_string()))?;
 
         // Build allowed secret names from capabilities
@@ -483,7 +716,7 @@ impl ExtensionManager {
                     .secrets
                     .exists(&self.user_id, &secret_def.name)
                     .await
-                    .unwrap_or(false);
+                    .map_err(|error| ExtensionError::AuthFailed(error.to_string()))?;
                 if !already_provided && !already_stored {
                     use rand::Rng;
                     let mut bytes = vec![0u8; auto_gen.length];
@@ -503,6 +736,8 @@ impl ExtensionManager {
                 }
             }
         }
+
+        drop(package);
 
         // Try to hot-activate the channel now that secrets are saved
         match self.activate_wasm_channel(name).await {

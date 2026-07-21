@@ -8031,6 +8031,7 @@ dependencies = [
  "insta",
  "jsonschema",
  "jsonwebtoken",
+ "libc",
  "libloading",
  "libsql",
  "lru 0.18.0",
@@ -8059,10 +8060,12 @@ dependencies = [
  "secrecy",
  "secret-service",
  "security-framework",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.11.0",
+ "shlex",
  "subtle",
  "sysinfo",
  "tar",
@@ -8119,6 +8122,7 @@ dependencies = [
  "wasmtime-wasi",
  "windows-service",
  "windows-sys 0.61.2",
+ "x509-parser",
  "zbus",
 ]
 
@@ -8156,6 +8160,7 @@ dependencies = [
  "thinclaw-platform",
  "thinclaw-safety",
  "thinclaw-soul",
+ "thinclaw-tools",
  "thinclaw-tools-core",
  "thinclaw-types",
  "thinclaw-workspace",
@@ -8206,6 +8211,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "jsonwebtoken",
+ "libc",
  "lru 0.18.0",
  "nostr-sdk",
  "rand 0.10.2",
@@ -8263,6 +8269,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thinclaw-gateway",
+ "thinclaw-types",
  "thiserror 2.0.18",
  "tokio",
  "uuid",
@@ -8293,6 +8300,7 @@ dependencies = [
  "thinclaw-workspace",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -8300,6 +8308,8 @@ name = "thinclaw-context"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "tempfile",
+ "thinclaw-platform",
  "thinclaw-types",
 ]
 
@@ -8309,6 +8319,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "chrono-tz",
  "deadpool-postgres",
  "libsql",
  "pgvector",
@@ -8359,6 +8370,7 @@ dependencies = [
  "futures",
  "hex",
  "ipnet",
+ "libc",
  "rand 0.10.2",
  "serde",
  "serde_json",
@@ -8415,9 +8427,9 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "bytes",
  "chrono",
  "futures",
- "hex",
  "rand 0.10.2",
  "regex",
  "reqwest 0.12.28",
@@ -8427,11 +8439,11 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "thinclaw-config",
  "thinclaw-experiments",
  "thinclaw-llm-core",
  "thinclaw-settings",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "tokio",
  "tracing",
@@ -8462,6 +8474,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "hex",
+ "libc",
  "mime_guess",
  "pdf-extract",
  "regex",
@@ -8469,11 +8482,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "thinclaw-platform",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite 0.29.0",
  "tracing",
  "url",
  "uuid",
@@ -8487,9 +8501,17 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dirs",
+ "fs4",
  "iana-time-zone",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8497,6 +8519,8 @@ name = "thinclaw-portability"
 version = "0.1.0"
 dependencies = [
  "aead 0.5.2",
+ "cap-fs-ext",
+ "cap-std",
  "chacha20poly1305",
  "flate2",
  "rand 0.10.2",
@@ -8507,6 +8531,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -8544,6 +8569,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "thiserror 2.0.18",
  "tokio",
@@ -8617,6 +8643,7 @@ dependencies = [
  "futures",
  "hex",
  "html-to-markdown-rs",
+ "libc",
  "libsql",
  "mime_guess",
  "nostr-sdk",
@@ -8716,6 +8743,7 @@ dependencies = [
  "thinclaw-platform",
  "thinclaw-safety",
  "thinclaw-soul",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "thiserror 2.0.18",
  "tokio",
@@ -9236,6 +9264,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper 1.0.2",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",

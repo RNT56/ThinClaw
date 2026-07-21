@@ -38,6 +38,8 @@ pub async fn mutate_thread_runtime<F>(
 where
     F: FnOnce(&mut ThreadRuntimeState),
 {
+    let _mutation_guard =
+        thinclaw_agent::thread_runtime::acquire_runtime_mutation_lock(thread_id).await;
     let mut runtime = load_thread_runtime(store, thread_id)
         .await?
         .unwrap_or_default();

@@ -347,7 +347,8 @@ pub async fn skills_install_handler(
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     } else if let Some(ref catalog) = state.skill_catalog {
-        let url = crate::skills::catalog::skill_download_url(catalog.registry_url(), &req.name);
+        let url = crate::skills::catalog::skill_download_url(catalog.registry_url(), &req.name)
+            .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
         crate::tools::builtin::skill_tools::fetch_skill_content(&url)
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
@@ -382,7 +383,11 @@ pub async fn skills_install_handler(
             // If any step fails, fall through — the install will fail with
             // AlreadyExists, which is the correct behavior.
             if let Ok(path) = guard.validate_remove(&skill_name_from_parse) {
-                let _ = crate::skills::registry::SkillRegistry::delete_skill_files(&path).await;
+                let _ = crate::skills::registry::SkillRegistry::delete_skill_files(
+                    &path,
+                    &skill_name_from_parse,
+                )
+                .await;
                 let _ = guard.commit_remove(&skill_name_from_parse);
                 tracing::info!(
                     skill = %skill_name_from_parse,
@@ -419,8 +424,11 @@ pub async fn skills_install_handler(
                     skill = %skill_name,
                     "Cleaning up orphaned skill files after failed commit"
                 );
-                let _ =
-                    crate::skills::registry::SkillRegistry::delete_skill_files(&orphan_dir).await;
+                let _ = crate::skills::registry::SkillRegistry::delete_skill_files(
+                    &orphan_dir,
+                    &skill_name,
+                )
+                .await;
             }
             Ok(Json(skill_action_error_response(e.to_string())))
         }
@@ -454,7 +462,7 @@ pub async fn skills_remove_handler(
         .validate_remove(&name)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path)
+    crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path, &name)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

@@ -3,7 +3,7 @@ use rig::completion::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{error, info};
+use tracing::info;
 
 #[derive(Clone)]
 pub struct LlamaProvider {
@@ -11,16 +11,121 @@ pub struct LlamaProvider {
     api_key: String,
     model: String,
     model_family: String,
+    is_local: bool,
+    client: Option<reqwest::Client>,
+    streaming_client: Option<reqwest::Client>,
+    configuration_error: Option<String>,
 }
 
 impl LlamaProvider {
     pub fn new(base_url: &str, api_key: &str, model: &str, model_family: &str) -> Self {
+        let configuration = Self::validate_configuration(base_url, api_key, model);
+        let (base_url, is_local, mut configuration_error) = match configuration {
+            Ok(configuration) => (configuration.0, configuration.1, None),
+            Err(error) => (String::new(), false, Some(error)),
+        };
+        let client = if configuration_error.is_none() {
+            match crate::rig_lib::http::client(is_local, false) {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    configuration_error = Some(error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let streaming_client = if configuration_error.is_none() {
+            match crate::rig_lib::http::client(is_local, true) {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    configuration_error = Some(error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Self {
-            base_url: base_url.to_string(),
+            base_url,
             api_key: api_key.to_string(),
             model: model.to_string(),
             model_family: model_family.to_string(),
+            is_local,
+            client,
+            streaming_client,
+            configuration_error,
         }
+    }
+
+    fn validate_configuration(
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+    ) -> Result<(String, bool), String> {
+        if base_url.is_empty() || base_url.len() > 4_096 || base_url.chars().any(char::is_control) {
+            return Err("The LLM endpoint is missing or invalid".to_string());
+        }
+        let url = reqwest::Url::parse(base_url)
+            .map_err(|_| "The LLM endpoint is not a valid URL".to_string())?;
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(
+                "The LLM endpoint must not contain credentials, a query, or a fragment".into(),
+            );
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| "The LLM endpoint has no host".to_string())?;
+        let is_local = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
+        if (is_local && !matches!(url.scheme(), "http" | "https"))
+            || (!is_local && url.scheme() != "https")
+        {
+            return Err(
+                "Remote LLM endpoints must use HTTPS; local endpoints must use HTTP(S)".into(),
+            );
+        }
+        if api_key.trim() != api_key
+            || api_key.len() > 16 * 1024
+            || api_key.chars().any(char::is_control)
+            || (!is_local && api_key.is_empty())
+        {
+            return Err("The LLM credential is missing or invalid".to_string());
+        }
+        if model.is_empty() || model.len() > 512 || model.chars().any(char::is_control) {
+            return Err("The LLM model identifier is missing or invalid".to_string());
+        }
+        Ok((base_url.trim_end_matches('/').to_string(), is_local))
+    }
+
+    fn client(&self, streaming: bool) -> Result<&reqwest::Client, String> {
+        if let Some(error) = &self.configuration_error {
+            return Err(error.clone());
+        }
+        if streaming {
+            self.streaming_client
+                .as_ref()
+                .ok_or_else(|| "The streaming LLM client is unavailable".to_string())
+        } else {
+            self.client
+                .as_ref()
+                .ok_or_else(|| "The LLM client is unavailable".to_string())
+        }
+    }
+
+    fn endpoint(&self, path: &str) -> Result<String, String> {
+        self.client(false)?;
+        Ok(format!(
+            "{}/{}",
+            self.base_url,
+            path.trim_start_matches('/')
+        ))
     }
 
     fn is_reasoning_model(&self) -> bool {
@@ -129,9 +234,22 @@ impl CompletionModel for LlamaProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Vec<ModelChoice>>, CompletionError> {
+        if request
+            .temperature
+            .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+        {
+            return Err(CompletionError::ProviderError(
+                "LLM temperature is outside the supported range".into(),
+            ));
+        }
+        let temperature = if self.is_reasoning_model() {
+            None
+        } else {
+            request.temperature
+        };
         // Construct messages
         let mut messages: Vec<serde_json::Value> = Vec::new();
-        let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
+        let is_local = self.is_local;
 
         let mut push_msg = |role: &str, content: String| {
             // Try to parse content as JSON (multimodal)
@@ -209,9 +327,9 @@ impl CompletionModel for LlamaProvider {
 
         let body = LlamaChatRequest {
             messages,
-            model: "default".to_string(),
+            model: self.model.clone(),
             stream: false,
-            temperature: None,
+            temperature,
             top_p: None,
             tools,
             // Per-model-family stop tokens: prevents ChatML models (Ministral, Qwen)
@@ -223,16 +341,18 @@ impl CompletionModel for LlamaProvider {
             },
         };
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-        let url = format!("{}/chat/completions", self.base_url);
+        let client = self.client(false).map_err(CompletionError::ProviderError)?;
+        let url = self
+            .endpoint("chat/completions")
+            .map_err(CompletionError::ProviderError)?;
+        let body = crate::rig_lib::http::bounded_json_body(&body)
+            .map_err(CompletionError::ProviderError)?;
 
         let mut request_builder = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body);
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
 
         if self.base_url.contains("openrouter.ai") {
             request_builder = request_builder
@@ -240,24 +360,18 @@ impl CompletionModel for LlamaProvider {
                 .header("X-Title", "ThinClaw Desktop");
         }
 
-        let resp = request_builder.send().await.map_err(|e| {
-            CompletionError::ProviderError(format!(
-                "Network Error: {}. Check your connection and API key.",
-                e
+        let resp = request_builder.send().await.map_err(|error| {
+            CompletionError::ProviderError(crate::rig_lib::http::transport_error(
+                "LLM request failed",
+                error,
             ))
         })?;
-
-        if !resp.status().is_success() {
-            return Err(CompletionError::ProviderError(format!(
-                "Server returned {}",
-                resp.status()
-            )));
-        }
-
-        let llama_resp: LlamaChatResponse = resp
-            .json()
+        let resp = crate::rig_lib::http::checked_response(resp, "LLM")
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(CompletionError::ProviderError)?;
+        let llama_resp: LlamaChatResponse = crate::rig_lib::http::bounded_json(resp, "LLM")
+            .await
+            .map_err(CompletionError::ProviderError)?;
 
         let choice_obj = llama_resp
             .choices
@@ -275,11 +389,35 @@ impl CompletionModel for LlamaProvider {
 
         // 2. Tool Calls
         if let Some(tool_calls) = &choice_obj.message.tool_calls {
+            if tool_calls.len() > 128 {
+                return Err(CompletionError::ProviderError(
+                    "LLM returned too many tool calls".into(),
+                ));
+            }
             for tc in tool_calls {
+                if tc.type_ != "function"
+                    || tc.function.name.is_empty()
+                    || tc.function.name.len() > 256
+                    || tc.function.name.chars().any(char::is_control)
+                    || tc.id.is_empty()
+                    || tc.id.len() > 512
+                    || tc.id.chars().any(char::is_control)
+                {
+                    return Err(CompletionError::ProviderError(
+                        "LLM returned a malformed tool call".into(),
+                    ));
+                }
                 let args_val: serde_json::Value = serde_json::from_str(&tc.function.arguments)
-                    .map_err(|e| {
-                        CompletionError::ProviderError(format!("Failed to parse tool args: {}", e))
+                    .map_err(|_| {
+                        CompletionError::ProviderError(
+                            "LLM returned malformed tool arguments".into(),
+                        )
                     })?;
+                if !args_val.is_object() {
+                    return Err(CompletionError::ProviderError(
+                        "LLM tool arguments must be a JSON object".into(),
+                    ));
+                }
 
                 choices.push(ModelChoice::ToolCall(
                     tc.function.name.clone(),
@@ -298,7 +436,9 @@ impl CompletionModel for LlamaProvider {
                 }
             }
         } else {
-            ModelChoice::Message("".into())
+            return Err(CompletionError::ProviderError(
+                "LLM returned an empty response".into(),
+            ));
         };
 
         Ok(CompletionResponse {
@@ -319,14 +459,11 @@ impl LlamaProvider {
         use eventsource_stream::Eventsource;
         use futures::StreamExt;
 
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| e.to_string())?;
-        let url = format!("{}/chat/completions", self.base_url);
+        let client = self.client(true)?;
+        let url = self.endpoint("chat/completions")?;
 
         let mut messages: Vec<serde_json::Value> = Vec::new();
-        let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
+        let is_local = self.is_local;
 
         let mut push_msg = |role: &str, content: String| {
             // For gemma family, sanitize system prompt content to avoid issues
@@ -413,10 +550,12 @@ impl LlamaProvider {
             },
         };
 
+        let body = crate::rig_lib::http::bounded_json_body(&body)?;
         let mut request_builder = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body);
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
 
         if self.base_url.contains("openrouter.ai") {
             request_builder = request_builder
@@ -424,18 +563,12 @@ impl LlamaProvider {
                 .header("X-Title", "ThinClaw Desktop");
         }
 
-        let response = request_builder
-            .send()
-            .await
-            .map_err(|e| format!("Connection Failed: {}. Check your internet or API key.", e))?;
+        let response = request_builder.send().await.map_err(|error| {
+            crate::rig_lib::http::transport_error("LLM connection failed", error)
+        })?;
+        let response = crate::rig_lib::http::checked_response(response, "LLM").await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let err_text = response.text().await.unwrap_or_default();
-            return Err(format!("API Error {}: {}", status, err_text));
-        }
-
-        let stream = response.bytes_stream().eventsource();
+        let stream = crate::rig_lib::http::bounded_sse_bytes(response).eventsource();
 
         Ok(stream
             .map(|event| {
@@ -443,6 +576,9 @@ impl LlamaProvider {
                     Ok(evt) => {
                         if evt.data == "[DONE]" {
                             return Ok("".to_string());
+                        }
+                        if evt.data.len() > 2 * 1024 * 1024 {
+                            return Err("LLM event exceeds the supported size".to_string());
                         }
                         // Parse chunk
                         match serde_json::from_str::<serde_json::Value>(&evt.data) {
@@ -459,7 +595,7 @@ impl LlamaProvider {
                                     Ok("".to_string())
                                 }
                             }
-                            Err(_) => Ok("".to_string()),
+                            Err(_) => Err("LLM stream returned invalid JSON".to_string()),
                         }
                     }
                     Err(e) => Err(e.to_string()),
@@ -469,10 +605,10 @@ impl LlamaProvider {
     }
 
     pub async fn count_tokens(&self, messages: Vec<serde_json::Value>) -> Result<u32, String> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3)) // Very short timeout for tokenization
-            .build()
-            .map_err(|e| e.to_string())?;
+        if messages.len() > 512 {
+            return Err("Tokenization input contains too many messages".to_string());
+        }
+        let client = self.client(false)?;
 
         let url = if self.base_url.ends_with("/v1") {
             format!("{}/tokenize", self.base_url.trim_end_matches("/v1"))
@@ -480,7 +616,7 @@ impl LlamaProvider {
             format!("{}/tokenize", self.base_url)
         };
 
-        let mut total_tokens = 0;
+        let mut total_tokens = 0_u32;
         for msg in messages {
             let content_str = match msg["content"].clone() {
                 serde_json::Value::String(s) => s,
@@ -495,33 +631,50 @@ impl LlamaProvider {
             };
 
             // Add some overhead for role wrappers
-            total_tokens += 4;
+            if content_str.len() > 2 * 1024 * 1024 {
+                return Err("Tokenization input message exceeds the size limit".to_string());
+            }
+            total_tokens = total_tokens.saturating_add(4);
 
             if !content_str.is_empty() {
                 // Approximate for cloud providers (no /tokenize)
-                if !self.base_url.contains("127.0.0.1") && !self.base_url.contains("localhost") {
-                    total_tokens += (content_str.len() / 3) as u32;
+                if !self.is_local {
+                    let estimate =
+                        u32::try_from(content_str.len().saturating_add(2) / 3).unwrap_or(u32::MAX);
+                    total_tokens = total_tokens.saturating_add(estimate);
                     continue;
                 }
 
+                let body =
+                    crate::rig_lib::http::bounded_json_body(&json!({ "content": content_str }))?;
                 let res = client
                     .post(&url)
                     .header("Authorization", format!("Bearer {}", self.api_key))
-                    .json(&json!({ "content": content_str }))
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .timeout(std::time::Duration::from_secs(3))
                     .send()
                     .await;
 
                 match res {
                     Ok(r) if r.status().is_success() => {
-                        if let Ok(body) = r.json::<serde_json::Value>().await {
-                            if let Some(tokens) = body["tokens"].as_array() {
-                                total_tokens += tokens.len() as u32;
-                            }
-                        }
+                        let token_count =
+                            crate::rig_lib::http::bounded_json::<serde_json::Value>(r, "tokenizer")
+                                .await
+                                .ok()
+                                .and_then(|body| body["tokens"].as_array().map(Vec::len))
+                                .and_then(|count| u32::try_from(count).ok());
+                        let count = token_count.unwrap_or_else(|| {
+                            u32::try_from(content_str.len().saturating_add(2) / 3)
+                                .unwrap_or(u32::MAX)
+                        });
+                        total_tokens = total_tokens.saturating_add(count);
                     }
                     _ => {
                         // Fallback to char count on error/timeout
-                        total_tokens += (content_str.len() / 3) as u32;
+                        let estimate = u32::try_from(content_str.len().saturating_add(2) / 3)
+                            .unwrap_or(u32::MAX);
+                        total_tokens = total_tokens.saturating_add(estimate);
                     }
                 }
             }
@@ -541,14 +694,11 @@ impl LlamaProvider {
         use eventsource_stream::Eventsource;
         use futures::StreamExt;
 
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| e.to_string())?;
-        let url = format!("{}/chat/completions", self.base_url);
+        let client = self.client(true)?;
+        let url = self.endpoint("chat/completions")?;
 
         let mut final_messages = Vec::new();
-        let is_local = self.base_url.contains("127.0.0.1") || self.base_url.contains("localhost");
+        let is_local = self.is_local;
 
         for msg in messages {
             let mut m = msg.clone();
@@ -609,6 +759,9 @@ impl LlamaProvider {
         }
         let final_messages = merged_messages;
 
+        if temperature.is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value)) {
+            return Err("LLM temperature is outside the supported range".to_string());
+        }
         let effective_temp = if self.is_reasoning_model() {
             None
         } else {
@@ -631,19 +784,17 @@ impl LlamaProvider {
             },
         };
 
-        // Debug: log the exact messages being sent
-        if let Ok(body_json) = serde_json::to_string_pretty(&body) {
-            info!("[llama_provider] REQUEST BODY:\n{}", body_json);
-        }
-
         info!(
-            "[llama_provider] Sending request to model: {} at url: {}",
-            self.model, url
+            model = %self.model,
+            message_count = body.messages.len(),
+            "[llama_provider] sending bounded request"
         );
+        let body = crate::rig_lib::http::bounded_json_body(&body)?;
         let mut request_builder = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body);
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
 
         if self.base_url.contains("openrouter.ai") {
             request_builder = request_builder
@@ -651,22 +802,13 @@ impl LlamaProvider {
                 .header("X-Title", "ThinClaw Desktop");
         }
 
-        let response = request_builder.send().await.map_err(|e| {
-            error!("[llama_provider] Network error: {}", e);
-            format!(
-                "Request failed: {}. Check model name '{}' and API key.",
-                e, self.model
-            )
-        })?;
+        let response = request_builder
+            .send()
+            .await
+            .map_err(|error| crate::rig_lib::http::transport_error("LLM request failed", error))?;
+        let response = crate::rig_lib::http::checked_response(response, "LLM").await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let err_text = response.text().await.unwrap_or_default();
-            error!("[llama_provider] API Error ({}): {}", status, err_text);
-            return Err(format!("OpenAI API Error ({}): {}", status, err_text));
-        }
-
-        let stream = response.bytes_stream().eventsource();
+        let stream = crate::rig_lib::http::bounded_sse_bytes(response).eventsource();
 
         // Track how many events we've seen for debugging
         let event_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -676,65 +818,58 @@ impl LlamaProvider {
             .map(move |event| {
                 let ev_num = event_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 match event {
-                Ok(evt) => {
-                    if evt.data == "[DONE]" {
-                        // End of stream
-                        eprintln!("[llama_provider] Stream completed after {} events", ev_num);
-                        return Ok(ProviderEvent::Content("".into()));
-                    }
-                    // Log first few events for debugging
-                    if ev_num < 5 {
-                        eprintln!("[llama_provider] SSE event #{}: {}", ev_num, &evt.data[..evt.data.len().min(200)]);
-                    }
-                    match serde_json::from_str::<serde_json::Value>(&evt.data) {
-                        Ok(json) => {
-                            // Check for server error objects (MLX/vLLM may return these)
-                            if let Some(err) = json.get("error").or(json.get("detail")) {
-                                let err_msg = err.as_str().unwrap_or(&err.to_string()).to_string();
-                                eprintln!("[llama_provider] Server error in stream: {}", err_msg);
-                                return Err(format!("Server error: {}", err_msg));
-                            }
-
-                            // Check for usage
-                            if let Some(usage) = json.get("usage") {
-                                if let (Some(p), Some(c), Some(t)) = (
-                                    usage["prompt_tokens"].as_u64(),
-                                    usage["completion_tokens"].as_u64(),
-                                    usage["total_tokens"].as_u64(),
-                                ) {
-                                    return Ok(ProviderEvent::Usage(crate::chat::TokenUsage {
-                                        prompt_tokens: p as u32,
-                                        completion_tokens: c as u32,
-                                        total_tokens: t as u32,
-                                    }));
+                    Ok(evt) => {
+                        if evt.data == "[DONE]" {
+                            tracing::debug!(events = ev_num, "[llama_provider] stream completed");
+                            return Ok(ProviderEvent::Content("".into()));
+                        }
+                        if evt.data.len() > 2 * 1024 * 1024 {
+                            return Err("LLM event exceeds the supported size".to_string());
+                        }
+                        match serde_json::from_str::<serde_json::Value>(&evt.data) {
+                            Ok(json) => {
+                                // Check for server error objects (MLX/vLLM may return these)
+                                if let Some(err) = json.get("error").or(json.get("detail")) {
+                                    let error_kind =
+                                        if err.is_string() { "message" } else { "object" };
+                                    return Err(format!(
+                                        "LLM server returned an error {error_kind}"
+                                    ));
                                 }
-                            }
 
-                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                                if !content.is_empty() {
-                                    Ok(ProviderEvent::Content(content.to_string()))
+                                // Check for usage
+                                if let Some(usage) = json.get("usage") {
+                                    if let (Some(p), Some(c), Some(t)) = (
+                                        usage["prompt_tokens"].as_u64(),
+                                        usage["completion_tokens"].as_u64(),
+                                        usage["total_tokens"].as_u64(),
+                                    ) {
+                                        return Ok(ProviderEvent::Usage(crate::chat::TokenUsage {
+                                            prompt_tokens: u32::try_from(p).unwrap_or(u32::MAX),
+                                            completion_tokens: u32::try_from(c).unwrap_or(u32::MAX),
+                                            total_tokens: u32::try_from(t).unwrap_or(u32::MAX),
+                                        }));
+                                    }
+                                }
+
+                                if let Some(content) =
+                                    json["choices"][0]["delta"]["content"].as_str()
+                                {
+                                    if !content.is_empty() {
+                                        Ok(ProviderEvent::Content(content.to_string()))
+                                    } else {
+                                        Ok(ProviderEvent::Content("".to_string()))
+                                    }
                                 } else {
                                     Ok(ProviderEvent::Content("".to_string()))
                                 }
-                            } else {
-                                // No content field — might be a role-only chunk or finish_reason
-                                if ev_num < 3 {
-                                    eprintln!("[llama_provider] No content in event #{} (may be role-only chunk)", ev_num);
-                                }
-                                Ok(ProviderEvent::Content("".to_string()))
                             }
-                        }
-                        Err(e) => {
-                            eprintln!("[llama_provider] JSON parse error: {} — data: {}", e, &evt.data[..evt.data.len().min(200)]);
-                            Ok(ProviderEvent::Content("".to_string()))
+                            Err(_) => Err("LLM stream returned invalid JSON".to_string()),
                         }
                     }
+                    Err(e) => Err(e.to_string()),
                 }
-                Err(e) => {
-                    eprintln!("[llama_provider] SSE stream error: {}", e);
-                    Err(e.to_string())
-                }
-            }})
+            })
             .boxed())
     }
 }

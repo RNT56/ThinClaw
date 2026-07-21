@@ -34,7 +34,7 @@ pub use thinclaw_gateway::web::types::{
     GatewayStatusResponse, HealthResponse, HistoryQuery, HistoryResponse, HookInfo,
     HookListResponse, HookRegisterRequest, HookRegisterResponse, HookUnregisterResponse,
     InstallExtensionRequest, JobDetailResponse, JobInfo, JobListResponse, JobSummaryResponse,
-    ListEntry, ListQuery, LogLevelRequest, LogLevelResponse, LogsRecentResponse,
+    ListEntry, ListQuery, LogLevelRequest, LogLevelResponse, LogsRecentResponse, MemoryAccessScope,
     MemoryDeleteRequest, MemoryDeleteResponse, MemoryListResponse, MemoryReadResponse,
     MemorySearchRequest, MemorySearchResponse, MemoryTreeResponse, MemoryWriteRequest,
     MemoryWriteResponse, ModelInfo, ModelUsageEntry, NostrPrivateKeyRequest, PairingApproveRequest,

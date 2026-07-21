@@ -142,69 +142,77 @@ impl LearningOrchestrator {
 
     pub async fn prefetch_provider_context(
         &self,
-        user_id: &str,
+        access: &thinclaw_identity::AccessContext,
         query: &str,
         limit: usize,
     ) -> Option<ProviderPrefetchContext> {
         self.provider_manager
-            .prefetch_provider_context(user_id, query, limit)
+            .prefetch_provider_context(access, query, limit)
             .await
     }
 
     pub async fn provider_recall(
         &self,
-        user_id: &str,
+        access: &thinclaw_identity::AccessContext,
         query: &str,
         limit: usize,
-    ) -> Vec<ProviderMemoryHit> {
+    ) -> Result<Vec<ProviderMemoryHit>, String> {
         self.provider_manager
-            .provider_recall(user_id, query, limit)
+            .provider_recall(access, query, limit)
             .await
     }
 
-    pub async fn provider_system_prompt_block(&self, user_id: &str) -> Option<String> {
+    pub async fn provider_system_prompt_block(
+        &self,
+        access: &thinclaw_identity::AccessContext,
+    ) -> Option<String> {
         self.provider_manager
-            .provider_system_prompt_block(user_id)
+            .provider_system_prompt_block(access)
             .await
     }
 
     pub async fn after_turn_sync_to_provider(
         &self,
-        user_id: &str,
+        access: &thinclaw_identity::AccessContext,
         artifact: &crate::agent::AgentRunArtifact,
     ) {
         self.provider_manager
-            .after_turn_sync(user_id, artifact)
+            .after_turn_sync(access, artifact)
             .await;
     }
 
     pub async fn export_provider_payload(
         &self,
-        user_id: &str,
+        access: &thinclaw_identity::AccessContext,
         payload: &serde_json::Value,
     ) -> Result<String, String> {
-        self.provider_manager.export_payload(user_id, payload).await
+        self.provider_manager.export_payload(access, payload).await
     }
 
     pub async fn session_end_extract(
         &self,
-        user_id: &str,
+        access: &thinclaw_identity::AccessContext,
         artifact: &crate::agent::AgentRunArtifact,
     ) {
         self.provider_manager
-            .session_end_extract(user_id, artifact)
+            .session_end_extract(access, artifact)
             .await;
     }
 
-    pub async fn mirror_workspace_write(&self, user_id: &str, payload: &serde_json::Value) {
+    pub async fn mirror_workspace_write(
+        &self,
+        access: &thinclaw_identity::AccessContext,
+        payload: &serde_json::Value,
+    ) {
         self.provider_manager
-            .mirror_workspace_write(user_id, payload)
+            .mirror_workspace_write(access, payload)
             .await;
     }
 
-    pub async fn provider_tool_extensions(&self, user_id: &str) -> Vec<String> {
-        self.provider_manager
-            .provider_tool_extensions(user_id)
-            .await
+    pub async fn provider_tool_extensions(
+        &self,
+        access: &thinclaw_identity::AccessContext,
+    ) -> Vec<String> {
+        self.provider_manager.provider_tool_extensions(access).await
     }
 }

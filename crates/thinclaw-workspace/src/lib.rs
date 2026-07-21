@@ -1,5 +1,6 @@
 //! Storage-oriented workspace types and algorithms.
 
+pub mod access;
 pub mod chunker;
 pub mod citations;
 pub mod document;
@@ -14,6 +15,10 @@ pub mod sqlite_vec;
 pub mod store;
 pub mod workspace_core;
 
+pub use access::{
+    AuthorizedWorkspace, WorkspaceAccess, WorkspaceAccessRole, WorkspaceOperation,
+    is_control_plane_path,
+};
 pub use chunker::{ChunkConfig, ChunkingStrategy, chunk, chunk_document};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
 #[cfg(feature = "bedrock")]

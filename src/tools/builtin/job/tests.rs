@@ -393,6 +393,27 @@ fn test_sandbox_schema_includes_credentials() {
 }
 
 #[test]
+fn create_job_credentials_always_require_explicit_approval() {
+    let manager = Arc::new(ContextManager::new(5));
+    let tool = CreateJobTool::new(manager);
+    assert_eq!(
+        tool.requires_approval(&serde_json::json!({
+            "title": "child",
+            "description": "work",
+            "credentials": {"github_token": "GITHUB_TOKEN"}
+        })),
+        ApprovalRequirement::Always
+    );
+    assert_eq!(
+        tool.requires_approval(&serde_json::json!({
+            "title": "child",
+            "description": "work"
+        })),
+        ApprovalRequirement::UnlessAutoApproved
+    );
+}
+
+#[test]
 fn test_sandbox_schema_only_exposes_enabled_agent_modes() {
     let manager = Arc::new(ContextManager::new(5));
     let jm = Arc::new(ContainerJobManager::new(

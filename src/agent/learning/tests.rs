@@ -23,6 +23,7 @@ use crate::workspace::Workspace;
 #[derive(Debug)]
 struct TestMemoryProvider {
     name: &'static str,
+    strict_scoping: bool,
     hits: Vec<ProviderMemoryHit>,
     recalls: Arc<Mutex<Vec<(String, String, usize)>>>,
     exports: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
@@ -34,6 +35,10 @@ struct TestMemoryProvider {
 impl MemoryProvider for TestMemoryProvider {
     fn name(&self) -> &'static str {
         self.name
+    }
+
+    fn supports_strict_subject_scoping(&self) -> bool {
+        self.strict_scoping
     }
 
     async fn health(&self, _settings: &LearningSettings) -> ProviderHealthStatus {
@@ -65,6 +70,29 @@ impl MemoryProvider for TestMemoryProvider {
             .expect("export log mutex poisoned")
             .push((user_id.to_string(), payload.clone()));
         Ok(())
+    }
+}
+
+#[cfg(feature = "libsql")]
+fn provider_access(user_id: &str, actor_id: &str) -> thinclaw_identity::AccessContext {
+    thinclaw_identity::AccessContext {
+        principal_id: user_id.to_string(),
+        actor_id: actor_id.to_string(),
+        conversation_scope_id: crate::identity::direct_scope_id(user_id, actor_id),
+        conversation_kind: ConversationKind::Direct,
+        channel: "test".to_string(),
+    }
+}
+
+#[cfg(feature = "libsql")]
+fn direct_learning_identity(user_id: &str, actor_id: &str) -> ResolvedIdentity {
+    ResolvedIdentity {
+        principal_id: user_id.to_string(),
+        actor_id: actor_id.to_string(),
+        conversation_scope_id: crate::identity::direct_scope_id(user_id, actor_id),
+        conversation_kind: ConversationKind::Direct,
+        raw_sender_id: actor_id.to_string(),
+        stable_external_conversation_key: String::new(),
     }
 }
 
@@ -386,6 +414,7 @@ fn generated_skill_test_content(skill_name: &str) -> String {
         skill_name,
         "Help the user collect a file summary and write it down.",
         &[crate::agent::session::TurnToolCall {
+            id: "call-shell".to_string(),
             name: "shell".to_string(),
             parameters: serde_json::json!({"cmd": "echo hi"}),
             result: Some(serde_json::json!({"stdout": "hi"})),
@@ -868,6 +897,121 @@ async fn auto_apply_routine_records_artifact_version_and_outcome_contract() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn auto_apply_memory_uses_authoritative_actor_scope() {
+    let (db, _guard) = crate::testing::test_db().await;
+    let user_id = "memory-auto-apply-user";
+    let actor_id = "alice";
+    let workspace = Arc::new(Workspace::new_with_db(user_id, Arc::clone(&db)));
+    let orchestrator = LearningOrchestrator::new(
+        Arc::clone(&db),
+        Some(Arc::clone(&workspace)),
+        None::<Arc<_>>,
+    );
+    let candidate = DbLearningCandidate {
+        id: Uuid::new_v4(),
+        learning_event_id: None,
+        user_id: user_id.to_string(),
+        candidate_type: "memory".to_string(),
+        risk_tier: "low".to_string(),
+        confidence: Some(0.9),
+        target_type: Some("memory".to_string()),
+        target_name: Some(paths::MEMORY.to_string()),
+        summary: Some("Remember an actor preference".to_string()),
+        proposal: proposal_with_resolved_identity(
+            serde_json::json!({
+                "memory_entry": "Alice prefers compact summaries.",
+                // These proposal fields are deliberately hostile; the reserved
+                // identity envelope must remain the only authority.
+                "actor_id": "bob",
+                "conversation_scope_id": Uuid::new_v4().to_string(),
+            }),
+            &direct_learning_identity(user_id, actor_id),
+            "test",
+            None,
+        ),
+        created_at: Utc::now(),
+    };
+    db.insert_learning_candidate(&candidate)
+        .await
+        .expect("persist actor-scoped memory candidate");
+
+    assert!(
+        orchestrator
+            .auto_apply_memory(&candidate)
+            .await
+            .expect("authorized actor memory should apply")
+    );
+    let actor_memory = workspace
+        .read(&paths::actor_memory(actor_id))
+        .await
+        .expect("actor memory should be written");
+    assert!(actor_memory.content.contains("compact summaries"));
+    assert!(workspace.read(&paths::actor_memory("bob")).await.is_err());
+    assert!(workspace.read(paths::MEMORY).await.is_err());
+
+    let versions = db
+        .list_learning_artifact_versions(user_id, Some("memory"), None, 10)
+        .await
+        .expect("list memory artifacts");
+    assert_eq!(versions.len(), 1);
+    assert!(versions[0].before_content.is_none());
+    assert!(versions[0].after_content.is_none());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn auto_apply_memory_rejects_unverified_group_scope() {
+    let (db, _guard) = crate::testing::test_db().await;
+    let user_id = "memory-auto-apply-group";
+    let workspace = Arc::new(Workspace::new_with_db(user_id, Arc::clone(&db)));
+    let orchestrator = LearningOrchestrator::new(
+        Arc::clone(&db),
+        Some(Arc::clone(&workspace)),
+        None::<Arc<_>>,
+    );
+    let group_scope = Uuid::new_v4();
+    let group_identity = ResolvedIdentity {
+        principal_id: user_id.to_string(),
+        actor_id: "alice".to_string(),
+        conversation_scope_id: group_scope,
+        conversation_kind: ConversationKind::Group,
+        raw_sender_id: "alice".to_string(),
+        stable_external_conversation_key: "group:test".to_string(),
+    };
+    let candidate = DbLearningCandidate {
+        id: Uuid::new_v4(),
+        learning_event_id: None,
+        user_id: user_id.to_string(),
+        candidate_type: "memory".to_string(),
+        risk_tier: "low".to_string(),
+        confidence: Some(0.9),
+        target_type: Some("memory".to_string()),
+        target_name: Some(paths::MEMORY.to_string()),
+        summary: None,
+        proposal: proposal_with_resolved_identity(
+            serde_json::json!({"memory_entry": "must not be written"}),
+            &group_identity,
+            "test",
+            Some(Uuid::new_v4()),
+        ),
+        created_at: Utc::now(),
+    };
+
+    let error = orchestrator
+        .auto_apply_memory(&candidate)
+        .await
+        .expect_err("unknown group conversation must fail closed");
+    assert!(error.contains("does not belong"));
+    assert!(
+        workspace
+            .read(&paths::conversation_memory(group_scope))
+            .await
+            .is_err()
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn auto_apply_prompt_materializes_patch_for_actor_user_targets() {
     let (db, _guard) = crate::testing::test_db().await;
     let user_id = "prompt-auto-apply-user";
@@ -889,14 +1033,19 @@ async fn auto_apply_prompt_materializes_patch_for_actor_user_targets() {
         target_type: Some("prompt".to_string()),
         target_name: Some(actor_target.clone()),
         summary: Some("Add outcome-backed prompt guidance".to_string()),
-        proposal: serde_json::json!({
-            "target": actor_target,
-            "prompt_patch": {
-                "operation": "upsert_section",
-                "heading": "Outcome-Backed Guidance",
-                "section_content": "- prefer direct implementation and verification"
-            }
-        }),
+        proposal: proposal_with_resolved_identity(
+            serde_json::json!({
+                "target": actor_target,
+                "prompt_patch": {
+                    "operation": "upsert_section",
+                    "heading": "Outcome-Backed Guidance",
+                    "section_content": "- prefer direct implementation and verification"
+                }
+            }),
+            &direct_learning_identity(user_id, "alice"),
+            "test",
+            None,
+        ),
         created_at: Utc::now(),
     };
     db.insert_learning_candidate(&candidate)
@@ -926,13 +1075,48 @@ async fn auto_apply_prompt_materializes_patch_for_actor_user_targets() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn auto_apply_prompt_cannot_target_a_sibling_actor() {
+    let (db, _guard) = crate::testing::test_db().await;
+    let user_id = "prompt-auto-apply-cross-actor";
+    let workspace = Arc::new(Workspace::new_with_db(user_id, Arc::clone(&db)));
+    let orchestrator = LearningOrchestrator::new(
+        Arc::clone(&db),
+        Some(Arc::clone(&workspace)),
+        None::<Arc<_>>,
+    );
+    let candidate = DbLearningCandidate {
+        id: Uuid::new_v4(),
+        learning_event_id: None,
+        user_id: user_id.to_string(),
+        candidate_type: "prompt".to_string(),
+        risk_tier: "medium".to_string(),
+        confidence: Some(0.9),
+        target_type: Some("prompt".to_string()),
+        target_name: Some(paths::actor_user("bob")),
+        summary: None,
+        proposal: proposal_with_resolved_identity(
+            serde_json::json!({"content": "# USER.md\n\n- **Name:** Bob\n"}),
+            &direct_learning_identity(user_id, "alice"),
+            "test",
+            None,
+        ),
+        created_at: Utc::now(),
+    };
+
+    let error = orchestrator
+        .auto_apply_prompt(&candidate)
+        .await
+        .expect_err("cross-actor prompt mutation must fail");
+    assert!(error.contains("different actor"));
+    assert!(workspace.read(&paths::actor_user("bob")).await.is_err());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn auto_apply_prompt_routes_canonical_soul_to_home_store() {
     let (db, _guard) = crate::testing::test_db().await;
     let temp_home = tempfile::tempdir().expect("temp home");
-    let previous_home = std::env::var_os("THINCLAW_HOME");
-    unsafe {
-        std::env::set_var("THINCLAW_HOME", temp_home.path());
-    }
+    let _home = crate::testing::ScopedEnvVar::set("THINCLAW_HOME", temp_home.path());
 
     let user_id = "prompt-auto-apply-soul";
     let workspace = Arc::new(Workspace::new_with_db(user_id, Arc::clone(&db)));
@@ -961,14 +1145,19 @@ async fn auto_apply_prompt_routes_canonical_soul_to_home_store() {
         target_type: Some("prompt".to_string()),
         target_name: Some(paths::SOUL.to_string()),
         summary: Some("Sharpen canonical soul guidance".to_string()),
-        proposal: serde_json::json!({
-            "target": paths::SOUL,
-            "prompt_patch": {
-                "operation": "upsert_section",
-                "heading": "Outcome-Backed Guidance",
-                "section_content": "- be direct and finish the job"
-            }
-        }),
+        proposal: proposal_with_resolved_identity(
+            serde_json::json!({
+                "target": paths::SOUL,
+                "prompt_patch": {
+                    "operation": "upsert_section",
+                    "heading": "Outcome-Backed Guidance",
+                    "section_content": "- be direct and finish the job"
+                }
+            }),
+            &direct_learning_identity(user_id, user_id),
+            "test",
+            None,
+        ),
         created_at: Utc::now(),
     };
     db.insert_learning_candidate(&candidate)
@@ -1005,16 +1194,6 @@ async fn auto_apply_prompt_routes_canonical_soul_to_home_store() {
         1,
         "canonical soul auto-apply should be ledgered"
     );
-
-    if let Some(previous_home) = previous_home {
-        unsafe {
-            std::env::set_var("THINCLAW_HOME", previous_home);
-        }
-    } else {
-        unsafe {
-            std::env::remove_var("THINCLAW_HOME");
-        }
-    }
 }
 
 #[cfg(feature = "libsql")]
@@ -1048,6 +1227,34 @@ async fn create_code_proposal_from_candidate_rejects_empty_diff() {
         .await
         .expect_err("empty diff should be rejected");
     assert!(err.contains("missing diff"));
+}
+
+#[test]
+fn learning_publish_mode_and_git_ref_validation_fail_closed() {
+    for mode in [
+        "branch_pr_draft",
+        "branch_only",
+        "bundle_only",
+        "local_autorollout",
+    ] {
+        assert_eq!(validate_learning_publish_mode(mode).unwrap(), mode);
+    }
+    assert!(validate_learning_publish_mode("typo_push_mode").is_err());
+
+    for valid in ["main", "feature/agent-fix", "release-1.2_3"] {
+        assert!(validate_learning_git_ref(valid).is_ok());
+    }
+    for invalid in [
+        "-branch",
+        "HEAD",
+        "foo..bar",
+        "foo//bar",
+        "foo/.bar",
+        "foo/bar.lock",
+        "foo/@{bar",
+    ] {
+        assert!(validate_learning_git_ref(invalid).is_err());
+    }
 }
 
 #[test]
@@ -1088,12 +1295,14 @@ fn generated_skill_feedback_polarity_maps_positive_and_negative_verdicts() {
 #[test]
 fn generated_workflow_digest_distinguishes_parameters_and_outcomes() {
     let first = vec![crate::agent::session::TurnToolCall {
+        id: "call-1".to_string(),
         name: "shell".to_string(),
         parameters: serde_json::json!({"cmd": "echo one"}),
         result: Some(serde_json::json!({"stdout": "one"})),
         error: None,
     }];
     let second = vec![crate::agent::session::TurnToolCall {
+        id: "call-2".to_string(),
         name: "shell".to_string(),
         parameters: serde_json::json!({"cmd": "echo two"}),
         result: Some(serde_json::json!({"stdout": "two"})),
@@ -1109,12 +1318,14 @@ fn generated_workflow_digest_distinguishes_parameters_and_outcomes() {
 #[test]
 fn generated_workflow_digest_is_stable_for_reordered_object_keys() {
     let first = vec![crate::agent::session::TurnToolCall {
+        id: "call-1".to_string(),
         name: "http".to_string(),
         parameters: serde_json::json!({"url": "https://example.com", "method": "GET"}),
         result: Some(serde_json::json!({"status": 200, "ok": true})),
         error: None,
     }];
     let second = vec![crate::agent::session::TurnToolCall {
+        id: "call-2".to_string(),
         name: "http".to_string(),
         parameters: serde_json::json!({"method": "GET", "url": "https://example.com"}),
         result: Some(serde_json::json!({"ok": true, "status": 200})),
@@ -1152,6 +1363,7 @@ async fn prefetch_provider_context_uses_only_the_active_provider() {
             vec![
                 Arc::new(TestMemoryProvider {
                     name: "honcho",
+                    strict_scoping: true,
                     hits: vec![ProviderMemoryHit {
                         provider: "honcho".to_string(),
                         summary: "Remembered preference".to_string(),
@@ -1164,6 +1376,7 @@ async fn prefetch_provider_context_uses_only_the_active_provider() {
                 }),
                 Arc::new(TestMemoryProvider {
                     name: "zep",
+                    strict_scoping: true,
                     hits: vec![ProviderMemoryHit {
                         provider: "zep".to_string(),
                         summary: "Should not be used".to_string(),
@@ -1179,7 +1392,11 @@ async fn prefetch_provider_context_uses_only_the_active_provider() {
     };
 
     let context = orchestrator
-        .prefetch_provider_context(user_id, "summarize my preferences", 3)
+        .prefetch_provider_context(
+            &provider_access(user_id, "actor-1"),
+            "summarize my preferences",
+            3,
+        )
         .await
         .expect("active provider should return prefetch context");
 
@@ -1222,6 +1439,7 @@ async fn unhealthy_active_provider_fails_closed_for_prefetch_and_tool_surface() 
             vec![
                 Arc::new(TestMemoryProvider {
                     name: "honcho",
+                    strict_scoping: true,
                     hits: vec![ProviderMemoryHit {
                         provider: "honcho".to_string(),
                         summary: "Should not be recalled".to_string(),
@@ -1239,6 +1457,7 @@ async fn unhealthy_active_provider_fails_closed_for_prefetch_and_tool_surface() 
                 }),
                 Arc::new(TestMemoryProvider {
                     name: "zep",
+                    strict_scoping: true,
                     hits: vec![ProviderMemoryHit {
                         provider: "zep".to_string(),
                         summary: "Inactive backup".to_string(),
@@ -1263,21 +1482,29 @@ async fn unhealthy_active_provider_fails_closed_for_prefetch_and_tool_surface() 
 
     assert!(
         orchestrator
-            .prefetch_provider_context(user_id, "remember my preferences", 3)
+            .prefetch_provider_context(
+                &provider_access(user_id, "actor-1"),
+                "remember my preferences",
+                3,
+            )
             .await
             .is_none(),
         "unhealthy providers should not surface prompt recall"
     );
     assert!(
         orchestrator
-            .provider_recall(user_id, "remember my preferences", 3)
+            .provider_recall(
+                &provider_access(user_id, "actor-1"),
+                "remember my preferences",
+                3,
+            )
             .await
-            .is_empty(),
+            .is_err(),
         "unhealthy providers should not execute recall calls"
     );
     assert!(
         orchestrator
-            .provider_tool_extensions(user_id)
+            .provider_tool_extensions(&provider_access(user_id, "actor-1"))
             .await
             .is_empty(),
         "tool extensions should disappear when the active provider is unhealthy"
@@ -1317,6 +1544,7 @@ async fn export_provider_payload_uses_only_ready_active_provider() {
             vec![
                 Arc::new(TestMemoryProvider {
                     name: "honcho",
+                    strict_scoping: true,
                     hits: Vec::new(),
                     recalls: Arc::new(Mutex::new(Vec::new())),
                     exports: Arc::clone(&honcho_exports),
@@ -1324,6 +1552,7 @@ async fn export_provider_payload_uses_only_ready_active_provider() {
                 }),
                 Arc::new(TestMemoryProvider {
                     name: "zep",
+                    strict_scoping: true,
                     hits: Vec::new(),
                     recalls: Arc::new(Mutex::new(Vec::new())),
                     exports: Arc::clone(&zep_exports),
@@ -1335,7 +1564,7 @@ async fn export_provider_payload_uses_only_ready_active_provider() {
 
     let provider = orchestrator
         .export_provider_payload(
-            user_id,
+            &provider_access(user_id, "actor-1"),
             &serde_json::json!({"content": "prefers concise docs"}),
         )
         .await
@@ -1344,12 +1573,144 @@ async fn export_provider_payload_uses_only_ready_active_provider() {
     assert_eq!(provider, "honcho");
     let exports = honcho_exports.lock().expect("honcho export log");
     assert_eq!(exports.len(), 1);
-    assert_eq!(exports[0].0, user_id);
+    assert_eq!(
+        exports[0].0,
+        provider_access(user_id, "actor-1").provider_subject_id()
+    );
     assert_eq!(exports[0].1["content"], "prefers concise docs");
+    assert_eq!(exports[0].1["_thinclaw_scope"]["subject_id"], exports[0].0);
     assert!(
         zep_exports.lock().expect("zep export log").is_empty(),
         "inactive providers must not receive explicit exports"
     );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn provider_exports_isolate_actors_and_share_only_the_exact_group_scope() {
+    let (db, _guard) = crate::testing::test_db().await;
+    let user_id = "provider-scope-user";
+    db.set_setting(
+        user_id,
+        "learning.providers.active",
+        &serde_json::json!("honcho"),
+    )
+    .await
+    .expect("set active provider");
+
+    let exports = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = LearningOrchestrator {
+        store: Arc::clone(&db),
+        workspace: None,
+        skill_registry: None,
+        routine_engine: None,
+        provider_manager: Arc::new(MemoryProviderManager::with_providers(
+            Arc::clone(&db),
+            vec![Arc::new(TestMemoryProvider {
+                name: "honcho",
+                strict_scoping: true,
+                hits: Vec::new(),
+                recalls: Arc::new(Mutex::new(Vec::new())),
+                exports: Arc::clone(&exports),
+                health_status: provider_status("honcho", ProviderReadiness::Ready, true, None),
+            })],
+        )),
+    };
+
+    let alice = provider_access(user_id, "alice");
+    let bob = provider_access(user_id, "bob");
+    let group_scope = uuid::Uuid::new_v4();
+    let group_alice = thinclaw_identity::AccessContext {
+        principal_id: user_id.to_string(),
+        actor_id: "alice".to_string(),
+        conversation_scope_id: group_scope,
+        conversation_kind: ConversationKind::Group,
+        channel: "test".to_string(),
+    };
+    let group_bob = thinclaw_identity::AccessContext {
+        actor_id: "bob".to_string(),
+        ..group_alice.clone()
+    };
+
+    for access in [&alice, &bob, &group_alice, &group_bob] {
+        orchestrator
+            .export_provider_payload(access, &serde_json::json!({"content": "scope probe"}))
+            .await
+            .expect("scoped export");
+    }
+
+    let exports = exports.lock().expect("export log");
+    assert_ne!(
+        exports[0].0, exports[1].0,
+        "sibling actors must be isolated"
+    );
+    assert_eq!(
+        exports[2].0, exports[3].0,
+        "members of the same group use the conversation subject"
+    );
+    assert_ne!(exports[0].0, exports[2].0, "direct and group memory differ");
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn provider_without_strict_subject_scoping_is_denied_every_memory_surface() {
+    let (db, _guard) = crate::testing::test_db().await;
+    let user_id = "provider-unscoped-user";
+    db.set_setting(
+        user_id,
+        "learning.providers.active",
+        &serde_json::json!("honcho"),
+    )
+    .await
+    .expect("set active provider");
+
+    let recalls = Arc::new(Mutex::new(Vec::new()));
+    let exports = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = LearningOrchestrator {
+        store: Arc::clone(&db),
+        workspace: None,
+        skill_registry: None,
+        routine_engine: None,
+        provider_manager: Arc::new(MemoryProviderManager::with_providers(
+            Arc::clone(&db),
+            vec![Arc::new(TestMemoryProvider {
+                name: "honcho",
+                strict_scoping: false,
+                hits: Vec::new(),
+                recalls: Arc::clone(&recalls),
+                exports: Arc::clone(&exports),
+                health_status: provider_status("honcho", ProviderReadiness::Ready, true, None),
+            })],
+        )),
+    };
+    let access = provider_access(user_id, "actor-1");
+
+    assert!(
+        orchestrator
+            .prefetch_provider_context(&access, "probe", 3)
+            .await
+            .is_none()
+    );
+    assert!(
+        orchestrator
+            .provider_recall(&access, "probe", 3)
+            .await
+            .is_err()
+    );
+    assert!(
+        orchestrator
+            .export_provider_payload(&access, &serde_json::json!({"content": "probe"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        orchestrator
+            .provider_tool_extensions(&access)
+            .await
+            .is_empty()
+    );
+    assert!(recalls.lock().expect("recall log").is_empty());
+    assert!(exports.lock().expect("export log").is_empty());
 }
 
 #[test]

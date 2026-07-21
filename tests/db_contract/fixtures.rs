@@ -185,6 +185,7 @@ pub(crate) fn experiment_project() -> ExperimentProject {
     let now = Utc::now();
     ExperimentProject {
         id: Uuid::new_v4(),
+        owner_user_id: "default".to_string(),
         name: format!("project-{}", Uuid::new_v4().simple()),
         workspace_path: ".".to_string(),
         git_remote_name: "origin".to_string(),
@@ -213,6 +214,7 @@ pub(crate) fn experiment_runner_profile() -> ExperimentRunnerProfile {
     let now = Utc::now();
     ExperimentRunnerProfile {
         id: Uuid::new_v4(),
+        owner_user_id: "default".to_string(),
         name: format!("runner-{}", Uuid::new_v4().simple()),
         backend: ExperimentRunnerBackend::LocalDocker,
         backend_config: serde_json::json!({}),

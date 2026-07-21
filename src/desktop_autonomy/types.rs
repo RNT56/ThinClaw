@@ -204,7 +204,7 @@ pub struct AutonomyStatus {
     pub prerequisite_summary: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AutonomyBootstrapReport {
     pub passed: bool,
     pub health: serde_json::Value,
@@ -231,6 +231,34 @@ pub struct AutonomyBootstrapReport {
     pub one_time_login_secret: Option<String>,
     #[serde(default)]
     pub notes: Vec<String>,
+}
+
+impl std::fmt::Debug for AutonomyBootstrapReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AutonomyBootstrapReport")
+            .field("passed", &self.passed)
+            .field("health", &self.health)
+            .field("permissions", &self.permissions)
+            .field("seeded_skills", &self.seeded_skills)
+            .field("seeded_routines", &self.seeded_routines)
+            .field("launch_agent_path", &self.launch_agent_path)
+            .field("launch_agent_written", &self.launch_agent_written)
+            .field("launch_agent_loaded", &self.launch_agent_loaded)
+            .field("fixture_paths", &self.fixture_paths)
+            .field("session_ready", &self.session_ready)
+            .field("blocking_reason", &self.blocking_reason)
+            .field(
+                "dedicated_user_keychain_label",
+                &self.dedicated_user_keychain_label,
+            )
+            .field(
+                "one_time_login_secret",
+                &self.one_time_login_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("notes", &self.notes)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,7 +355,7 @@ pub(crate) struct ActionReadinessSnapshot {
     pub(super) prerequisite_summary: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct DesktopFixturePaths {
     #[serde(default)]
     pub calendar_title: String,
@@ -342,6 +370,7 @@ pub struct DesktopFixturePaths {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DesktopCanaryManifest {
     pub build_id: String,
     pub proposal_id: String,
@@ -352,6 +381,7 @@ pub struct DesktopCanaryManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DesktopCanaryReport {
     pub build_id: String,
     pub generated_at: DateTime<Utc>,
@@ -371,15 +401,28 @@ pub(crate) struct RuntimeState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RolloutState {
     pub(super) consecutive_failed_promotions: u32,
     pub(super) failed_canaries: Vec<DateTime<Utc>>,
     pub(super) code_auto_apply_paused: bool,
     pub(super) pause_reason: Option<String>,
     pub(super) last_promoted_build_id: Option<String>,
+    #[serde(default)]
+    pub(super) selected_build_history: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PromotionJournal {
+    pub(super) version: u8,
+    pub(super) build_id: String,
+    pub(super) rollout_state: RolloutState,
+    pub(super) manifest: BuildManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BuildManifest {
     pub(super) build_id: String,
     pub(super) user_id: String,
@@ -393,11 +436,27 @@ pub(crate) struct BuildManifest {
     pub(super) metadata: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct DedicatedUserBootstrap {
     pub(super) keychain_label: Option<String>,
     pub(super) session_ready: bool,
     pub(super) blocking_reason: Option<String>,
     pub(super) created_user: bool,
     pub(super) one_time_login_secret: Option<String>,
+}
+
+impl std::fmt::Debug for DedicatedUserBootstrap {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DedicatedUserBootstrap")
+            .field("keychain_label", &self.keychain_label)
+            .field("session_ready", &self.session_ready)
+            .field("blocking_reason", &self.blocking_reason)
+            .field("created_user", &self.created_user)
+            .field(
+                "one_time_login_secret",
+                &self.one_time_login_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }

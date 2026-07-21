@@ -15,20 +15,6 @@ impl Store {
                 project_dir, job_mode, metadata, success, failure_reason,
                 created_at, started_at, completed_at, credential_grants
             ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-            ON CONFLICT (id) DO UPDATE SET
-                title = EXCLUDED.title,
-                description = EXCLUDED.description,
-                status = EXCLUDED.status,
-                principal_id = EXCLUDED.principal_id,
-                success = EXCLUDED.success,
-                failure_reason = EXCLUDED.failure_reason,
-                actor_id = EXCLUDED.actor_id,
-                project_dir = EXCLUDED.project_dir,
-                job_mode = EXCLUDED.job_mode,
-                metadata = EXCLUDED.metadata,
-                started_at = EXCLUDED.started_at,
-                completed_at = EXCLUDED.completed_at,
-                credential_grants = EXCLUDED.credential_grants
             "#,
             &[
                 &job.id,
@@ -255,7 +241,9 @@ impl Store {
                 failure_reason = COALESCE($4, failure_reason),
                 started_at = COALESCE($5, started_at),
                 completed_at = COALESCE($6, completed_at)
-            WHERE id = $1 AND source = 'sandbox'
+            WHERE id = $1
+              AND source = 'sandbox'
+              AND status IN ('creating', 'running')
             "#,
             &[&id, &status, &success, &message, &started_at, &completed_at],
         )
@@ -263,10 +251,62 @@ impl Store {
         Ok(())
     }
 
+    /// Atomically claim a terminal sandbox transition and persist its result
+    /// event in the same transaction.
+    pub async fn finalize_sandbox_job_status(
+        &self,
+        id: Uuid,
+        status: &str,
+        success: bool,
+        message: Option<&str>,
+        completed_at: DateTime<Utc>,
+        event_data: &serde_json::Value,
+    ) -> Result<bool, DatabaseError> {
+        if !thinclaw_types::sandbox::is_terminal_sandbox_status(status) {
+            return Err(DatabaseError::Constraint(format!(
+                "sandbox final status must be canonical and terminal, got {status}"
+            )));
+        }
+
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+        tx.batch_execute("SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '5s'")
+            .await?;
+        let changed = tx
+            .execute(
+                r#"
+                UPDATE agent_jobs SET
+                    status = $2,
+                    success = $3,
+                    failure_reason = COALESCE($4, failure_reason),
+                    completed_at = $5
+                WHERE id = $1
+                  AND source = 'sandbox'
+                  AND status IN ('creating', 'running')
+                "#,
+                &[&id, &status, &success, &message, &completed_at],
+            )
+            .await?;
+        if changed == 0 {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO job_events (job_id, event_type, data) VALUES ($1, 'result', $2)",
+            &[&id, event_data],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// Mark any sandbox jobs left in "running" or "creating" as "interrupted".
     ///
     /// Called on startup to handle jobs that were running when the process died.
-    pub async fn cleanup_stale_sandbox_jobs(&self) -> Result<u64, DatabaseError> {
+    pub async fn cleanup_stale_sandbox_jobs(
+        &self,
+        runtime_scope: &str,
+    ) -> Result<u64, DatabaseError> {
         let conn = self.conn().await?;
         let count = conn
             .execute(
@@ -275,13 +315,15 @@ impl Store {
                     status = 'interrupted',
                     failure_reason = 'Process restarted',
                     completed_at = NOW()
-                WHERE source = 'sandbox' AND status IN ('running', 'creating')
+                WHERE source = 'sandbox'
+                  AND status IN ('running', 'creating')
+                  AND metadata #>> '{_sandbox,runtime_scope}' = $1
                 "#,
-                &[],
+                &[&runtime_scope],
             )
             .await?;
         if count > 0 {
-            tracing::info!("Marked {} stale sandbox jobs as interrupted", count);
+            tracing::info!(%runtime_scope, "Marked {} owned stale sandbox jobs as interrupted", count);
         }
         Ok(count)
     }

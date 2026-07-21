@@ -20,11 +20,12 @@ use crate::rig_lib::unified_provider::ProviderKind;
 /// The inner `Mutex` is `tokio::sync::Mutex`. `chat_stream` already holds the
 /// global generation lock, so contention here is practically zero.
 use crate::rig_lib::RigManager;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 /// All parameters that uniquely identify a `RigManager` configuration.
 /// If any field changes, the cached instance is rebuilt.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct RigManagerKey {
     /// Discriminant for the provider (OpenAI, Anthropic, Local, …)
     pub provider_kind: String,
@@ -32,16 +33,38 @@ pub struct RigManagerKey {
     pub base_url: String,
     /// Model name, e.g. `gpt-4o`
     pub model_name: String,
-    /// Auth token / API key
-    pub token: String,
+    /// One-way credential fingerprint. The live token is already held by the
+    /// provider; retaining another plaintext copy in the cache key needlessly
+    /// widened its lifetime and made accidental debug disclosure possible.
+    token_fingerprint: [u8; 32],
     /// Context window in tokens
     pub context_size: usize,
     /// Whether tool use (web_search, image_gen, …) is enabled
     pub enable_tools: bool,
-    /// Concatenated knowledge-bit content (empty string if none)
-    pub gk_content: String,
+    /// One-way fingerprint and byte length of the configured knowledge context.
+    /// The live context is retained by the manager itself; the cache key does
+    /// not need a second plaintext copy.
+    gk_fingerprint: [u8; 32],
+    gk_content_bytes: usize,
     /// Detected model family tag, e.g. `"chatml"` or `"gemma"`
     pub model_family: Option<String>,
+}
+
+impl std::fmt::Debug for RigManagerKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RigManagerKey")
+            .field("provider_kind", &self.provider_kind)
+            .field("base_url", &self.base_url)
+            .field("model_name", &self.model_name)
+            .field("token_fingerprint", &crate::debug_redaction::Redacted)
+            .field("context_size", &self.context_size)
+            .field("enable_tools", &self.enable_tools)
+            .field("gk_fingerprint", &crate::debug_redaction::Redacted)
+            .field("gk_content_bytes", &self.gk_content_bytes)
+            .field("model_family", &self.model_family)
+            .finish()
+    }
 }
 
 impl RigManagerKey {
@@ -62,10 +85,11 @@ impl RigManagerKey {
             provider_kind: format!("{:?}", kind),
             base_url: base_url.to_string(),
             model_name: model_name.to_string(),
-            token: token.to_string(),
+            token_fingerprint: Sha256::digest(token.as_bytes()).into(),
             context_size,
             enable_tools,
-            gk_content: gk_content.to_string(),
+            gk_fingerprint: Sha256::digest(gk_content.as_bytes()).into(),
+            gk_content_bytes: gk_content.len(),
             model_family: model_family.map(str::to_string),
         }
     }
@@ -124,5 +148,40 @@ impl RigManagerCache {
         let mut guard = self.inner.lock().await;
         *guard = None;
         tracing::info!("[rig_cache] Cache explicitly invalidated");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_distinguishes_rotated_tokens_without_retaining_or_debugging_them() {
+        let first = RigManagerKey::from_parts(
+            &ProviderKind::OpenAI,
+            "https://api.example.test",
+            "model",
+            "first-live-secret",
+            4096,
+            true,
+            "private knowledge",
+            None,
+        );
+        let second = RigManagerKey::from_parts(
+            &ProviderKind::OpenAI,
+            "https://api.example.test",
+            "model",
+            "second-live-secret",
+            4096,
+            true,
+            "private knowledge",
+            None,
+        );
+
+        assert_ne!(first, second);
+        let debug = format!("{first:?}");
+        assert!(!debug.contains("first-live-secret"));
+        assert!(!debug.contains("private knowledge"));
+        assert!(debug.contains("[REDACTED]"));
     }
 }

@@ -2,7 +2,10 @@
 //!
 //! Uses Gemini 2.0+ inline audio for transcription.
 
-use crate::inference::stt::{SttBackend, SttRequest};
+use crate::inference::stt::{
+    audio_file_metadata, bounded_stt_json, stt_http_client, validate_stt_request,
+    validate_transcript, SttBackend, SttRequest,
+};
 use crate::inference::{BackendInfo, InferenceError, InferenceResult};
 use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
@@ -30,27 +33,19 @@ impl SttBackend for GeminiSttBackend {
     }
 
     async fn transcribe(&self, request: SttRequest) -> InferenceResult<String> {
-        let client = reqwest::Client::new();
+        validate_stt_request(&request)?;
+        let client = stt_http_client(false)?;
         let audio_b64 = general_purpose::STANDARD.encode(&request.audio);
-
-        let mime_type = match request.format {
-            super::super::AudioFormat::Wav => "audio/wav",
-            super::super::AudioFormat::Mp3 => "audio/mp3",
-            _ => "audio/wav",
-        };
+        let (_, mime_type, _) = audio_file_metadata(request.format);
 
         let mut prompt = "Transcribe the following audio accurately. Output ONLY the transcription text, nothing else.".to_string();
         if let Some(lang) = &request.language {
             prompt = format!("{} The audio is in {} language.", prompt, lang);
         }
 
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
-            self.api_key
-        );
-
         let response = client
-            .post(&url)
+            .post("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent")
+            .header("x-goog-api-key", &self.api_key)
             .json(&serde_json::json!({
                 "contents": [{
                     "parts": [
@@ -70,17 +65,12 @@ impl SttBackend for GeminiSttBackend {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
             return Err(InferenceError::provider(format!(
-                "Gemini STT error ({}): {}",
-                status, text
+                "Gemini STT error ({status})"
             )));
         }
 
-        let result: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| InferenceError::provider(format!("Parse error: {}", e)))?;
+        let result: serde_json::Value = bounded_stt_json(response).await?;
 
         let text = result
             .get("candidates")
@@ -92,7 +82,7 @@ impl SttBackend for GeminiSttBackend {
             .and_then(|t| t.as_str())
             .unwrap_or("");
 
-        Ok(text.trim().to_string())
+        validate_transcript(text.to_string())
     }
 
     fn supported_languages(&self) -> Vec<String> {

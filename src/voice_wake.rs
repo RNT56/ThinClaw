@@ -600,7 +600,8 @@ impl VoiceWakeRuntime {
             .unwrap_or(std::path::Path::new("."))
             .join("keywords.txt");
 
-        let mut child = match Command::new("sherpa-onnx-keyword-spotter")
+        let mut command = Command::new("sherpa-onnx-keyword-spotter");
+        command
             .args([
                 "--encoder",
                 &format!("{}/{}", model_path, encoder_filename),
@@ -622,9 +623,8 @@ impl VoiceWakeRuntime {
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-        {
+            .stderr(Stdio::null());
+        let mut child = match thinclaw_platform::OwnedStdChild::spawn(&mut command) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("Failed to spawn sherpa-onnx: {}", e);
@@ -639,8 +639,20 @@ impl VoiceWakeRuntime {
             }
         };
 
-        let mut stdin = child.stdin.take().expect("stdin piped");
-        let stdout = child.stdout.take().expect("stdout piped");
+        let stdin = child.take_stdin();
+        let stdout = child.take_stdout();
+        let (Some(mut stdin), Some(stdout)) = (stdin, stdout) else {
+            tracing::error!("Sherpa-ONNX did not expose the configured standard streams");
+            let _ = event_tx
+                .send(VoiceWakeEvent::Error {
+                    message: "Sherpa-ONNX standard-stream setup failed".to_string(),
+                })
+                .await;
+            running.store(false, Ordering::Relaxed);
+            let _ = child.kill();
+            let _ = audio_handle.join();
+            return;
+        };
 
         // --- Thread 2: stdin feeder (pcm_rx → child stdin) ---
         let feed_running = running.clone();
@@ -730,13 +742,7 @@ impl VoiceWakeRuntime {
 
     /// Check if the Sherpa-ONNX keyword spotter binary is available.
     pub fn sherpa_available() -> bool {
-        std::process::Command::new("sherpa-onnx-keyword-spotter")
-            .arg("--help")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success() || s.code() == Some(1)) // --help may return 1
-            .unwrap_or(false)
+        thinclaw_platform::find_executable_in_path("sherpa-onnx-keyword-spotter").is_some()
     }
 }
 

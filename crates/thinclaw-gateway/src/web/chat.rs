@@ -135,6 +135,7 @@ pub const CHAT_STORE_UNAVAILABLE_MESSAGE: &str = "Store not available";
 pub const CHAT_DATABASE_UNAVAILABLE_MESSAGE: &str = "Database not available";
 pub const DELETE_ASSISTANT_THREAD_FORBIDDEN_MESSAGE: &str = "Cannot delete the Assistant thread";
 pub const EMPTY_CHAT_MESSAGE_CONTENT_MESSAGE: &str = "Message content is empty";
+pub const MAX_GATEWAY_CHAT_CONTENT_BYTES: usize = 1024 * 1024;
 
 pub fn chat_rate_limit_error() -> (StatusCode, String) {
     (
@@ -147,15 +148,35 @@ pub fn empty_chat_message_content_message() -> String {
     EMPTY_CHAT_MESSAGE_CONTENT_MESSAGE.to_string()
 }
 
+pub fn validate_gateway_chat_content(content: &str) -> Result<(), (StatusCode, String)> {
+    if content.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            empty_chat_message_content_message(),
+        ));
+    }
+    if content.contains('\0') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "message content must not contain NUL".to_string(),
+        ));
+    }
+    if content.len() > MAX_GATEWAY_CHAT_CONTENT_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "message content exceeds the 1 MiB limit".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn chat_cancel_failed_message(error: impl std::fmt::Display) -> String {
     format!("Cancel failed: {error}")
 }
 
 pub fn unknown_approval_action_error(action: impl AsRef<str>) -> (StatusCode, String) {
-    (
-        StatusCode::BAD_REQUEST,
-        format!("Unknown action: {}", action.as_ref()),
-    )
+    let action = action.as_ref().chars().take(32).collect::<String>();
+    (StatusCode::BAD_REQUEST, format!("Unknown action: {action}"))
 }
 
 pub fn parse_approval_request_id(id: &str) -> Result<Uuid, (StatusCode, String)> {
@@ -213,7 +234,7 @@ pub fn normalize_chat_history_query(
         .transpose()?;
 
     Ok(ChatHistoryQueryOptions {
-        limit: query.limit.unwrap_or(50),
+        limit: query.limit.unwrap_or(50).clamp(1, 500),
         before_cursor,
     })
 }
@@ -498,26 +519,107 @@ pub fn thread_export_content(
     format: &str,
     messages: &[GatewayThreadExportMessage],
 ) -> Result<String, serde_json::Error> {
-    if format == "json" {
-        return serde_json::to_string_pretty(messages);
+    match format {
+        "json" => serde_json::to_string_pretty(messages),
+        "csv" => {
+            let mut csv = String::from("timestamp,role,content\n");
+            for message in messages {
+                csv.push_str(&format!(
+                    "{},{},{}\n",
+                    thread_export_csv_cell(&message.created_at.to_rfc3339()),
+                    thread_export_csv_cell(&message.role),
+                    thread_export_csv_cell(&message.content)
+                ));
+            }
+            Ok(csv)
+        }
+        "txt" => Ok(messages
+            .iter()
+            .map(|message| {
+                format!(
+                    "[{}] {}: {}",
+                    message.created_at.to_rfc3339(),
+                    message.role,
+                    message.content
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")),
+        "html" => {
+            let mut html = String::from(
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
+                 <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\">\
+                 <title>Session export</title><style>body{font-family:system-ui;max-width:800px;margin:0 auto;padding:2rem}\
+                 article{padding:1rem;border-radius:8px;margin:.5rem 0;background:#f4f4f4;white-space:pre-wrap}\
+                 time{color:#666;font-size:.8rem}</style></head><body><h1>Session export</h1>",
+            );
+            for message in messages {
+                html.push_str(&format!(
+                    "<article><strong>{}</strong> <time>{}</time><p>{}</p></article>",
+                    escape_thread_export_html(&message.role),
+                    escape_thread_export_html(&message.created_at.to_rfc3339()),
+                    escape_thread_export_html(&message.content)
+                ));
+            }
+            html.push_str("</body></html>");
+            Ok(html)
+        }
+        "md" | "markdown" => Ok(messages
+            .iter()
+            .map(|message| format!("## {}\n\n{}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join("\n\n")),
+        _ => Ok(messages
+            .iter()
+            .map(|message| format!("## {}\n\n{}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join("\n\n")),
     }
+}
 
-    Ok(messages
-        .iter()
-        .map(|message| format!("## {}\n\n{}", message.role, message.content))
-        .collect::<Vec<_>>()
-        .join("\n\n"))
+pub fn supported_thread_export_format(format: &str) -> bool {
+    matches!(format, "md" | "markdown" | "json" | "txt" | "csv" | "html")
+}
+
+fn escape_thread_export_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn thread_export_csv_cell(value: &str) -> String {
+    let mut flattened = value.replace(['\r', '\n'], " ");
+    if flattened
+        .trim_start()
+        .chars()
+        .next()
+        .is_some_and(|character| matches!(character, '=' | '+' | '-' | '@'))
+    {
+        flattened.insert(0, '\'');
+    }
+    format!("\"{}\"", flattened.replace('"', "\"\""))
 }
 
 pub fn thread_export_response(
     thread_id: Uuid,
     format: impl Into<String>,
     content: impl Into<String>,
+    message_count: usize,
 ) -> ThreadExportResponse {
     ThreadExportResponse {
         thread_id,
         format: format.into(),
         content: content.into(),
+        message_count,
     }
 }
 
@@ -547,8 +649,8 @@ pub fn build_turns_from_messages(messages: &[GatewayChatMessage]) -> Vec<Gateway
 
             if let Some(next) = iter.peek()
                 && next.role == "assistant"
+                && let Some(assistant_msg) = iter.next()
             {
-                let assistant_msg = iter.next().expect("peeked");
                 turn.response = Some(assistant_msg.content.clone());
                 turn.completed_at = Some(assistant_msg.created_at.to_rfc3339());
             }
@@ -1002,6 +1104,30 @@ mod tests {
     }
 
     #[test]
+    fn thread_export_content_escapes_html_and_neutralizes_csv_formulas() {
+        let message = GatewayThreadExportMessage {
+            id: Uuid::from_u128(1),
+            role: "user".to_string(),
+            content: "<script>alert(1)</script> =SUM(1,1)".to_string(),
+            actor_id: None,
+            actor_display_name: None,
+            raw_sender_id: None,
+            metadata: serde_json::Value::Null,
+            created_at: "2026-06-02T10:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        };
+
+        let html = thread_export_content("html", std::slice::from_ref(&message)).unwrap();
+        assert!(html.contains("Content-Security-Policy"));
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
+
+        let mut formula = message;
+        formula.content = "=HYPERLINK(\"https://example.com\")".to_string();
+        let csv = thread_export_content("csv", &[formula]).unwrap();
+        assert!(csv.contains("\"'=HYPERLINK(\"\"https://example.com\"\")\""));
+    }
+
+    #[test]
     fn chat_boundary_errors_preserve_existing_statuses_and_messages() {
         assert_eq!(
             chat_rate_limit_error(),
@@ -1013,6 +1139,17 @@ mod tests {
         assert_eq!(
             empty_chat_message_content_message(),
             EMPTY_CHAT_MESSAGE_CONTENT_MESSAGE
+        );
+        assert!(validate_gateway_chat_content("hello").is_ok());
+        assert_eq!(
+            validate_gateway_chat_content("bad\0message").unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            validate_gateway_chat_content(&"x".repeat(MAX_GATEWAY_CHAT_CONTENT_BYTES + 1))
+                .unwrap_err()
+                .0,
+            StatusCode::PAYLOAD_TOO_LARGE
         );
         assert_eq!(
             chat_cancel_failed_message("offline"),
@@ -1149,6 +1286,20 @@ mod tests {
         assert_eq!(
             normalize_chat_history_query(&bad_query),
             Err(invalid_before_timestamp_error())
+        );
+
+        let excessive_query = HistoryQuery {
+            thread_id: None,
+            limit: Some(usize::MAX),
+            before: None,
+            user_id: None,
+            actor_id: None,
+        };
+        assert_eq!(
+            normalize_chat_history_query(&excessive_query)
+                .unwrap()
+                .limit,
+            500
         );
     }
 

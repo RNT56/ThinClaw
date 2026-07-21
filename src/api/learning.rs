@@ -14,6 +14,12 @@ use super::error::{ApiError, ApiResult};
 
 pub use thinclaw_gateway::web::learning::*;
 
+const MAX_LEARNING_LIST_RESULTS: usize = 500;
+
+fn bounded_learning_limit(limit: usize) -> usize {
+    limit.clamp(1, MAX_LEARNING_LIST_RESULTS)
+}
+
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
 }
@@ -24,6 +30,7 @@ pub async fn status(
     user_id: &str,
     limit: usize,
 ) -> ApiResult<LearningStatusResponse> {
+    let limit = bounded_learning_limit(limit);
     let settings = orchestrator.load_settings_for_user(user_id).await;
     let recent_limit = (limit.saturating_add(1)) as i64;
 
@@ -125,6 +132,7 @@ pub async fn history(
     thread_id: Option<&str>,
     limit: usize,
 ) -> ApiResult<LearningHistoryResponse> {
+    let limit = bounded_learning_limit(limit);
     let limit_plus_one = (limit.saturating_add(1)) as i64;
     let events = store
         .list_learning_events(user_id, actor_id, channel, thread_id, limit_plus_one)
@@ -159,6 +167,7 @@ pub async fn candidates(
     risk_tier: Option<&str>,
     limit: usize,
 ) -> ApiResult<LearningCandidateResponse> {
+    let limit = bounded_learning_limit(limit);
     let limit_plus_one = (limit.saturating_add(1)) as i64;
     let candidates = store
         .list_learning_candidates(user_id, candidate_type, risk_tier, limit_plus_one)
@@ -184,6 +193,7 @@ pub async fn artifact_versions(
     artifact_name: Option<&str>,
     limit: usize,
 ) -> ApiResult<LearningArtifactVersionResponse> {
+    let limit = bounded_learning_limit(limit);
     let limit_plus_one = (limit.saturating_add(1)) as i64;
     let versions = store
         .list_learning_artifact_versions(user_id, artifact_type, artifact_name, limit_plus_one)
@@ -209,6 +219,7 @@ pub async fn feedback(
     target_id: Option<&str>,
     limit: usize,
 ) -> ApiResult<LearningFeedbackResponse> {
+    let limit = bounded_learning_limit(limit);
     let limit_plus_one = (limit.saturating_add(1)) as i64;
     let entries = store
         .list_learning_feedback(user_id, target_type, target_id, limit_plus_one)
@@ -262,6 +273,7 @@ pub async fn code_proposals(
     status: Option<&str>,
     limit: usize,
 ) -> ApiResult<LearningCodeProposalResponse> {
+    let limit = bounded_learning_limit(limit);
     let limit_plus_one = (limit.saturating_add(1)) as i64;
     let proposals = store
         .list_learning_code_proposals(user_id, status, limit_plus_one)
@@ -287,6 +299,7 @@ pub async fn rollbacks(
     artifact_name: Option<&str>,
     limit: usize,
 ) -> ApiResult<LearningRollbackResponse> {
+    let limit = bounded_learning_limit(limit);
     let limit_plus_one = (limit.saturating_add(1)) as i64;
     let entries = store
         .list_learning_rollbacks(user_id, artifact_type, artifact_name, limit_plus_one)
@@ -315,6 +328,7 @@ pub async fn outcomes(
     thread_id: Option<&str>,
     limit: usize,
 ) -> ApiResult<LearningOutcomeResponse> {
+    let limit = bounded_learning_limit(limit);
     let limit_plus_one = (limit.saturating_add(1)) as i64;
     let contracts = store
         .list_outcome_contracts(&crate::history::OutcomeContractQuery {

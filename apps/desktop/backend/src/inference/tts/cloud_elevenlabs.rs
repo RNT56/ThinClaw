@@ -1,6 +1,9 @@
 //! ElevenLabs TTS backend.
 
-use crate::inference::tts::{TtsBackend, TtsRequest};
+use crate::inference::tts::{
+    bounded_tts_audio, bounded_tts_json_with_limit, checked_tts_response, tts_http_client,
+    validate_tts_request, TtsBackend, TtsRequest, MAX_TTS_VOICES, MAX_TTS_VOICE_RESPONSE_BYTES,
+};
 use crate::inference::{AudioFormat, BackendInfo, InferenceError, InferenceResult, VoiceInfo};
 use async_trait::async_trait;
 
@@ -27,10 +30,19 @@ impl TtsBackend for ElevenLabsTtsBackend {
     }
 
     async fn synthesize(&self, request: TtsRequest) -> InferenceResult<Vec<u8>> {
-        let client = reqwest::Client::new();
+        validate_tts_request(&request)?;
+        let client = tts_http_client(&self.api_key)?;
         let voice_id = request
             .voice
             .unwrap_or_else(|| "21m00Tcm4TlvDq8ikWAM".to_string()); // Rachel
+        if !voice_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(InferenceError::config(
+                "The ElevenLabs voice identifier is invalid",
+            ));
+        }
 
         let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{}", voice_id);
 
@@ -49,30 +61,13 @@ impl TtsBackend for ElevenLabsTtsBackend {
             .await
             .map_err(|e| InferenceError::network(format!("ElevenLabs request failed: {}", e)))?;
 
-        if response.status() == 401 {
-            return Err(InferenceError::auth("Invalid ElevenLabs API key"));
-        }
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(InferenceError::provider(format!(
-                "ElevenLabs error ({}): {}",
-                status, text
-            )));
-        }
-
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| InferenceError::provider(format!("Failed to read audio: {}", e)))?;
-
-        Ok(bytes.to_vec())
+        let response = checked_tts_response(response, "ElevenLabs").await?;
+        bounded_tts_audio(response, "ElevenLabs").await
     }
 
     async fn available_voices(&self) -> InferenceResult<Vec<VoiceInfo>> {
         // Fetch from ElevenLabs API
-        let client = reqwest::Client::new();
+        let client = tts_http_client(&self.api_key)?;
         let response = client
             .get("https://api.elevenlabs.io/v1/voices")
             .header("xi-api-key", &self.api_key)
@@ -80,39 +75,7 @@ impl TtsBackend for ElevenLabsTtsBackend {
             .await
             .map_err(|e| InferenceError::network(format!("Failed to fetch voices: {}", e)))?;
 
-        if !response.status().is_success() {
-            // Return default voices as fallback
-            return Ok(vec![
-                VoiceInfo {
-                    id: "21m00Tcm4TlvDq8ikWAM".into(),
-                    name: "Rachel".into(),
-                    language: Some("en".into()),
-                    gender: Some("female".into()),
-                    is_default: true,
-                },
-                VoiceInfo {
-                    id: "EXAVITQu4vr4xnSDxMaL".into(),
-                    name: "Bella".into(),
-                    language: Some("en".into()),
-                    gender: Some("female".into()),
-                    is_default: false,
-                },
-                VoiceInfo {
-                    id: "MF3mGyEYCl7XYWbV9V6O".into(),
-                    name: "Elli".into(),
-                    language: Some("en".into()),
-                    gender: Some("female".into()),
-                    is_default: false,
-                },
-                VoiceInfo {
-                    id: "TxGEqnHWrfWFTfGW9XjX".into(),
-                    name: "Josh".into(),
-                    language: Some("en".into()),
-                    gender: Some("male".into()),
-                    is_default: false,
-                },
-            ]);
-        }
+        let response = checked_tts_response(response, "ElevenLabs voices").await?;
 
         #[derive(serde::Deserialize)]
         struct VoicesResponse {
@@ -124,10 +87,29 @@ impl TtsBackend for ElevenLabsTtsBackend {
             name: String,
         }
 
-        let result: VoicesResponse = response
-            .json()
-            .await
-            .map_err(|e| InferenceError::provider(format!("Parse error: {}", e)))?;
+        let result: VoicesResponse = bounded_tts_json_with_limit(
+            response,
+            "ElevenLabs voices",
+            MAX_TTS_VOICE_RESPONSE_BYTES,
+        )
+        .await?;
+        if result.voices.len() > MAX_TTS_VOICES
+            || result.voices.iter().any(|voice| {
+                voice.voice_id.is_empty()
+                    || voice.voice_id.len() > 128
+                    || !voice
+                        .voice_id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                    || voice.name.is_empty()
+                    || voice.name.len() > 512
+                    || voice.name.chars().any(char::is_control)
+            })
+        {
+            return Err(InferenceError::provider(
+                "ElevenLabs returned invalid voice metadata",
+            ));
+        }
 
         Ok(result
             .voices

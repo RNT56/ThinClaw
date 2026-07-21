@@ -69,6 +69,7 @@ pub enum ProductionStatus {
 
 /// Root schema for a channel capabilities JSON file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChannelCapabilitiesFile {
     /// File type, must be "channel".
     #[serde(default = "default_type")]
@@ -112,12 +113,404 @@ fn default_type() -> String {
 impl ChannelCapabilitiesFile {
     /// Parse from JSON string.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
+        let parsed: Self = serde_json::from_str(json)?;
+        parsed
+            .validate()
+            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        Ok(parsed)
     }
 
     /// Parse from JSON bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
+        let parsed: Self = serde_json::from_slice(bytes)?;
+        parsed
+            .validate()
+            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        Ok(parsed)
+    }
+
+    /// Validate all operator-controlled bounds before any part of a channel
+    /// manifest is converted into runtime policy or setup behavior.
+    pub fn validate(&self) -> Result<(), String> {
+        fn valid_token(value: &str, max: usize) -> bool {
+            !value.is_empty()
+                && value.len() <= max
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        }
+
+        fn valid_rate_limit(rate: &RateLimitSchema) -> bool {
+            rate.requests_per_minute > 0
+                && rate.requests_per_minute <= 10_000
+                && rate.requests_per_hour >= rate.requests_per_minute
+                && rate.requests_per_hour <= 1_000_000
+        }
+
+        fn valid_host_pattern(value: &str) -> bool {
+            if value == "*" {
+                return true;
+            }
+            let host = value.strip_prefix("*.").unwrap_or(value);
+            !host.is_empty()
+                && host.len() <= 253
+                && !host.starts_with('.')
+                && !host.ends_with('.')
+                && host.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                        && label
+                            .as_bytes()
+                            .first()
+                            .is_some_and(u8::is_ascii_alphanumeric)
+                        && label
+                            .as_bytes()
+                            .last()
+                            .is_some_and(u8::is_ascii_alphanumeric)
+                })
+        }
+
+        fn valid_http_path_prefix(value: &str) -> bool {
+            !value.is_empty()
+                && value.len() <= 2048
+                && value.starts_with('/')
+                && !value.contains(['\\', '?', '#'])
+                && !value.chars().any(char::is_control)
+                && !value.split('/').any(|part| matches!(part, "." | ".."))
+        }
+
+        if self.r#type != "channel" {
+            return Err("capabilities file type must be 'channel'".to_string());
+        }
+        if !crate::wasm::capabilities::is_valid_channel_name(&self.name) {
+            return Err("channel name must be a safe lowercase namespace key".to_string());
+        }
+        if self
+            .description
+            .as_deref()
+            .is_some_and(|value| value.len() > 4096 || value.chars().any(char::is_control))
+            || self
+                .formatting_hints
+                .as_deref()
+                .is_some_and(|value| value.len() > 64 * 1024)
+        {
+            return Err("channel description or formatting hints are oversized".to_string());
+        }
+        if self.config.len() > 256
+            || self.config.keys().any(|key| !valid_token(key, 128))
+            || serde_json::to_vec(&self.config)
+                .map(|bytes| bytes.len() > 1024 * 1024)
+                .unwrap_or(true)
+        {
+            return Err("channel config exceeds its key or byte limit".to_string());
+        }
+
+        if self.setup.required_secrets.len() > 64 {
+            return Err("setup secret list exceeds the entry limit".to_string());
+        }
+        let mut declared_setup_secrets = std::collections::HashSet::new();
+        for secret in &self.setup.required_secrets {
+            if !valid_token(&secret.name, 128)
+                || !declared_setup_secrets.insert(secret.name.as_str())
+                || secret.prompt.is_empty()
+                || secret.prompt.len() > 4096
+                || secret.prompt.chars().any(char::is_control)
+                || secret.validation.as_deref().is_some_and(|value| {
+                    value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control)
+                })
+                || secret
+                    .auto_generate
+                    .as_ref()
+                    .is_some_and(|value| value.length == 0 || value.length > 1024)
+            {
+                return Err(
+                    "setup secret declarations must be unique, bounded, and well formed"
+                        .to_string(),
+                );
+            }
+        }
+
+        if let Some(http) = &self.capabilities.http {
+            if http.allowlist.len() > 128
+                || http.credentials.len() > 64
+                || http
+                    .max_request_bytes
+                    .is_some_and(|value| value == 0 || value > 20 * 1024 * 1024)
+                || http
+                    .max_response_bytes
+                    .is_some_and(|value| value == 0 || value > 20 * 1024 * 1024)
+                || http
+                    .timeout_secs
+                    .is_some_and(|value| value == 0 || value > 120)
+                || http
+                    .rate_limit
+                    .as_ref()
+                    .is_some_and(|rate| !valid_rate_limit(rate))
+            {
+                return Err(
+                    "HTTP capability exceeds a count, size, rate, or timeout limit".to_string(),
+                );
+            }
+            for endpoint in &http.allowlist {
+                if !valid_host_pattern(&endpoint.host)
+                    || endpoint
+                        .path_prefix
+                        .as_deref()
+                        .is_some_and(|path| !valid_http_path_prefix(path))
+                    || endpoint.methods.len() > 8
+                    || endpoint.methods.iter().any(|method| {
+                        !matches!(
+                            method.to_ascii_uppercase().as_str(),
+                            "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"
+                        )
+                    })
+                {
+                    return Err("HTTP allowlist entry is malformed or oversized".to_string());
+                }
+            }
+            let allowed_hosts = http
+                .allowlist
+                .iter()
+                .map(|endpoint| endpoint.host.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let has_wildcard_base = http.credentials.values().any(|mapping| {
+                matches!(mapping.location, CredentialLocationSchema::UrlBase { .. })
+                    && mapping.host_patterns.iter().any(|host| host == "*")
+            });
+            let mut mapped_secret_names = std::collections::HashSet::new();
+            for (alias, mapping) in &http.credentials {
+                let expected_placeholder =
+                    crate::wasm::capabilities::credential_placeholder_name(&mapping.secret_name)
+                        .map(|name| format!("{{{name}}}"));
+                if !valid_token(alias, 128)
+                    || expected_placeholder.is_none()
+                    || !mapped_secret_names.insert(mapping.secret_name.as_str())
+                    || !declared_setup_secrets.contains(mapping.secret_name.as_str())
+                    || mapping.host_patterns.is_empty()
+                    || mapping.host_patterns.len() > 32
+                    || mapping.host_patterns.iter().any(|host| {
+                        !valid_host_pattern(host)
+                            || !allowed_hosts.contains(host.as_str())
+                            || (host == "*" && !has_wildcard_base)
+                    })
+                {
+                    return Err(
+                        "HTTP credential mapping is malformed, undeclared, or overbroad"
+                            .to_string(),
+                    );
+                }
+                match &mapping.location {
+                    CredentialLocationSchema::Bearer => {}
+                    CredentialLocationSchema::Basic { username } => {
+                        if username.is_empty()
+                            || username.len() > 1024
+                            || username.contains(['\r', '\n'])
+                        {
+                            return Err("HTTP basic-auth username is invalid".to_string());
+                        }
+                    }
+                    CredentialLocationSchema::Header { name, prefix } => {
+                        if axum::http::HeaderName::from_bytes(name.as_bytes()).is_err()
+                            || prefix.as_deref().is_some_and(|value| {
+                                value.len() > 1024 || value.contains(['\r', '\n'])
+                            })
+                        {
+                            return Err("HTTP credential header mapping is invalid".to_string());
+                        }
+                    }
+                    CredentialLocationSchema::QueryParam { name } => {
+                        if !valid_token(name, 128) {
+                            return Err("HTTP credential query parameter is invalid".to_string());
+                        }
+                    }
+                    CredentialLocationSchema::UrlPath { placeholder }
+                    | CredentialLocationSchema::UrlBase { placeholder }
+                    | CredentialLocationSchema::Body { placeholder } => {
+                        let inner = placeholder
+                            .strip_prefix('{')
+                            .and_then(|value| value.strip_suffix('}'));
+                        if inner.is_none_or(|value| {
+                            value.is_empty()
+                                || value.len() > 128
+                                || !value.bytes().all(|byte| {
+                                    byte.is_ascii_uppercase()
+                                        || byte.is_ascii_digit()
+                                        || byte == b'_'
+                                })
+                        }) || Some(placeholder) != expected_placeholder.as_ref()
+                        {
+                            return Err("HTTP credential placeholder is invalid".to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(secrets) = &self.capabilities.secrets
+            && (secrets.allowed_names.len() > 128
+                || secrets.allowed_names.iter().any(|name| {
+                    let base = name.strip_suffix('*').unwrap_or(name);
+                    base.is_empty() || !valid_token(base, 128)
+                }))
+        {
+            return Err("secret capability is malformed or oversized".to_string());
+        }
+        if let Some(tool_invoke) = &self.capabilities.tool_invoke
+            && (tool_invoke.aliases.len() > 128
+                || tool_invoke
+                    .aliases
+                    .iter()
+                    .any(|(alias, target)| !valid_token(alias, 128) || !valid_token(target, 128))
+                || tool_invoke
+                    .rate_limit
+                    .as_ref()
+                    .is_some_and(|rate| !valid_rate_limit(rate)))
+        {
+            return Err("tool-invoke capability is malformed or oversized".to_string());
+        }
+        if let Some(workspace) = &self.capabilities.workspace
+            && (workspace.allowed_prefixes.len() > 64
+                || workspace.allowed_prefixes.iter().any(|prefix| {
+                    prefix.is_empty()
+                        || prefix.len() > 1024
+                        || prefix.starts_with('/')
+                        || prefix.contains('\\')
+                        || prefix.chars().any(char::is_control)
+                        || prefix
+                            .trim_end_matches('/')
+                            .split('/')
+                            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+                }))
+        {
+            return Err("workspace capability is malformed or oversized".to_string());
+        }
+
+        if let Some(channel) = &self.capabilities.channel {
+            let expected_path = format!("/webhook/{}", self.name);
+            if channel.allowed_paths.len() > 32
+                || channel.allowed_paths.iter().any(|path| {
+                    path != &expected_path
+                        && !path
+                            .strip_prefix(&expected_path)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+                || channel
+                    .min_poll_interval_ms
+                    .is_some_and(|value| value > 86_400_000)
+                || channel
+                    .max_message_size
+                    .is_some_and(|value| value == 0 || value > 64 * 1024)
+                || channel
+                    .callback_timeout_secs
+                    .is_some_and(|value| value == 0 || value > 120)
+                || channel.emit_rate_limit.as_ref().is_some_and(|rate| {
+                    rate.messages_per_minute == 0
+                        || rate.messages_per_minute > 10_000
+                        || rate.messages_per_hour < rate.messages_per_minute
+                        || rate.messages_per_hour > 1_000_000
+                })
+            {
+                return Err(
+                    "channel capability exceeds its namespace or runtime limits".to_string()
+                );
+            }
+            if let Some(prefix) = &channel.workspace_prefix {
+                let probe = ChannelCapabilities {
+                    workspace_prefix: prefix.clone(),
+                    ..ChannelCapabilities::default()
+                };
+                probe.validate_workspace_path("validation-probe")?;
+            }
+            if let Some(webhook) = &channel.webhook {
+                let signature_secret_name = webhook
+                    .secret_name
+                    .clone()
+                    .unwrap_or_else(|| format!("{}_webhook_secret", self.name));
+                let verify_secret_name = webhook
+                    .verify_token_secret_name
+                    .as_deref()
+                    .unwrap_or(&signature_secret_name);
+                if webhook
+                    .secret_header
+                    .as_deref()
+                    .is_none_or(|name| axum::http::HeaderName::from_bytes(name.as_bytes()).is_err())
+                    || !valid_token(&signature_secret_name, 128)
+                    || !declared_setup_secrets.contains(signature_secret_name.as_str())
+                    || webhook
+                        .verify_token_param
+                        .as_deref()
+                        .is_some_and(|name| !valid_token(name, 128))
+                    || webhook.verify_token_secret_name.is_some()
+                        && webhook.verify_token_param.is_none()
+                    || webhook.verify_token_param.is_some()
+                        && (!valid_token(verify_secret_name, 128)
+                            || !declared_setup_secrets.contains(verify_secret_name))
+                {
+                    return Err(
+                        "webhook authentication must use declared setup secrets and valid header/query names"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        if let Some(endpoint) = &self.setup.validation_endpoint {
+            let parsed_url = url::Url::parse(endpoint.url()).ok();
+            if endpoint.url().is_empty()
+                || endpoint.url().len() > 16 * 1024
+                || parsed_url.as_ref().is_none_or(|url| {
+                    url.scheme() != "https"
+                        || url.host_str().is_none()
+                        || !url.username().is_empty()
+                        || url.password().is_some()
+                        || url.fragment().is_some()
+                })
+            {
+                return Err("setup validation URL is invalid or oversized".to_string());
+            }
+            let Some(parsed_url) = parsed_url else {
+                return Err("setup validation URL is invalid or oversized".to_string());
+            };
+            let method = endpoint
+                .request()
+                .map_or("GET", |request| request.method.as_str());
+            if let Some(request) = endpoint.request()
+                && (!matches!(request.method.to_ascii_uppercase().as_str(), "GET" | "POST")
+                    || !(200..400).contains(&request.success_status)
+                    || request.secret_name.as_deref().is_some_and(|name| {
+                        !valid_token(name, 128) || !declared_setup_secrets.contains(name)
+                    })
+                    || request.secret_name.is_some() != request.credential.is_some()
+                    || request.credential.as_ref().is_some_and(|credential| {
+                        !matches!(
+                            credential,
+                            CredentialLocationSchema::Bearer
+                                | CredentialLocationSchema::Basic { .. }
+                                | CredentialLocationSchema::Header { .. }
+                        )
+                    }))
+            {
+                return Err("setup validation request is malformed".to_string());
+            }
+            let validation_granted = self.capabilities.http.as_ref().is_some_and(|http| {
+                http.allowlist.iter().any(|grant| {
+                    grant.to_endpoint_pattern().matches(
+                        parsed_url.host_str().unwrap_or_default(),
+                        parsed_url.path(),
+                        method,
+                    )
+                })
+            });
+            if !validation_granted {
+                return Err(
+                    "setup validation URL is not granted by the HTTP capability".to_string()
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Convert to runtime ChannelCapabilities.
@@ -198,21 +591,8 @@ impl ChannelCapabilitiesFile {
 
 /// Schema for channel capabilities.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChannelCapabilitiesSchema {
-    /// Tool capabilities (HTTP, secrets, workspace_read).
-    /// Note: Using the struct directly (not Option) because #[serde(flatten)]
-    /// with Option<T> doesn't work correctly when T has all-optional fields.
-    #[serde(flatten)]
-    pub tool: ToolCapabilitiesFile,
-
-    /// Channel-specific capabilities.
-    #[serde(default)]
-    pub channel: Option<ChannelSpecificCapabilitiesSchema>,
-}
-
-/// Root schema for the tool-runtime capability subset used by channels.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ToolCapabilitiesFile {
     #[serde(default)]
     pub http: Option<HttpCapabilitySchema>,
     #[serde(default)]
@@ -221,10 +601,14 @@ pub struct ToolCapabilitiesFile {
     pub tool_invoke: Option<ToolInvokeCapabilitySchema>,
     #[serde(default)]
     pub workspace: Option<WorkspaceCapabilitySchema>,
+
+    /// Channel-specific capabilities.
+    #[serde(default)]
+    pub channel: Option<ChannelSpecificCapabilitiesSchema>,
 }
 
-impl ToolCapabilitiesFile {
-    pub fn to_capabilities(&self) -> ToolCapabilities {
+impl ChannelCapabilitiesSchema {
+    fn to_tool_capabilities(&self) -> ToolCapabilities {
         let mut caps = ToolCapabilities::default();
 
         if let Some(http) = &self.http {
@@ -256,6 +640,7 @@ impl ToolCapabilitiesFile {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpCapabilitySchema {
     #[serde(default)]
     pub allowlist: Vec<EndpointPatternSchema>,
@@ -281,8 +666,8 @@ impl HttpCapabilitySchema {
                 .collect(),
             credentials: self
                 .credentials
-                .values()
-                .map(|m| (m.secret_name.clone(), m.to_credential_mapping()))
+                .iter()
+                .map(|(alias, mapping)| (alias.clone(), mapping.to_credential_mapping()))
                 .collect(),
             rate_limit: self
                 .rate_limit
@@ -307,6 +692,7 @@ impl HttpCapabilitySchema {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EndpointPatternSchema {
     pub host: String,
     #[serde(default)]
@@ -326,6 +712,7 @@ impl EndpointPatternSchema {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CredentialMappingSchema {
     pub secret_name: String,
     pub location: CredentialLocationSchema,
@@ -345,6 +732,7 @@ impl CredentialMappingSchema {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum CredentialLocationSchema {
     Bearer,
     Basic {
@@ -359,6 +747,12 @@ pub enum CredentialLocationSchema {
         name: String,
     },
     UrlPath {
+        placeholder: String,
+    },
+    UrlBase {
+        placeholder: String,
+    },
+    Body {
         placeholder: String,
     },
 }
@@ -378,11 +772,18 @@ impl CredentialLocationSchema {
             Self::UrlPath { placeholder } => CredentialLocation::UrlPath {
                 placeholder: placeholder.clone(),
             },
+            Self::UrlBase { placeholder } => CredentialLocation::UrlBase {
+                placeholder: placeholder.clone(),
+            },
+            Self::Body { placeholder } => CredentialLocation::Body {
+                placeholder: placeholder.clone(),
+            },
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimitSchema {
     #[serde(default = "default_requests_per_minute")]
     pub requests_per_minute: u32,
@@ -408,12 +809,14 @@ impl RateLimitSchema {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecretsCapabilitySchema {
     #[serde(default)]
     pub allowed_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolInvokeCapabilitySchema {
     #[serde(default)]
     pub aliases: HashMap<String, String>,
@@ -422,6 +825,7 @@ pub struct ToolInvokeCapabilitySchema {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceCapabilitySchema {
     #[serde(default)]
     pub allowed_prefixes: Vec<String>,
@@ -430,7 +834,7 @@ pub struct WorkspaceCapabilitySchema {
 impl ChannelCapabilitiesSchema {
     /// Convert to runtime ChannelCapabilities.
     pub fn to_channel_capabilities(&self, channel_name: &str) -> ChannelCapabilities {
-        let tool_caps = self.tool.to_capabilities();
+        let tool_caps = self.to_tool_capabilities();
 
         let mut caps =
             ChannelCapabilities::for_channel(channel_name).with_tool_capabilities(tool_caps);
@@ -466,6 +870,7 @@ impl ChannelCapabilitiesSchema {
 
 /// Channel-specific capabilities schema.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChannelSpecificCapabilitiesSchema {
     /// HTTP paths the channel can register for webhooks.
     #[serde(default)]
@@ -504,6 +909,7 @@ pub struct ChannelSpecificCapabilitiesSchema {
 ///
 /// Allows channels to specify their webhook validation requirements.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebhookSchema {
     /// HTTP header name for secret validation.
     ///
@@ -563,19 +969,69 @@ pub enum WebhookSecretValidation {
 ///
 /// Allows channels to declare their setup requirements for the wizard.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetupSchema {
     /// Required secrets that must be configured during setup.
     #[serde(default)]
     pub required_secrets: Vec<SecretSetupSchema>,
 
-    /// Optional validation endpoint to verify configuration.
-    /// Placeholders like {secret_name} are replaced with actual values.
+    /// Optional validation endpoint to verify configuration. The legacy string
+    /// form remains readable for static, unauthenticated checks. Credentialed
+    /// validation should use the structured form so secrets stay in headers.
     #[serde(default)]
-    pub validation_endpoint: Option<String>,
+    pub validation_endpoint: Option<SetupValidationEndpointSchema>,
+}
+
+/// Setup validation endpoint, with backwards-compatible parsing of legacy
+/// static URL strings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SetupValidationEndpointSchema {
+    LegacyUrl(String),
+    Request(SetupValidationRequestSchema),
+}
+
+impl SetupValidationEndpointSchema {
+    pub fn url(&self) -> &str {
+        match self {
+            Self::LegacyUrl(url) => url,
+            Self::Request(request) => &request.url,
+        }
+    }
+
+    pub fn request(&self) -> Option<&SetupValidationRequestSchema> {
+        match self {
+            Self::LegacyUrl(_) => None,
+            Self::Request(request) => Some(request),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupValidationRequestSchema {
+    pub url: String,
+    #[serde(default = "default_setup_validation_method")]
+    pub method: String,
+    #[serde(default = "default_setup_validation_status")]
+    pub success_status: u16,
+    #[serde(default)]
+    pub secret_name: Option<String>,
+    #[serde(default)]
+    pub credential: Option<CredentialLocationSchema>,
+}
+
+fn default_setup_validation_method() -> String {
+    "GET".to_string()
+}
+
+fn default_setup_validation_status() -> u16 {
+    200
 }
 
 /// Configuration for a secret required during setup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecretSetupSchema {
     /// Secret name in the secrets store (e.g., "telegram_bot_token").
     pub name: String,
@@ -598,6 +1054,7 @@ pub struct SecretSetupSchema {
 
 /// Configuration for auto-generating a secret value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AutoGenerateSchema {
     /// Length of the generated value in bytes (will be hex-encoded).
     #[serde(default = "default_auto_generate_length")]
@@ -610,6 +1067,7 @@ fn default_auto_generate_length() -> usize {
 
 /// Schema for emit rate limiting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmitRateLimitSchema {
     /// Maximum messages per minute.
     #[serde(default = "default_messages_per_minute")]
@@ -648,6 +1106,7 @@ impl From<RateLimitSchema> for EmitRateLimitSchema {
 
 /// Channel configuration returned by on_start.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChannelConfig {
     /// Display name for the channel.
     pub display_name: String,
@@ -673,6 +1132,7 @@ impl Default for ChannelConfig {
 
 /// HTTP endpoint configuration schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpEndpointConfigSchema {
     /// Path to register.
     pub path: String,
@@ -688,6 +1148,7 @@ pub struct HttpEndpointConfigSchema {
 
 /// Polling configuration schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PollConfigSchema {
     /// Polling interval in milliseconds.
     pub interval_ms: u32,
@@ -718,6 +1179,12 @@ mod tests {
             "name": "slack",
             "description": "Slack Events API channel",
             "formatting_hints": "Use Slack mrkdwn. Avoid triple backticks when plain text will do.",
+            "setup": {
+                "required_secrets": [{
+                    "name": "slack_bot_token",
+                    "prompt": "Slack bot token"
+                }]
+            },
             "capabilities": {
                 "http": {
                     "allowlist": [
@@ -850,6 +1317,12 @@ mod tests {
     fn test_webhook_schema() {
         let json = r#"{
             "name": "telegram",
+            "setup": {
+                "required_secrets": [
+                    {"name": "telegram_webhook_secret", "prompt": "Webhook secret"},
+                    {"name": "telegram_verify_token", "prompt": "Verify token"}
+                ]
+            },
             "capabilities": {
                 "channel": {
                     "allowed_paths": ["/webhook/telegram"],
@@ -900,12 +1373,49 @@ mod tests {
     }
 
     #[test]
+    fn bundled_channel_capabilities_all_validate() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("channels-src");
+        let mut checked = 0usize;
+        for directory in std::fs::read_dir(&root).unwrap() {
+            let directory = directory.unwrap();
+            if !directory.file_type().unwrap().is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(directory.path()).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".capabilities.json"))
+                {
+                    let bytes = std::fs::read(&path).unwrap();
+                    ChannelCapabilitiesFile::from_bytes(&bytes).unwrap_or_else(|error| {
+                        panic!("{} failed validation: {error}", path.display())
+                    });
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 16, "expected all bundled channel manifests");
+    }
+
+    #[test]
     fn test_webhook_verify_token_secret_name_defaults_to_post_secret() {
         let json = r#"{
             "name": "whatsapp",
+            "setup": {
+                "required_secrets": [{
+                    "name": "whatsapp_app_secret",
+                    "prompt": "App secret"
+                }]
+            },
             "capabilities": {
                 "channel": {
                     "webhook": {
+                        "secret_header": "X-Hub-Signature-256",
                         "secret_name": "whatsapp_app_secret",
                         "verify_token_param": "hub.verify_token"
                     }
@@ -938,7 +1448,20 @@ mod tests {
                         "auto_generate": { "length": 64 }
                     }
                 ],
-                "validation_endpoint": "https://api.telegram.org/bot{telegram_bot_token}/getMe"
+                "validation_endpoint": {
+                    "url": "https://api.telegram.org/bot/getMe",
+                    "secret_name": "telegram_bot_token",
+                    "credential": { "type": "bearer" }
+                }
+            },
+            "capabilities": {
+                "http": {
+                    "allowlist": [{
+                        "host": "api.telegram.org",
+                        "path_prefix": "/bot/",
+                        "methods": ["GET"]
+                    }]
+                }
             }
         }"#;
 

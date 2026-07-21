@@ -33,6 +33,8 @@ pub struct NostrChannel {
 }
 
 const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_NOSTR_ATTACHMENT_FALLBACKS: usize = 32;
+const MAX_NOSTR_ATTACHMENT_LABEL_CHARS: usize = 256;
 
 impl NostrChannel {
     pub fn new(config: NostrConfig) -> Result<Self, ChannelError> {
@@ -68,6 +70,11 @@ impl Channel for NostrChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
+        if self.runtime.owner_pubkey().is_none() {
+            return Err(ChannelError::Configuration(
+                "Nostr owner-control ingress requires an explicit owner public key".to_string(),
+            ));
+        }
         if let Some(handle) = self.notification_task.lock().await.take() {
             self.runtime.shutdown().await;
             drain_channel_task(handle, "nostr").await;
@@ -82,10 +89,22 @@ impl Channel for NostrChannel {
             "Nostr channel connected"
         );
 
+        let mut subscribed = 0usize;
         for filter in self.runtime.control_filters() {
-            if let Err(err) = self.runtime.client().subscribe(filter, None).await {
-                tracing::error!(error = %err, "Failed to subscribe to Nostr control DMs");
+            match self.runtime.client().subscribe(filter, None).await {
+                Ok(_) => subscribed += 1,
+                Err(err) => {
+                    tracing::error!(error = %err, "Failed to subscribe to Nostr control DMs")
+                }
             }
+        }
+        if subscribed == 0 {
+            self.runtime.shutdown().await;
+            return Err(ChannelError::StartupFailed {
+                name: "nostr".to_string(),
+                reason: "Failed to subscribe to either supported direct-message protocol"
+                    .to_string(),
+            });
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(256);
@@ -109,10 +128,6 @@ impl Channel for NostrChannel {
                                 return Ok(false);
                             }
 
-                            if !runtime.mark_control_event_seen(&event.id).await {
-                                return Ok(false);
-                            }
-
                             let inbound = match runtime.decrypt_inbound_dm(&event).await {
                                 Ok(Some(dm)) => dm,
                                 Ok(None) => return Ok(false),
@@ -128,6 +143,18 @@ impl Channel for NostrChannel {
                                     "Nostr: dropping DM from non-owner sender"
                                 );
                                 return Ok(false);
+                            }
+
+                            match runtime.mark_control_event_seen(&event.id).await {
+                                Ok(true) => {}
+                                Ok(false) => return Ok(false),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        error = %error,
+                                        "Nostr: refusing to process an event whose replay state could not be persisted"
+                                    );
+                                    return Ok(false);
+                                }
                             }
 
                             if let Err(err) = runtime
@@ -317,15 +344,25 @@ fn format_response_with_attachment_fallback(response: &OutgoingResponse) -> Stri
     }
     text.push_str("Generated media:");
 
-    for attachment in &response.attachments {
-        let filename = attachment.filename.as_deref().unwrap_or("generated-media");
-        let source = attachment.source_url.as_deref().unwrap_or("stored locally");
+    for attachment in response
+        .attachments
+        .iter()
+        .take(MAX_NOSTR_ATTACHMENT_FALLBACKS)
+    {
+        let filename =
+            bounded_attachment_label(attachment.filename.as_deref().unwrap_or("generated-media"));
+        let mime_type = bounded_attachment_label(&attachment.mime_type);
         text.push_str(&format!(
-            "\n- {} ({} bytes, {}): {}",
+            "\n- {} ({} bytes, {})",
             filename,
             attachment.data.len(),
-            attachment.mime_type,
-            source
+            mime_type,
+        ));
+    }
+    if response.attachments.len() > MAX_NOSTR_ATTACHMENT_FALLBACKS {
+        text.push_str(&format!(
+            "\n- {} additional attachment(s) omitted",
+            response.attachments.len() - MAX_NOSTR_ATTACHMENT_FALLBACKS
         ));
     }
 
@@ -337,10 +374,23 @@ fn format_response_with_attachment_fallback(response: &OutgoingResponse) -> Stri
     text
 }
 
+fn bounded_attachment_label(value: &str) -> String {
+    let mut output = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_NOSTR_ATTACHMENT_LABEL_CHARS)
+        .collect::<String>();
+    if output.is_empty() {
+        output.push_str("unknown");
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use secrecy::SecretString;
+    use thinclaw_types::media::MediaContent;
 
     fn sample_config() -> NostrConfig {
         NostrConfig {
@@ -348,7 +398,9 @@ mod tests {
                 "0000000000000000000000000000000000000000000000000000000000000001",
             ),
             relays: vec!["wss://relay.example".into()],
-            owner_pubkey: None,
+            owner_pubkey: Some(
+                "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".into(),
+            ),
             social_dm_enabled: false,
             allow_from: vec![],
         }
@@ -377,5 +429,26 @@ mod tests {
         let runtime = Arc::new(NostrRuntime::new(&config).unwrap());
         let channel = NostrChannel::new_with_runtime(config, Arc::clone(&runtime)).unwrap();
         assert_eq!(channel.runtime().public_key_hex(), runtime.public_key_hex());
+    }
+
+    #[tokio::test]
+    async fn start_rejects_missing_owner_before_connecting() {
+        let mut config = sample_config();
+        config.owner_pubkey = None;
+        let channel = NostrChannel::new(config).unwrap();
+        assert!(channel.start().await.is_err());
+    }
+
+    #[test]
+    fn attachment_fallback_does_not_expose_source_paths() {
+        let response = OutgoingResponse::text("result").with_attachments(vec![
+            MediaContent::new(vec![1, 2, 3], "image/png")
+                .with_filename("image.png")
+                .with_source_url("file:///Users/example/private/image.png"),
+        ]);
+        let text = format_response_with_attachment_fallback(&response);
+        assert!(text.contains("image.png"));
+        assert!(!text.contains("file://"));
+        assert!(!text.contains("/Users/example"));
     }
 }

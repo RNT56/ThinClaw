@@ -5,6 +5,10 @@ impl MemoryProvider for ZepProvider {
         "zep"
     }
 
+    fn supports_strict_subject_scoping(&self) -> bool {
+        true
+    }
+
     async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus {
         provider_health_request(
             self.name(),
@@ -29,8 +33,9 @@ impl MemoryProvider for ZepProvider {
             .ok_or_else(|| "Zep base_url not configured".to_string())?;
         let token = provider_token(&settings.providers.zep.config);
 
-        let mut req = shared_http_client()
-            .post(format!("{}/api/v1/search", base_url.trim_end_matches('/')))
+        let url = provider_join_url(&base_url, "/api/v1/search")?;
+        let mut req = shared_http_client()?
+            .post(url)
             .timeout(std::time::Duration::from_secs(8))
             .json(&serde_json::json!({
                 "user_id": user_id,
@@ -41,20 +46,15 @@ impl MemoryProvider for ZepProvider {
             req = req.bearer_auth(token);
         }
 
-        let response = req.send().await.map_err(|e| e.to_string())?;
-        if !response.status().is_success() {
-            return Err(format!("Zep search failed: HTTP {}", response.status()));
-        }
-        let json = response
-            .json::<serde_json::Value>()
-            .await
-            .map_err(|e| e.to_string())?;
+        let response = req.send().await.map_err(|e| e.without_url().to_string())?;
+        let json = provider_json_response(response).await?;
         let hits = json
             .get("results")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default()
             .into_iter()
+            .take(limit.min(100))
             .map(|item| ProviderMemoryHit {
                 provider: self.name().to_string(),
                 summary: item
@@ -83,8 +83,9 @@ impl MemoryProvider for ZepProvider {
             .ok_or_else(|| "Zep base_url not configured".to_string())?;
         let token = provider_token(&settings.providers.zep.config);
 
-        let mut req = shared_http_client()
-            .post(format!("{}/api/v1/events", base_url.trim_end_matches('/')))
+        let url = provider_join_url(&base_url, "/api/v1/events")?;
+        let mut req = shared_http_client()?
+            .post(url)
             .timeout(std::time::Duration::from_secs(8))
             .json(&serde_json::json!({
                 "user_id": user_id,
@@ -93,11 +94,7 @@ impl MemoryProvider for ZepProvider {
         if let Some(token) = token {
             req = req.bearer_auth(token);
         }
-        let response = req.send().await.map_err(|e| e.to_string())?;
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(format!("Zep export failed: HTTP {}", response.status()))
-        }
+        let response = req.send().await.map_err(|e| e.without_url().to_string())?;
+        provider_status_response(response).await
     }
 }

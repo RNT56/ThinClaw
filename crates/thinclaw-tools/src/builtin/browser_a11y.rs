@@ -4,19 +4,28 @@
 //! `browser` tool name, but its actions are oriented around aria snapshots and
 //! `@ref` selectors rather than Chromium CDP state kept in-process.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use base64::Engine as _;
 use regex::Regex;
 use tokio::process::Command;
 
 use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 use thinclaw_types::JobContext;
 
+use super::browser::BrowserEgressRuntime;
+use super::browser::is_network_url_allowed;
+use super::capture_target::{CaptureFormat, CaptureTarget};
+use crate::execution::bounded_command_output;
+
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-const SCREENSHOT_PATH: &str = "thinclaw_agent_browser_screenshot.png";
+const MAX_AGENT_BROWSER_TEXT_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_AGENT_BROWSER_STDERR_BYTES: usize = 256 * 1024;
+const MAX_AGENT_BROWSER_REFS: usize = 8192;
+const MAX_AGENT_BROWSER_TEXT_INPUT_BYTES: usize = 64 * 1024;
+const MAX_AGENT_BROWSER_EXPRESSION_BYTES: usize = 256 * 1024;
 
 static REF_PATTERN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r#"ref="([^"]+)"|@ref=([A-Za-z0-9_-]+)"#).expect("valid agent-browser ref regex")
@@ -24,6 +33,10 @@ static REF_PATTERN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
 
 pub struct AgentBrowserTool {
     command: String,
+    session: String,
+    egress_runtime: Option<Arc<dyn BrowserEgressRuntime>>,
+    operation_lock: tokio::sync::Mutex<()>,
+    controlled_config: Result<tempfile::NamedTempFile, String>,
 }
 
 impl Default for AgentBrowserTool {
@@ -34,36 +47,74 @@ impl Default for AgentBrowserTool {
 
 impl AgentBrowserTool {
     pub fn new() -> Self {
+        Self::new_internal(None)
+    }
+
+    pub fn new_with_egress(egress_runtime: Arc<dyn BrowserEgressRuntime>) -> Self {
+        Self::new_internal(Some(egress_runtime))
+    }
+
+    fn new_internal(egress_runtime: Option<Arc<dyn BrowserEgressRuntime>>) -> Self {
+        let session = format!("thinclaw-{}", uuid::Uuid::new_v4().simple());
         Self {
             command: std::env::var("AGENT_BROWSER_BIN")
                 .unwrap_or_else(|_| "agent-browser".to_string()),
+            session,
+            egress_runtime,
+            operation_lock: tokio::sync::Mutex::new(()),
+            controlled_config: create_controlled_agent_browser_config(),
         }
     }
 
     async fn run_text_command(&self, args: &[String]) -> Result<String, ToolError> {
+        let egress_runtime = self.egress_runtime.as_ref().ok_or_else(|| {
+            ToolError::ExecutionFailed(
+                "agent-browser requires ThinClaw's pinned egress runtime".to_string(),
+            )
+        })?;
+        let proxy = egress_runtime.start().await.map_err(|error| {
+            ToolError::ExecutionFailed(format!(
+                "failed to start agent-browser egress proxy: {error}"
+            ))
+        })?;
+        let proxy_endpoint = proxy.authenticated_endpoint().map_err(|error| {
+            ToolError::ExecutionFailed(format!("invalid agent-browser proxy: {error}"))
+        })?;
+        let config_path = self
+            .controlled_config
+            .as_ref()
+            .map_err(|error| ToolError::ExecutionFailed(error.clone()))?
+            .path();
+        write_controlled_agent_browser_config(config_path, Some(&proxy_endpoint)).map_err(
+            |error| {
+                ToolError::ExecutionFailed(format!(
+                    "failed to update agent-browser proxy config: {error}"
+                ))
+            },
+        )?;
+
         let mut command = Command::new(&self.command);
-        command.args(args);
-        let output = tokio::time::timeout(COMMAND_TIMEOUT, command.output())
-            .await
-            .map_err(|_| {
-                ToolError::ExecutionFailed(format!(
-                    "`{}` timed out after {:?}",
-                    self.command, COMMAND_TIMEOUT
-                ))
-            })?
-            .map_err(|error| {
-                ToolError::ExecutionFailed(format!(
-                    "Failed to launch `{}`: {}. Install agent-browser or switch browser_backend back to 'chromium'.",
-                    self.command, error
-                ))
-            })?;
+        command
+            .arg("--config")
+            .arg(config_path)
+            .arg("--session")
+            .arg(&self.session)
+            .args(args);
+        let output = bounded_command_output(
+            &mut command,
+            COMMAND_TIMEOUT,
+            MAX_AGENT_BROWSER_TEXT_OUTPUT_BYTES,
+            MAX_AGENT_BROWSER_STDERR_BYTES,
+            "agent-browser command",
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let action = args.first().map(String::as_str).unwrap_or("command");
             return Err(ToolError::ExecutionFailed(format!(
-                "`{}` {} failed: {}",
+                "`{}` {action} failed: {}",
                 self.command,
-                args.join(" "),
                 if stderr.is_empty() {
                     format!("exit {}", output.status)
                 } else {
@@ -80,44 +131,10 @@ impl AgentBrowserTool {
         })
     }
 
-    async fn run_binary_command(&self, args: &[String]) -> Result<Vec<u8>, ToolError> {
-        let mut command = Command::new(&self.command);
-        command.args(args);
-        let output = tokio::time::timeout(COMMAND_TIMEOUT, command.output())
-            .await
-            .map_err(|_| {
-                ToolError::ExecutionFailed(format!(
-                    "`{}` timed out after {:?}",
-                    self.command, COMMAND_TIMEOUT
-                ))
-            })?
-            .map_err(|error| {
-                ToolError::ExecutionFailed(format!(
-                    "Failed to launch `{}`: {}. Install agent-browser or switch browser_backend back to 'chromium'.",
-                    self.command, error
-                ))
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(ToolError::ExecutionFailed(format!(
-                "`{}` {} failed: {}",
-                self.command,
-                args.join(" "),
-                if stderr.is_empty() {
-                    format!("exit {}", output.status)
-                } else {
-                    stderr
-                }
-            )));
-        }
-
-        Ok(output.stdout)
-    }
-
     fn snapshot_payload(snapshot: String, status: &str) -> serde_json::Value {
         let refs: Vec<String> = REF_PATTERN
             .captures_iter(&snapshot)
+            .take(MAX_AGENT_BROWSER_REFS)
             .filter_map(|captures| {
                 captures
                     .get(1)
@@ -136,9 +153,12 @@ impl AgentBrowserTool {
     }
 
     async fn navigate(&self, url: &str) -> Result<serde_json::Value, ToolError> {
-        let snapshot = self
-            .run_text_command(&["navigate".to_string(), url.to_string()])
+        is_network_url_allowed(url)
+            .await
+            .map_err(ToolError::InvalidParameters)?;
+        self.run_text_command(&["open".to_string(), url.to_string()])
             .await?;
+        let snapshot = self.run_text_command(&["snapshot".to_string()]).await?;
         Ok(Self::snapshot_payload(snapshot, "navigated"))
     }
 
@@ -148,29 +168,49 @@ impl AgentBrowserTool {
     }
 
     async fn click(&self, reference: &str) -> Result<serde_json::Value, ToolError> {
-        let snapshot = self
-            .run_text_command(&["click".to_string(), reference.to_string()])
+        let reference = normalize_reference(reference)?;
+        self.run_text_command(&["click".to_string(), reference])
             .await?;
+        let snapshot = self.run_text_command(&["snapshot".to_string()]).await?;
         Ok(Self::snapshot_payload(snapshot, "clicked"))
     }
 
     async fn type_text(&self, reference: &str, text: &str) -> Result<serde_json::Value, ToolError> {
-        let snapshot = self
-            .run_text_command(&["type".to_string(), reference.to_string(), text.to_string()])
+        let reference = normalize_reference(reference)?;
+        if text.len() > MAX_AGENT_BROWSER_TEXT_INPUT_BYTES || text.contains('\0') {
+            return Err(ToolError::InvalidParameters(format!(
+                "browser text exceeds {MAX_AGENT_BROWSER_TEXT_INPUT_BYTES} bytes or contains NUL"
+            )));
+        }
+        self.run_text_command(&["fill".to_string(), reference, text.to_string()])
             .await?;
+        let snapshot = self.run_text_command(&["snapshot".to_string()]).await?;
         Ok(Self::snapshot_payload(snapshot, "typed"))
     }
 
     async fn scroll(&self, direction: &str) -> Result<serde_json::Value, ToolError> {
-        let snapshot = self
-            .run_text_command(&["scroll".to_string(), direction.to_string()])
+        if !matches!(direction, "up" | "down") {
+            return Err(ToolError::InvalidParameters(
+                "scroll direction must be up or down".to_string(),
+            ));
+        }
+        self.run_text_command(&["scroll".to_string(), direction.to_string()])
             .await?;
+        let snapshot = self.run_text_command(&["snapshot".to_string()]).await?;
         Ok(Self::snapshot_payload(snapshot, "scrolled"))
     }
 
     async fn console(&self, expression: &str) -> Result<serde_json::Value, ToolError> {
+        if expression.is_empty()
+            || expression.len() > MAX_AGENT_BROWSER_EXPRESSION_BYTES
+            || expression.contains('\0')
+        {
+            return Err(ToolError::InvalidParameters(format!(
+                "browser expression must be non-empty, at most {MAX_AGENT_BROWSER_EXPRESSION_BYTES} bytes, and contain no NUL"
+            )));
+        }
         let output = self
-            .run_text_command(&["console".to_string(), expression.to_string()])
+            .run_text_command(&["eval".to_string(), expression.to_string()])
             .await?;
         Ok(serde_json::json!({
             "backend": "agent_browser",
@@ -179,42 +219,94 @@ impl AgentBrowserTool {
     }
 
     async fn screenshot(&self) -> Result<serde_json::Value, ToolError> {
-        let raw = self.run_binary_command(&["screenshot".to_string()]).await?;
-
-        let png_bytes = if raw.starts_with(b"\x89PNG") {
-            raw
-        } else {
-            let text = String::from_utf8(raw).map_err(|error| {
-                ToolError::ExecutionFailed(format!(
-                    "`{}` screenshot output was neither PNG bytes nor valid UTF-8/base64: {}",
-                    self.command, error
-                ))
-            })?;
-            base64::engine::general_purpose::STANDARD
-                .decode(text.trim())
-                .map_err(|error| {
-                    ToolError::ExecutionFailed(format!(
-                        "`{}` screenshot output was not valid PNG or base64 PNG: {}",
-                        self.command, error
-                    ))
-                })?
-        };
-
-        let path: PathBuf = std::env::temp_dir().join(SCREENSHOT_PATH);
-        tokio::fs::write(&path, &png_bytes).await.map_err(|error| {
-            ToolError::ExecutionFailed(format!(
-                "Failed to save agent-browser screenshot: {}",
-                error
-            ))
-        })?;
+        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let requested_path = thinclaw_platform::state_paths()
+            .screenshots_dir
+            .join(format!(
+                "agent_browser_{ts}_{}.png",
+                uuid::Uuid::new_v4().simple()
+            ));
+        let target = CaptureTarget::prepare(&requested_path, CaptureFormat::Png).await?;
+        self.run_text_command(&[
+            "screenshot".to_string(),
+            target.staging_path().to_string_lossy().to_string(),
+        ])
+        .await?;
+        let (path, size_bytes) = target.publish().await?;
 
         Ok(serde_json::json!({
             "status": "screenshot_taken",
             "backend": "agent_browser",
             "path": path.to_string_lossy(),
-            "size_bytes": png_bytes.len(),
+            "size_bytes": size_bytes,
         }))
     }
+
+    async fn close(&self) -> Result<serde_json::Value, ToolError> {
+        let close_result = self.run_text_command(&["close".to_string()]).await;
+        let stop_result = if let Some(runtime) = self.egress_runtime.as_ref() {
+            runtime.stop().await.map_err(|error| {
+                ToolError::ExecutionFailed(format!(
+                    "failed to stop agent-browser egress proxy: {error}"
+                ))
+            })
+        } else {
+            Ok(())
+        };
+        close_result?;
+        stop_result?;
+        Ok(serde_json::json!({
+            "status": "closed",
+            "backend": "agent_browser",
+        }))
+    }
+}
+
+impl Drop for AgentBrowserTool {
+    fn drop(&mut self) {
+        let Some(runtime) = self.egress_runtime.clone() else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!("agent-browser dropped outside a Tokio runtime; async cleanup skipped");
+            return;
+        };
+        let command_name = self.command.clone();
+        let session = self.session.clone();
+        let cleanup_config = create_controlled_agent_browser_config().ok();
+        handle.spawn(async move {
+            let mut command = Command::new(command_name);
+            if let Some(config) = cleanup_config.as_ref() {
+                command.arg("--config").arg(config.path());
+            }
+            command.arg("--session").arg(session).arg("close");
+            let _ = bounded_command_output(
+                &mut command,
+                Duration::from_secs(10),
+                64 * 1024,
+                64 * 1024,
+                "agent-browser cleanup",
+            )
+            .await;
+            if let Err(error) = runtime.stop().await {
+                tracing::warn!(%error, "failed to stop dropped agent-browser egress runtime");
+            }
+        });
+    }
+}
+
+fn normalize_reference(reference: &str) -> Result<String, ToolError> {
+    let reference = reference.strip_prefix('@').unwrap_or(reference);
+    if reference.len() < 2
+        || reference.len() > 16
+        || !reference.starts_with('e')
+        || !reference[1..].bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(ToolError::InvalidParameters(
+            "browser ref must use the snapshot form e<number>".to_string(),
+        ));
+    }
+    Ok(format!("@{reference}"))
 }
 
 #[async_trait]
@@ -235,7 +327,7 @@ impl Tool for AgentBrowserTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["navigate", "snapshot", "click", "type", "scroll", "console", "screenshot"],
+                    "enum": ["navigate", "snapshot", "click", "type", "scroll", "console", "screenshot", "close"],
                     "description": "The browser action to perform."
                 },
                 "url": {
@@ -270,6 +362,7 @@ impl Tool for AgentBrowserTool {
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
+        let _operation_guard = self.operation_lock.lock().await;
         let action = params
             .get("action")
             .and_then(|value| value.as_str())
@@ -321,6 +414,7 @@ impl Tool for AgentBrowserTool {
                 self.console(expression).await?
             }
             "screenshot" => self.screenshot().await?,
+            "close" => self.close().await?,
             _ => {
                 return Err(ToolError::InvalidParameters(format!(
                     "Unknown action '{}'. Supported actions: navigate, snapshot, click, type, scroll, console, screenshot",
@@ -343,6 +437,61 @@ impl Tool for AgentBrowserTool {
     fn execution_timeout(&self) -> Duration {
         Duration::from_secs(120)
     }
+}
+
+fn create_controlled_agent_browser_config() -> Result<tempfile::NamedTempFile, String> {
+    let file = tempfile::Builder::new()
+        .prefix("thinclaw-agent-browser-")
+        .suffix(".json")
+        .tempfile()
+        .map_err(|error| format!("failed to create agent-browser config: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("failed to secure agent-browser config: {error}"))?;
+    }
+    write_controlled_agent_browser_config(file.path(), None)?;
+    Ok(file)
+}
+
+fn write_controlled_agent_browser_config(
+    path: &std::path::Path,
+    proxy_endpoint: Option<&str>,
+) -> Result<(), String> {
+    let bypass_host = format!("{}.invalid", uuid::Uuid::new_v4().simple());
+    let mut config = serde_json::json!({
+        "autoConnect": false,
+        "allowFileAccess": false,
+        "contentBoundaries": true,
+        "maxOutput": MAX_AGENT_BROWSER_TEXT_OUTPUT_BYTES,
+        "proxyBypass": bypass_host,
+        "args": "--proxy-bypass-list=<-loopback>",
+        "headed": false,
+    });
+    if let Some(proxy_endpoint) = proxy_endpoint {
+        config["proxy"] = serde_json::Value::String(proxy_endpoint.to_string());
+    }
+    let encoded = serde_json::to_vec(&config)
+        .map_err(|error| format!("failed to encode agent-browser config: {error}"))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("failed to open agent-browser config: {error}"))?;
+    file.write_all(&encoded)
+        .map_err(|error| format!("failed to write agent-browser config: {error}"))?;
+    file.flush()
+        .map_err(|error| format!("failed to flush agent-browser config: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("failed to sync agent-browser config: {error}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

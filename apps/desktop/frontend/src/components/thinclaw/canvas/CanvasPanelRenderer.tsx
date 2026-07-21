@@ -19,16 +19,36 @@ import {
 } from 'lucide-react';
 
 interface PanelRendererProps {
+    panelId: string;
     components: UiComponent[];
-    sessionKey?: string;
-    runId?: string;
 }
 
-export function CanvasPanelRenderer({ components, sessionKey, runId }: PanelRendererProps) {
+function safeExternalHref(raw: string): string | null {
+    try {
+        const parsed = new URL(raw);
+        return ['https:', 'http:', 'mailto:'].includes(parsed.protocol) ? parsed.href : null;
+    } catch {
+        return null;
+    }
+}
+
+function safeImageSrc(raw: string): string | null {
+    if (/^data:image\/(?:png|gif|jpeg|webp|avif);base64,[a-z0-9+/=]+$/i.test(raw)) {
+        return raw;
+    }
+    try {
+        const parsed = new URL(raw);
+        return ['https:', 'http:'].includes(parsed.protocol) ? parsed.href : null;
+    } catch {
+        return null;
+    }
+}
+
+export function CanvasPanelRenderer({ panelId, components }: PanelRendererProps) {
     return (
         <div className="space-y-3 p-4 text-sm">
             {components.map((comp, i) => (
-                <ComponentRenderer key={i} component={comp} sessionKey={sessionKey} runId={runId} />
+                <ComponentRenderer key={i} component={comp} panelId={panelId} />
             ))}
         </div>
     );
@@ -36,8 +56,8 @@ export function CanvasPanelRenderer({ components, sessionKey, runId }: PanelRend
 
 // ── Individual Component Renderers ──────────────────────────────────
 
-function ComponentRenderer({ component: comp, sessionKey, runId }: {
-    component: UiComponent; sessionKey?: string; runId?: string;
+function ComponentRenderer({ component: comp, panelId }: {
+    component: UiComponent; panelId: string;
 }) {
     switch (comp.type) {
         case 'text':
@@ -57,9 +77,9 @@ function ComponentRenderer({ component: comp, sessionKey, runId }: {
         case 'divider':
             return <div className="border-t border-white/10 my-2" />;
         case 'button':
-            return <ButtonRenderer label={comp.label} action={comp.action} style={comp.style} sessionKey={sessionKey} runId={runId} />;
+            return <ButtonRenderer label={comp.label} action={comp.action} style={comp.style} panelId={panelId} />;
         case 'form':
-            return <FormRenderer formId={comp.form_id} fields={comp.fields} submitLabel={comp.submit_label} sessionKey={sessionKey} runId={runId} />;
+            return <FormRenderer formId={comp.form_id} fields={comp.fields} submitLabel={comp.submit_label} panelId={panelId} />;
         case 'json':
             return <JsonRenderer data={comp.data} collapsed={comp.collapsed} />;
         default:
@@ -82,8 +102,12 @@ function TextRenderer({ content }: { content: string }) {
                 if (part.startsWith('`') && part.endsWith('`'))
                     return <code key={i} className="px-1.5 py-0.5 rounded bg-white/5 font-mono text-xs text-cyan-400">{part.slice(1, -1)}</code>;
                 const linkMatch = part.match(/^\[(.*?)\]\((.*?)\)$/);
-                if (linkMatch)
-                    return <a key={i} href={linkMatch[2]} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">{linkMatch[1]}</a>;
+                if (linkMatch) {
+                    const href = safeExternalHref(linkMatch[2]);
+                    return href
+                        ? <a key={i} href={href} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">{linkMatch[1]}</a>
+                        : <span key={i}>{linkMatch[1]}</span>;
+                }
                 return <span key={i}>{part}</span>;
             })}
         </p>
@@ -157,9 +181,13 @@ function CodeRenderer({ language, content }: { language: string; content: string
 // ── Image ───────────────────────────────────────────────────────────
 
 function ImageRenderer({ src, alt, width }: { src: string; alt?: string; width?: number }) {
+    const safeSrc = safeImageSrc(src);
+    if (!safeSrc) {
+        return <div className="text-xs text-amber-400/80">Blocked unsafe image source</div>;
+    }
     return (
         <div className="rounded-lg overflow-hidden border border-white/10">
-            <img src={src} alt={alt ?? ''} style={width ? { maxWidth: width } : undefined} className="w-full h-auto" />
+            <img src={safeSrc} alt={alt ?? ''} style={width ? { maxWidth: Math.min(4096, Math.max(1, width)) } : undefined} className="w-full h-auto" />
             {alt && <p className="text-[10px] text-zinc-500 px-2 py-1 bg-white/5">{alt}</p>}
         </div>
     );
@@ -168,7 +196,9 @@ function ImageRenderer({ src, alt, width }: { src: string; alt?: string; width?:
 // ── Progress ────────────────────────────────────────────────────────
 
 function ProgressRenderer({ label, value, max }: { label?: string; value: number; max: number }) {
-    const pct = Math.min(100, Math.round((value / max) * 100));
+    const safeMax = Number.isFinite(max) && max > 0 ? max : 100;
+    const safeValue = Number.isFinite(value) ? value : 0;
+    const pct = Math.min(100, Math.max(0, Math.round((safeValue / safeMax) * 100)));
     return (
         <div>
             {label && <div className="text-xs text-zinc-400 mb-1">{label}</div>}
@@ -201,16 +231,15 @@ function KeyValueRenderer({ items }: { items: { key: string; value: string }[] }
 
 // ── Button ──────────────────────────────────────────────────────────
 
-function ButtonRenderer({ label, action, style, sessionKey, runId }: {
-    label: string; action: string; style?: ButtonStyle; sessionKey?: string; runId?: string;
+function ButtonRenderer({ label, action, style, panelId }: {
+    label: string; action: string; style?: ButtonStyle; panelId: string;
 }) {
     const [loading, setLoading] = useState(false);
 
     const handleClick = async () => {
-        if (!sessionKey) return;
         setLoading(true);
         try {
-            await canvasDispatchAction(sessionKey, 'button_click', { action }, runId);
+            await canvasDispatchAction(panelId, action);
         } catch (e) {
             console.error('[Canvas] Button action failed:', e);
         } finally {
@@ -228,12 +257,11 @@ function ButtonRenderer({ label, action, style, sessionKey, runId }: {
     return (
         <button
             onClick={handleClick}
-            disabled={loading || !sessionKey}
+            disabled={loading}
             className={cn(
                 'inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold border transition-all',
                 styleClasses[style ?? 'primary'],
                 loading && 'opacity-50 cursor-wait',
-                !sessionKey && 'opacity-30 cursor-not-allowed',
             )}
         >
             {loading && <div className="w-3 h-3 border-2 border-current/30 border-t-current rounded-full animate-spin" />}
@@ -244,8 +272,8 @@ function ButtonRenderer({ label, action, style, sessionKey, runId }: {
 
 // ── Form ────────────────────────────────────────────────────────────
 
-function FormRenderer({ formId, fields, submitLabel, sessionKey, runId }: {
-    formId: string; fields: FormField[]; submitLabel: string; sessionKey?: string; runId?: string;
+function FormRenderer({ formId, fields, submitLabel, panelId }: {
+    formId: string; fields: FormField[]; submitLabel: string; panelId: string;
 }) {
     const [values, setValues] = useState<Record<string, any>>(() => {
         const init: Record<string, any> = {};
@@ -259,16 +287,15 @@ function FormRenderer({ formId, fields, submitLabel, sessionKey, runId }: {
 
     const handleSubmit = useCallback(async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!sessionKey) return;
         setSubmitting(true);
         try {
-            await canvasDispatchAction(sessionKey, 'form_submit', { form_id: formId, values }, runId);
+            await canvasDispatchAction(panelId, `form_submit:${formId}`, values);
         } catch (err) {
             console.error('[Canvas] Form submit failed:', err);
         } finally {
             setSubmitting(false);
         }
-    }, [sessionKey, formId, values, runId]);
+    }, [panelId, formId, values]);
 
     const inputCls = 'w-full h-9 rounded-lg border border-white/10 bg-white/3 px-3 text-xs font-mono text-zinc-200 focus:ring-1 focus:ring-indigo-500/30 outline-hidden transition-all';
 
@@ -333,7 +360,7 @@ function FormRenderer({ formId, fields, submitLabel, sessionKey, runId }: {
             ))}
             <button
                 type="submit"
-                disabled={submitting || !sessionKey}
+                disabled={submitting}
                 className={cn(
                     'w-full py-2.5 rounded-lg text-xs font-bold uppercase tracking-wider border transition-all',
                     'bg-indigo-500/20 text-indigo-300 border-indigo-500/30 hover:bg-indigo-500/30',
@@ -350,7 +377,8 @@ function FormRenderer({ formId, fields, submitLabel, sessionKey, runId }: {
 
 function JsonRenderer({ data, collapsed: initialCollapsed }: { data: any; collapsed?: boolean }) {
     const [collapsed, setCollapsed] = useState(initialCollapsed ?? false);
-    const formatted = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+    const formatted = typeof data === 'string' ? data : (JSON.stringify(data, null, 2) ?? String(data));
+    const keyCount = data !== null && typeof data === 'object' ? Object.keys(data).length : null;
 
     return (
         <div className="rounded-lg border border-white/10 overflow-hidden">
@@ -360,7 +388,7 @@ function JsonRenderer({ data, collapsed: initialCollapsed }: { data: any; collap
             >
                 {collapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                 <span className="uppercase font-bold tracking-wider">JSON Data</span>
-                <span className="text-zinc-600 ml-auto">{typeof data === 'object' ? Object.keys(data).length + ' keys' : ''}</span>
+                <span className="text-zinc-600 ml-auto">{keyCount !== null ? `${keyCount} keys` : ''}</span>
             </button>
             {!collapsed && (
                 <pre className="p-3 overflow-x-auto bg-black/30 text-xs font-mono text-emerald-400/80 leading-relaxed max-h-64">

@@ -32,7 +32,9 @@ pub mod allowlist;
 pub mod http;
 pub mod policy;
 
-pub use allowlist::{DomainAllowlist, DomainPattern, DomainValidationResult};
+pub use allowlist::{
+    DomainAllowlist, DomainPattern, DomainValidationResult, validate_domain_allowlist,
+};
 pub use http::{
     CredentialResolver, EnvCredentialResolver, HttpProxy, NoCredentialResolver,
     StoreCredentialResolver,

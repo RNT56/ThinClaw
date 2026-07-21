@@ -6,14 +6,17 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use reqwest::Client;
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::{Client, Method, StatusCode, Url};
 
 use crate::wasm::{InjectedCredentials, SharedCredentialRegistry, inject_credential};
 use thinclaw_safety::LeakDetector;
 use thinclaw_secrets::SecretsStore;
+#[cfg(test)]
+use thinclaw_tools_core::validate_outbound_url_pinned;
 use thinclaw_tools_core::{
     ApprovalRequirement, GuardedUrl, OutboundUrlGuardOptions, Tool, ToolError, ToolOutput,
-    ToolRateLimitConfig, require_str, validate_outbound_url, validate_outbound_url_pinned,
+    ToolRateLimitConfig, require_str, validate_outbound_url_pinned_async,
 };
 use thinclaw_types::JobContext;
 
@@ -26,10 +29,21 @@ use crate::builtin::convert_html_to_markdown;
 /// but small enough to prevent OOM from malicious or runaway servers.  The WASM
 /// HTTP wrapper uses the same limit for consistency.
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
+const MAX_REQUEST_BODY_SIZE: usize = 5 * 1024 * 1024;
+const MAX_REQUEST_URL_BYTES: usize = 16 * 1024;
+const MAX_REQUEST_HEADERS: usize = 64;
+const MAX_REQUEST_HEADER_NAME_BYTES: usize = 256;
+const MAX_REQUEST_HEADER_VALUE_BYTES: usize = 16 * 1024;
+const MAX_REQUEST_HEADER_TOTAL_BYTES: usize = 64 * 1024;
+const MAX_AUTOMATIC_CREDENTIALS: usize = 64;
+const MAX_REDIRECTS: usize = 10;
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+const MAX_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 /// Tool for making HTTP requests.
 pub struct HttpTool {
-    client: Client,
+    client: Option<Client>,
+    client_init_error: Option<String>,
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// Optional domain allowlist. When set (non-empty), only URLs whose host
@@ -41,16 +55,23 @@ pub struct HttpTool {
 impl HttpTool {
     /// Create a new HTTP tool.
     pub fn new() -> Self {
-        // Allow redirects with validation: each hop is checked against the
-        // SSRF blocklist so we don't follow Location: http://internal-service.
-        // We validate inside the execute() method after the response comes back.
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            // Follow up to 10 redirects. We re-validate each hop and the final
-            // URL to prevent SSRF via redirect chains.
-            .redirect(redirect_policy())
-            .build()
-            .expect("Failed to create HTTP client");
+        // Redirects are processed manually in `execute`: every hop is resolved,
+        // checked, and pinned before a connection is attempted. Reqwest's
+        // automatic redirect path cannot dynamically pin a newly selected host.
+        let client_result = Client::builder()
+            .timeout(Duration::from_secs(MAX_REQUEST_TIMEOUT_SECS))
+            .redirect(reqwest::redirect::Policy::none())
+            // A configured HTTP(S) proxy would receive the destination URL and
+            // bypass the DNS address that passed the SSRF guard.
+            .no_proxy()
+            .build();
+        let (client, client_init_error) = match client_result {
+            Ok(client) => (Some(client), None),
+            Err(error) => {
+                tracing::error!(%error, "Failed to initialize the guarded HTTP tool client");
+                (None, Some(error.to_string()))
+            }
+        };
 
         // Parse URL allowlist from environment
         let url_allowlist: Vec<String> = std::env::var("HTTP_URL_ALLOWLIST")
@@ -65,6 +86,7 @@ impl HttpTool {
 
         Self {
             client,
+            client_init_error,
             credential_registry: None,
             secrets_store: None,
             url_allowlist,
@@ -83,7 +105,13 @@ impl HttpTool {
     }
 }
 
+#[cfg(test)]
 fn validate_url(url: &str, url_allowlist: &[String]) -> Result<GuardedUrl, ToolError> {
+    if url.len() > MAX_REQUEST_URL_BYTES {
+        return Err(ToolError::InvalidParameters(format!(
+            "URL exceeds the {MAX_REQUEST_URL_BYTES}-byte limit"
+        )));
+    }
     validate_outbound_url_pinned(
         url,
         &OutboundUrlGuardOptions {
@@ -94,63 +122,93 @@ fn validate_url(url: &str, url_allowlist: &[String]) -> Result<GuardedUrl, ToolE
     )
 }
 
+async fn validate_url_async(url: &str, url_allowlist: &[String]) -> Result<GuardedUrl, ToolError> {
+    if url.len() > MAX_REQUEST_URL_BYTES {
+        return Err(ToolError::InvalidParameters(format!(
+            "URL exceeds the {MAX_REQUEST_URL_BYTES}-byte limit"
+        )));
+    }
+    validate_outbound_url_pinned_async(
+        url,
+        &OutboundUrlGuardOptions {
+            require_https: true,
+            upgrade_http_to_https: true,
+            allowlist: url_allowlist.to_vec(),
+        },
+    )
+    .await
+}
+
 /// Build a request-scoped client that pins the connection for `host` to the
 /// exact socket addresses that passed SSRF validation, closing the
-/// DNS-rebinding TOCTOU window. When `pinned_addrs` is empty (IP-literal host,
-/// or resolution that yielded nothing) the base client is returned unchanged so
-/// behavior is identical to before.
+/// DNS-rebinding TOCTOU window. When `pinned_addrs` is empty (an IP-literal
+/// host), the base client is returned unchanged.
 ///
 /// reqwest only accepts a DNS override at client-build time, so a pinned client
 /// is rebuilt with the same timeout and redirect policy as [`HttpTool::new`]
-/// plus a `resolve_to_addrs` override for `host`. If the rebuild somehow fails
-/// we fall back to the base client (which still re-validates every redirect
-/// hop) rather than failing the request outright.
-fn pinned_client(base: &Client, host: &str, pinned_addrs: &[std::net::SocketAddr]) -> Client {
+/// plus a `resolve_to_addrs` override for `host`. A client-build failure is
+/// surfaced instead of falling back to a fresh DNS lookup.
+fn pinned_client(
+    base: &Client,
+    host: &str,
+    pinned_addrs: &[std::net::SocketAddr],
+) -> Result<Client, ToolError> {
     if pinned_addrs.is_empty() {
-        return base.clone();
+        return Ok(base.clone());
     }
     // reqwest ignores the port carried by the override addresses and connects
     // using the port from the request URL, so passing the validated
     // SocketAddrs as-is is correct.
     match Client::builder()
-        .timeout(Duration::from_secs(30))
-        .redirect(redirect_policy())
+        .timeout(Duration::from_secs(MAX_REQUEST_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .resolve_to_addrs(host, pinned_addrs)
         .build()
     {
-        Ok(client) => client,
-        Err(e) => {
-            // Falling back to the base client would re-open the rebinding
-            // window, so surface the failure by refusing to pin only if we
-            // truly cannot build a client. In practice ClientBuilder::build
-            // does not fail for a resolve override, but guard defensively.
-            tracing::warn!(error = %e, host, "failed to build pinned HTTP client; using base client");
-            base.clone()
-        }
+        Ok(client) => Ok(client),
+        Err(error) => Err(ToolError::ExternalService(format!(
+            "failed to create a DNS-pinned HTTP client: {error}"
+        ))),
     }
 }
 
-/// Shared redirect policy: follow up to 10 hops, re-validating each against the
-/// SSRF blocklist so we never follow `Location:` into a private network.
-fn redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
-        if attempt.previous().len() >= 10 {
-            attempt.error("too many redirects")
-        } else if validate_outbound_url(
-            attempt.url().as_str(),
-            &OutboundUrlGuardOptions {
-                require_https: true,
-                upgrade_http_to_https: false,
-                allowlist: Vec::new(),
-            },
-        )
-        .is_ok()
-        {
-            attempt.follow()
-        } else {
-            attempt.stop()
-        }
-    })
+fn redacted_url_for_log(url: &Url) -> String {
+    let host = match url.host_str() {
+        Some(host) if host.contains(':') => format!("[{host}]"),
+        Some(host) => host.to_string(),
+        None => return "<invalid-url>".to_string(),
+    };
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
+}
+
+fn sanitized_response_headers(headers: &HeaderMap) -> HashMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let name_text = name.as_str();
+            if matches!(
+                name_text,
+                "set-cookie"
+                    | "set-cookie2"
+                    | "authorization"
+                    | "proxy-authorization"
+                    | "www-authenticate"
+                    | "proxy-authenticate"
+            ) {
+                return None;
+            }
+            let value = value.to_str().ok()?;
+            if name_text == "location" {
+                let parsed = Url::parse(value).ok()?;
+                return Some((name_text.to_string(), redacted_url_for_log(&parsed)));
+            }
+            Some((name_text.to_string(), value.to_string()))
+        })
+        .collect()
 }
 
 #[cfg(feature = "html-to-markdown")]
@@ -166,7 +224,7 @@ fn is_html_response(headers: &HashMap<String, String>) -> bool {
 fn parse_headers_param(
     headers: Option<&serde_json::Value>,
 ) -> Result<Vec<(String, String)>, ToolError> {
-    match headers {
+    let parsed = match headers {
         None => Ok(Vec::new()),
         Some(serde_json::Value::Object(map)) => {
             let mut out = Vec::with_capacity(map.len());
@@ -200,7 +258,218 @@ fn parse_headers_param(
         Some(_) => Err(ToolError::InvalidParameters(
             "'headers' must be an object or an array of {name, value}".to_string(),
         )),
+    }?;
+
+    if parsed.len() > MAX_REQUEST_HEADERS {
+        return Err(ToolError::InvalidParameters(format!(
+            "request contains more than {MAX_REQUEST_HEADERS} headers"
+        )));
     }
+    let mut total_bytes = 0usize;
+    let mut names = std::collections::HashSet::with_capacity(parsed.len());
+    for (name, value) in &parsed {
+        let normalized_name = name.to_ascii_lowercase();
+        total_bytes = total_bytes
+            .checked_add(name.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or_else(|| {
+                ToolError::InvalidParameters("request header size overflow".to_string())
+            })?;
+        if name.is_empty()
+            || name.len() > MAX_REQUEST_HEADER_NAME_BYTES
+            || value.len() > MAX_REQUEST_HEADER_VALUE_BYTES
+            || HeaderName::from_bytes(name.as_bytes()).is_err()
+            || HeaderValue::from_str(value).is_err()
+            || matches!(
+                normalized_name.as_str(),
+                "host"
+                    | "content-length"
+                    | "transfer-encoding"
+                    | "connection"
+                    | "proxy-connection"
+                    | "upgrade"
+                    | "te"
+                    | "trailer"
+            )
+        {
+            return Err(ToolError::InvalidParameters(
+                "request contains an invalid or oversized header".to_string(),
+            ));
+        }
+        if !names.insert(normalized_name) {
+            return Err(ToolError::InvalidParameters(format!(
+                "request contains duplicate header '{name}'"
+            )));
+        }
+    }
+    if total_bytes > MAX_REQUEST_HEADER_TOTAL_BYTES {
+        return Err(ToolError::InvalidParameters(format!(
+            "request headers exceed the {MAX_REQUEST_HEADER_TOTAL_BYTES}-byte limit"
+        )));
+    }
+
+    Ok(parsed)
+}
+
+#[derive(Clone)]
+struct RequestBody {
+    bytes: Vec<u8>,
+    is_json: bool,
+}
+
+fn parse_request_body(body: Option<&serde_json::Value>) -> Result<Option<RequestBody>, ToolError> {
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let (bytes, is_json) = if let Some(body_str) = body.as_str() {
+        if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
+            (
+                serde_json::to_vec(&json_body).map_err(|error| {
+                    ToolError::InvalidParameters(format!("invalid body JSON: {error}"))
+                })?,
+                true,
+            )
+        } else {
+            (body_str.as_bytes().to_vec(), false)
+        }
+    } else {
+        (
+            serde_json::to_vec(body).map_err(|error| {
+                ToolError::InvalidParameters(format!("invalid body JSON: {error}"))
+            })?,
+            true,
+        )
+    };
+    if bytes.len() > MAX_REQUEST_BODY_SIZE {
+        return Err(ToolError::InvalidParameters(format!(
+            "request body exceeds the {MAX_REQUEST_BODY_SIZE}-byte limit"
+        )));
+    }
+    Ok(Some(RequestBody { bytes, is_json }))
+}
+
+fn parse_request_timeout(params: &serde_json::Value) -> Result<Duration, ToolError> {
+    let seconds = match params.get("timeout_secs") {
+        None => DEFAULT_REQUEST_TIMEOUT_SECS,
+        Some(value) => value.as_u64().ok_or_else(|| {
+            ToolError::InvalidParameters("timeout_secs must be a positive integer".to_string())
+        })?,
+    };
+    if !(1..=MAX_REQUEST_TIMEOUT_SECS).contains(&seconds) {
+        return Err(ToolError::InvalidParameters(format!(
+            "timeout_secs must be between 1 and {MAX_REQUEST_TIMEOUT_SECS}"
+        )));
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+fn request_origin(url: &Url) -> (&str, &str, Option<u16>) {
+    (
+        url.scheme(),
+        url.host_str().unwrap_or_default(),
+        url.port_or_known_default(),
+    )
+}
+
+fn redirect_target(
+    response_url: &Url,
+    response: &reqwest::Response,
+) -> Result<Option<Url>, ToolError> {
+    if !matches!(
+        response.status(),
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    ) {
+        return Ok(None);
+    }
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .ok_or_else(|| {
+            ToolError::ExternalService("redirect omitted its Location header".to_string())
+        })?
+        .to_str()
+        .map_err(|_| {
+            ToolError::ExternalService("redirect Location is not valid text".to_string())
+        })?;
+    response_url
+        .join(location)
+        .map(Some)
+        .map_err(|_| ToolError::ExternalService("redirect Location is not a valid URL".to_string()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum CredentialDestination {
+    Header(String),
+    Query(String),
+}
+
+fn credential_destination(
+    location: &thinclaw_secrets::CredentialLocation,
+) -> Option<CredentialDestination> {
+    match location {
+        thinclaw_secrets::CredentialLocation::AuthorizationBearer
+        | thinclaw_secrets::CredentialLocation::AuthorizationBasic { .. } => {
+            Some(CredentialDestination::Header("authorization".to_string()))
+        }
+        thinclaw_secrets::CredentialLocation::Header { name, .. } => {
+            Some(CredentialDestination::Header(name.to_ascii_lowercase()))
+        }
+        thinclaw_secrets::CredentialLocation::QueryParam { name } => {
+            Some(CredentialDestination::Query(name.clone()))
+        }
+        thinclaw_secrets::CredentialLocation::UrlPath { .. }
+        | thinclaw_secrets::CredentialLocation::UrlBase { .. }
+        | thinclaw_secrets::CredentialLocation::Body { .. } => None,
+    }
+}
+
+fn validate_automatic_credential_destinations(
+    mappings: &[thinclaw_secrets::CredentialMapping],
+    headers: &[(String, String)],
+    url: &Url,
+) -> Result<(), ToolError> {
+    if mappings.len() > MAX_AUTOMATIC_CREDENTIALS {
+        return Err(ToolError::NotAuthorized(format!(
+            "more than {MAX_AUTOMATIC_CREDENTIALS} automatic credentials match this host"
+        )));
+    }
+    let mut destinations = std::collections::HashSet::new();
+    for mapping in mappings {
+        let Some(destination) = credential_destination(&mapping.location) else {
+            continue;
+        };
+        let destination_is_valid = match &destination {
+            CredentialDestination::Header(name) => {
+                !name.is_empty()
+                    && name.len() <= MAX_REQUEST_HEADER_NAME_BYTES
+                    && HeaderName::from_bytes(name.as_bytes()).is_ok()
+                    && !headers
+                        .iter()
+                        .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+            }
+            CredentialDestination::Query(name) => {
+                !name.is_empty()
+                    && name.len() <= MAX_REQUEST_HEADER_NAME_BYTES
+                    && !name.chars().any(char::is_control)
+                    && !url
+                        .query_pairs()
+                        .any(|(existing, _)| existing == name.as_str())
+            }
+        };
+        if !destination_is_valid || !destinations.insert(destination.clone()) {
+            let name = match destination {
+                CredentialDestination::Header(name) | CredentialDestination::Query(name) => name,
+            };
+            return Err(ToolError::NotAuthorized(format!(
+                "automatic credential destination '{name}' is invalid, conflicting, or ambiguous"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Extract host from URL in params (for approval checks).
@@ -240,16 +509,18 @@ impl Tool for HttpTool {
                 },
                 "url": {
                     "type": "string",
+                    "maxLength": MAX_REQUEST_URL_BYTES,
                     "description": "The URL to request"
                 },
                 "headers": {
                     "type": "array",
+                    "maxItems": MAX_REQUEST_HEADERS,
                     "description": "Optional headers as a list of {name, value} objects",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": { "type": "string" },
-                            "value": { "type": "string" }
+                            "name": { "type": "string", "maxLength": MAX_REQUEST_HEADER_NAME_BYTES },
+                            "value": { "type": "string", "maxLength": MAX_REQUEST_HEADER_VALUE_BYTES }
                         },
                         "required": ["name", "value"],
                         "additionalProperties": false
@@ -260,7 +531,9 @@ impl Tool for HttpTool {
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Request timeout in seconds (default: 30)"
+                    "minimum": 1,
+                    "maximum": MAX_REQUEST_TIMEOUT_SECS,
+                    "description": "Total request timeout in seconds, including redirects (default: 30)"
                 }
             },
             "required": ["method", "url"]
@@ -273,138 +546,194 @@ impl Tool for HttpTool {
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-
-        let method = require_str(&params, "method")?;
-
-        let url = require_str(&params, "url")?;
-        let guarded = validate_url(url, &self.url_allowlist)?;
-        let GuardedUrl {
-            url: mut parsed_url,
-            pinned_addrs,
-        } = guarded;
-
-        // Pin the connection to the exact addresses that passed SSRF
-        // validation. This closes the DNS-rebinding TOCTOU window: the host
-        // cannot re-resolve to a private address between validation and the
-        // client's connect-time resolution. For IP-literal hosts (empty
-        // pinned_addrs) this returns the base client unchanged.
-        let host = parsed_url.host_str().unwrap_or_default().to_string();
-        let client = pinned_client(&self.client, &host, &pinned_addrs);
-
-        // Parse headers
-        let mut headers_vec = parse_headers_param(params.get("headers"))?;
-
-        // Build request
-        let mut request = match method.to_uppercase().as_str() {
-            "GET" => client.get(parsed_url.clone()),
-            "POST" => client.post(parsed_url.clone()),
-            "PUT" => client.put(parsed_url.clone()),
-            "DELETE" => client.delete(parsed_url.clone()),
-            "PATCH" => client.patch(parsed_url.clone()),
+        let base_client = self.client.as_ref().ok_or_else(|| {
+            ToolError::ExternalService(format!(
+                "guarded HTTP client is unavailable: {}",
+                self.client_init_error
+                    .as_deref()
+                    .unwrap_or("initialization failed")
+            ))
+        })?;
+        let method_name = require_str(&params, "method")?.to_ascii_uppercase();
+        let mut method = match method_name.as_str() {
+            "GET" => Method::GET,
+            "POST" => Method::POST,
+            "PUT" => Method::PUT,
+            "DELETE" => Method::DELETE,
+            "PATCH" => Method::PATCH,
             _ => {
                 return Err(ToolError::InvalidParameters(format!(
-                    "unsupported method: {}",
-                    method
+                    "unsupported method: {method_name}"
                 )));
             }
         };
 
-        // Add headers
-        for (key, value) in &headers_vec {
-            request = request.header(key.as_str(), value.as_str());
-        }
-
-        // Add body if present
-        let body_bytes = if let Some(body) = params.get("body") {
-            if let Some(body_str) = body.as_str() {
-                if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
-                    let bytes = serde_json::to_vec(&json_body).map_err(|e| {
-                        ToolError::InvalidParameters(format!("invalid body JSON: {}", e))
-                    })?;
-                    request = request.json(&json_body);
-                    Some(bytes)
-                } else {
-                    let bytes = body_str.as_bytes().to_vec();
-                    request = request.body(body_str.to_string());
-                    Some(bytes)
-                }
-            } else {
-                let bytes = serde_json::to_vec(body).map_err(|e| {
-                    ToolError::InvalidParameters(format!("invalid body JSON: {}", e))
-                })?;
-                request = request.json(body);
-                Some(bytes)
-            }
-        } else {
-            None
-        };
-
-        // Credential injection from shared registry
-        if let (Some(registry), Some(store)) = (
-            self.credential_registry.as_ref(),
-            self.secrets_store.as_ref(),
-        ) {
-            let host = parsed_url.host_str().unwrap_or("").to_string();
-            let path = parsed_url.path().to_string();
-            let matched: Vec<thinclaw_secrets::CredentialMapping> = registry.find_for_host(&host);
-            for mapping in &matched {
-                match store
-                    .get_for_injection(
-                        &_ctx.user_id,
-                        &mapping.secret_name,
-                        thinclaw_secrets::SecretAccessContext::new(
-                            "builtin.http",
-                            "http_credential_injection",
-                        )
-                        .target(host.clone(), path.clone()),
-                    )
-                    .await
-                {
-                    Ok(secret) => {
-                        let mut injected = InjectedCredentials::empty();
-                        inject_credential(&mut injected, &mapping.location, &secret);
-                        for (name, value) in &injected.headers {
-                            request = request.header(name.as_str(), value.as_str());
-                            headers_vec.push((name.clone(), value.clone()));
-                        }
-                        for (name, value) in &injected.query_params {
-                            parsed_url.query_pairs_mut().append_pair(name, value);
-                            request = request.query(&[(name.as_str(), value.as_str())]);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            secret = %mapping.secret_name,
-                            error = %e,
-                            "Failed to inject credential for HTTP tool"
-                        );
-                    }
-                }
-            }
-        }
-
-        // Leak detection on outbound request (url/headers/body)
+        let mut headers_vec = parse_headers_param(params.get("headers"))?;
+        let mut request_body = parse_request_body(params.get("body"))?;
+        let request_timeout = parse_request_timeout(&params)?;
+        let deadline = tokio::time::Instant::now() + request_timeout;
         let detector = LeakDetector::new();
-        detector
-            .scan_http_request(parsed_url.as_str(), &headers_vec, body_bytes.as_deref())
-            .map_err(|e| ToolError::NotAuthorized(format!("{}", e)))?;
 
-        // Execute request
-        let response = request.send().await.map_err(|e| {
-            if e.is_timeout() {
-                ToolError::Timeout(Duration::from_secs(30))
-            } else {
-                ToolError::ExternalService(e.to_string())
+        let mut guarded = tokio::time::timeout_at(
+            deadline,
+            validate_url_async(require_str(&params, "url")?, &self.url_allowlist),
+        )
+        .await
+        .map_err(|_| ToolError::Timeout(request_timeout))??;
+        let initial_url = guarded.url.clone();
+        let mut redirect_count = 0usize;
+        let (response, parsed_url) = loop {
+            let GuardedUrl {
+                url: validated_url,
+                pinned_addrs,
+            } = guarded;
+
+            // Only same-origin redirects are followed. This prevents caller
+            // headers and host-injected credentials from crossing an origin
+            // boundary while still supporting ordinary path redirects.
+            if request_origin(&validated_url) != request_origin(&initial_url) {
+                return Err(ToolError::NotAuthorized(
+                    "cross-origin HTTP redirects are not followed".to_string(),
+                ));
             }
-        })?;
+
+            detector
+                .scan_http_request(
+                    validated_url.as_str(),
+                    &headers_vec,
+                    request_body.as_ref().map(|body| body.bytes.as_slice()),
+                )
+                .map_err(|error| ToolError::NotAuthorized(error.to_string()))?;
+
+            let host = validated_url.host_str().unwrap_or_default().to_string();
+            let path = validated_url.path().to_string();
+            let client = pinned_client(base_client, &host, &pinned_addrs)?;
+            let mut request_url = validated_url.clone();
+            let mut request_headers = headers_vec.clone();
+
+            // Resolve every destination before loading any secret. Ambiguous or
+            // caller-controlled destinations fail without partial secret access.
+            if let (Some(registry), Some(store)) = (
+                self.credential_registry.as_ref(),
+                self.secrets_store.as_ref(),
+            ) {
+                let matched = registry.find_for_host(&host);
+                validate_automatic_credential_destinations(
+                    &matched,
+                    &request_headers,
+                    &request_url,
+                )?;
+                for mapping in &matched {
+                    if credential_destination(&mapping.location).is_none() {
+                        continue;
+                    }
+                    let secret = store
+                        .get_for_injection(
+                            &_ctx.user_id,
+                            &mapping.secret_name,
+                            thinclaw_secrets::SecretAccessContext::new(
+                                "builtin.http",
+                                "http_credential_injection",
+                            )
+                            .target(host.clone(), path.clone()),
+                        )
+                        .await
+                        .map_err(|_| {
+                            ToolError::NotAuthorized(
+                                "a required automatic credential could not be loaded".to_string(),
+                            )
+                        })?;
+                    let mut injected = InjectedCredentials::empty();
+                    inject_credential(&mut injected, &mapping.location, &secret);
+                    request_headers.extend(injected.headers);
+                    for (name, value) in injected.query_params {
+                        request_url.query_pairs_mut().append_pair(&name, &value);
+                    }
+                }
+            }
+
+            if request_url.as_str().len() > MAX_REQUEST_URL_BYTES
+                || request_headers.len() > MAX_REQUEST_HEADERS + MAX_AUTOMATIC_CREDENTIALS
+                || request_headers.iter().any(|(name, value)| {
+                    HeaderName::from_bytes(name.as_bytes()).is_err()
+                        || HeaderValue::from_str(value).is_err()
+                        || value.len() > MAX_REQUEST_HEADER_VALUE_BYTES
+                })
+            {
+                return Err(ToolError::NotAuthorized(
+                    "request is invalid or oversized after credential injection".to_string(),
+                ));
+            }
+
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .ok_or(ToolError::Timeout(request_timeout))?;
+            let mut request = client
+                .request(method.clone(), request_url)
+                .timeout(remaining);
+            for (name, value) in &request_headers {
+                request = request.header(name, value);
+            }
+            if let Some(body) = request_body.as_ref() {
+                if body.is_json
+                    && !request_headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case(CONTENT_TYPE.as_str()))
+                {
+                    request = request.header(CONTENT_TYPE, "application/json");
+                }
+                request = request.body(body.bytes.clone());
+            }
+
+            let response = request.send().await.map_err(|error| {
+                if error.is_timeout() {
+                    ToolError::Timeout(request_timeout)
+                } else {
+                    ToolError::ExternalService(error.without_url().to_string())
+                }
+            })?;
+
+            let Some(target) = redirect_target(&validated_url, &response)? else {
+                break (response, validated_url);
+            };
+            if redirect_count >= MAX_REDIRECTS {
+                return Err(ToolError::ExternalService(format!(
+                    "HTTP request exceeded {MAX_REDIRECTS} redirects"
+                )));
+            }
+            if request_origin(&target) != request_origin(&initial_url) {
+                return Err(ToolError::NotAuthorized(
+                    "cross-origin HTTP redirects are not followed".to_string(),
+                ));
+            }
+
+            let status = response.status();
+            if status == StatusCode::SEE_OTHER
+                || matches!(status, StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND)
+                    && method == Method::POST
+            {
+                method = Method::GET;
+                request_body = None;
+                headers_vec.retain(|(name, _)| {
+                    !name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str())
+                        && !name.eq_ignore_ascii_case(CONTENT_TYPE.as_str())
+                });
+            }
+            guarded = tokio::time::timeout_at(
+                deadline,
+                validate_url_async(target.as_str(), &self.url_allowlist),
+            )
+            .await
+            .map_err(|_| ToolError::Timeout(request_timeout))??;
+            redirect_count += 1;
+        };
 
         let status = response.status().as_u16();
 
-        let headers: HashMap<String, String> = response
-            .headers()
-            .iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.to_string(), v.to_string())))
-            .collect();
+        // Never place session cookies or authentication challenges into the
+        // model-visible tool result. Redirect locations are reduced to their
+        // origin so signed query strings and path tokens cannot escape either.
+        let headers = sanitized_response_headers(response.headers());
 
         // Pre-check Content-Length header to reject obviously oversized responses
         // before downloading anything, preventing OOM from malicious servers.
@@ -414,7 +743,7 @@ impl Tool for HttpTool {
             && len > MAX_RESPONSE_SIZE
         {
             tracing::warn!(
-                url = %parsed_url,
+                url = %redacted_url_for_log(&parsed_url),
                 content_length = len,
                 max = MAX_RESPONSE_SIZE,
                 "Rejected HTTP response: Content-Length exceeds limit"
@@ -431,7 +760,10 @@ impl Tool for HttpTool {
         let mut stream = response.bytes_stream();
         while let Some(chunk) = StreamExt::next(&mut stream).await {
             let chunk = chunk.map_err(|e| {
-                ToolError::ExternalService(format!("failed to read response body: {}", e))
+                ToolError::ExternalService(format!(
+                    "failed to read response body: {}",
+                    e.without_url()
+                ))
             })?;
             if body.len() + chunk.len() > MAX_RESPONSE_SIZE {
                 return Err(ToolError::ExecutionFailed(format!(
@@ -450,7 +782,7 @@ impl Tool for HttpTool {
             match convert_html_to_markdown(&body_text, parsed_url.as_str()) {
                 Ok(md) => md,
                 Err(e) => {
-                    tracing::warn!(url = %parsed_url, error = %e, "HTML-to-markdown conversion failed, returning raw HTML");
+                    tracing::warn!(url = %redacted_url_for_log(&parsed_url), error = %e, "HTML-to-markdown conversion failed, returning raw HTML");
                     body_text
                 }
             }
@@ -515,7 +847,7 @@ mod tests {
     fn test_validate_url_upgrades_http_to_https() {
         // validate_url silently upgrades http:// → https:// since the LLM
         // frequently generates http:// URLs even for HTTPS-capable sites.
-        let url = validate_url("http://example.com", &[]).unwrap().url;
+        let url = validate_url("http://8.8.8.8", &[]).unwrap().url;
         assert_eq!(url.scheme(), "https");
     }
 
@@ -527,8 +859,8 @@ mod tests {
 
     #[test]
     fn test_validate_url_accepts_https_public() {
-        let url = validate_url("https://example.com", &[]).unwrap().url;
-        assert_eq!(url.host_str(), Some("example.com"));
+        let url = validate_url("https://8.8.8.8", &[]).unwrap().url;
+        assert_eq!(url.host_str(), Some("8.8.8.8"));
     }
 
     #[test]
@@ -567,6 +899,47 @@ mod tests {
     fn test_max_response_size_is_reasonable() {
         // MAX_RESPONSE_SIZE should be 5 MB to prevent OOM while allowing typical API responses.
         assert_eq!(MAX_RESPONSE_SIZE, 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn response_headers_hide_credentials_and_signed_locations() {
+        let mut headers = HeaderMap::new();
+        headers.insert("set-cookie", HeaderValue::from_static("session=top-secret"));
+        headers.insert(
+            "www-authenticate",
+            HeaderValue::from_static("Bearer error=\"token-secret\""),
+        );
+        headers.insert(
+            "location",
+            HeaderValue::from_static("https://user:pass@example.com/private?token=secret#part"),
+        );
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+
+        let sanitized = sanitized_response_headers(&headers);
+        assert!(!sanitized.contains_key("set-cookie"));
+        assert!(!sanitized.contains_key("www-authenticate"));
+        assert_eq!(
+            sanitized.get("location").map(String::as_str),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            sanitized.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+        let serialized = format!("{sanitized:?}");
+        assert!(!serialized.contains("top-secret"));
+        assert!(!serialized.contains("token-secret"));
+        assert!(!serialized.contains("private"));
+        assert!(!serialized.contains("secret"));
+    }
+
+    #[test]
+    fn log_url_is_reduced_to_origin() {
+        let url = Url::parse(
+            "https://user:password@example.com:8443/private/token?api_key=secret#fragment",
+        )
+        .unwrap();
+        assert_eq!(redacted_url_for_log(&url), "https://example.com:8443");
     }
 
     #[test]
@@ -752,10 +1125,12 @@ mod tests {
         use thinclaw_secrets::CredentialMapping;
 
         let registry = Arc::new(SharedCredentialRegistry::new());
-        registry.add_mappings(vec![CredentialMapping::bearer(
-            "openai_key",
-            "api.openai.com",
-        )]);
+        registry
+            .add_mappings(vec![CredentialMapping::bearer(
+                "openai_key",
+                "api.openai.com",
+            )])
+            .unwrap();
 
         let tool = HttpTool::new().with_credentials(
             registry,
@@ -851,26 +1226,32 @@ mod tests {
 
     #[test]
     fn test_allowlist_allows_listed_host() {
-        let allowlist = vec!["api.openai.com".to_string()];
-        let url = validate_url("https://api.openai.com/v1/models", &allowlist)
+        let allowlist = vec!["8.8.8.8".to_string()];
+        let url = validate_url("https://8.8.8.8/v1/models", &allowlist)
             .unwrap()
             .url;
-        assert_eq!(url.host_str(), Some("api.openai.com"));
+        assert_eq!(url.host_str(), Some("8.8.8.8"));
     }
 
     #[test]
     fn test_allowlist_glob_matches_subdomain() {
         let allowlist = vec!["*.example.com".to_string()];
-        let url = validate_url("https://api.example.com/path", &allowlist)
-            .unwrap()
-            .url;
-        assert_eq!(url.host_str(), Some("api.example.com"));
+        let subdomain = validate_url("https://api.example.com/path", &allowlist);
+        assert!(
+            !subdomain
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("not in the URL allowlist")),
+            "glob should accept a matching subdomain before optional DNS resolution"
+        );
 
         // Root domain also matches
-        let url2 = validate_url("https://example.com/path", &allowlist)
-            .unwrap()
-            .url;
-        assert_eq!(url2.host_str(), Some("example.com"));
+        let root = validate_url("https://example.com/path", &allowlist);
+        assert!(
+            !root
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("not in the URL allowlist")),
+            "glob should accept its root domain before optional DNS resolution"
+        );
     }
 
     #[test]
@@ -882,8 +1263,8 @@ mod tests {
 
     #[test]
     fn test_empty_allowlist_allows_all() {
-        let url = validate_url("https://anything.com/path", &[]).unwrap().url;
-        assert_eq!(url.host_str(), Some("anything.com"));
+        let url = validate_url("https://8.8.8.8/path", &[]).unwrap().url;
+        assert_eq!(url.host_str(), Some("8.8.8.8"));
     }
 
     // ── IPv4-mapped IPv6 bypass blocking tests ─────────────────────────
@@ -952,7 +1333,7 @@ mod tests {
         // usable client cloned from the base. This exercises the empty branch
         // and confirms the consumer of the pin field compiles and runs.
         let base = HttpTool::new().client;
-        let _client = pinned_client(&base, "8.8.8.8", &[]);
+        let _client = pinned_client(base.as_ref().unwrap(), "8.8.8.8", &[]).unwrap();
     }
 
     #[test]
@@ -963,7 +1344,101 @@ mod tests {
         // is exercised at connect time.
         let base = HttpTool::new().client;
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 443);
-        let _client = pinned_client(&base, "example.com", &[addr]);
+        let _client = pinned_client(base.as_ref().unwrap(), "example.com", &[addr]).unwrap();
+    }
+
+    #[test]
+    fn request_headers_reject_duplicates_and_transport_overrides() {
+        let duplicate = serde_json::json!([
+            {"name": "Authorization", "value": "one"},
+            {"name": "authorization", "value": "two"}
+        ]);
+        assert!(parse_headers_param(Some(&duplicate)).is_err());
+
+        let host = serde_json::json!([{"name": "Host", "value": "internal.example"}]);
+        assert!(parse_headers_param(Some(&host)).is_err());
+
+        let transfer_encoding =
+            serde_json::json!([{"name": "Transfer-Encoding", "value": "chunked"}]);
+        assert!(parse_headers_param(Some(&transfer_encoding)).is_err());
+    }
+
+    #[test]
+    fn request_timeout_is_bounded_and_honored_by_parser() {
+        assert_eq!(
+            parse_request_timeout(&serde_json::json!({})).unwrap(),
+            Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            parse_request_timeout(&serde_json::json!({"timeout_secs": 7})).unwrap(),
+            Duration::from_secs(7)
+        );
+        assert!(parse_request_timeout(&serde_json::json!({"timeout_secs": 0})).is_err());
+        assert!(
+            parse_request_timeout(
+                &serde_json::json!({"timeout_secs": MAX_REQUEST_TIMEOUT_SECS + 1})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn automatic_credentials_reject_ambiguous_or_manual_destinations() {
+        use thinclaw_secrets::CredentialMapping;
+
+        let url = Url::parse("https://8.8.8.8/resource").unwrap();
+        let duplicate = vec![
+            CredentialMapping::bearer("first", "8.8.8.8"),
+            CredentialMapping::bearer("second", "8.8.8.8"),
+        ];
+        assert!(validate_automatic_credential_destinations(&duplicate, &[], &url).is_err());
+
+        let manual = vec![("Authorization".to_string(), "manual".to_string())];
+        assert!(
+            validate_automatic_credential_destinations(&duplicate[..1], &manual, &url).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_credential_lookup_fails_before_network_send() {
+        use crate::wasm::SharedCredentialRegistry;
+        use thinclaw_secrets::CredentialMapping;
+
+        let registry = Arc::new(SharedCredentialRegistry::new());
+        registry
+            .add_mappings([CredentialMapping::bearer("missing", "8.8.8.8")])
+            .unwrap();
+        let store = Arc::new(thinclaw_secrets::InMemorySecretsStore::new(Arc::new(
+            thinclaw_secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                "0123456789abcdef0123456789abcdef".to_string(),
+            ))
+            .unwrap(),
+        )));
+        let tool = HttpTool::new().with_credentials(registry, store);
+        let error = tool
+            .execute(
+                serde_json::json!({
+                    "method": "GET",
+                    "url": "https://8.8.8.8/",
+                    "timeout_secs": 1
+                }),
+                &JobContext::with_user("user", "test", "http test"),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ToolError::NotAuthorized(_)));
+        assert!(error.to_string().contains("required automatic credential"));
+    }
+
+    #[test]
+    fn redirect_origin_comparison_includes_scheme_host_and_port() {
+        let origin = Url::parse("https://example.com/a").unwrap();
+        let same = Url::parse("https://example.com/b").unwrap();
+        let other_host = Url::parse("https://www.example.com/b").unwrap();
+        let other_port = Url::parse("https://example.com:8443/b").unwrap();
+        assert_eq!(request_origin(&origin), request_origin(&same));
+        assert_ne!(request_origin(&origin), request_origin(&other_host));
+        assert_ne!(request_origin(&origin), request_origin(&other_port));
     }
 
     #[test]

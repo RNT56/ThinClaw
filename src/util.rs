@@ -103,35 +103,8 @@ const MACOS_BINARY_FALLBACKS: &[(&str, &str)] = &[
 /// Returns the binary name unchanged if it's in `$PATH`, or the
 /// absolute path to the fallback binary if found there.
 pub fn resolve_binary(name: &str) -> String {
-    // Check PATH first
-    #[cfg(unix)]
-    {
-        let found_in_path = std::process::Command::new("which")
-            .arg(name)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-
-        if found_in_path {
-            return name.to_string();
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        let found_in_path = std::process::Command::new("where")
-            .arg(name)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-
-        if found_in_path {
-            return name.to_string();
-        }
+    if let Some(path) = thinclaw_platform::find_executable_in_path(name) {
+        return path.to_string_lossy().to_string();
     }
 
     // macOS fallback: check known Homebrew paths

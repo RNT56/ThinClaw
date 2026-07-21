@@ -99,10 +99,18 @@ impl InferenceEngine for LlamaCppEngine {
         };
         let token = self.get_token().unwrap_or_default();
 
-        reqwest::Client::new()
+        let Ok(client) = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(2))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+        else {
+            return false;
+        };
+        client
             .get(format!("http://127.0.0.1:{}/health", port))
             .bearer_auth(&token)
-            .timeout(std::time::Duration::from_secs(2))
             .send()
             .await
             .map(|r| r.status().is_success())
@@ -112,6 +120,10 @@ impl InferenceEngine for LlamaCppEngine {
     fn base_url(&self) -> Option<String> {
         self.get_port()
             .map(|p| format!("http://127.0.0.1:{}/v1", p))
+    }
+
+    fn api_key(&self) -> Option<String> {
+        self.get_token()
     }
 
     fn display_name(&self) -> &'static str {

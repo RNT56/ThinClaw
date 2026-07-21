@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,18 +25,60 @@ use uuid::Uuid;
 use crate::apns_push::{ApnsPushSpec, ApnsPusher};
 use crate::native_lifecycle::{NativeLifecycleClient, NativeLifecycleEvent, NativeOutboundMessage};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+const MAX_NATIVE_HTTP_URL_BYTES: usize = 16 * 1024;
+const MAX_NATIVE_HTTP_HEADERS: usize = 64;
+const MAX_NATIVE_HTTP_HEADER_BYTES: usize = 64 * 1024;
+const MAX_NATIVE_HTTP_BODY_BYTES: usize = 1024 * 1024;
+const MAX_NATIVE_HTTP_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_NATIVE_REGISTRY_USERS: usize = 10_000;
+const MAX_NATIVE_REGISTRY_ENDPOINTS_PER_USER: usize = 32;
+const MAX_NATIVE_REGISTRY_FILE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_NATIVE_HTTP_DNS_ADDRESSES: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeHttpDestinationPolicy {
+    /// Owner-configured endpoint; HTTP is permitted for local/self-hosted use.
+    Configured,
+    /// Untrusted or provider endpoint; require public HTTPS and pin DNS.
+    PublicHttps,
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct NativeHttpRequest {
     pub method: String,
     pub url: String,
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
+    pub destination_policy: NativeHttpDestinationPolicy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for NativeHttpRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeHttpRequest")
+            .field("method", &self.method)
+            .field("url", &"[REDACTED]")
+            .field("header_count", &self.headers.len())
+            .field("body_bytes", &self.body.len())
+            .field("destination_policy", &self.destination_policy)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct NativeHttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for NativeHttpResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeHttpResponse")
+            .field("status", &self.status)
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
 }
 
 #[async_trait]
@@ -45,9 +87,7 @@ pub trait NativeHttpClient: Send + Sync {
 }
 
 #[derive(Debug)]
-pub struct ReqwestNativeHttpClient {
-    client: reqwest::Client,
-}
+pub struct ReqwestNativeHttpClient;
 
 impl Default for ReqwestNativeHttpClient {
     fn default() -> Self {
@@ -57,32 +97,200 @@ impl Default for ReqwestNativeHttpClient {
 
 impl ReqwestNativeHttpClient {
     pub fn new() -> Self {
-        // A bounded client is required: without timeouts a blackholed provider
-        // (Matrix homeserver, APNs, push endpoint) hangs the caller forever, and
-        // a stuck reply can wedge channel health checks. The `http2` cargo
-        // feature also lets reqwest negotiate h2 via ALPN, which APNs mandates.
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_default();
-        Self { client }
+        Self
     }
 }
 
 #[async_trait]
 impl NativeHttpClient for ReqwestNativeHttpClient {
     async fn send(&self, request: NativeHttpRequest) -> Result<NativeHttpResponse, ChannelError> {
+        if request.url.is_empty()
+            || request.url.len() > MAX_NATIVE_HTTP_URL_BYTES
+            || request.headers.len() > MAX_NATIVE_HTTP_HEADERS
+            || request.body.len() > MAX_NATIVE_HTTP_BODY_BYTES
+            || request.headers.iter().fold(0usize, |total, (name, value)| {
+                total.saturating_add(name.len()).saturating_add(value.len())
+            }) > MAX_NATIVE_HTTP_HEADER_BYTES
+            || request.headers.iter().any(|(name, value)| {
+                name.is_empty()
+                    || name.len() > 256
+                    || value.len() > 16 * 1024
+                    || name.chars().any(char::is_control)
+                    || value.contains(['\r', '\n', '\0'])
+            })
+        {
+            return Err(ChannelError::SendFailed {
+                name: "native-http".to_string(),
+                reason: "native HTTP request is malformed or oversized".to_string(),
+            });
+        }
         let method = request.method.parse::<reqwest::Method>().map_err(|error| {
             ChannelError::SendFailed {
                 name: "native-http".to_string(),
                 reason: format!("invalid HTTP method: {error}"),
             }
         })?;
-        let mut builder = self.client.request(method, &request.url);
-        for (name, value) in request.headers {
-            builder = builder.header(name, value);
+        if !matches!(
+            method.as_str(),
+            "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD"
+        ) {
+            return Err(ChannelError::SendFailed {
+                name: "native-http".to_string(),
+                reason: "native HTTP method is not supported".to_string(),
+            });
         }
+        let mut headers = reqwest::header::HeaderMap::with_capacity(request.headers.len());
+        for (name, value) in &request.headers {
+            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                ChannelError::SendFailed {
+                    name: "native-http".to_string(),
+                    reason: "native HTTP header name is invalid".to_string(),
+                }
+            })?;
+            if matches!(
+                name.as_str(),
+                "host"
+                    | "content-length"
+                    | "transfer-encoding"
+                    | "connection"
+                    | "proxy-connection"
+                    | "upgrade"
+                    | "te"
+                    | "trailer"
+            ) {
+                return Err(ChannelError::SendFailed {
+                    name: "native-http".to_string(),
+                    reason: "native HTTP request contains a transport-controlled header"
+                        .to_string(),
+                });
+            }
+            let value = reqwest::header::HeaderValue::from_str(value).map_err(|_| {
+                ChannelError::SendFailed {
+                    name: "native-http".to_string(),
+                    reason: "native HTTP header value is invalid".to_string(),
+                }
+            })?;
+            if headers.insert(name, value).is_some() {
+                return Err(ChannelError::SendFailed {
+                    name: "native-http".to_string(),
+                    reason: "native HTTP request contains duplicate headers".to_string(),
+                });
+            }
+        }
+
+        let parsed = Url::parse(&request.url).map_err(|_| ChannelError::SendFailed {
+            name: "native-http".to_string(),
+            reason: "native HTTP URL is malformed".to_string(),
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(ChannelError::SendFailed {
+                name: "native-http".to_string(),
+                reason: "native HTTP URL is not trusted".to_string(),
+            });
+        }
+
+        let (client, target) = match request.destination_policy {
+            NativeHttpDestinationPolicy::Configured => {
+                let host = parsed.host_str().ok_or_else(|| ChannelError::SendFailed {
+                    name: "native-http".to_string(),
+                    reason: "native HTTP URL has no host".to_string(),
+                })?;
+                let port =
+                    parsed
+                        .port_or_known_default()
+                        .ok_or_else(|| ChannelError::SendFailed {
+                            name: "native-http".to_string(),
+                            reason: "native HTTP URL has no port".to_string(),
+                        })?;
+                let resolved = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    tokio::net::lookup_host((host, port)),
+                )
+                .await
+                .map_err(|_| ChannelError::SendFailed {
+                    name: "native-http".to_string(),
+                    reason: "native HTTP DNS lookup timed out".to_string(),
+                })?
+                .map_err(|_| ChannelError::SendFailed {
+                    name: "native-http".to_string(),
+                    reason: "native HTTP DNS lookup failed".to_string(),
+                })?;
+                let mut addresses = resolved.collect::<Vec<_>>();
+                addresses.sort_unstable();
+                addresses.dedup();
+                if addresses.is_empty()
+                    || addresses.len() > MAX_NATIVE_HTTP_DNS_ADDRESSES
+                    || addresses.iter().any(|address| {
+                        let ip = address.ip();
+                        ip.is_unspecified()
+                            || ip.is_multicast()
+                            || matches!(ip, std::net::IpAddr::V4(ip) if ip.is_broadcast())
+                            || parsed.scheme() == "http"
+                                && thinclaw_tools_core::is_public_outbound_ip(ip)
+                    })
+                {
+                    return Err(ChannelError::SendFailed {
+                        name: "native-http".to_string(),
+                        reason: "native HTTP destination resolved to an invalid address"
+                            .to_string(),
+                    });
+                }
+                // A bounded client is required: without timeouts a blackholed
+                // endpoint can wedge channel health checks. Rebuilding here lets
+                // us pin the exact DNS answers validated above.
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .no_proxy()
+                    .resolve_to_addrs(host, &addresses)
+                    .build()
+                    .map_err(|_| ChannelError::SendFailed {
+                        name: "native-http".to_string(),
+                        reason: "failed to build native HTTP client".to_string(),
+                    })?;
+                (client, parsed)
+            }
+            NativeHttpDestinationPolicy::PublicHttps => {
+                let guarded = thinclaw_tools_core::validate_outbound_url_pinned_async(
+                    parsed.as_str(),
+                    &thinclaw_tools_core::OutboundUrlGuardOptions {
+                        require_https: true,
+                        upgrade_http_to_https: false,
+                        allowlist: Vec::new(),
+                    },
+                )
+                .await
+                .map_err(|_| ChannelError::SendFailed {
+                    name: "native-http".to_string(),
+                    reason: "native HTTP destination is not a public HTTPS endpoint".to_string(),
+                })?;
+                let mut client_builder = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .no_proxy();
+                if !guarded.pinned_addrs.is_empty()
+                    && let Some(host) = guarded.url.host_str()
+                {
+                    client_builder = client_builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+                }
+                let client = client_builder
+                    .build()
+                    .map_err(|_| ChannelError::SendFailed {
+                        name: "native-http".to_string(),
+                        reason: "failed to build native HTTP client".to_string(),
+                    })?;
+                (client, guarded.url)
+            }
+        };
+
+        let builder = client.request(method, target).headers(headers);
         let response =
             builder
                 .body(request.body)
@@ -97,22 +305,30 @@ impl NativeHttpClient for ReqwestNativeHttpClient {
                     reason: error.without_url().to_string(),
                 })?;
         let status = response.status().as_u16();
-        let body = response
-            .bytes()
+        let body = crate::response::bounded_bytes(response, MAX_NATIVE_HTTP_RESPONSE_BYTES)
             .await
             .map_err(|error| ChannelError::SendFailed {
                 name: "native-http".to_string(),
-                reason: error.without_url().to_string(),
-            })?
-            .to_vec();
+                reason: format!("native HTTP response is invalid: {error}"),
+            })?;
         Ok(NativeHttpResponse { status, body })
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MatrixNativeConfig {
     pub homeserver: String,
     pub access_token: String,
+}
+
+impl std::fmt::Debug for MatrixNativeConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MatrixNativeConfig")
+            .field("homeserver", &self.homeserver)
+            .field("access_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 pub struct MatrixNativeClient {
@@ -126,11 +342,7 @@ impl MatrixNativeClient {
     }
 
     fn endpoint(&self, path: &str) -> Result<String, ChannelError> {
-        let base =
-            Url::parse(&self.config.homeserver).map_err(|error| ChannelError::StartupFailed {
-                name: "matrix".to_string(),
-                reason: format!("invalid MATRIX_HOMESERVER: {error}"),
-            })?;
+        let base = validate_configured_origin(&self.config.homeserver, "matrix")?;
         base.join(path.trim_start_matches('/'))
             .map(|url| url.to_string())
             .map_err(|error| ChannelError::StartupFailed {
@@ -145,13 +357,19 @@ impl MatrixNativeClient {
             .and_then(Value::as_str)?
             .trim()
             .to_string();
-        if text.is_empty() {
+        let chat_id = event.get("room_id")?.as_str()?;
+        let user_id = event.get("sender")?.as_str()?;
+        if text.is_empty()
+            || text.len() > 256 * 1024
+            || !valid_native_identifier(chat_id, 4096)
+            || !valid_native_identifier(user_id, 4096)
+        {
             return None;
         }
         Some(NativeLifecycleEvent {
-            chat_id: event.get("room_id")?.as_str()?.to_string(),
+            chat_id: chat_id.to_string(),
             chat_type: Some("room".to_string()),
-            user_id: event.get("sender")?.as_str()?.to_string(),
+            user_id: user_id.to_string(),
             user_name: None,
             text,
             metadata: serde_json::json!({
@@ -165,6 +383,7 @@ impl MatrixNativeClient {
 #[async_trait]
 impl NativeLifecycleClient for MatrixNativeClient {
     async fn validate(&self) -> Result<(), ChannelError> {
+        validate_secret_value(&self.config.access_token, "matrix", "access token")?;
         let response = self
             .http
             .send(NativeHttpRequest {
@@ -172,12 +391,19 @@ impl NativeLifecycleClient for MatrixNativeClient {
                 url: self.endpoint("/_matrix/client/v3/account/whoami")?,
                 headers: bearer_headers(&self.config.access_token),
                 body: Vec::new(),
+                destination_policy: NativeHttpDestinationPolicy::Configured,
             })
             .await?;
         ensure_success("matrix", "whoami", response.status)
     }
 
     async fn send(&self, message: NativeOutboundMessage) -> Result<(), ChannelError> {
+        if !valid_native_identifier(&message.chat_id, 4096) || message.content.len() > 256 * 1024 {
+            return Err(ChannelError::SendFailed {
+                name: "matrix".to_string(),
+                reason: "Matrix message is malformed or oversized".to_string(),
+            });
+        }
         let txn = Uuid::new_v4().simple().to_string();
         let path = format!(
             "/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
@@ -195,6 +421,7 @@ impl NativeLifecycleClient for MatrixNativeClient {
                 url: self.endpoint(&path)?,
                 headers: json_bearer_headers(&self.config.access_token),
                 body: serde_json::to_vec(&body).unwrap_or_default(),
+                destination_policy: NativeHttpDestinationPolicy::Configured,
             })
             .await?;
         ensure_success("matrix", "send message", response.status)
@@ -208,10 +435,41 @@ impl NativeLifecycleClient for MatrixNativeClient {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct VoiceCallNativeConfig {
     pub response_url: String,
     pub webhook_secret: Option<String>,
+}
+
+impl std::fmt::Debug for VoiceCallNativeConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VoiceCallNativeConfig")
+            .field("response_url", &redacted_url_origin(&self.response_url))
+            .field(
+                "webhook_secret",
+                &self.webhook_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+fn redacted_url_origin(raw: &str) -> String {
+    let Ok(url) = Url::parse(raw) else {
+        return "<invalid-url>".to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return "<invalid-url>".to_string();
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
 }
 
 pub struct VoiceCallNativeClient {
@@ -228,14 +486,24 @@ impl VoiceCallNativeClient {
 #[async_trait]
 impl NativeLifecycleClient for VoiceCallNativeClient {
     async fn validate(&self) -> Result<(), ChannelError> {
-        Url::parse(&self.config.response_url).map_err(|error| ChannelError::StartupFailed {
-            name: "voice-call".to_string(),
-            reason: format!("invalid voice response URL: {error}"),
-        })?;
+        validate_public_https_url(&self.config.response_url, "voice-call")?;
+        if let Some(secret) = self.config.webhook_secret.as_deref() {
+            validate_secret_value(secret, "voice-call", "webhook secret")?;
+        }
         Ok(())
     }
 
     async fn send(&self, message: NativeOutboundMessage) -> Result<(), ChannelError> {
+        self.validate().await?;
+        if !valid_native_identifier(&message.chat_id, 4096)
+            || !valid_native_identifier(&message.user_id, 4096)
+            || message.content.len() > 256 * 1024
+        {
+            return Err(ChannelError::SendFailed {
+                name: "voice-call".to_string(),
+                reason: "Voice response is malformed or oversized".to_string(),
+            });
+        }
         let mut headers =
             HashMap::from([("Content-Type".to_string(), "application/json".to_string())]);
         if let Some(secret) = &self.config.webhook_secret {
@@ -254,19 +522,33 @@ impl NativeLifecycleClient for VoiceCallNativeClient {
                     "metadata": message.metadata,
                 }))
                 .unwrap_or_default(),
+                destination_policy: NativeHttpDestinationPolicy::PublicHttps,
             })
             .await?;
         ensure_success("voice-call", "send response", response.status)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ApnsNativeConfig {
     pub team_id: String,
     pub key_id: String,
     pub bundle_id: String,
     pub private_key_pem: String,
     pub sandbox: bool,
+}
+
+impl std::fmt::Debug for ApnsNativeConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApnsNativeConfig")
+            .field("team_id", &self.team_id)
+            .field("key_id", &self.key_id)
+            .field("bundle_id", &self.bundle_id)
+            .field("private_key_pem", &"[REDACTED]")
+            .field("sandbox", &self.sandbox)
+            .finish()
+    }
 }
 
 pub struct ApnsNativeClient {
@@ -309,6 +591,15 @@ impl ApnsNativeClient {
         device_token: &str,
         message: &NativeOutboundMessage,
     ) -> Result<(), ChannelError> {
+        if !valid_native_identifier(device_token, 512)
+            || message.content.len() > 256 * 1024
+            || !valid_native_identifier(&message.user_id, 4096)
+        {
+            return Err(ChannelError::SendFailed {
+                name: "apns".to_string(),
+                reason: "APNs destination or payload is malformed or oversized".to_string(),
+            });
+        }
         let payload = serde_json::json!({
             "aps": {
                 "alert": message.content,
@@ -343,6 +634,24 @@ pub(crate) fn apns_provider_token(config: &ApnsNativeConfig) -> Result<String, C
 #[async_trait]
 impl NativeLifecycleClient for ApnsNativeClient {
     async fn validate(&self) -> Result<(), ChannelError> {
+        for (label, value) in [
+            ("team ID", self.config.team_id.as_str()),
+            ("key ID", self.config.key_id.as_str()),
+            ("bundle ID", self.config.bundle_id.as_str()),
+        ] {
+            if !valid_native_identifier(value, 256) {
+                return Err(ChannelError::AuthFailed {
+                    name: "apns".to_string(),
+                    reason: format!("APNs {label} is malformed or oversized"),
+                });
+            }
+        }
+        if self.config.private_key_pem.len() > 64 * 1024 {
+            return Err(ChannelError::AuthFailed {
+                name: "apns".to_string(),
+                reason: "APNs private key is oversized".to_string(),
+            });
+        }
         let _ = self.provider_token()?;
         Ok(())
     }
@@ -368,12 +677,24 @@ impl NativeLifecycleClient for ApnsNativeClient {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BrowserPushNativeConfig {
     pub vapid_public_key: String,
     pub vapid_private_key_pem: String,
     pub subject: String,
     pub ttl_seconds: u32,
+}
+
+impl std::fmt::Debug for BrowserPushNativeConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserPushNativeConfig")
+            .field("vapid_public_key", &self.vapid_public_key)
+            .field("vapid_private_key_pem", &"[REDACTED]")
+            .field("subject", &self.subject)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .finish()
+    }
 }
 
 pub struct BrowserPushNativeClient {
@@ -404,22 +725,17 @@ impl BrowserPushNativeClient {
     }
 
     fn vapid_token(&self, endpoint: &str) -> Result<String, ChannelError> {
-        let aud = Url::parse(endpoint)
-            .map_err(|error| ChannelError::SendFailed {
-                name: "browser-push".to_string(),
-                reason: format!("invalid subscription endpoint: {error}"),
-            })
-            .and_then(|url| {
-                let origin = url.origin().ascii_serialization();
-                if origin == "null" {
-                    Err(ChannelError::SendFailed {
-                        name: "browser-push".to_string(),
-                        reason: "subscription endpoint has no origin".to_string(),
-                    })
-                } else {
-                    Ok(origin)
-                }
-            })?;
+        let aud = validate_public_https_url(endpoint, "browser-push").and_then(|url| {
+            let origin = url.origin().ascii_serialization();
+            if origin == "null" {
+                Err(ChannelError::SendFailed {
+                    name: "browser-push".to_string(),
+                    reason: "subscription endpoint has no origin".to_string(),
+                })
+            } else {
+                Ok(origin)
+            }
+        })?;
         jwt_es256(
             "browser-push",
             String::new(),
@@ -452,6 +768,7 @@ impl BrowserPushNativeClient {
                     ("Content-Length".to_string(), "0".to_string()),
                 ]),
                 body: Vec::new(),
+                destination_policy: NativeHttpDestinationPolicy::PublicHttps,
             })
             .await?;
         ensure_success("browser-push", "wake subscription", response.status)?;
@@ -463,12 +780,39 @@ impl BrowserPushNativeClient {
 #[async_trait]
 impl NativeLifecycleClient for BrowserPushNativeClient {
     async fn validate(&self) -> Result<(), ChannelError> {
-        if self.config.vapid_public_key.trim().is_empty() {
+        if self.config.vapid_public_key.trim().is_empty()
+            || self.config.vapid_public_key.len() > 4096
+            || self.config.vapid_public_key.chars().any(char::is_control)
+            || self.config.vapid_private_key_pem.is_empty()
+            || self.config.vapid_private_key_pem.len() > 64 * 1024
+            || self.config.subject.is_empty()
+            || self.config.subject.len() > 4096
+            || self.config.subject.chars().any(char::is_control)
+            || self.config.ttl_seconds > 2_419_200
+        {
             return Err(ChannelError::AuthFailed {
                 name: "browser-push".to_string(),
-                reason: "VAPID public key is required".to_string(),
+                reason: "VAPID configuration is malformed or oversized".to_string(),
             });
         }
+        if !(self.config.subject.starts_with("mailto:")
+            || self.config.subject.starts_with("https://"))
+        {
+            return Err(ChannelError::AuthFailed {
+                name: "browser-push".to_string(),
+                reason: "VAPID subject must be a mailto: or HTTPS URI".to_string(),
+            });
+        }
+        let _ = jwt_es256(
+            "browser-push",
+            String::new(),
+            VapidClaims {
+                aud: "https://example.invalid".to_string(),
+                exp: unix_now() + 60,
+                sub: self.config.subject.clone(),
+            },
+            &self.config.vapid_private_key_pem,
+        )?;
         Ok(())
     }
 
@@ -493,10 +837,20 @@ impl NativeLifecycleClient for BrowserPushNativeClient {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct NativeEndpointRegistry {
     inner: Arc<RwLock<HashMap<String, BTreeSet<String>>>>,
     persistence_path: Option<Arc<PathBuf>>,
+    persist_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl std::fmt::Debug for NativeEndpointRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeEndpointRegistry")
+            .field("persistence_configured", &self.persistence_path.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl NativeEndpointRegistry {
@@ -505,25 +859,43 @@ impl NativeEndpointRegistry {
         let registry = Self {
             inner: Arc::new(RwLock::new(load_endpoint_registry_file(&path).await?)),
             persistence_path: Some(Arc::new(path)),
+            persist_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         Ok(registry)
     }
 
-    pub async fn register(&self, user_id: impl Into<String>, endpoint: impl Into<String>) {
+    pub async fn register(
+        &self,
+        user_id: impl Into<String>,
+        endpoint: impl Into<String>,
+    ) -> Result<(), ChannelError> {
         let user_id = user_id.into();
         let endpoint = endpoint.into();
-        if user_id.trim().is_empty() || endpoint.trim().is_empty() {
-            return;
+        if !valid_native_identifier(&user_id, 4096)
+            || !valid_native_identifier(&endpoint, MAX_NATIVE_HTTP_URL_BYTES)
+        {
+            return Err(ChannelError::Configuration(
+                "native endpoint registration is malformed or oversized".to_string(),
+            ));
         }
-        self.inner
-            .write()
-            .await
-            .entry(user_id)
-            .or_default()
-            .insert(endpoint);
-        if let Err(error) = self.persist().await {
-            tracing::warn!(error = %error, "failed to persist native endpoint registration");
+        {
+            let mut guard = self.inner.write().await;
+            if !guard.contains_key(&user_id) && guard.len() >= MAX_NATIVE_REGISTRY_USERS {
+                return Err(ChannelError::Configuration(
+                    "native endpoint registry user limit reached".to_string(),
+                ));
+            }
+            let endpoints = guard.entry(user_id).or_default();
+            if !endpoints.contains(&endpoint)
+                && endpoints.len() >= MAX_NATIVE_REGISTRY_ENDPOINTS_PER_USER
+            {
+                return Err(ChannelError::Configuration(
+                    "native endpoint limit reached for user".to_string(),
+                ));
+            }
+            endpoints.insert(endpoint);
         }
+        self.persist().await
     }
 
     pub async fn unregister(&self, user_id: &str, endpoint: &str) -> bool {
@@ -565,6 +937,7 @@ impl NativeEndpointRegistry {
         let Some(path) = &self.persistence_path else {
             return Ok(());
         };
+        let _persist_guard = self.persist_lock.lock().await;
         let snapshot = self.snapshot().await;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|error| {
@@ -581,12 +954,16 @@ impl NativeEndpointRegistry {
                     path.display()
                 ))
             })?;
-        tokio::fs::write(path.as_ref(), encoded)
+        if encoded.len() > MAX_NATIVE_REGISTRY_FILE_BYTES {
+            return Err(ChannelError::Configuration(
+                "native endpoint registry exceeds the persistence size limit".to_string(),
+            ));
+        }
+        thinclaw_platform::write_private_file_atomic_async(path.as_ref().clone(), encoded, true)
             .await
             .map_err(|error| {
                 ChannelError::Configuration(format!(
-                    "failed to write native endpoint registry {}: {error}",
-                    path.display()
+                    "failed to persist native endpoint registry: {error}"
                 ))
             })
     }
@@ -601,22 +978,39 @@ impl NativeEndpointRegistry {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 struct NativeEndpointRegistryFile {
     #[serde(default)]
     users: BTreeMap<String, BTreeSet<String>>,
 }
 
+impl std::fmt::Debug for NativeEndpointRegistryFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeEndpointRegistryFile")
+            .field("user_count", &self.users.len())
+            .field(
+                "endpoint_count",
+                &self.users.values().map(BTreeSet::len).sum::<usize>(),
+            )
+            .finish()
+    }
+}
+
 async fn load_endpoint_registry_file(
-    path: &PathBuf,
+    path: &Path,
 ) -> Result<HashMap<String, BTreeSet<String>>, ChannelError> {
-    let bytes = match tokio::fs::read(path).await {
+    let bytes = match thinclaw_platform::read_regular_file_bounded_async(
+        path.to_path_buf(),
+        MAX_NATIVE_REGISTRY_FILE_BYTES as u64,
+    )
+    .await
+    {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(HashMap::new()),
         Err(error) => {
             return Err(ChannelError::Configuration(format!(
-                "failed to read native endpoint registry {}: {error}",
-                path.display()
+                "native endpoint registry file is unsafe or unreadable: {error}"
             )));
         }
     };
@@ -626,6 +1020,19 @@ async fn load_endpoint_registry_file(
             path.display()
         ))
     })?;
+    if decoded.users.len() > MAX_NATIVE_REGISTRY_USERS
+        || decoded.users.iter().any(|(user_id, endpoints)| {
+            !valid_native_identifier(user_id, 4096)
+                || endpoints.len() > MAX_NATIVE_REGISTRY_ENDPOINTS_PER_USER
+                || endpoints
+                    .iter()
+                    .any(|endpoint| !valid_native_identifier(endpoint, MAX_NATIVE_HTTP_URL_BYTES))
+        })
+    {
+        return Err(ChannelError::Configuration(
+            "native endpoint registry contents are malformed or oversized".to_string(),
+        ));
+    }
     Ok(decoded.users.into_iter().collect())
 }
 
@@ -669,6 +1076,80 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn valid_native_identifier(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
+}
+
+fn validate_secret_value(value: &str, channel: &str, label: &str) -> Result<(), ChannelError> {
+    if value.is_empty() || value.len() > 64 * 1024 || value.chars().any(char::is_control) {
+        return Err(ChannelError::AuthFailed {
+            name: channel.to_string(),
+            reason: format!("{label} is missing, malformed, or oversized"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_configured_origin(value: &str, channel: &str) -> Result<Url, ChannelError> {
+    let parsed = Url::parse(value).map_err(|_| ChannelError::StartupFailed {
+        name: channel.to_string(),
+        reason: "configured server URL is malformed".to_string(),
+    })?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ChannelError::StartupFailed {
+            name: channel.to_string(),
+            reason: "configured server URL requires a host".to_string(),
+        })?;
+    if value.len() > MAX_NATIVE_HTTP_URL_BYTES
+        || !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+        || (parsed.scheme() == "http" && !is_local_native_host(host))
+    {
+        return Err(ChannelError::StartupFailed {
+            name: channel.to_string(),
+            reason: "configured server must be an HTTPS origin (local HTTP is allowed)".to_string(),
+        });
+    }
+    Ok(parsed)
+}
+
+fn validate_public_https_url(value: &str, channel: &str) -> Result<Url, ChannelError> {
+    let parsed = Url::parse(value).map_err(|_| ChannelError::StartupFailed {
+        name: channel.to_string(),
+        reason: "provider URL is malformed".to_string(),
+    })?;
+    if value.len() > MAX_NATIVE_HTTP_URL_BYTES
+        || parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+        || parsed
+            .host_str()
+            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|ip| !thinclaw_tools_core::is_public_outbound_ip(ip))
+    {
+        return Err(ChannelError::StartupFailed {
+            name: channel.to_string(),
+            reason: "provider URL must be a public credential-free HTTPS URL".to_string(),
+        });
+    }
+    Ok(parsed)
+}
+
+fn is_local_native_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".local")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| !thinclaw_tools_core::is_public_outbound_ip(ip))
 }
 
 fn bearer_headers(token: &str) -> HashMap<String, String> {
@@ -892,8 +1373,8 @@ mod tests {
     async fn apns_client_broadcasts_to_registered_device_tokens() {
         let http = MockHttp::ok();
         let registry = NativeEndpointRegistry::default();
-        registry.register("user-1", "device-token-a").await;
-        registry.register("user-1", "device-token-b").await;
+        registry.register("user-1", "device-token-a").await.unwrap();
+        registry.register("user-1", "device-token-b").await.unwrap();
         let client = ApnsNativeClient::with_registry(
             ApnsNativeConfig {
                 team_id: "TEAMID1234".to_string(),
@@ -969,10 +1450,12 @@ mod tests {
         let registry = NativeEndpointRegistry::default();
         registry
             .register("user-1", "https://push.example.test/subscription/a")
-            .await;
+            .await
+            .unwrap();
         registry
             .register("user-1", "https://push.example.test/subscription/b")
-            .await;
+            .await
+            .unwrap();
         let client = BrowserPushNativeClient::with_registry(
             BrowserPushNativeConfig {
                 vapid_public_key: "public-key".to_string(),
@@ -1014,9 +1497,9 @@ mod tests {
             .await
             .unwrap();
 
-        registry.register("user-1", "endpoint-a").await;
-        registry.register("user-1", "endpoint-b").await;
-        registry.register("user-2", "endpoint-c").await;
+        registry.register("user-1", "endpoint-a").await.unwrap();
+        registry.register("user-1", "endpoint-b").await.unwrap();
+        registry.register("user-2", "endpoint-c").await.unwrap();
 
         let loaded = NativeEndpointRegistry::persistent(path.clone())
             .await

@@ -26,6 +26,12 @@ pub use thinclaw_tools_core::{CanvasAction, NotifyLevel, PanelPosition, UiCompon
 use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};
 use thinclaw_types::JobContext;
 
+const MAX_PANEL_ID_BYTES: usize = 128;
+const MAX_PANEL_TITLE_BYTES: usize = 512;
+const MAX_COMPONENTS: usize = 100;
+const MAX_COMPONENT_PAYLOAD_BYTES: usize = 1024 * 1024;
+const MAX_NOTIFICATION_BYTES: usize = 16 * 1024;
+
 // ── Tool Implementation ─────────────────────────────────────────────
 
 /// Canvas tool for agent-generated interactive UIs.
@@ -55,14 +61,19 @@ impl Tool for CanvasTool {
                 },
                 "panel_id": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
                     "description": "Unique panel identifier (required for show/update/dismiss)"
                 },
                 "title": {
                     "type": "string",
+                    "maxLength": 512,
                     "description": "Panel title (for show action)"
                 },
                 "components": {
                     "type": "array",
+                    "minItems": 1,
+                    "maxItems": 100,
                     "description": "UI components to display (for show/update actions)",
                     "items": {
                         "type": "object",
@@ -80,6 +91,8 @@ impl Tool for CanvasTool {
                 },
                 "message": {
                     "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16384,
                     "description": "Notification message (for notify action)"
                 },
                 "level": {
@@ -89,6 +102,8 @@ impl Tool for CanvasTool {
                 },
                 "duration_secs": {
                     "type": "integer",
+                    "minimum": 0,
+                    "maximum": 86400,
                     "description": "Auto-dismiss duration in seconds, 0 = persistent (for notify action)"
                 }
             },
@@ -115,14 +130,24 @@ impl Tool for CanvasTool {
                 let panel_id = params
                     .get("panel_id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("default")
+                    .ok_or_else(|| {
+                        ToolError::InvalidParameters(
+                            "Missing 'panel_id' for show action".to_string(),
+                        )
+                    })?
                     .to_string();
+                validate_panel_id(&panel_id)?;
 
                 let title = params
                     .get("title")
                     .and_then(|v| v.as_str())
                     .unwrap_or("Agent Panel")
                     .to_string();
+                if title.len() > MAX_PANEL_TITLE_BYTES {
+                    return Err(ToolError::InvalidParameters(
+                        "Canvas title exceeds the 512-byte limit".to_string(),
+                    ));
+                }
 
                 let components = parse_components(&params)?;
 
@@ -160,6 +185,7 @@ impl Tool for CanvasTool {
                         )
                     })?
                     .to_string();
+                validate_panel_id(&panel_id)?;
 
                 let components = parse_components(&params)?;
 
@@ -178,6 +204,7 @@ impl Tool for CanvasTool {
                         )
                     })?
                     .to_string();
+                validate_panel_id(&panel_id)?;
 
                 CanvasAction::Dismiss { panel_id }
             }
@@ -191,6 +218,11 @@ impl Tool for CanvasTool {
                         )
                     })?
                     .to_string();
+                if message.trim().is_empty() || message.len() > MAX_NOTIFICATION_BYTES {
+                    return Err(ToolError::InvalidParameters(
+                        "Canvas notification must contain 1 to 16384 bytes".to_string(),
+                    ));
+                }
 
                 let level = params
                     .get("level")
@@ -203,10 +235,24 @@ impl Tool for CanvasTool {
                     })
                     .unwrap_or_default();
 
-                let duration_secs = params
-                    .get("duration_secs")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(5);
+                let duration_secs = match params.get("duration_secs") {
+                    None => 5,
+                    Some(value) => {
+                        let duration = value.as_u64().ok_or_else(|| {
+                            ToolError::InvalidParameters(
+                                "Canvas duration_secs must be an integer from 0 to 86400"
+                                    .to_string(),
+                            )
+                        })?;
+                        if duration > 86_400 {
+                            return Err(ToolError::InvalidParameters(
+                                "Canvas duration_secs must be an integer from 0 to 86400"
+                                    .to_string(),
+                            ));
+                        }
+                        duration
+                    }
+                };
 
                 CanvasAction::Notify {
                     message,
@@ -249,6 +295,23 @@ fn parse_components(params: &serde_json::Value) -> Result<Vec<UiComponent>, Tool
         .get("components")
         .ok_or_else(|| ToolError::InvalidParameters("Missing 'components' array".to_string()))?;
 
+    let raw_components = components_value
+        .as_array()
+        .ok_or_else(|| ToolError::InvalidParameters("'components' must be an array".to_string()))?;
+    if raw_components.len() > MAX_COMPONENTS {
+        return Err(ToolError::InvalidParameters(format!(
+            "Canvas panels support at most {MAX_COMPONENTS} components"
+        )));
+    }
+    let payload_size = serde_json::to_vec(components_value)
+        .map_err(|error| ToolError::InvalidParameters(format!("Invalid components: {error}")))?
+        .len();
+    if payload_size > MAX_COMPONENT_PAYLOAD_BYTES {
+        return Err(ToolError::InvalidParameters(
+            "Canvas component payload exceeds the 1 MiB limit".to_string(),
+        ));
+    }
+
     let components: Vec<UiComponent> =
         serde_json::from_value(components_value.clone()).map_err(|e| {
             ToolError::InvalidParameters(format!(
@@ -263,6 +326,18 @@ fn parse_components(params: &serde_json::Value) -> Result<Vec<UiComponent>, Tool
     }
 
     Ok(components)
+}
+
+fn validate_panel_id(panel_id: &str) -> Result<(), ToolError> {
+    if panel_id.trim().is_empty()
+        || panel_id.len() > MAX_PANEL_ID_BYTES
+        || panel_id.chars().any(char::is_control)
+    {
+        return Err(ToolError::InvalidParameters(
+            "Canvas panel_id must contain 1 to 128 bytes and no control characters".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -394,6 +469,84 @@ mod tests {
         let ctx = JobContext::default();
         let err = tool.execute(params, &ctx).await.unwrap_err();
         assert!(err.to_string().contains("components"));
+    }
+
+    #[tokio::test]
+    async fn show_requires_a_valid_bounded_panel_id() {
+        let tool = CanvasTool;
+        let ctx = JobContext::default();
+        for panel_id in [None, Some("   "), Some("bad\nname")] {
+            let mut params = serde_json::json!({
+                "action": "show",
+                "components": [{"type": "text", "content": "hello"}]
+            });
+            if let Some(panel_id) = panel_id {
+                params["panel_id"] = serde_json::json!(panel_id);
+            }
+            let error = tool.execute(params, &ctx).await.unwrap_err();
+            assert!(error.to_string().contains("panel_id"));
+        }
+
+        let error = tool
+            .execute(
+                serde_json::json!({
+                    "action": "show",
+                    "panel_id": "x".repeat(MAX_PANEL_ID_BYTES + 1),
+                    "components": [{"type": "text", "content": "hello"}]
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("panel_id"));
+    }
+
+    #[tokio::test]
+    async fn canvas_payload_limits_are_enforced() {
+        let tool = CanvasTool;
+        let ctx = JobContext::default();
+        let components = (0..=MAX_COMPONENTS)
+            .map(|_| serde_json::json!({"type": "text", "content": "x"}))
+            .collect::<Vec<_>>();
+        let error = tool
+            .execute(
+                serde_json::json!({
+                    "action": "show",
+                    "panel_id": "many",
+                    "components": components,
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("at most"));
+
+        let error = tool
+            .execute(
+                serde_json::json!({
+                    "action": "notify",
+                    "message": "x".repeat(MAX_NOTIFICATION_BYTES + 1),
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("16384"));
+
+        for duration in [serde_json::json!(-1), serde_json::json!(86_401)] {
+            let error = tool
+                .execute(
+                    serde_json::json!({
+                        "action": "notify",
+                        "message": "hello",
+                        "duration_secs": duration,
+                    }),
+                    &ctx,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("duration_secs"));
+        }
     }
 
     #[test]

@@ -22,6 +22,13 @@ const TOKENS_PER_WORD: f64 = 1.3;
 /// mixed English / code / JSON content.
 const CHARS_PER_TOKEN: usize = 4;
 
+/// Default reserve for tokenizer variance, provider framing, and model-specific
+/// accounting that is not visible to the provider-neutral estimator.
+pub const AUXILIARY_CONTEXT_SAFETY_MARGIN_PERCENT: u8 = 10;
+
+const RECENT_EVIDENCE_TRUNCATION_MARKER: &str =
+    "[... older evidence omitted to fit the active model context ...]\n";
+
 /// Context pressure levels derived from approximate context usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ContextPressure {
@@ -157,6 +164,112 @@ impl ContextMonitor {
     pub fn threshold(&self) -> usize {
         (self.context_limit as f64 * self.threshold_ratio) as usize
     }
+}
+
+/// A typed untrusted-evidence message fitted to a concrete provider request
+/// budget. The newest evidence is retained when truncation is necessary.
+#[derive(Debug, Clone)]
+pub struct BoundedUntrustedContext {
+    pub message: ChatMessage,
+    pub was_truncated: bool,
+    pub retained_chars: usize,
+    pub estimated_input_tokens: usize,
+    pub input_token_limit: usize,
+}
+
+/// Fit one untrusted evidence block beside fixed request messages while
+/// reserving output tokens and a percentage of the total model window.
+///
+/// This is intended for auxiliary LLM paths such as compaction, summaries,
+/// search synthesis, and heartbeat checks. Those paths do not run the main
+/// dispatcher history cap, so merely limiting the number of messages is not a
+/// sufficient context bound: one message may itself be larger than the model
+/// window.
+///
+/// Returns `None` only when the fixed messages plus an empty typed evidence
+/// envelope cannot fit. Callers should fail closed rather than sending an
+/// inevitably oversized request to the provider.
+pub fn bound_recent_untrusted_context(
+    monitor: &ContextMonitor,
+    fixed_messages: &[ChatMessage],
+    segment_id: &str,
+    source: &str,
+    content: &str,
+    output_reserve_tokens: usize,
+    safety_margin_percent: u8,
+) -> Option<BoundedUntrustedContext> {
+    let safety_margin = monitor
+        .limit()
+        .saturating_mul(safety_margin_percent.min(95) as usize)
+        / 100;
+    let input_token_limit = monitor
+        .limit()
+        .saturating_sub(output_reserve_tokens)
+        .saturating_sub(safety_margin);
+    let fixed_tokens = monitor.estimate_tokens(fixed_messages);
+
+    let full_message = ChatMessage::untrusted_context(segment_id, source, content);
+    let full_tokens =
+        fixed_tokens.saturating_add(monitor.estimate_tokens(std::slice::from_ref(&full_message)));
+    if full_tokens <= input_token_limit {
+        return Some(BoundedUntrustedContext {
+            message: full_message,
+            was_truncated: false,
+            retained_chars: content.chars().count(),
+            estimated_input_tokens: full_tokens,
+            input_token_limit,
+        });
+    }
+
+    let empty_message = ChatMessage::untrusted_context(segment_id, source, "");
+    let empty_tokens =
+        fixed_tokens.saturating_add(monitor.estimate_tokens(std::slice::from_ref(&empty_message)));
+    if empty_tokens > input_token_limit {
+        return None;
+    }
+
+    let total_chars = content.chars().count();
+    let candidate = |retained_chars: usize| {
+        if retained_chars == 0 {
+            return String::new();
+        }
+        let skipped_chars = total_chars.saturating_sub(retained_chars);
+        let start = content
+            .char_indices()
+            .nth(skipped_chars)
+            .map_or(content.len(), |(index, _)| index);
+        format!("{RECENT_EVIDENCE_TRUNCATION_MARKER}{}", &content[start..])
+    };
+
+    // Binary search the largest UTF-8-safe suffix whose fully rendered typed
+    // envelope fits. Measuring the rendered message also accounts for JSON
+    // escaping and envelope framing rather than guessing from raw bytes.
+    let mut low = 0usize;
+    let mut high = total_chars;
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        let raw = candidate(mid);
+        let message = ChatMessage::untrusted_context(segment_id, source, raw);
+        let tokens =
+            fixed_tokens.saturating_add(monitor.estimate_tokens(std::slice::from_ref(&message)));
+        if tokens <= input_token_limit {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    let raw = candidate(low);
+    let message = ChatMessage::untrusted_context(segment_id, source, raw);
+    let estimated_input_tokens =
+        fixed_tokens.saturating_add(monitor.estimate_tokens(std::slice::from_ref(&message)));
+    Some(BoundedUntrustedContext {
+        message,
+        was_truncated: true,
+        retained_chars: low,
+        estimated_input_tokens,
+        input_token_limit,
+    })
 }
 
 /// Get the warning message for a given pressure level.
@@ -434,6 +547,54 @@ mod tests {
         assert!(breakdown.system_tokens > 0);
         assert!(breakdown.user_tokens > 0);
         assert!(breakdown.assistant_tokens > 0);
+    }
+
+    #[test]
+    fn auxiliary_evidence_is_bounded_and_retains_recent_utf8_content() {
+        let monitor = ContextMonitor::new().with_limit(500);
+        let fixed = vec![ChatMessage::system("Summarize the evidence.")];
+        let old = "old-日本語-".repeat(800);
+        let recent = "RECENT-DECISION-日本語";
+        let content = format!("{old}{recent}");
+
+        let bounded = bound_recent_untrusted_context(
+            &monitor,
+            &fixed,
+            "conversation",
+            "test",
+            &content,
+            100,
+            AUXILIARY_CONTEXT_SAFETY_MARGIN_PERCENT,
+        )
+        .expect("fixed prompt should leave room for evidence");
+
+        assert!(bounded.was_truncated);
+        assert!(bounded.retained_chars < content.chars().count());
+        assert!(bounded.message.content.contains(recent));
+        assert!(bounded.message.content.contains("older evidence omitted"));
+        assert!(bounded.estimated_input_tokens <= bounded.input_token_limit);
+        assert_eq!(
+            bounded.message.untrusted_context_identity(),
+            Some(("conversation", "test"))
+        );
+    }
+
+    #[test]
+    fn auxiliary_evidence_fails_when_required_request_cannot_fit() {
+        let monitor = ContextMonitor::new().with_limit(64);
+        let fixed = vec![ChatMessage::system("x".repeat(1_000))];
+        assert!(
+            bound_recent_untrusted_context(
+                &monitor,
+                &fixed,
+                "conversation",
+                "test",
+                "evidence",
+                16,
+                AUXILIARY_CONTEXT_SAFETY_MARGIN_PERCENT,
+            )
+            .is_none()
+        );
     }
 
     #[test]

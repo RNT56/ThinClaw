@@ -10,6 +10,49 @@ use super::ThinClawManager;
 use crate::thinclaw::bridge::{gated, BridgeError, RouteMode};
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
+const MAX_CONFIG_PATCH_ENTRIES: usize = 256;
+const MAX_CONFIG_PATCH_BYTES: usize = 1024 * 1024;
+const MAX_CONFIG_KEY_BYTES: usize = 256;
+const MAX_CONFIG_VALUE_BYTES: usize = 256 * 1024;
+
+fn validated_config_patch(
+    patch: serde_json::Value,
+) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
+    let object = patch
+        .as_object()
+        .ok_or_else(|| "configuration patch must be a JSON object".to_string())?;
+    if object.len() > MAX_CONFIG_PATCH_ENTRIES {
+        return Err(format!(
+            "configuration patch exceeds the {MAX_CONFIG_PATCH_ENTRIES}-entry limit"
+        ));
+    }
+    if serde_json::to_vec(&patch)
+        .map_err(|error| format!("failed to encode configuration patch: {error}"))?
+        .len()
+        > MAX_CONFIG_PATCH_BYTES
+    {
+        return Err("configuration patch exceeds the 1 MiB limit".to_string());
+    }
+
+    let mut settings = std::collections::HashMap::with_capacity(object.len());
+    for (key, value) in object {
+        if key.is_empty()
+            || key.len() > MAX_CONFIG_KEY_BYTES
+            || key.chars().any(char::is_control)
+            || serde_json::to_vec(value)
+                .map_err(|error| format!("failed to encode setting '{key}': {error}"))?
+                .len()
+                > MAX_CONFIG_VALUE_BYTES
+        {
+            return Err(format!(
+                "configuration setting '{key}' is malformed or oversized"
+            ));
+        }
+        settings.insert(key.clone(), value.clone());
+    }
+    Ok(settings)
+}
+
 // ============================================================================
 // Config commands
 // ============================================================================
@@ -64,10 +107,18 @@ pub async fn thinclaw_config_set(
 
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
+    let restart_gmail = key.starts_with("channels.gmail_");
+    let secrets = restart_gmail
+        .then(|| agent.secrets_store().cloned())
+        .flatten();
 
     thinclaw_core::api::config::set_setting(store, "local_user", &key, &value)
         .await
         .map_err(|e| e.to_string())?;
+    drop(agent);
+    if restart_gmail {
+        ironclaw.restart_local(secrets).await?;
+    }
 
     Ok(serde_json::json!({ "ok": true }))
 }
@@ -78,24 +129,27 @@ pub async fn thinclaw_config_patch(
     ironclaw: State<'_, ThinClawRuntimeState>,
     patch: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    let settings = validated_config_patch(patch)?;
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        if let Some(obj) = patch.as_object() {
-            for (key, value) in obj {
-                proxy.set_setting(key, value).await?;
-            }
-        }
+        proxy.patch_settings(&settings).await?;
         return Ok(serde_json::json!({ "ok": true }));
     }
 
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
+    let restart_gmail = settings
+        .keys()
+        .any(|key| key.starts_with("channels.gmail_"));
+    let secrets = restart_gmail
+        .then(|| agent.secrets_store().cloned())
+        .flatten();
 
-    if let Some(obj) = patch.as_object() {
-        for (key, value) in obj {
-            thinclaw_core::api::config::set_setting(store, "local_user", key, value)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
+    thinclaw_core::api::config::import_settings(store, "local_user", &settings)
+        .await
+        .map_err(|error| error.to_string())?;
+    drop(agent);
+    if restart_gmail {
+        ironclaw.restart_local(secrets).await?;
     }
 
     Ok(serde_json::json!({ "ok": true }))
@@ -311,11 +365,14 @@ pub async fn thinclaw_check_bootstrap_needed(
     match ironclaw.agent().await {
         Ok(agent) => {
             if let Some(workspace) = agent.workspace() {
-                let bootstrap_exists =
-                    thinclaw_core::api::memory::get_file(workspace, "BOOTSTRAP.md")
-                        .await
-                        .map(|r| !r.content.trim().is_empty())
-                        .unwrap_or(false);
+                let bootstrap_exists = thinclaw_core::api::memory::get_file_for_identity(
+                    workspace,
+                    &super::sessions::desktop_memory_identity(),
+                    "BOOTSTRAP.md",
+                )
+                .await
+                .map(|r| !r.content.trim().is_empty())
+                .unwrap_or(false);
 
                 if !bootstrap_exists {
                     tracing::info!(
@@ -664,6 +721,64 @@ pub async fn thinclaw_save_cloud_config(
     enabled_models: std::collections::HashMap<String, Vec<String>>,
     custom_llm: Option<CustomLlmConfigInput>,
 ) -> Result<(), String> {
+    let custom_llm = custom_llm.map(|mut custom| {
+        custom.url = custom
+            .url
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
+        custom.model = custom
+            .model
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        custom
+    });
+    if enabled_providers.len() > 128 || enabled_models.len() > 128 {
+        return Err("cloud configuration exceeds the 128-provider limit".to_string());
+    }
+    let valid_provider = |provider: &str| {
+        !provider.is_empty()
+            && provider.len() <= 128
+            && provider
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    };
+    let mut provider_ids = std::collections::HashSet::new();
+    if enabled_providers
+        .iter()
+        .any(|provider| !valid_provider(provider) || !provider_ids.insert(provider.as_str()))
+    {
+        return Err("cloud providers contain an invalid or duplicated identifier".to_string());
+    }
+    let mut total_models = 0usize;
+    for (provider, models) in &enabled_models {
+        total_models = total_models.saturating_add(models.len());
+        let mut model_ids = std::collections::HashSet::new();
+        if !valid_provider(provider)
+            || models.len() > 256
+            || total_models > 4_096
+            || models.iter().any(|model| {
+                model.is_empty()
+                    || model.len() > 512
+                    || model.chars().any(char::is_control)
+                    || !model_ids.insert(model.as_str())
+            })
+        {
+            return Err("cloud model selections are malformed or excessive".to_string());
+        }
+    }
+    if custom_llm.as_ref().is_some_and(|custom| {
+        custom.url.as_deref().is_some_and(|value| {
+            value.is_empty() || value.len() > 2_048 || value.chars().any(char::is_control)
+        }) || custom.model.as_deref().is_some_and(|value| {
+            value.is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+        }) || custom
+            .key
+            .as_deref()
+            .is_some_and(|value| value.len() > 64 * 1024 || value.contains('\0'))
+    }) {
+        return Err("custom LLM configuration is malformed or oversized".to_string());
+    }
+
     let remote_mode = ironclaw.remote_proxy().await;
     if let Some(proxy) = remote_mode.as_ref() {
         let mut remote_config = proxy
@@ -679,13 +794,14 @@ pub async fn thinclaw_save_cloud_config(
             custom_llm.as_ref().and_then(|cfg| cfg.model.as_deref()),
         );
         if let Some(custom) = custom_llm.as_ref() {
-            if custom.enabled {
-                if let Some(key) = custom
-                    .key
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|key| !key.is_empty())
-                {
+            if let Some(key) = custom.key.as_deref() {
+                let key = key.trim();
+                if key.is_empty() {
+                    proxy
+                        .delete_provider_key("openai_compatible")
+                        .await
+                        .map_err(|err| format!("remote provider key delete failed: {err}"))?;
+                } else {
                     proxy
                         .save_provider_key("openai_compatible", key)
                         .await
@@ -708,24 +824,43 @@ pub async fn thinclaw_save_cloud_config(
     cfg.enabled_cloud_providers = enabled_providers;
     cfg.enabled_cloud_models = enabled_models;
 
+    let old_custom_llm_key = crate::thinclaw::config::keychain::get_key("custom_llm_key");
+    let mut custom_llm_key_changed = false;
     if let Some(c) = &custom_llm {
         cfg.custom_llm_enabled = c.enabled;
         cfg.custom_llm_url = c.url.clone();
         // Store custom LLM key in Keychain, not identity.json
         if remote_mode.is_none() {
-            if let Some(ref key) = c.key {
-                let _ = crate::thinclaw::config::keychain::set_key("custom_llm_key", Some(key));
+            if let Some(key) = c.key.as_deref() {
+                let key = key.trim();
+                crate::thinclaw::config::keychain::set_key(
+                    "custom_llm_key",
+                    (!key.is_empty()).then_some(key),
+                )
+                .map_err(|error| format!("failed to store custom LLM credential: {error}"))?;
+                custom_llm_key_changed = true;
+                cfg.custom_llm_key = (!key.is_empty()).then(|| key.to_string());
             }
         }
-        cfg.custom_llm_key = if remote_mode.is_none() {
-            c.key.clone()
-        } else {
-            None
-        };
+        if remote_mode.is_some() {
+            cfg.custom_llm_key = None;
+        }
         cfg.custom_llm_model = c.model.clone();
     }
 
-    cfg.save_identity().map_err(|e| e.to_string())?;
+    if let Err(error) = cfg.save_identity() {
+        if custom_llm_key_changed {
+            if let Err(rollback_error) = crate::thinclaw::config::keychain::set_key(
+                "custom_llm_key",
+                old_custom_llm_key.as_deref(),
+            ) {
+                return Err(format!(
+                    "failed to persist cloud configuration ({error}); credential rollback also failed: {rollback_error}"
+                ));
+            }
+        }
+        return Err(error.to_string());
+    }
 
     // Regenerate engine config so ThinClaw picks up the new model allowlist
     // and provider selections. Without this, changes were lost on engine restart.
@@ -748,4 +883,40 @@ pub async fn thinclaw_save_cloud_config(
 
     *state.config.write().await = Some(cfg);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validated_config_patch;
+
+    #[test]
+    fn config_patch_requires_a_bounded_object() {
+        assert!(validated_config_patch(serde_json::json!([])).is_err());
+        let oversized = serde_json::Value::Object(
+            (0..257)
+                .map(|index| (format!("key_{index}"), serde_json::json!(index)))
+                .collect(),
+        );
+        assert!(validated_config_patch(oversized).is_err());
+    }
+
+    #[test]
+    fn config_patch_rejects_bad_keys_and_large_values() {
+        assert!(validated_config_patch(serde_json::json!({ "bad\nkey": true })).is_err());
+        assert!(validated_config_patch(serde_json::json!({
+            "valid": "x".repeat(256 * 1024 + 1)
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn config_patch_preserves_valid_entries() {
+        let settings = validated_config_patch(serde_json::json!({
+            "channels.gmail_enabled": true,
+            "channels.gmail_project_id": "project"
+        }))
+        .expect("valid patch");
+        assert_eq!(settings.len(), 2);
+        assert_eq!(settings["channels.gmail_enabled"], serde_json::json!(true));
+    }
 }

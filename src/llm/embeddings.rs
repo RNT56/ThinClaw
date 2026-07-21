@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Configuration for an embedding provider.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EmbeddingConfig {
     /// Provider type.
     pub provider: EmbeddingProvider,
@@ -20,6 +20,23 @@ pub struct EmbeddingConfig {
     pub base_url: Option<String>,
     /// Max tokens per request.
     pub max_tokens: u32,
+}
+
+impl std::fmt::Debug for EmbeddingConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EmbeddingConfig")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("dimensions", &self.dimensions)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "base_url",
+                &self.base_url.as_ref().map(|_| "[REDACTED URL]"),
+            )
+            .field("max_tokens", &self.max_tokens)
+            .finish()
+    }
 }
 
 /// Supported embedding providers.

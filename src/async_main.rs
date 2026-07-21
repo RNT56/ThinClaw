@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
+use secrecy::ExposeSecret;
 
 #[cfg(feature = "docker-sandbox")]
 use thinclaw::orchestrator::{OrchestratorApi, api::OrchestratorState};
@@ -198,6 +199,11 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             init_worker_tracing();
             return run_codex_bridge(*job_id, orchestrator_url, model).await;
         }
+        #[cfg(feature = "docker-sandbox")]
+        Some(Command::NetworkRelay { forwards }) => {
+            init_worker_tracing();
+            return run_network_relay(forwards).await;
+        }
         Some(Command::Onboard {
             skip_auth,
             channels_only,
@@ -333,6 +339,11 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         }
         Err(e) => return Err(e.into()),
     };
+    // Acquire cross-process ownership before AppBuilder performs stale-job or
+    // routine cleanup. A second runtime sharing this state directory could
+    // otherwise mark live work interrupted and reap its containers.
+    let runtime_lease = thinclaw::runtime_lease::RuntimeLease::acquire_default()
+        .map_err(|error| anyhow::anyhow!(error))?;
 
     let entrypoint_plan = RuntimeEntrypointPlan::new(
         runtime_entry_mode,
@@ -374,6 +385,17 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
     tracing::info!("LLM backend: {}", config.llm.backend);
 
+    #[cfg(feature = "docker-sandbox")]
+    match thinclaw::sandbox::cleanup_stale_sandbox_resources(runtime_lease.scope_id()).await {
+        Ok((containers, networks)) if containers > 0 || networks > 0 => tracing::info!(
+            containers,
+            networks,
+            "Cleaned stale runtime-owned sandbox resources"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::debug!(%error, "Sandbox startup cleanup unavailable"),
+    }
+
     // ── Phase 1-5: Build all core components via AppBuilder ────────────
 
     let flags = AppBuilderFlags { no_db: cli.no_db };
@@ -383,9 +405,18 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         toml_path.map(std::path::PathBuf::from),
         Arc::clone(&log_broadcaster),
     )
+    .with_runtime_scope(runtime_lease.scope_id())
     .build_all()
     .await?;
     let oauth_credential_sync = components.oauth_credential_sync.take();
+
+    if let Some(db) = components.db.as_ref()
+        && let Err(error) = db
+            .cleanup_stale_sandbox_jobs(runtime_lease.scope_id())
+            .await
+    {
+        tracing::warn!(%error, "Failed to clean up owned stale sandbox jobs");
+    }
 
     if let Some(db) = components.db.clone() {
         thinclaw::tauri_commands::configure_routing_persistence(
@@ -454,10 +485,22 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     >::new()));
     #[cfg(feature = "docker-sandbox")]
     let mut orchestrator_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
+    #[cfg(feature = "docker-sandbox")]
+    let mut orchestrator_task: Option<tokio::task::JoinHandle<()>> = None;
 
     #[cfg(feature = "docker-sandbox")]
     let container_job_manager: Option<Arc<ContainerJobManager>> = if config.sandbox.enabled {
         let token_store = TokenStore::new();
+        // Reserve a collision-free port synchronously. Container jobs are not
+        // admitted unless this succeeds, so a worker can never send its token
+        // to an unrelated process that happened to own a hard-coded port.
+        let orchestrator_listener = OrchestratorApi::bind_listener(0)
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to bind orchestrator API: {error}"))?;
+        let orchestrator_port = orchestrator_listener
+            .local_addr()
+            .map_err(|error| anyhow::anyhow!("failed to inspect orchestrator listener: {error}"))?
+            .port();
 
         // On macOS, prefer the encrypted secrets store and treat the OS keychain
         // as the root trust anchor (master key) plus a legacy migration fallback.
@@ -481,11 +524,15 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         )
         .await;
 
+        let runtime_sandbox_config = config.sandbox.to_sandbox_config();
         let job_config = ContainerJobConfig {
+            runtime_scope: runtime_lease.scope_id().to_string(),
             image: config.sandbox.image.clone(),
             memory_limit_mb: config.sandbox.memory_limit_mb,
             cpu_shares: config.sandbox.cpu_shares,
-            orchestrator_port: 50051,
+            orchestrator_port,
+            network_allowlist: runtime_sandbox_config.network_allowlist,
+            proxy_port: runtime_sandbox_config.proxy_port,
             claude_code_api_key,
             claude_code_oauth_token: thinclaw::config::ClaudeCodeConfig::extract_oauth_token(),
             claude_code_enabled: config.claude_code.enabled,
@@ -502,14 +549,17 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         };
         let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
-        // Clean up orphan containers from a previous process crash
-        // (fire-and-forget — never blocks startup)
-        {
-            let jm_cleanup = Arc::clone(&jm);
-            tokio::spawn(async move {
-                jm_cleanup.cleanup_orphan_containers().await;
-            });
-        }
+        // Finish orphan cleanup before job admission. Running it concurrently
+        // with creation can observe a just-created container before its ID is
+        // published in the handle map and incorrectly delete the live job.
+        jm.cleanup_orphan_containers().await;
+
+        let controller_on_orchestrator_exit = thinclaw::sandbox_jobs::SandboxJobController::new(
+            components.db.clone(),
+            Some(Arc::clone(&jm)),
+            job_event_tx.clone(),
+            Some(Arc::clone(&prompt_queue)),
+        );
 
         // Start the orchestrator internal API in the background
         let orchestrator_state = OrchestratorState {
@@ -524,16 +574,43 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         orchestrator_shutdown_tx = Some(shutdown_tx);
-        tokio::spawn(async move {
-            if let Err(e) =
-                OrchestratorApi::start_with_shutdown(orchestrator_state, 50051, async move {
+        let jm_on_orchestrator_exit = Arc::clone(&jm);
+        orchestrator_task = Some(tokio::spawn(async move {
+            if let Err(e) = OrchestratorApi::serve_listener(
+                orchestrator_state,
+                orchestrator_listener,
+                async move {
                     let _ = shutdown_rx.await;
-                })
-                .await
+                },
+            )
+            .await
             {
                 tracing::error!("Orchestrator API failed: {}", e);
             }
-        });
+            // Once the authenticated control plane is gone, fail job
+            // admission closed. First persist terminal outcomes for every
+            // retained handle; this also covers an unexpected API exit.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(90),
+                controller_on_orchestrator_exit
+                    .finalize_all_jobs_for_shutdown("Orchestrator API stopped"),
+            )
+            .await
+            {
+                Ok(results) => {
+                    for (job_id, result) in results {
+                        if let Err(error) = result {
+                            tracing::warn!(%job_id, %error, "Failed to finalize sandbox job after orchestrator exit");
+                        }
+                    }
+                }
+                Err(_) => tracing::warn!(
+                    "Timed out persisting sandbox terminal states after orchestrator exit"
+                ),
+            }
+            // This is idempotent with normal shutdown.
+            jm_on_orchestrator_exit.shutdown_all().await;
+        }));
 
         if config.claude_code.enabled {
             if docker_status.is_ok() {
@@ -729,7 +806,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             ignore_attachments: signal_config.ignore_attachments,
             ignore_stories: signal_config.ignore_stories,
         };
-        let signal_channel = SignalChannel::new(channel_config)?;
+        let signal_channel = SignalChannel::new_pinned(channel_config).await?;
         channel_names.push("signal".to_string());
         channels.add(Box::new(signal_channel)).await;
         let safe_url = SignalChannel::redact_url(&signal_config.http_url);
@@ -944,6 +1021,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     // Add HTTP channel if configured and not CLI-only mode.
     let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
+    let mut canvas_http_auth_token: Option<String> = None;
     if channel_plan.http
         && let Some(ref http_config) = config.channels.http
     {
@@ -957,6 +1035,11 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         })?);
         channel_names.push("http".to_string());
         channels.add(Box::new(http_channel)).await;
+        canvas_http_auth_token = http_config
+            .webhook_secret
+            .as_ref()
+            .map(|secret| secret.expose_secret().to_string())
+            .filter(|secret| !secret.is_empty());
         tracing::info!(
             "HTTP channel enabled on {}:{}",
             http_config.host,
@@ -964,11 +1047,22 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         );
     }
 
-    // Create the shared canvas store and mount HTTP routes.
+    // Create the shared canvas store. HTTP access is mounted only when the
+    // explicitly enabled HTTP channel has a non-empty authentication secret;
+    // Canvas must never open an otherwise-unused port or expose panels without
+    // authentication.
     let canvas_store = thinclaw::channels::canvas_gateway::CanvasStore::default();
-    webhook_routes.push(thinclaw::channels::canvas_gateway::canvas_routes(
-        canvas_store.clone(),
-    ));
+    canvas_store
+        .set_submission_sender(channels.inject_sender())
+        .await;
+    if let Some(auth_token) = canvas_http_auth_token {
+        webhook_routes.push(thinclaw::channels::canvas_gateway::canvas_routes(
+            canvas_store.clone(),
+            auth_token,
+        ));
+    } else if channel_plan.http {
+        tracing::warn!("Canvas HTTP routes disabled because HTTP_WEBHOOK_SECRET is not configured");
+    }
 
     // Start the unified webhook server if any routes were registered.
     let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> = if !webhook_routes
@@ -1793,6 +1887,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     // Clone handles for the shutdown flush (before components are moved into deps).
     let shutdown_db = components.db.as_ref().map(Arc::clone);
     let shutdown_tracker = Arc::clone(&components.cost_tracker);
+    let shutdown_tools = Arc::clone(&components.tools);
 
     let restart_requested = Arc::new(AtomicBool::new(false));
     // Shared cell the agent loop writes the repo project supervisor into, so the
@@ -1882,9 +1977,77 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     if let Some(handle) = oauth_credential_sync {
         handle.shutdown().await;
     }
-    agent_result?;
+    shutdown_tools.shutdown_all().await;
 
-    // Final cost flush — captures any entries since the last periodic flush.
+    if let Some(ref server) = webhook_server {
+        server.lock().await.shutdown().await;
+    }
+
+    // Persist a canonical terminal result for every retained sandbox handle
+    // before taking down its authenticated control plane. The controller's
+    // work is cancellation-shielded and subsequently drained by the manager.
+    #[cfg(feature = "docker-sandbox")]
+    if let Some(job_manager) = container_job_manager.as_ref() {
+        let controller = thinclaw::sandbox_jobs::SandboxJobController::new(
+            shutdown_db.clone(),
+            Some(Arc::clone(job_manager)),
+            job_event_tx.clone(),
+            if config.sandbox.enabled {
+                Some(Arc::clone(&prompt_queue))
+            } else {
+                None
+            },
+        );
+        let finalize_all = controller.finalize_all_jobs_for_shutdown("Runtime shutdown");
+        match tokio::time::timeout(std::time::Duration::from_secs(90), finalize_all).await {
+            Ok(results) => {
+                for (job_id, result) in results {
+                    if let Err(error) = result {
+                        tracing::warn!(%job_id, %error, "Failed to finalize sandbox job during shutdown");
+                    }
+                }
+            }
+            Err(_) => tracing::warn!(
+                "Timed out waiting for sandbox terminal-state persistence during shutdown"
+            ),
+        }
+    }
+
+    #[cfg(feature = "docker-sandbox")]
+    if let Some(tx) = orchestrator_shutdown_tx.take() {
+        let _ = tx.send(());
+    }
+    #[cfg(feature = "docker-sandbox")]
+    if let Some(mut task) = orchestrator_task.take() {
+        // The task may spend up to 90s persisting terminal states before the
+        // manager's bounded create/finalization/container/network drains. Its
+        // former 120s outer timeout could abort that cleanup mid-container.
+        const ORCHESTRATOR_SHUTDOWN_TIMEOUT: std::time::Duration =
+            std::time::Duration::from_secs(360);
+        match tokio::time::timeout(ORCHESTRATOR_SHUTDOWN_TIMEOUT, &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "Orchestrator task failed during shutdown"),
+            Err(_) => {
+                tracing::warn!(
+                    timeout_secs = ORCHESTRATOR_SHUTDOWN_TIMEOUT.as_secs(),
+                    "Orchestrator task did not stop before timeout; aborting"
+                );
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
+
+    #[cfg(feature = "tunnel")]
+    if let Some(tunnel) = active_tunnel {
+        tracing::info!("Stopping {} tunnel...", tunnel.name());
+        if let Err(e) = tunnel.stop().await {
+            tracing::warn!("Failed to stop tunnel cleanly: {}", e);
+        }
+    }
+
+    // Final cost flush comes after every ingress path and sandbox LLM caller
+    // has stopped, so no late usage can race behind the snapshot.
     if let Some(ref db) = shutdown_db {
         let persistence_plan = PeriodicPersistencePlan::cost_entries();
         let snapshot = shutdown_tracker.lock().await.to_json();
@@ -1897,22 +2060,10 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         }
     }
 
-    if let Some(ref server) = webhook_server {
-        server.lock().await.shutdown().await;
-    }
-
-    #[cfg(feature = "docker-sandbox")]
-    if let Some(tx) = orchestrator_shutdown_tx.take() {
-        let _ = tx.send(());
-    }
-
-    #[cfg(feature = "tunnel")]
-    if let Some(tunnel) = active_tunnel {
-        tracing::info!("Stopping {} tunnel...", tunnel.name());
-        if let Err(e) = tunnel.stop().await {
-            tracing::warn!("Failed to stop tunnel cleanly: {}", e);
-        }
-    }
+    // An agent-loop error must not bypass the external runtime teardown above.
+    // Propagate it only after maintenance, persistence, webhooks, the
+    // orchestrator listener, and tunnels have all been stopped.
+    agent_result?;
 
     tracing::info!("Agent shutdown complete");
 

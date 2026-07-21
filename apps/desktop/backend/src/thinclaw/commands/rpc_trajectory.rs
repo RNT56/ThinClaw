@@ -65,7 +65,7 @@ pub async fn thinclaw_trajectory_records(
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
 
-    let limit = limit.unwrap_or(100) as usize;
+    let limit = limit.unwrap_or(100).clamp(1, 1_000) as usize;
     let start = records.len().saturating_sub(limit);
     records[start..]
         .iter()

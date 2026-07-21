@@ -1,9 +1,106 @@
 use crate::rig_lib::RigManager;
-use serde_json::json;
 use std::sync::Arc;
 use thinclaw_desktop_tools::events::StatusReporter;
 use thinclaw_desktop_tools::sandbox::{Sandbox, SandboxConfig};
 use tracing::{info, warn};
+
+const MAX_TOOL_TEXT_BYTES: usize = 64 * 1024;
+const MAX_TOOL_JSON_BYTES: usize = 1024 * 1024;
+const MAX_DOCUMENT_READ_BYTES: u64 = 1024 * 1024;
+const MAX_DOCUMENT_RESULT_BYTES: usize = 20_000;
+
+fn bounded_tool_text<'a>(value: &'a str, label: &str, max_bytes: usize) -> Result<&'a str, String> {
+    if value.trim() != value || value.is_empty() || value.len() > max_bytes || value.contains('\0')
+    {
+        return Err(format!("{label} is missing, malformed, or oversized"));
+    }
+    Ok(value)
+}
+
+fn bounded_limit(limit: i64, maximum: usize) -> Result<usize, String> {
+    usize::try_from(limit)
+        .ok()
+        .filter(|value| (1..=maximum).contains(value))
+        .ok_or_else(|| format!("limit must be between 1 and {maximum}"))
+}
+
+fn dynamic_from_serializable<T: serde::Serialize>(value: T) -> rhai::Dynamic {
+    rhai::serde::to_dynamic(value)
+        .unwrap_or_else(|_| rhai::Dynamic::from("Error: tool response could not be encoded"))
+}
+
+fn read_managed_document(root: Option<&std::path::Path>, requested: &str) -> String {
+    use std::path::{Component, Path, PathBuf};
+
+    let Some(root) = root else {
+        return "Read error: managed document storage is unavailable".to_string();
+    };
+    if requested.trim() != requested
+        || requested.is_empty()
+        || requested.len() > 4_096
+        || requested.contains('\0')
+    {
+        return "Read error: document path is invalid".to_string();
+    }
+    let requested = Path::new(requested);
+    if requested.is_absolute() {
+        return "Read error: use a path relative to managed document storage".to_string();
+    }
+    let mut components = requested.components().peekable();
+    if components.peek().is_some_and(
+        |component| matches!(component, Component::Normal(name) if *name == "documents"),
+    ) {
+        components.next();
+    }
+    let mut relative = PathBuf::new();
+    for component in components {
+        match component {
+            Component::Normal(part) if !part.is_empty() => relative.push(part),
+            _ => return "Read error: document path is not normalized".to_string(),
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return "Read error: document path is empty".to_string();
+    }
+
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        _ => return "Read error: managed document storage is unavailable".to_string(),
+    }
+    let mut candidate = root.to_path_buf();
+    let component_count = relative.components().count();
+    for (index, component) in relative.components().enumerate() {
+        let Component::Normal(part) = component else {
+            return "Read error: document path is not normalized".to_string();
+        };
+        candidate.push(part);
+        if index + 1 < component_count {
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+                _ => return "Read error: document parent is not a real directory".to_string(),
+            }
+        }
+    }
+    let bytes = match thinclaw_platform::read_regular_file_bounded_single_link(
+        &candidate,
+        MAX_DOCUMENT_READ_BYTES,
+    ) {
+        Ok(bytes) => bytes,
+        Err(_) => return "Read error: document is unavailable or unsafe".to_string(),
+    };
+    let content = match String::from_utf8(bytes) {
+        Ok(content) => content,
+        Err(_) => return "Read error: document is not UTF-8 text".to_string(),
+    };
+    if content.len() <= MAX_DOCUMENT_RESULT_BYTES {
+        return content;
+    }
+    let mut end = MAX_DOCUMENT_RESULT_BYTES;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}... (truncated)", &content[..end])
+}
 
 /// Configuration for the MCP sandbox factory
 #[derive(Clone, Debug, Default)]
@@ -14,6 +111,12 @@ pub struct McpOrchestratorConfig {
     pub mcp_auth_token: Option<String>,
     /// Whether sandbox mode is enabled
     pub sandbox_enabled: bool,
+    /// Register outbound web-search functions in the sandbox.
+    pub allow_web_search: bool,
+    /// Register managed-document search/read functions in the sandbox.
+    pub allow_file_search: bool,
+    /// Register image generation in the sandbox.
+    pub allow_image_gen: bool,
     /// Path to user-defined skills
     pub user_skills_path: Option<std::path::PathBuf>,
     /// Path to built-in skills
@@ -107,8 +210,14 @@ fn persist_user_skill(
 
     let id = id.trim();
     let script = script.trim();
-    if id.is_empty() || script.is_empty() {
-        return "Error: ID and Script cannot be empty".to_string();
+    if id.is_empty()
+        || id.len() > 64
+        || script.is_empty()
+        || script.len() > 256 * 1024
+        || description.len() > 16 * 1024
+        || parameters.len() > 64
+    {
+        return "Error: skill input is missing, malformed, or oversized".to_string();
     }
     let Some(user_path) = user_skills_path else {
         return "Error: User skills directory not configured".to_string();
@@ -139,6 +248,9 @@ fn parse_skill_parameters(
     let trimmed = params_json.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
+    }
+    if trimmed.len() > 256 * 1024 {
+        return Err("skill parameters JSON exceeds the size limit".to_string());
     }
     serde_json::from_str(trimmed).map_err(|e| e.to_string())
 }
@@ -187,7 +299,7 @@ where
                                 })
                             })
                             .collect();
-                        rhai::serde::to_dynamic(serde_json::Value::Array(list)).unwrap_or_default()
+                        dynamic_from_serializable(serde_json::Value::Array(list))
                     }
                     Err(e) => format!("Error listing skills: {}", e).into(),
                 }
@@ -201,19 +313,28 @@ where
                 let manager = m2.clone();
 
                 // 1. Prepare
-                let args: serde_json::Value = serde_json::from_str(&args_json).unwrap_or(json!({}));
+                if args_json.len() > MAX_TOOL_JSON_BYTES {
+                    return "Skill Error: arguments exceed the size limit".into();
+                }
+                let args: serde_json::Value = match serde_json::from_str(&args_json) {
+                    Ok(args) => args,
+                    Err(_) => return "Skill Error: arguments are not valid JSON".into(),
+                };
                 let args_map = match args.as_object() {
                     Some(obj) => obj
                         .clone()
                         .into_iter()
                         .collect::<std::collections::HashMap<String, serde_json::Value>>(),
-                    None => std::collections::HashMap::new(),
+                    None => return "Skill Error: arguments must be a JSON object".into(),
                 };
 
                 let script = match manager.prepare_script(&id, &args_map) {
                     Ok(s) => s,
                     Err(e) => return format!("Skill Error: {}", e).into(),
                 };
+                if script.len() > 256 * 1024 {
+                    return "Skill Error: prepared script exceeds the execution limit".into();
+                }
 
                 // 2. Execute in a new scope
                 // Note: Skills are self-contained with injected parameters
@@ -229,103 +350,131 @@ where
         );
     }
 
-    // -- Register host tool: web_search --
-    let rig_for_ws = rig.clone();
-    sandbox
-        .engine_mut()
-        .register_fn("web_search", move |query: String| -> rhai::Dynamic {
-            let rig = rig_for_ws.clone();
-            // Rhai is synchronous — bridge to async via tokio block_in_place
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { rig.explicit_search(&query).await })
+    if mcp_config.allow_web_search {
+        // -- Register host tool: web_search --
+        let rig_for_ws = rig.clone();
+        sandbox
+            .engine_mut()
+            .register_fn("web_search", move |query: String| -> rhai::Dynamic {
+                let query = match bounded_tool_text(&query, "search query", 16 * 1024) {
+                    Ok(query) => query.to_string(),
+                    Err(error) => return error.into(),
+                };
+                let rig = rig_for_ws.clone();
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(async { rig.explicit_search(&query).await })
+                });
+                rhai::Dynamic::from(result)
             });
-            eprintln!(
-                "[DEBUG web_search] Returning {} chars to Rhai. First 200: {:?}",
-                result.len(),
-                {
-                    let mut end = std::cmp::min(200, result.len());
-                    while end > 0 && !result.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    &result[..end]
-                }
-            );
-            rhai::Dynamic::from(result)
-        });
+    }
 
-    // -- Register host tool: rag_search --
-    let rig_for_rag = rig.clone();
-    sandbox
-        .engine_mut()
-        .register_fn("rag_search", move |query: String| -> rhai::Dynamic {
-            let rig = rig_for_rag.clone();
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    if let Some(app) = &rig.app_handle {
-                        use tauri::Manager;
-                        let sidecar = app.state::<crate::sidecar::SidecarManager>();
-                        let pool = app.state::<sqlx::SqlitePool>();
-                        let store = app.state::<crate::vector_store::VectorStoreManager>();
-                        let reranker = app.state::<crate::reranker::RerankerWrapper>();
-                        let emb_backend = {
-                            let router = app.state::<crate::inference::router::InferenceRouter>();
-                            router.embedding_backend().await
-                        };
-                        match crate::rag::retrieve_context_internal(
-                            Some(app.clone()),
-                            sidecar.inner(),
-                            pool.inner().clone(),
-                            store.inner().clone(),
-                            reranker.inner(),
-                            emb_backend,
-                            query.clone(),
-                            rig.conversation_id.clone(),
-                            None::<Vec<String>>,
-                            None,
-                        )
-                        .await
-                        {
-                            Ok(results) => results.join("\n\n"),
-                            Err(e) => format!("RAG Error: {}", e),
-                        }
-                    } else {
-                        "App state not available".to_string()
-                    }
-                })
-            });
-            rhai::Dynamic::from(result)
-        });
-
-    // -- Register host tool: read_file --
-    sandbox
-        .engine_mut()
-        .register_fn("read_file", move |path: String| -> rhai::Dynamic {
-            if std::path::Path::new(&path).exists() {
-                match std::fs::read_to_string(&path) {
-                    Ok(content) => {
-                        if content.len() > 20000 {
-                            let mut end = 20000;
-                            while !content.is_char_boundary(end) {
-                                end -= 1;
+    if mcp_config.allow_file_search {
+        // -- Register host tool: rag_search --
+        let rig_for_rag = rig.clone();
+        sandbox
+            .engine_mut()
+            .register_fn("rag_search", move |query: String| -> rhai::Dynamic {
+                let query = match bounded_tool_text(&query, "RAG query", 16 * 1024) {
+                    Ok(query) => query.to_string(),
+                    Err(error) => return error.into(),
+                };
+                let rig = rig_for_rag.clone();
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        if let Some(app) = &rig.app_handle {
+                            use tauri::Manager;
+                            let sidecar = app.state::<crate::sidecar::SidecarManager>();
+                            let pool = app.state::<sqlx::SqlitePool>();
+                            let store = app.state::<crate::vector_store::VectorStoreManager>();
+                            let reranker = app.state::<crate::reranker::RerankerWrapper>();
+                            let emb_backend = {
+                                let router =
+                                    app.state::<crate::inference::router::InferenceRouter>();
+                                router.embedding_backend().await
+                            };
+                            match crate::rag::retrieve_context_internal(
+                                Some(app.clone()),
+                                sidecar.inner(),
+                                pool.inner().clone(),
+                                store.inner().clone(),
+                                reranker.inner(),
+                                emb_backend,
+                                query.clone(),
+                                rig.conversation_id.clone(),
+                                None::<Vec<String>>,
+                                None,
+                            )
+                            .await
+                            {
+                                Ok(results) => results.join("\n\n"),
+                                Err(e) => format!("RAG Error: {}", e),
                             }
-                            rhai::Dynamic::from(format!("{}... (truncated)", &content[..end]))
                         } else {
-                            rhai::Dynamic::from(content)
+                            "App state not available".to_string()
                         }
-                    }
-                    Err(e) => rhai::Dynamic::from(format!("Read error: {}", e)),
-                }
-            } else {
-                rhai::Dynamic::from("File not found".to_string())
-            }
+                    })
+                });
+                rhai::Dynamic::from(result)
+            });
+
+        // -- Register host tool: read_file (managed documents only) --
+        let managed_documents_root = rig.app_handle.as_ref().and_then(|app| {
+            use tauri::Manager;
+            app.path()
+                .app_data_dir()
+                .ok()
+                .map(|root| root.join("documents"))
         });
+        sandbox
+            .engine_mut()
+            .register_fn("read_file", move |path: String| -> rhai::Dynamic {
+                rhai::Dynamic::from(read_managed_document(
+                    managed_documents_root.as_deref(),
+                    &path,
+                ))
+            });
+    }
+
+    if mcp_config.allow_image_gen {
+        let image_app = rig.app_handle.clone();
+        sandbox.engine_mut().register_fn(
+            "generate_image",
+            move |prompt: String| -> rhai::Dynamic {
+                let prompt = match bounded_tool_text(&prompt, "image prompt", 32 * 1024) {
+                    Ok(prompt) => prompt.to_string(),
+                    Err(error) => return error.into(),
+                };
+                let Some(app) = image_app.clone() else {
+                    return "Image generation is unavailable".into();
+                };
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        use rig::tool::Tool as _;
+                        crate::rig_lib::tools::image_gen_tool::ImageGenTool { app }
+                            .call(crate::rig_lib::tools::image_gen_tool::ImageGenArgs {
+                                prompt,
+                                negative_prompt: None,
+                            })
+                            .await
+                            .unwrap_or_else(|error| format!("Image generation error: {error}"))
+                    })
+                });
+                result.into()
+            },
+        );
+    }
 
     // -- Register host tool: calculator (pure computation, no async needed) --
     // Returns full trace + result for transparency
     sandbox
         .engine_mut()
         .register_fn("calculator", |expr: String| -> rhai::Dynamic {
+            if let Err(error) =
+                bounded_tool_text(&expr, "calculator expression", MAX_TOOL_TEXT_BYTES)
+            {
+                return error.into();
+            }
             match crate::rig_lib::tools::calculator_tool::evaluate_with_vars(
                 &expr,
                 std::collections::HashMap::new(),
@@ -341,8 +490,18 @@ where
     sandbox.engine_mut().register_fn(
         "calculator_with_vars",
         |expr: String, vars_json: String| -> rhai::Dynamic {
+            if let Err(error) = bounded_tool_text(&expr, "calculator expression", 64 * 1024) {
+                return error.into();
+            }
+            if vars_json.len() > 256 * 1024 {
+                return "Calculator Error: variables JSON exceeds the size limit".into();
+            }
             let vars: std::collections::HashMap<String, f64> =
-                serde_json::from_str(&vars_json).unwrap_or_default();
+                match serde_json::from_str::<std::collections::HashMap<String, f64>>(&vars_json) {
+                    Ok(vars) if vars.len() <= 128 => vars,
+                    Ok(_) => return "Calculator Error: too many variables".into(),
+                    Err(_) => return "Calculator Error: variables are not valid JSON".into(),
+                };
             match crate::rig_lib::tools::calculator_tool::evaluate_with_vars(&expr, vars) {
                 Ok(output) => rhai::Dynamic::from(
                     crate::rig_lib::tools::calculator_tool::format_eval_output(&output),
@@ -366,13 +525,27 @@ where
 
     let user_skills_path = mcp_config.user_skills_path.clone();
     let builtin_skills_path = mcp_config.builtin_skills_path.clone();
+    let mut allowed_host_tools = vec!["calculator".to_string()];
+    if mcp_config.allow_web_search {
+        allowed_host_tools.push("web_search".to_string());
+    }
+    if mcp_config.allow_file_search {
+        allowed_host_tools.extend(["rag_search".to_string(), "read_file".to_string()]);
+    }
+    if mcp_config.allow_image_gen {
+        allowed_host_tools.push("generate_image".to_string());
+    }
 
     sandbox
         .engine_mut()
         .register_fn("search_tools", move |query: String| -> rhai::Dynamic {
+            if query.len() > 4_096 || query.contains('\0') {
+                return rhai::Dynamic::from("Error: tool search query is malformed or oversized");
+            }
             let client = mcp_client_for_discovery.clone();
             let upath = user_skills_path.clone();
             let bpath = builtin_skills_path.clone();
+            let allowed_host_tools = allowed_host_tools.clone();
 
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
@@ -383,7 +556,7 @@ where
                         &query,
                         client.as_ref(),
                         skill_manager.as_ref(),
-                        true, // include host tools
+                        &allowed_host_tools,
                     )
                     .await;
 
@@ -444,11 +617,22 @@ where
             sandbox.engine_mut().register_fn(
                 "mcp_call",
                 move |tool: String, args_json: String| -> rhai::Dynamic {
+                    if bounded_tool_text(&tool, "MCP tool name", 256).is_err()
+                        || args_json.len() > MAX_TOOL_JSON_BYTES
+                    {
+                        return "MCP Error: tool name or arguments are malformed or oversized"
+                            .into();
+                    }
+                    let args: serde_json::Value = match serde_json::from_str(&args_json) {
+                        Ok(serde_json::Value::Object(arguments)) => {
+                            serde_json::Value::Object(arguments)
+                        }
+                        Ok(_) => return "MCP Error: arguments must be a JSON object".into(),
+                        Err(_) => return "MCP Error: arguments are not valid JSON".into(),
+                    };
                     let c = client_for_call.clone();
                     let result = tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
-                            let args: serde_json::Value =
-                                serde_json::from_str(&args_json).unwrap_or(json!({}));
                             match c.call_tool_raw(&tool, args).await {
                                 Ok(val) => val.to_string(),
                                 Err(e) => format!("MCP Error: {}", e),
@@ -469,12 +653,15 @@ where
                 sandbox.engine_mut().register_fn(
                     "finance::get_stock_price",
                     move |symbol: String| -> rhai::Dynamic {
+                        if let Err(error) = bounded_tool_text(&symbol, "stock symbol", 256) {
+                            return error.into();
+                        }
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
                                 thinclaw_desktop_tools::tools::finance::get_stock_price(&c, &symbol)
                                     .await
-                                    .map(|r| rhai::serde::to_dynamic(r).unwrap())
+                                    .map(dynamic_from_serializable)
                                     .unwrap_or_else(|e| format!("Error: {}", e).into())
                             })
                         });
@@ -489,6 +676,15 @@ where
                 sandbox.engine_mut().register_fn(
                     "news::get_news",
                     move |category: String, limit: i64| -> rhai::Dynamic {
+                        let limit = match bounded_limit(limit, 100) {
+                            Ok(limit) => limit,
+                            Err(error) => return error.into(),
+                        };
+                        if !category.is_empty()
+                            && bounded_tool_text(&category, "news category", 256).is_err()
+                        {
+                            return "news category is malformed or oversized".into();
+                        }
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
@@ -497,14 +693,10 @@ where
                                 } else {
                                     Some(category.as_str())
                                 };
-                                thinclaw_desktop_tools::tools::news::get_news(
-                                    &c,
-                                    cat,
-                                    Some(limit as usize),
-                                )
-                                .await
-                                .map(|r| rhai::serde::to_dynamic(r).unwrap())
-                                .unwrap_or_else(|e| format!("Error: {}", e).into())
+                                thinclaw_desktop_tools::tools::news::get_news(&c, cat, Some(limit))
+                                    .await
+                                    .map(dynamic_from_serializable)
+                                    .unwrap_or_else(|e| format!("Error: {}", e).into())
                             })
                         });
                         rhai::Dynamic::from(result)
@@ -514,12 +706,15 @@ where
                 sandbox.engine_mut().register_fn(
                     "news::search_news",
                     move |query: String| -> rhai::Dynamic {
+                        if let Err(error) = bounded_tool_text(&query, "news query", 16 * 1024) {
+                            return error.into();
+                        }
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
                                 thinclaw_desktop_tools::tools::news::search_news(&c, &query, None)
                                     .await
-                                    .map(|r| rhai::serde::to_dynamic(r).unwrap())
+                                    .map(dynamic_from_serializable)
                                     .unwrap_or_else(|e| format!("Error: {}", e).into())
                             })
                         });
@@ -530,16 +725,23 @@ where
                 sandbox.engine_mut().register_fn(
                     "news::get_headlines",
                     move |country: String, limit: i64| -> rhai::Dynamic {
+                        if let Err(error) = bounded_tool_text(&country, "country", 64) {
+                            return error.into();
+                        }
+                        let limit = match bounded_limit(limit, 100) {
+                            Ok(limit) => limit,
+                            Err(error) => return error.into(),
+                        };
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
                                 thinclaw_desktop_tools::tools::news::get_headlines(
                                     &c,
                                     &country,
-                                    Some(limit as usize),
+                                    Some(limit),
                                 )
                                 .await
-                                .map(|r| rhai::serde::to_dynamic(r).unwrap())
+                                .map(dynamic_from_serializable)
                                 .unwrap_or_else(|e| format!("Error: {}", e).into())
                             })
                         });
@@ -554,6 +756,10 @@ where
                 sandbox.engine_mut().register_fn(
                     "knowledge::rag_query",
                     move |query: String| -> rhai::Dynamic {
+                        if let Err(error) = bounded_tool_text(&query, "knowledge query", 16 * 1024)
+                        {
+                            return error.into();
+                        }
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
@@ -561,7 +767,7 @@ where
                                     &c, &query, None,
                                 )
                                 .await
-                                .map(|r| rhai::serde::to_dynamic(r).unwrap())
+                                .map(dynamic_from_serializable)
                                 .unwrap_or_else(|e| format!("Error: {}", e).into())
                             })
                         });
@@ -576,6 +782,9 @@ where
                 sandbox.engine_mut().register_fn(
                     "economics::get_economic_data",
                     move |country: String| -> rhai::Dynamic {
+                        if let Err(error) = bounded_tool_text(&country, "country", 256) {
+                            return error.into();
+                        }
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
@@ -583,7 +792,7 @@ where
                                     &c, &country, None,
                                 )
                                 .await
-                                .map(|r| rhai::serde::to_dynamic(r).unwrap())
+                                .map(dynamic_from_serializable)
                                 .unwrap_or_else(|e| format!("Error: {}", e).into())
                             })
                         });
@@ -605,7 +814,7 @@ where
                                     &c, None, None,
                                 )
                                 .await
-                                .map(|r| rhai::serde::to_dynamic(r).unwrap())
+                                .map(dynamic_from_serializable)
                                 .unwrap_or_else(|e| format!("Error: {}", e).into())
                             })
                         });
@@ -620,16 +829,23 @@ where
                 sandbox.engine_mut().register_fn(
                     "health::search_medical_research",
                     move |query: String, limit: i64| -> rhai::Dynamic {
+                        if let Err(error) = bounded_tool_text(&query, "medical query", 16 * 1024) {
+                            return error.into();
+                        }
+                        let limit = match bounded_limit(limit, 100) {
+                            Ok(limit) => limit,
+                            Err(error) => return error.into(),
+                        };
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
                                 thinclaw_desktop_tools::tools::health::search_medical_research(
                                     &c,
                                     &query,
-                                    Some(limit as usize),
+                                    Some(limit),
                                 )
                                 .await
-                                .map(|r| rhai::serde::to_dynamic(r).unwrap())
+                                .map(dynamic_from_serializable)
                                 .unwrap_or_else(|e| format!("Error: {}", e).into())
                             })
                         });
@@ -644,6 +860,17 @@ where
                 sandbox.engine_mut().register_fn(
                     "ai_tools::summarize_text",
                     move |text: String, length: String| -> rhai::Dynamic {
+                        if text.is_empty()
+                            || text.len() > MAX_TOOL_JSON_BYTES
+                            || text.contains('\0')
+                        {
+                            return "text to summarize is missing, malformed, or oversized".into();
+                        }
+                        if !length.is_empty()
+                            && bounded_tool_text(&length, "summary length", 64).is_err()
+                        {
+                            return "summary length is malformed or oversized".into();
+                        }
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
@@ -656,7 +883,7 @@ where
                                     &c, &text, len_opt,
                                 )
                                 .await
-                                .map(|r| rhai::serde::to_dynamic(r).unwrap())
+                                .map(dynamic_from_serializable)
                                 .unwrap_or_else(|e| format!("Error: {}", e).into())
                             })
                         });
@@ -665,15 +892,9 @@ where
                 );
             }
 
-            info!(
-                "[sandbox_factory] MCP remote tools registered (mcp_call + typed bindings) → {}",
-                base_url
-            );
+            info!("[sandbox_factory] bounded MCP remote tools registered");
         } else {
-            warn!(
-                "[sandbox_factory] Failed to create McpClient, remote tools unavailable: {}",
-                base_url
-            );
+            warn!("[sandbox_factory] invalid MCP configuration; remote tools unavailable");
         }
     }
 
@@ -682,7 +903,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::detect_tools_used;
+    use super::{detect_tools_used, read_managed_document, MAX_DOCUMENT_RESULT_BYTES};
 
     #[test]
     fn detects_called_builtins() {
@@ -715,5 +936,55 @@ mod tests {
     #[test]
     fn empty_script_has_no_tools() {
         assert!(detect_tools_used("").is_empty());
+    }
+
+    #[test]
+    fn managed_document_reads_are_confined_bounded_and_utf8_safe() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("ok.txt"), "hello").unwrap();
+        assert_eq!(
+            read_managed_document(Some(directory.path()), "documents/ok.txt"),
+            "hello"
+        );
+        assert!(
+            read_managed_document(Some(directory.path()), "../ok.txt").starts_with("Read error")
+        );
+        assert!(
+            read_managed_document(Some(directory.path()), "/tmp/ok.txt").starts_with("Read error")
+        );
+
+        std::fs::write(
+            directory.path().join("unicode.txt"),
+            "🦀".repeat(MAX_DOCUMENT_RESULT_BYTES),
+        )
+        .unwrap();
+        let truncated = read_managed_document(Some(directory.path()), "unicode.txt");
+        assert!(truncated.is_char_boundary(truncated.len()));
+        assert!(truncated.ends_with("... (truncated)"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_document_reads_reject_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            directory.path().join("symlink.txt"),
+        )
+        .unwrap();
+        std::fs::hard_link(
+            outside.path().join("secret.txt"),
+            directory.path().join("hardlink.txt"),
+        )
+        .unwrap();
+
+        assert!(
+            read_managed_document(Some(directory.path()), "symlink.txt").starts_with("Read error")
+        );
+        assert!(
+            read_managed_document(Some(directory.path()), "hardlink.txt").starts_with("Read error")
+        );
     }
 }

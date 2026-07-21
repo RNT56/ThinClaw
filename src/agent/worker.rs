@@ -7,6 +7,7 @@ use crate::llm::cost_tracker::CostTracker;
 use chrono::Utc;
 
 use thinclaw_agent::loop_control::{LoopKind, LoopStopReason};
+use thinclaw_agent::routine_engine::heartbeat_critique_setting_key;
 use thinclaw_agent::worker_runtime::{
     DEFAULT_WORKER_ITERATIONS, RoutineFinalizationOutcome, WORKER_COMPLETE_JOB_TOOL_NAME,
     WORKER_DIRECT_LOOP_DELAY_MS, WORKER_TASK_FAILED_DURING_EXECUTION_REASON, WorkerLoopMetadata,
@@ -23,11 +24,11 @@ use uuid::Uuid;
 
 use std::sync::Mutex as StdMutex;
 
+const WORKER_TAIL_TIMEOUT: Duration = Duration::from_secs(30);
+const WORKER_STATE_PERSIST_TIMEOUT: Duration = Duration::from_secs(5);
+
 use crate::agent::outcomes;
-use crate::agent::routine::{
-    routine_state_has_runtime_advance_for_run, routine_state_with_runtime_advance,
-};
-use crate::agent::routine_engine::persist_routine_runtime_update;
+use crate::agent::routine_engine::finalize_routine_run_record;
 use crate::agent::scheduler::WorkerMessage;
 use crate::channels::OutgoingResponse;
 use crate::channels::web::types::SseEvent;
@@ -41,7 +42,7 @@ use crate::llm::{
 use crate::observability::{LoopMetricGuard, Observer};
 use crate::safety::SafetyLayer;
 use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
-use crate::workspace::Workspace;
+use crate::workspace::{AuthorizedWorkspace, Workspace};
 
 /// Shared dependencies for worker execution.
 ///
@@ -119,6 +120,82 @@ struct ToolExecResult {
 struct WorkerLoopOutcome {
     stop_reason: LoopStopReason,
     iterations: usize,
+}
+
+fn worker_identity_from_job(
+    job_ctx: &crate::context::JobContext,
+) -> Result<crate::identity::ResolvedIdentity, crate::identity::CarriedIdentityError> {
+    let conversation_kind = job_ctx
+        .metadata
+        .get("conversation_kind")
+        .and_then(|value| value.as_str())
+        .and_then(crate::identity::parse_conversation_kind_hint)
+        .unwrap_or(crate::identity::ConversationKind::Direct);
+    let conversation_scope_id = job_ctx
+        .metadata
+        .get("conversation_scope_id")
+        .and_then(|value| value.as_str())
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let stable_external_conversation_key = job_ctx
+        .metadata
+        .get("stable_external_conversation_key")
+        .and_then(|value| value.as_str());
+
+    crate::identity::resolved_identity_from_carried_context(
+        &job_ctx.principal_id,
+        job_ctx.owner_actor_id(),
+        conversation_kind,
+        conversation_scope_id,
+        stable_external_conversation_key,
+    )
+}
+
+async fn worker_workspace_prompt(
+    base_workspace: &Arc<Workspace>,
+    job_ctx: &crate::context::JobContext,
+    safety: &SafetyLayer,
+) -> Option<String> {
+    let identity = match worker_identity_from_job(job_ctx) {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::warn!(
+                job_id = %job_ctx.job_id,
+                principal_id = %job_ctx.principal_id,
+                actor_id = %job_ctx.owner_actor_id(),
+                %error,
+                "Refusing to assemble worker workspace context from incomplete identity"
+            );
+            return None;
+        }
+    };
+    let agent_workspace_id = thinclaw_tools::builtin::memory::workspace_agent_id_from_metadata(
+        &job_ctx.metadata,
+        base_workspace.agent_id(),
+    );
+    let effective_workspace =
+        base_workspace.scoped_clone(identity.principal_id.clone(), agent_workspace_id);
+    let channel = job_ctx
+        .metadata
+        .get("channel")
+        .and_then(|value| value.as_str())
+        .unwrap_or("worker");
+    let workspace = AuthorizedWorkspace::conversation(&effective_workspace, &identity, channel);
+
+    match workspace
+        .trusted_system_prompt(safety.redact_pii_in_prompts())
+        .await
+    {
+        Ok(prompt) if !prompt.is_empty() => Some(prompt),
+        Ok(_) => None,
+        Err(error) => {
+            tracing::debug!(
+                job_id = %job_ctx.job_id,
+                %error,
+                "Could not load authorized workspace identity for worker"
+            );
+            None
+        }
+    }
 }
 
 impl WorkerLoopOutcome {
@@ -249,61 +326,85 @@ impl Worker {
         self.deps.use_planning
     }
 
-    /// Fire-and-forget persistence of job status.
-    fn persist_status(&self, status: JobState, reason: Option<String>) {
+    /// Persist job status before the worker can be cleaned up. Detached writes
+    /// could complete out of order and resurrect an older state after a newer
+    /// terminal snapshot.
+    async fn persist_status(&self, status: JobState, reason: Option<String>) {
         if let Some(store) = self.store() {
-            let store = store.clone();
-            let context_manager = self.context_manager().clone();
-            let job_id = self.job_id;
-            tokio::spawn(async move {
-                match context_manager.get_context(job_id).await {
-                    Ok(ctx) => {
-                        if let Err(error) = store.save_job(&ctx).await {
-                            tracing::warn!(
+            match self.context_manager().get_context(self.job_id).await {
+                Ok(ctx) => {
+                    let saved =
+                        tokio::time::timeout(WORKER_STATE_PERSIST_TIMEOUT, store.save_job(&ctx))
+                            .await;
+                    if !matches!(&saved, Ok(Ok(()))) {
+                        match saved {
+                            Ok(Err(error)) => tracing::warn!(
                                 "Failed to persist job snapshot for job {}: {}",
-                                job_id,
+                                self.job_id,
                                 error
-                            );
-                            if let Err(update_error) = store
-                                .update_job_status(job_id, status, reason.as_deref())
-                                .await
-                            {
-                                tracing::warn!(
-                                    "Failed to persist status fallback for job {}: {}",
-                                    job_id,
-                                    update_error
-                                );
-                            }
+                            ),
+                            Err(_) => tracing::warn!(
+                                job_id = %self.job_id,
+                                "Timed out persisting job snapshot"
+                            ),
+                            Ok(Ok(())) => {}
                         }
-                    }
-                    Err(_) => {
-                        if let Err(error) = store
-                            .update_job_status(job_id, status, reason.as_deref())
-                            .await
-                        {
-                            tracing::warn!(
-                                "Failed to persist status for job {}: {}",
-                                job_id,
-                                error
-                            );
-                        }
+                        self.persist_status_fallback(store, status, reason.as_deref())
+                            .await;
                     }
                 }
-            });
+                Err(_) => {
+                    self.persist_status_fallback(store, status, reason.as_deref())
+                        .await;
+                }
+            }
         }
     }
 
-    /// Fire-and-forget persistence of a job event.
-    fn log_event(&self, event_type: &str, data: serde_json::Value) {
+    async fn persist_status_fallback(
+        &self,
+        store: &Arc<dyn Database>,
+        status: JobState,
+        reason: Option<&str>,
+    ) {
+        match tokio::time::timeout(
+            WORKER_STATE_PERSIST_TIMEOUT,
+            store.update_job_status(self.job_id, status, reason),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(
+                "Failed to persist status fallback for job {}: {}",
+                self.job_id,
+                error
+            ),
+            Err(_) => tracing::warn!(
+                job_id = %self.job_id,
+                "Timed out persisting job status fallback"
+            ),
+        }
+    }
+
+    /// Persist a job event in causal order with the worker's other state.
+    async fn log_event(&self, event_type: &str, data: serde_json::Value) {
         if let Some(store) = self.store() {
-            let store = store.clone();
-            let job_id = self.job_id;
-            let event_type = event_type.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = store.save_job_event(job_id, &event_type, &data).await {
-                    tracing::warn!("Failed to persist event for job {}: {}", job_id, e);
+            match tokio::time::timeout(
+                WORKER_STATE_PERSIST_TIMEOUT,
+                store.save_job_event(self.job_id, event_type, &data),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!("Failed to persist event for job {}: {}", self.job_id, error);
                 }
-            });
+                Err(_) => tracing::warn!(
+                    job_id = %self.job_id,
+                    event_type,
+                    "Timed out persisting job event"
+                ),
+            }
         }
     }
 
@@ -318,14 +419,27 @@ impl Worker {
     pub async fn run(self, mut rx: mpsc::Receiver<WorkerMessage>) -> Result<(), Error> {
         tracing::info!("Worker starting for job {}", self.job_id);
 
-        // Wait for start signal
-        match rx.recv().await {
-            Some(WorkerMessage::Start) => {}
-            Some(WorkerMessage::Stop) | None => {
-                tracing::debug!("Worker for job {} stopped before starting", self.job_id);
-                return Ok(());
+        // Wait for the actual start signal. A health ping is not admission to
+        // execute, and an early stop must still finalize routine bookkeeping.
+        loop {
+            match rx.recv().await {
+                Some(WorkerMessage::Start) => break,
+                Some(WorkerMessage::Ping) => continue,
+                Some(WorkerMessage::Stop) | None => {
+                    tracing::debug!("Worker for job {} stopped before starting", self.job_id);
+                    let already_terminal = self
+                        .context_manager()
+                        .get_context(self.job_id)
+                        .await
+                        .ok()
+                        .is_some_and(|context| is_worker_terminal_state(context.state));
+                    if !already_terminal {
+                        self.mark_cancelled("stopped_before_start").await?;
+                    }
+                    self.finalize_routine_run_bounded().await;
+                    return Ok(());
+                }
             }
-            Some(WorkerMessage::Ping) => {}
         }
 
         // Get job context
@@ -333,15 +447,8 @@ impl Worker {
 
         // Load workspace identity (SOUL.md, IDENTITY.md, USER.md, psychographic profile).
         // Without this, autonomous jobs execute as a generic agent without personality.
-        let identity_block = if let Some(ref ws) = self.deps.workspace {
-            match ws.system_prompt_for_context(false).await {
-                Ok(prompt) if !prompt.is_empty() => Some(prompt),
-                Ok(_) => None,
-                Err(e) => {
-                    tracing::debug!("Could not load workspace identity for worker: {}", e);
-                    None
-                }
-            }
+        let identity_block = if let Some(ref workspace) = self.deps.workspace {
+            worker_workspace_prompt(workspace, &job_ctx, self.safety()).await
         } else {
             None
         };
@@ -410,14 +517,47 @@ impl Worker {
                     .ok()
                     .map(|c| is_worker_terminal_state(c.state))
                     .unwrap_or(false);
-                if !already_terminal && let Err(e) = self.mark_completed().await {
-                    tracing::warn!("Failed to mark job {} completed: {}", self.job_id, e);
+                if !already_terminal {
+                    let terminal_result = match outcome.stop_reason {
+                        LoopStopReason::Completed | LoopStopReason::NoWork => {
+                            self.mark_completed().await
+                        }
+                        LoopStopReason::Cancelled
+                        | LoopStopReason::Interrupted
+                        | LoopStopReason::ChannelClosed
+                        | LoopStopReason::ExternalShutdown => {
+                            self.mark_cancelled(outcome.stop_reason.as_str()).await
+                        }
+                        LoopStopReason::IterationBudgetExceeded
+                        | LoopStopReason::RetryBudgetExceeded
+                        | LoopStopReason::IdleTimeout
+                        | LoopStopReason::WallTimeBudgetExceeded
+                        | LoopStopReason::FatalError => {
+                            self.mark_stuck(outcome.stop_reason.as_str()).await
+                        }
+                    };
+                    if let Err(error) = terminal_result {
+                        tracing::warn!(
+                            job_id = %self.job_id,
+                            stop_reason = outcome.stop_reason.as_str(),
+                            %error,
+                            "Failed to persist worker terminal state"
+                        );
+                    }
                 }
             }
             Ok(Err(e)) => {
                 loop_metrics.stop_with(LoopStopReason::FatalError);
                 tracing::error!("Worker for job {} failed: {}", self.job_id, e);
-                self.mark_failed(&e.to_string()).await?;
+                let already_terminal = self
+                    .context_manager()
+                    .get_context(self.job_id)
+                    .await
+                    .ok()
+                    .is_some_and(|context| is_worker_terminal_state(context.state));
+                if !already_terminal {
+                    self.mark_failed(&e.to_string()).await?;
+                }
             }
             Err(stop_reason) => {
                 loop_metrics.stop_with(stop_reason);
@@ -426,11 +566,31 @@ impl Worker {
                     "Worker for job {} timed out",
                     self.job_id
                 );
-                self.mark_stuck(match stop_reason {
-                    LoopStopReason::IdleTimeout => "Execution inactivity timeout",
-                    _ => "Execution wall-time budget exceeded",
-                })
-                .await?;
+                let terminal_context = self
+                    .context_manager()
+                    .get_context(self.job_id)
+                    .await
+                    .ok()
+                    .filter(|context| is_worker_terminal_state(context.state));
+                if let Some(context) = terminal_context {
+                    // The deadline can race the awaited persistence tail after a
+                    // terminal in-memory transition. Never overwrite that result;
+                    // make the terminal snapshot durable instead.
+                    self.persist_status(
+                        context.state,
+                        context
+                            .transitions
+                            .last()
+                            .and_then(|transition| transition.reason.clone()),
+                    )
+                    .await;
+                } else {
+                    self.mark_stuck(match stop_reason {
+                        LoopStopReason::IdleTimeout => "Execution inactivity timeout",
+                        _ => "Execution wall-time budget exceeded",
+                    })
+                    .await?;
+                }
             }
         }
 
@@ -438,7 +598,20 @@ impl Worker {
         // All exit paths above converge here. We read the job's final
         // state once and map it to a RunStatus + SSE event. This keeps
         // routine lifecycle concerns out of the individual mark_* methods.
-        self.finalize_routine_run().await;
+        self.finalize_routine_run_bounded().await;
+
+        // Evaluation is optional worker-tail work. Run it only after execution
+        // deadlines and routine finalization have ended, otherwise a slow
+        // evaluator/database write can retroactively turn Completed into Stuck.
+        let completed = self
+            .context_manager()
+            .get_context(self.job_id)
+            .await
+            .ok()
+            .is_some_and(|context| context.state == JobState::Completed);
+        if completed {
+            self.run_post_completion_evaluation().await;
+        }
 
         Ok(())
     }
@@ -539,7 +712,8 @@ impl Worker {
                             p.actions.iter().enumerate()
                                 .map(|(i, a)| format!("{}. {} - {}", i + 1, a.tool_name, a.reasoning))
                                 .collect::<Vec<_>>().join("\n"))
-                    }));
+                    }))
+                    .await;
 
                     Some(p)
                 }
@@ -712,7 +886,8 @@ impl Worker {
                                 "role": "assistant",
                                 "content": response,
                             }),
-                        );
+                        )
+                        .await;
 
                         // Give it one more chance to select a tool.
                         // Only nudge occasionally to avoid polluting context (Bug 26).
@@ -740,7 +915,8 @@ impl Worker {
                                     "role": "assistant",
                                     "content": text,
                                 }),
-                            );
+                            )
+                            .await;
                         }
 
                         // Add assistant message with tool_calls (OpenAI protocol)
@@ -1057,13 +1233,12 @@ impl Worker {
             },
         };
 
-        // Persist action to database (fire-and-forget)
-        if let (Some(action), Some(store)) = (action, deps.store.clone()) {
-            tokio::spawn(async move {
-                if let Err(e) = store.save_action(job_id, &action).await {
-                    tracing::warn!("Failed to persist action for job {}: {}", job_id, e);
-                }
-            });
+        // Persist the audit row before the worker can finish and its owning
+        // ContextManager entry is removed.
+        if let (Some(action), Some(store)) = (action, deps.store.clone())
+            && let Err(e) = store.save_action(job_id, &action).await
+        {
+            tracing::warn!("Failed to persist action for job {}: {}", job_id, e);
         }
 
         let output = result?;
@@ -1084,7 +1259,8 @@ impl Worker {
                 "input": crate::agent::agent_loop::truncate_for_preview(
                     &selection.parameters.to_string(), 500),
             }),
-        );
+        )
+        .await;
 
         match result {
             Ok(output) => {
@@ -1106,11 +1282,15 @@ impl Worker {
                     wrapped,
                 ));
 
-                self.log_event("tool_result", serde_json::json!({
-                    "tool_name": selection.tool_name,
-                    "success": true,
-                    "output": crate::agent::agent_loop::truncate_for_preview(&sanitized.content, 500),
-                }));
+                self.log_event(
+                    "tool_result",
+                    serde_json::json!({
+                        "tool_name": selection.tool_name,
+                        "success": true,
+                        "output": crate::agent::agent_loop::truncate_for_preview(&sanitized.content, 500),
+                    }),
+                )
+                .await;
 
                 // ── emit_user_message interception ───────────────────────
                 // Deliver the message to the frontend via SSE so routine
@@ -1245,15 +1425,13 @@ impl Worker {
 
                 // Record failure for self-repair tracking
                 if let Some(store) = self.store() {
-                    let store = store.clone();
-                    let tool_name = selection.tool_name.clone();
                     let error_msg = e.to_string();
-                    tokio::spawn(async move {
-                        if let Err(db_err) = store.record_tool_failure(&tool_name, &error_msg).await
-                        {
-                            tracing::warn!("Failed to record tool failure: {}", db_err);
-                        }
-                    });
+                    if let Err(db_err) = store
+                        .record_tool_failure(&selection.tool_name, &error_msg)
+                        .await
+                    {
+                        tracing::warn!("Failed to record tool failure: {}", db_err);
+                    }
                 }
 
                 self.log_event(
@@ -1263,7 +1441,8 @@ impl Worker {
                         "success": false,
                         "output": format!("Error: {}", e),
                     }),
-                );
+                )
+                .await;
 
                 reason_ctx.messages.push(ChatMessage::tool_result(
                     &selection.tool_call_id,
@@ -1442,11 +1621,11 @@ impl Worker {
         self.set_last_output(&heartbeat_iteration_exhausted_user_message(max_iterations));
         if let Some(store) = self.store() {
             let critique = heartbeat_iteration_exhausted_critique(self.job_id, max_iterations);
-            if let Err(error) = store
-                .set_setting("system", "heartbeat.last_critique", &critique)
-                .await
-            {
-                tracing::warn!("Failed to persist heartbeat stuck critique: {}", error);
+            if let Ok(job) = self.context_manager().get_context(self.job_id).await {
+                let key = heartbeat_critique_setting_key(job.owner_actor_id());
+                if let Err(error) = store.set_setting(&job.principal_id, &key, &critique).await {
+                    tracing::warn!("Failed to persist heartbeat stuck critique: {}", error);
+                }
             }
         }
         self.mark_stuck(&stuck_reason).await
@@ -1460,6 +1639,19 @@ impl Worker {
     ///
     /// This replaces the previous pattern of calling `complete_routine_run`
     /// inside each `mark_*` method, which was fragile and easy to miss.
+    async fn finalize_routine_run_bounded(&self) {
+        if tokio::time::timeout(WORKER_TAIL_TIMEOUT, self.finalize_routine_run())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                job_id = %self.job_id,
+                timeout_secs = WORKER_TAIL_TIMEOUT.as_secs(),
+                "Routine worker finalization timed out"
+            );
+        }
+    }
+
     async fn finalize_routine_run(&self) {
         // Only relevant when dispatched from a routine.
         let (run_id_str, routine_name) = match (&self.deps.routine_run_id, &self.deps.routine_name)
@@ -1502,11 +1694,21 @@ impl Worker {
         // Update the routine run record in the database.
         if let Some(store) = self.store().cloned() {
             let summary_ref = rich_summary.clone();
-            if let Err(e) = store
-                .complete_routine_run(run_id, status, Some(&summary_ref), None)
+            match finalize_routine_run_record(&store, run_id, status, Some(&summary_ref), None)
                 .await
             {
-                tracing::error!(run_id = %run_id, "Failed to complete routine run: {}", e);
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::debug!(
+                        %run_id,
+                        "Routine run was already terminal; skipping duplicate worker finalization"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(run_id = %run_id, "Failed to complete routine run: {}", e);
+                    return;
+                }
             }
             if let (Some(user_id), Some(actor_id)) =
                 (job_user_id.as_deref(), job_actor_id.as_deref())
@@ -1528,45 +1730,6 @@ impl Worker {
                 }
                 if let Some(routine) = routine {
                     let completed_at = Utc::now();
-                    let runtime_already_advanced =
-                        routine_state_has_runtime_advance_for_run(&routine.state, run_id);
-                    let next_fire_at = if runtime_already_advanced {
-                        routine.next_fire_at
-                    } else {
-                        crate::agent::routine::next_fire_for_routine(&routine, None, completed_at)
-                            .unwrap_or(routine.next_fire_at)
-                    };
-                    let run_count = if runtime_already_advanced {
-                        routine.run_count
-                    } else {
-                        routine.run_count + 1
-                    };
-                    let consecutive_failures = if status == crate::agent::routine::RunStatus::Failed
-                    {
-                        routine.consecutive_failures + 1
-                    } else {
-                        0
-                    };
-                    let state =
-                        routine_state_with_runtime_advance(&routine.state, run_id, completed_at);
-                    if let Err(error) = persist_routine_runtime_update(
-                        &store,
-                        routine.id,
-                        completed_at,
-                        next_fire_at,
-                        run_count,
-                        consecutive_failures,
-                        &state,
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            routine = %routine.name,
-                            run_id = %run_id,
-                            "Failed to update routine runtime after worker finalization: {}",
-                            error
-                        );
-                    }
                     let completed_run = crate::agent::routine::RoutineRun {
                         id: run_id,
                         routine_id: routine.id,
@@ -1622,30 +1785,44 @@ impl Worker {
                 "success": true,
                 "message": "Job completed successfully",
             }),
-        );
+        )
+        .await;
         self.persist_status(
             JobState::Completed,
             Some("Job completed successfully".to_string()),
-        );
+        )
+        .await;
 
         // NOTE: Routine run finalization (DB + SSE) is handled by
         // finalize_routine_run() at the end of run(), not here.
 
-        // ── Post-completion evaluation (fire-and-forget) ────────────
+        Ok(())
+    }
+
+    async fn run_post_completion_evaluation(&self) {
+        // ── Post-completion evaluation ─────────────────────────────
+        // Scheduler cleanup removes the job context as soon as `run()`
+        // returns. The old detached evaluator raced that cleanup and usually
+        // observed "job not found". Keep it in the owned worker tail, with a
+        // hard bound so optional evaluation cannot stall shutdown forever.
         let job_id = self.job_id;
         let context_manager = self.context_manager().clone();
         let store = self.store().cloned();
-        tokio::spawn(async move {
+        let evaluation = async move {
             use crate::evaluation::SuccessEvaluator;
 
             // Check if this was a heartbeat job so we can persist self-critique
-            let is_heartbeat = context_manager
+            let heartbeat_owner = context_manager
                 .get_context(job_id)
                 .await
                 .ok()
-                .and_then(|ctx| ctx.metadata.get("heartbeat").and_then(|v| v.as_bool()))
-                .unwrap_or(false);
-
+                .and_then(|ctx| {
+                    ctx.metadata
+                        .get("heartbeat")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false)
+                        .then(|| (ctx.principal_id.clone(), ctx.owner_actor_id().to_string()))
+                });
             let eval_result: Result<_, Box<dyn std::error::Error + Send + Sync>> = async {
                 let job_ctx = context_manager.get_context(job_id).await?;
                 let memory = context_manager.get_memory(job_id).await?;
@@ -1683,7 +1860,10 @@ impl Worker {
                     // When a heartbeat evaluation finds issues, persist the
                     // critique so the next heartbeat run can read it and
                     // avoid repeating the same mistake.
-                    if is_heartbeat && let Some(ref store) = store {
+                    if let (Some((principal_id, actor_id)), Some(store)) =
+                        (heartbeat_owner.as_ref(), store.as_ref())
+                    {
+                        let critique_key = heartbeat_critique_setting_key(actor_id);
                         if should_persist_heartbeat_completion_critique(
                             result.success,
                             result.quality_score,
@@ -1694,7 +1874,7 @@ impl Worker {
                                 result.reasoning,
                             );
                             if let Err(e) = store
-                                .set_setting("system", "heartbeat.last_critique", &critique)
+                                .set_setting(principal_id, &critique_key, &critique)
                                 .await
                             {
                                 tracing::warn!("Failed to persist heartbeat self-critique: {}", e);
@@ -1702,11 +1882,7 @@ impl Worker {
                         } else {
                             // Clean run — clear any stale critique
                             let _ = store
-                                .set_setting(
-                                    "system",
-                                    "heartbeat.last_critique",
-                                    &serde_json::Value::Null,
-                                )
+                                .set_setting(principal_id, &critique_key, &serde_json::Value::Null)
                                 .await;
                         }
                     }
@@ -1715,9 +1891,17 @@ impl Worker {
                     tracing::debug!(job_id = %job_id, "Evaluation skipped: {}", e);
                 }
             }
-        });
-
-        Ok(())
+        };
+        if tokio::time::timeout(WORKER_TAIL_TIMEOUT, evaluation)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                job_id = %job_id,
+                timeout_ms = WORKER_TAIL_TIMEOUT.as_millis() as u64,
+                "Post-completion evaluation timed out"
+            );
+        }
     }
 
     async fn mark_failed(&self, reason: &str) -> Result<(), Error> {
@@ -1737,12 +1921,39 @@ impl Worker {
                 "success": false,
                 "message": format!("Execution failed: {}", reason),
             }),
-        );
-        self.persist_status(JobState::Failed, Some(reason.to_string()));
+        )
+        .await;
+        self.persist_status(JobState::Failed, Some(reason.to_string()))
+            .await;
 
         // NOTE: Routine run finalization (DB + SSE) is handled by
         // finalize_routine_run() at the end of run(), not here.
 
+        Ok(())
+    }
+
+    async fn mark_cancelled(&self, reason: &str) -> Result<(), Error> {
+        self.context_manager()
+            .update_context(self.job_id, |ctx| {
+                ctx.transition_to(JobState::Cancelled, Some(reason.to_string()))
+            })
+            .await?
+            .map_err(|message| crate::error::JobError::ContextError {
+                id: self.job_id,
+                reason: message,
+            })?;
+
+        self.log_event(
+            "result",
+            serde_json::json!({
+                "success": false,
+                "cancelled": true,
+                "message": reason,
+            }),
+        )
+        .await;
+        self.persist_status(JobState::Cancelled, Some(reason.to_string()))
+            .await;
         Ok(())
     }
 
@@ -1761,8 +1972,10 @@ impl Worker {
                 "success": false,
                 "message": format!("Job stuck: {}", reason),
             }),
-        );
-        self.persist_status(JobState::Stuck, Some(reason.to_string()));
+        )
+        .await;
+        self.persist_status(JobState::Stuck, Some(reason.to_string()))
+            .await;
 
         // NOTE: Routine run finalization (DB + SSE) is handled by
         // finalize_routine_run() at the end of run(), not here.

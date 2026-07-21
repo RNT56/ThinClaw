@@ -26,6 +26,7 @@ pub mod nostr_runtime;
 pub mod pairing;
 pub mod reaction_machine;
 pub mod repl;
+mod response;
 pub mod setup;
 pub mod signal;
 pub mod status_view;
@@ -58,8 +59,8 @@ pub use native_lifecycle::{
 pub use native_lifecycle_clients::{
     ApnsNativeClient, ApnsNativeConfig, BrowserPushNativeClient, BrowserPushNativeConfig,
     MatrixNativeClient, MatrixNativeConfig, NativeEndpointRegistry, NativeHttpClient,
-    NativeHttpRequest, NativeHttpResponse, ReqwestNativeHttpClient, VoiceCallNativeClient,
-    VoiceCallNativeConfig,
+    NativeHttpDestinationPolicy, NativeHttpRequest, NativeHttpResponse, ReqwestNativeHttpClient,
+    VoiceCallNativeClient, VoiceCallNativeConfig,
 };
 #[cfg(feature = "nostr")]
 pub use nostr::NostrChannel;

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use thinclaw_llm_core::ChatMessage;
 
-use crate::ports::{PortableThreadState, ThreadMessage, ThreadRuntimeSnapshot, ThreadStorePort};
+use crate::ports::{PortableThreadState, ThreadRuntimeSnapshot, ThreadStorePort};
 use crate::session::{
     PendingApproval, PendingAuth, PendingAuthMode, Thread, ThreadState,
     message_hides_user_input_in_main_chat,
@@ -19,6 +19,18 @@ pub const DIRECT_THREAD_ROLE_MAIN: &str = "main";
 pub const ORIGIN_CHANNEL_KEY: &str = "origin_channel";
 pub const LAST_ACTIVE_CHANNEL_KEY: &str = "last_active_channel";
 pub const SEEN_CHANNELS_KEY: &str = "seen_channels";
+
+/// Restore an in-memory thread after a durable mutation fails without losing
+/// an interrupt that raced the storage call. Interrupt is the only lifecycle
+/// mutation allowed to bypass the per-identity execution lock; it must win over
+/// rollback and mark the restored processing turn interrupted as well.
+pub fn restore_thread_after_failed_persistence(thread: &mut Thread, snapshot: Thread) {
+    let was_interrupted = thread.state == ThreadState::Interrupted;
+    *thread = snapshot;
+    if was_interrupted {
+        thread.interrupt();
+    }
+}
 
 pub fn detect_user_correction_signal(role: &str, content: &str) -> u32 {
     if !role.eq_ignore_ascii_case("user") {
@@ -259,6 +271,7 @@ pub fn runtime_snapshot_for_persistence(
         runtime.prompt_manifest_digest = existing.prompt_manifest_digest.clone();
         runtime.prompt_segment_order = existing.prompt_segment_order.clone();
         runtime.provider_context_refs = existing.provider_context_refs.clone();
+        runtime.active_message_start_row = existing.active_message_start_row;
         runtime.undo_checkpoints = existing.undo_checkpoints.clone();
     }
     // The active-message watermark always tracks the live in-memory thread:
@@ -299,31 +312,39 @@ pub fn thread_state_input_admission(state: ThreadState) -> ThreadInputAdmission 
 
 #[derive(Debug, Clone)]
 pub enum PendingApprovalAdmission {
-    Ready(PendingApproval),
+    Ready(Box<PendingApproval>),
     Missing,
     RequestIdMismatch,
+    RequesterMismatch,
 }
 
 pub fn take_pending_approval_matching(
     thread: &mut Thread,
     request_id: Option<Uuid>,
+    identity: &thinclaw_identity::ResolvedIdentity,
 ) -> PendingApprovalAdmission {
     if thread.state != ThreadState::AwaitingApproval {
         return PendingApprovalAdmission::Missing;
     }
 
-    let Some(pending) = thread.take_pending_approval() else {
+    let Some(pending) = thread.pending_approval.as_ref() else {
         return PendingApprovalAdmission::Missing;
     };
 
     if let Some(request_id) = request_id
         && request_id != pending.request_id
     {
-        thread.await_approval(pending);
         return PendingApprovalAdmission::RequestIdMismatch;
     }
 
-    PendingApprovalAdmission::Ready(pending)
+    if !pending.accepts_identity(identity) {
+        return PendingApprovalAdmission::RequesterMismatch;
+    }
+
+    match thread.take_pending_approval() {
+        Some(pending) => PendingApprovalAdmission::Ready(Box::new(pending)),
+        None => PendingApprovalAdmission::Missing,
+    }
 }
 
 pub fn pending_approval_missing_message() -> &'static str {
@@ -332,6 +353,10 @@ pub fn pending_approval_missing_message() -> &'static str {
 
 pub fn pending_approval_request_mismatch_message() -> &'static str {
     "Request ID mismatch. Use the correct request ID."
+}
+
+pub fn pending_approval_requester_mismatch_message() -> &'static str {
+    "This approval request belongs to a different actor."
 }
 
 pub fn mark_pending_approval_approved(thread: &mut Thread) {
@@ -359,6 +384,21 @@ pub fn start_user_turn(
     thread.messages()
 }
 
+/// Atomically re-check admission and start a turn while the caller holds the
+/// owning session lock. This closes the gap between an optimistic preflight
+/// check and the actual state mutation.
+pub fn try_start_user_turn(
+    thread: &mut Thread,
+    undo: &mut UndoManager,
+    content: &str,
+    metadata: &serde_json::Value,
+) -> Result<Vec<ChatMessage>, &'static str> {
+    match thread_input_admission(thread) {
+        ThreadInputAdmission::Accept => Ok(start_user_turn(thread, undo, content, metadata)),
+        ThreadInputAdmission::Reject(message) => Err(message),
+    }
+}
+
 pub fn interrupt_thread(thread: &mut Thread) -> bool {
     match thread.state {
         ThreadState::Processing | ThreadState::AwaitingApproval => {
@@ -378,7 +418,7 @@ pub fn clear_thread(thread: &mut Thread) {
 
 pub fn complete_thread_response(thread: &mut Thread, response: &str) -> (usize, Vec<ChatMessage>) {
     thread.complete_turn(response);
-    (thread.turn_number(), thread.messages())
+    (completed_turn_number(thread), thread.messages())
 }
 
 pub fn fail_thread_turn(thread: &mut Thread, error: &str) -> Vec<ChatMessage> {
@@ -394,18 +434,26 @@ pub fn await_thread_approval(thread: &mut Thread, pending: PendingApproval) -> V
 pub fn reject_pending_approval(thread: &mut Thread, rejection: &str) -> (usize, Vec<ChatMessage>) {
     thread.clear_pending_approval();
     thread.complete_turn(rejection);
-    (thread.turn_number(), thread.messages())
+    (completed_turn_number(thread), thread.messages())
 }
 
 pub fn enter_auth_mode_and_complete_turn(
     thread: &mut Thread,
     extension_name: String,
     auth_mode: PendingAuthMode,
+    requesting_identity: thinclaw_identity::ResolvedIdentity,
     instructions: &str,
 ) -> (usize, Vec<ChatMessage>) {
-    thread.enter_auth_mode(extension_name, auth_mode);
+    thread.enter_auth_mode(extension_name, auth_mode, requesting_identity);
     thread.complete_turn(instructions);
-    (thread.turn_number(), thread.messages())
+    (completed_turn_number(thread), thread.messages())
+}
+
+fn completed_turn_number(thread: &Thread) -> usize {
+    thread
+        .last_turn()
+        .map(|turn| turn.turn_number.saturating_add(1))
+        .unwrap_or(0)
 }
 
 pub fn clear_pending_auth(thread: &mut Thread) -> bool {
@@ -413,7 +461,7 @@ pub fn clear_pending_auth(thread: &mut Thread) -> bool {
 }
 
 pub fn reenter_pending_auth(thread: &mut Thread, pending: &PendingAuth) {
-    thread.enter_auth_mode(pending.extension_name.clone(), pending.auth_mode);
+    thread.pending_auth = Some(pending.clone());
 }
 
 pub fn auth_mode_status_label(mode: PendingAuthMode) -> &'static str {
@@ -594,6 +642,7 @@ pub async fn mutate_thread_runtime_snapshot<F>(
 where
     F: FnOnce(&mut ThreadRuntimeSnapshot),
 {
+    let _mutation_guard = crate::thread_runtime::acquire_runtime_mutation_lock(thread_id).await;
     let mut runtime = store
         .load_thread_runtime(thread_id)
         .await?
@@ -635,48 +684,28 @@ pub async fn set_last_context_pressure(
     .await
 }
 
+fn clear_runtime_transient_fields(runtime: &mut ThreadRuntimeSnapshot) {
+    runtime.pending_approval = None;
+    runtime.pending_auth = None;
+    runtime.post_compaction_context = None;
+    runtime.frozen_workspace_prompt = None;
+    runtime.frozen_provider_system_prompt = None;
+    runtime.prompt_snapshot_hash = None;
+    runtime.ephemeral_overlay_hash = None;
+    runtime.prompt_contract_version = None;
+    runtime.prompt_manifest_digest = None;
+    runtime.prompt_segment_order.clear();
+    runtime.provider_context_refs.clear();
+    runtime.inflight_tool_trace.clear();
+    // Explicit lifecycle restores leave the live thread ready for new input.
+    runtime.state = PortableThreadState::Idle;
+}
+
 pub async fn clear_thread_runtime_transients(
     store: &dyn ThreadStorePort,
     thread_id: Uuid,
 ) -> Result<ThreadRuntimeSnapshot, DatabaseError> {
-    mutate_thread_runtime_snapshot(store, thread_id, |runtime| {
-        runtime.pending_approval = None;
-        runtime.pending_auth = None;
-        runtime.post_compaction_context = None;
-        runtime.frozen_workspace_prompt = None;
-        runtime.frozen_provider_system_prompt = None;
-        runtime.prompt_snapshot_hash = None;
-        runtime.ephemeral_overlay_hash = None;
-        runtime.prompt_contract_version = None;
-        runtime.prompt_manifest_digest = None;
-        runtime.prompt_segment_order.clear();
-        runtime.provider_context_refs.clear();
-        if runtime.state == PortableThreadState::AwaitingApproval {
-            runtime.state = PortableThreadState::Idle;
-        }
-    })
-    .await
-}
-
-/// Truncate durable conversation rows to the active-message watermark
-/// before they are replayed into an in-memory thread.
-///
-/// Rows are ordered oldest-first (as returned by history storage) and the
-/// watermark counts how many of the oldest rows are still "active" after
-/// `/undo`, `/redo`, or `/clear`. `None` (no watermark recorded yet) keeps
-/// every row so pre-existing threads behave exactly as before this field
-/// was introduced. This is pure so it can be unit-tested without a store.
-pub fn truncate_messages_to_watermark(
-    messages: Vec<ThreadMessage>,
-    active_message_row_count: Option<i64>,
-) -> Vec<ThreadMessage> {
-    match active_message_row_count {
-        Some(watermark) => {
-            let keep = usize::try_from(watermark.max(0)).unwrap_or(usize::MAX);
-            messages.into_iter().take(keep).collect()
-        }
-        None => messages,
-    }
+    mutate_thread_runtime_snapshot(store, thread_id, clear_runtime_transient_fields).await
 }
 
 /// Persist the active-message watermark and a capped undo-stack snapshot in
@@ -691,8 +720,50 @@ pub async fn set_active_watermark_and_undo_stack(
     undo_checkpoints: Vec<Checkpoint>,
 ) -> Result<ThreadRuntimeSnapshot, DatabaseError> {
     mutate_thread_runtime_snapshot(store, thread_id, |runtime| {
+        clear_runtime_transient_fields(runtime);
         runtime.active_message_row_count = Some(active_message_row_count);
         runtime.undo_checkpoints = undo_checkpoints.clone();
+    })
+    .await
+}
+
+/// Advance the start of the active append-only history window after old rows
+/// are deliberately removed from live context (compaction or `/clear`).
+/// Undo checkpoints are invalid across this boundary and are cleared in the
+/// same serialized runtime mutation.
+pub async fn advance_active_history_window(
+    store: &dyn ThreadStorePort,
+    thread_id: Uuid,
+    removed_row_count: i64,
+    active_message_row_count: i64,
+    post_compaction_context: Option<String>,
+) -> Result<ThreadRuntimeSnapshot, DatabaseError> {
+    mutate_thread_runtime_snapshot(store, thread_id, |runtime| {
+        let current_start = runtime.active_message_start_row.unwrap_or(0).max(0);
+        runtime.active_message_start_row =
+            Some(current_start.saturating_add(removed_row_count.max(0)));
+        runtime.active_message_row_count = Some(active_message_row_count.max(0));
+        runtime.post_compaction_context = post_compaction_context.clone();
+        runtime.undo_checkpoints.clear();
+    })
+    .await
+}
+
+/// Clear all active history and lifecycle transients in the same durable RMW.
+/// `/clear` must not advance the replay window in one write and clear prompt /
+/// approval state in another: either partial order can resurrect stale state.
+pub async fn clear_active_history_window(
+    store: &dyn ThreadStorePort,
+    thread_id: Uuid,
+    removed_row_count: i64,
+) -> Result<ThreadRuntimeSnapshot, DatabaseError> {
+    mutate_thread_runtime_snapshot(store, thread_id, |runtime| {
+        let current_start = runtime.active_message_start_row.unwrap_or(0).max(0);
+        runtime.active_message_start_row =
+            Some(current_start.saturating_add(removed_row_count.max(0)));
+        runtime.active_message_row_count = Some(0);
+        runtime.undo_checkpoints.clear();
+        clear_runtime_transient_fields(runtime);
     })
     .await
 }
@@ -700,6 +771,49 @@ pub async fn set_active_watermark_and_undo_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_identity(actor_id: &str) -> thinclaw_identity::ResolvedIdentity {
+        thinclaw_identity::ResolvedIdentity {
+            principal_id: "principal-1".to_string(),
+            actor_id: actor_id.to_string(),
+            conversation_scope_id: thinclaw_identity::scope_id_from_key("test:group:one"),
+            conversation_kind: thinclaw_identity::ConversationKind::Group,
+            raw_sender_id: actor_id.to_string(),
+            stable_external_conversation_key: "test:group:one".to_string(),
+        }
+    }
+
+    #[test]
+    fn failed_persistence_rollback_preserves_racing_interrupt() {
+        let mut snapshot = Thread::new(Uuid::new_v4());
+        snapshot.start_turn("active request");
+        let mut live = snapshot.clone();
+        clear_thread(&mut live);
+        live.interrupt();
+
+        restore_thread_after_failed_persistence(&mut live, snapshot);
+
+        assert_eq!(live.state, ThreadState::Interrupted);
+        assert_eq!(
+            live.last_turn().map(|turn| turn.state),
+            Some(crate::session::TurnState::Interrupted)
+        );
+    }
+
+    #[test]
+    fn failed_persistence_rollback_restores_snapshot_when_not_interrupted() {
+        let mut snapshot = Thread::new(Uuid::new_v4());
+        snapshot.start_turn("active request");
+        let expected_updated_at = snapshot.updated_at;
+        let mut live = snapshot.clone();
+        clear_thread(&mut live);
+
+        restore_thread_after_failed_persistence(&mut live, snapshot);
+
+        assert_eq!(live.state, ThreadState::Processing);
+        assert_eq!(live.turns.len(), 1);
+        assert_eq!(live.updated_at, expected_updated_at);
+    }
 
     #[test]
     fn detects_correction_prefixes() {
@@ -884,6 +998,18 @@ mod tests {
     }
 
     #[test]
+    fn terminal_helpers_report_the_turn_just_completed() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        thread.start_turn("first");
+        let (first, _) = complete_thread_response(&mut thread, "done");
+        assert_eq!(first, 1);
+
+        thread.start_turn("second");
+        let (second, _) = reject_pending_approval(&mut thread, "denied");
+        assert_eq!(second, 2);
+    }
+
+    #[test]
     fn pending_approval_admission_preserves_mismatched_request() {
         let mut thread = Thread::new(Uuid::new_v4());
         let request_id = Uuid::new_v4();
@@ -895,11 +1021,18 @@ mod tests {
             tool_call_id: "call_1".to_string(),
             context_messages: vec![ChatMessage::user("run pwd")],
             deferred_tool_calls: vec![],
+            requesting_identity: Some(test_identity("actor-1")),
+            request_channel: "gateway".to_string(),
+            request_metadata: serde_json::Value::Null,
         };
         thread.await_approval(pending);
 
         assert!(matches!(
-            take_pending_approval_matching(&mut thread, Some(Uuid::new_v4())),
+            take_pending_approval_matching(
+                &mut thread,
+                Some(Uuid::new_v4()),
+                &test_identity("actor-1")
+            ),
             PendingApprovalAdmission::RequestIdMismatch
         ));
         assert_eq!(thread.state, ThreadState::AwaitingApproval);
@@ -911,7 +1044,21 @@ mod tests {
             Some(request_id)
         );
 
-        let admitted = take_pending_approval_matching(&mut thread, Some(request_id));
+        assert!(matches!(
+            take_pending_approval_matching(
+                &mut thread,
+                Some(request_id),
+                &test_identity("actor-2")
+            ),
+            PendingApprovalAdmission::RequesterMismatch
+        ));
+        assert!(thread.pending_approval.is_some());
+
+        let admitted = take_pending_approval_matching(
+            &mut thread,
+            Some(request_id),
+            &test_identity("actor-1"),
+        );
         assert!(matches!(admitted, PendingApprovalAdmission::Ready(_)));
         assert!(thread.pending_approval.is_none());
     }
@@ -954,6 +1101,7 @@ mod tests {
         let pending = crate::session::PendingAuth {
             extension_name: "github".to_string(),
             auth_mode: crate::session::PendingAuthMode::ExternalOAuth,
+            requesting_identity: Some(test_identity("actor-1")),
         };
         reenter_pending_auth(&mut thread, &pending);
         assert!(thread.pending_auth.is_some());
@@ -1061,6 +1209,7 @@ mod tests {
         thread.pending_auth = Some(crate::session::PendingAuth {
             extension_name: "github".to_string(),
             auth_mode: crate::session::PendingAuthMode::ManualToken,
+            requesting_identity: Some(test_identity("actor-1")),
         });
 
         clear_thread(&mut thread);
@@ -1162,65 +1311,6 @@ mod tests {
         assert!(runtime.provider_context_refs.is_empty());
     }
 
-    fn sample_thread_message(role: &str, content: &str) -> ThreadMessage {
-        ThreadMessage {
-            id: Uuid::new_v4(),
-            conversation_id: Uuid::new_v4(),
-            role: role.to_string(),
-            content: content.to_string(),
-            actor_id: None,
-            actor_display_name: None,
-            raw_sender_id: None,
-            metadata: serde_json::json!({}),
-            created_at: chrono::Utc::now(),
-        }
-    }
-
-    #[test]
-    fn truncate_messages_to_watermark_keeps_oldest_n_rows() {
-        let messages = vec![
-            sample_thread_message("user", "first"),
-            sample_thread_message("assistant", "first reply"),
-            sample_thread_message("user", "second"),
-            sample_thread_message("assistant", "second reply"),
-        ];
-
-        let truncated = truncate_messages_to_watermark(messages, Some(2));
-        assert_eq!(truncated.len(), 2);
-        assert_eq!(truncated[0].content, "first");
-        assert_eq!(truncated[1].content, "first reply");
-    }
-
-    #[test]
-    fn truncate_messages_to_watermark_zero_clears_history() {
-        let messages = vec![
-            sample_thread_message("user", "first"),
-            sample_thread_message("assistant", "first reply"),
-        ];
-
-        let truncated = truncate_messages_to_watermark(messages, Some(0));
-        assert!(truncated.is_empty());
-    }
-
-    #[test]
-    fn truncate_messages_to_watermark_none_keeps_all_rows() {
-        let messages = vec![
-            sample_thread_message("user", "first"),
-            sample_thread_message("assistant", "first reply"),
-        ];
-
-        let truncated = truncate_messages_to_watermark(messages.clone(), None);
-        assert_eq!(truncated.len(), messages.len());
-    }
-
-    #[test]
-    fn truncate_messages_to_watermark_beyond_len_is_noop() {
-        let messages = vec![sample_thread_message("user", "only")];
-
-        let truncated = truncate_messages_to_watermark(messages.clone(), Some(50));
-        assert_eq!(truncated.len(), 1);
-    }
-
     #[tokio::test]
     async fn set_active_watermark_and_undo_stack_persists_both_fields() {
         let thread_id = Uuid::new_v4();
@@ -1235,6 +1325,60 @@ mod tests {
         assert_eq!(runtime.active_message_row_count, Some(2));
         assert_eq!(runtime.undo_checkpoints.len(), 1);
         assert_eq!(runtime.undo_checkpoints[0].turn_number, 1);
+    }
+
+    #[tokio::test]
+    async fn advances_history_window_and_compaction_context_in_one_snapshot() {
+        let thread_id = Uuid::new_v4();
+        let store = MemoryThreadStore::new(Some(ThreadRuntimeSnapshot {
+            active_message_start_row: Some(4),
+            active_message_row_count: Some(8),
+            undo_checkpoints: vec![Checkpoint::new(1, vec![], "old")],
+            ..Default::default()
+        }));
+
+        let runtime = advance_active_history_window(
+            &store,
+            thread_id,
+            3,
+            5,
+            Some("bounded summary".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runtime.active_message_start_row, Some(7));
+        assert_eq!(runtime.active_message_row_count, Some(5));
+        assert_eq!(
+            runtime.post_compaction_context.as_deref(),
+            Some("bounded summary")
+        );
+        assert!(runtime.undo_checkpoints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_history_window_resets_transients_atomically() {
+        let thread_id = Uuid::new_v4();
+        let store = MemoryThreadStore::new(Some(ThreadRuntimeSnapshot {
+            state: PortableThreadState::Interrupted,
+            active_message_start_row: Some(2),
+            active_message_row_count: Some(6),
+            post_compaction_context: Some("stale".to_string()),
+            frozen_workspace_prompt: Some("stale prompt".to_string()),
+            undo_checkpoints: vec![Checkpoint::new(1, vec![], "old")],
+            ..Default::default()
+        }));
+
+        let runtime = clear_active_history_window(&store, thread_id, 6)
+            .await
+            .unwrap();
+
+        assert_eq!(runtime.state, PortableThreadState::Idle);
+        assert_eq!(runtime.active_message_start_row, Some(8));
+        assert_eq!(runtime.active_message_row_count, Some(0));
+        assert!(runtime.post_compaction_context.is_none());
+        assert!(runtime.frozen_workspace_prompt.is_none());
+        assert!(runtime.undo_checkpoints.is_empty());
     }
 
     #[tokio::test]

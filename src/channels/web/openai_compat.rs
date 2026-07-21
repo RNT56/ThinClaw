@@ -15,6 +15,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
 };
+use thinclaw_gateway::web::identity::{DeviceContext, GatewayRequestIdentity};
 use thinclaw_gateway::web::openai_compat::{
     OpenAiChatRequest, OpenAiChatRequestPlan, OpenAiErrorKind, OpenAiErrorMapping,
     OpenAiErrorResponse, build_completion_chat_response, build_finish_chunk, build_models_response,
@@ -68,12 +69,10 @@ fn map_llm_error(err: crate::error::LlmError) -> (StatusCode, Json<OpenAiErrorRe
 
 pub async fn chat_completions_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
     Json(req): Json<OpenAiChatRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<OpenAiErrorResponse>)> {
-    if !state.chat_rate_limiter.check() {
-        return Err(openai_rate_limit_error());
-    }
-
     let llm = state
         .llm_provider
         .as_ref()
@@ -81,6 +80,11 @@ pub async fn chat_completions_handler(
 
     let plan = plan_openai_chat_request(&req)
         .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, OpenAiErrorKind::InvalidRequest))?;
+
+    let rate_limit_key = request_identity.rate_limit_key(device_ctx.as_ref().map(|ctx| &ctx.0));
+    if !state.chat_rate_limiter.check_for(&rate_limit_key) {
+        return Err(openai_rate_limit_error());
+    }
 
     if plan.stream {
         return handle_streaming(llm.clone(), req, plan)

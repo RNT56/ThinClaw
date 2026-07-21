@@ -146,12 +146,35 @@ struct CachedSearch {
     fetched_at: Instant,
 }
 
+fn registry_endpoint(base: &str, path: &str) -> Result<reqwest::Url, String> {
+    if base.is_empty() || base.len() > 16 * 1024 {
+        return Err("Registry URL is empty or oversized".to_string());
+    }
+    let mut base =
+        reqwest::Url::parse(base).map_err(|error| format!("Registry URL is invalid: {error}"))?;
+    if base.scheme() != "https"
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+    {
+        return Err(
+            "Registry URL must be HTTPS without credentials, query, or fragment".to_string(),
+        );
+    }
+    if !base.path().ends_with('/') {
+        let base_path = format!("{}/", base.path());
+        base.set_path(&base_path);
+    }
+    base.join(path.trim_start_matches('/'))
+        .map_err(|error| format!("Registry endpoint is invalid: {error}"))
+}
+
 /// Runtime skill catalog that queries ClawHub's API.
 pub struct SkillCatalog {
     /// Base URL for the registry.
     registry_url: String,
-    /// HTTP client (reused across requests).
-    client: reqwest::Client,
     /// In-memory search cache keyed by query string.
     cache: RwLock<Vec<CachedSearch>>,
 }
@@ -166,15 +189,8 @@ impl SkillCatalog {
             .or_else(|_| std::env::var("CLAWDHUB_REGISTRY"))
             .unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string());
 
-        let client = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .user_agent(concat!("thinclaw/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap_or_default();
-
         Self {
             registry_url,
-            client,
             cache: RwLock::new(Vec::new()),
         }
     }
@@ -182,15 +198,8 @@ impl SkillCatalog {
     /// Create a catalog with a custom registry URL (for testing).
     #[cfg(test)]
     pub fn with_url(url: &str) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .user_agent(concat!("thinclaw/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap_or_default();
-
         Self {
             registry_url: url.to_string(),
-            client,
             cache: RwLock::new(Vec::new()),
         }
     }
@@ -238,29 +247,33 @@ impl SkillCatalog {
 
     /// Fetch search results from the ClawHub API.
     async fn fetch_search(&self, query: &str) -> CatalogSearchOutcome {
-        let url = format!("{}/api/v1/search", self.registry_url);
-
-        let response = match self.client.get(&url).query(&[("q", query)]).send().await {
-            Ok(resp) => resp,
-            Err(e) => {
-                tracing::warn!("Catalog search failed (network): {}", e);
+        let mut url = match registry_endpoint(&self.registry_url, "api/v1/search") {
+            Ok(url) => url,
+            Err(error) => {
+                tracing::warn!(%error, "Catalog registry URL is invalid");
                 return CatalogSearchOutcome {
                     results: Vec::new(),
                     error: Some("Registry unreachable".to_string()),
                 };
             }
         };
+        url.query_pairs_mut().append_pair("q", query);
+
+        let response =
+            match super::remote_http::get_public_https(url.as_str(), REQUEST_TIMEOUT).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::warn!("Catalog search failed (network): {}", e);
+                    return CatalogSearchOutcome {
+                        results: Vec::new(),
+                        error: Some("Registry unreachable".to_string()),
+                    };
+                }
+            };
 
         if !response.status().is_success() {
             let status = response.status();
-            tracing::debug!(
-                "Catalog search returned status {}: {}",
-                status,
-                response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "(no body)".to_string())
-            );
+            tracing::debug!(%status, "Catalog search returned a non-success status");
             return CatalogSearchOutcome {
                 results: Vec::new(),
                 error: Some(format!("Registry returned status {status}")),
@@ -268,7 +281,7 @@ impl SkillCatalog {
         }
 
         // Parse the response body as text first so we can try multiple formats.
-        let body = match response.text().await {
+        let body = match crate::http_response::bounded_text(response, 4 * 1024 * 1024).await {
             Ok(b) => b,
             Err(e) => {
                 tracing::debug!("Catalog search: failed to read response body: {}", e);
@@ -287,8 +300,7 @@ impl SkillCatalog {
         } else if let Ok(arr) = serde_json::from_str::<Vec<CatalogSearchResult>>(&body) {
             arr
         } else {
-            let preview = body.get(..200).unwrap_or(&body);
-            tracing::debug!("Catalog search: failed to parse response: {}", preview);
+            tracing::debug!("Catalog search returned malformed JSON");
             return CatalogSearchOutcome {
                 results: Vec::new(),
                 error: Some("Invalid response from registry".to_string()),
@@ -321,13 +333,15 @@ impl SkillCatalog {
     /// Calls `GET /api/v1/skills/{slug}` and returns the detail if available.
     /// Returns `None` on any network or parse error (best-effort).
     pub async fn fetch_skill_detail(&self, slug: &str) -> Option<SkillDetail> {
-        let url = format!(
-            "{}/api/v1/skills/{}",
-            self.registry_url,
-            urlencoding::encode(slug)
-        );
+        let url = registry_endpoint(
+            &self.registry_url,
+            &format!("api/v1/skills/{}", urlencoding::encode(slug)),
+        )
+        .ok()?;
 
-        let response = self.client.get(&url).send().await.ok()?;
+        let response = super::remote_http::get_public_https(url.as_str(), REQUEST_TIMEOUT)
+            .await
+            .ok()?;
         if !response.status().is_success() {
             tracing::debug!(
                 "Skill detail for '{}' returned status {}",
@@ -337,7 +351,10 @@ impl SkillCatalog {
             return None;
         }
 
-        let wrapper = response.json::<SkillDetailResponse>().await.ok()?;
+        let wrapper =
+            crate::http_response::bounded_json::<SkillDetailResponse>(response, 1024 * 1024)
+                .await
+                .ok()?;
         let inner = wrapper.skill;
         Some(SkillDetail {
             slug: inner.slug,
@@ -425,12 +442,10 @@ struct CatalogSearchResult {
 ///
 /// The slug is URL-encoded to prevent query string injection via special
 /// characters like `&` or `#`.
-pub fn skill_download_url(registry_url: &str, slug: &str) -> String {
-    format!(
-        "{}/api/v1/download?slug={}",
-        registry_url,
-        urlencoding::encode(slug)
-    )
+pub fn skill_download_url(registry_url: &str, slug: &str) -> Result<String, String> {
+    let mut url = registry_endpoint(registry_url, "api/v1/download")?;
+    url.query_pairs_mut().append_pair("slug", slug);
+    Ok(url.to_string())
 }
 
 /// Convenience wrapper for creating a shared catalog.
@@ -488,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_skill_download_url() {
-        let url = skill_download_url("https://clawhub.ai", "owner/my-skill");
+        let url = skill_download_url("https://clawhub.ai", "owner/my-skill").unwrap();
         assert_eq!(
             url,
             "https://clawhub.ai/api/v1/download?slug=owner%2Fmy-skill"
@@ -497,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_skill_download_url_encodes_special_chars() {
-        let url = skill_download_url("https://clawhub.ai", "foo&bar=baz#frag");
+        let url = skill_download_url("https://clawhub.ai", "foo&bar=baz#frag").unwrap();
         assert!(url.contains("slug=foo%26bar%3Dbaz%23frag"));
     }
 

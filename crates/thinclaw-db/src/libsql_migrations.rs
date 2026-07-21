@@ -47,6 +47,12 @@ CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_actor ON conversations(actor_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_scope ON conversations(conversation_scope_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_last_activity ON conversations(last_activity);
+CREATE INDEX IF NOT EXISTS idx_conversations_ingress_direct
+    ON conversations(user_id, actor_id, channel, thread_id, last_activity DESC)
+    WHERE conversation_kind = 'direct';
+CREATE INDEX IF NOT EXISTS idx_conversations_ingress_group
+    ON conversations(user_id, conversation_scope_id, last_activity DESC)
+    WHERE conversation_kind = 'group';
 
 CREATE TABLE IF NOT EXISTS conversation_messages (
     id TEXT PRIMARY KEY,
@@ -321,15 +327,18 @@ CREATE TABLE IF NOT EXISTS experiment_runner_profiles (
     env_grants TEXT NOT NULL DEFAULT '{}',
     secret_references TEXT NOT NULL DEFAULT '[]',
     cache_policy TEXT NOT NULL DEFAULT '{}',
-    status TEXT NOT NULL DEFAULT 'draft',
-    readiness_class TEXT NOT NULL DEFAULT 'manual_only',
+    status TEXT NOT NULL DEFAULT '"draft"',
+    readiness_class TEXT NOT NULL DEFAULT '"manual_only"',
     launch_eligible INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    owner_user_id TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_experiment_runner_profiles_updated
     ON experiment_runner_profiles(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_experiment_runner_profiles_owner_updated
+    ON experiment_runner_profiles(owner_user_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS experiment_projects (
     id TEXT PRIMARY KEY,
@@ -337,7 +346,7 @@ CREATE TABLE IF NOT EXISTS experiment_projects (
     workspace_path TEXT NOT NULL,
     git_remote_name TEXT NOT NULL,
     base_branch TEXT NOT NULL,
-    preset TEXT NOT NULL DEFAULT 'autoresearch_single_file',
+    preset TEXT NOT NULL DEFAULT '"autoresearch_single_file"',
     strategy_prompt TEXT NOT NULL DEFAULT '',
     workdir TEXT NOT NULL DEFAULT '.',
     prepare_command TEXT,
@@ -350,21 +359,24 @@ CREATE TABLE IF NOT EXISTS experiment_projects (
     stop_policy TEXT NOT NULL DEFAULT '{}',
     default_runner_profile_id TEXT REFERENCES experiment_runner_profiles(id) ON DELETE SET NULL,
     promotion_mode TEXT NOT NULL DEFAULT 'branch_pr_draft',
-    autonomy_mode TEXT NOT NULL DEFAULT 'autonomous',
-    status TEXT NOT NULL DEFAULT 'draft',
+    autonomy_mode TEXT NOT NULL DEFAULT '"autonomous"',
+    status TEXT NOT NULL DEFAULT '"draft"',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    owner_user_id TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_experiment_projects_updated
     ON experiment_projects(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_experiment_projects_owner_updated
+    ON experiment_projects(owner_user_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS experiment_campaigns (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES experiment_projects(id) ON DELETE CASCADE,
     runner_profile_id TEXT NOT NULL REFERENCES experiment_runner_profiles(id) ON DELETE RESTRICT,
     owner_user_id TEXT NOT NULL DEFAULT 'default',
-    status TEXT NOT NULL DEFAULT 'pending_baseline',
+    status TEXT NOT NULL DEFAULT '"pending_baseline"',
     baseline_commit TEXT,
     best_commit TEXT,
     best_metrics TEXT NOT NULL DEFAULT '{}',
@@ -400,7 +412,7 @@ CREATE TABLE IF NOT EXISTS experiment_trials (
     sequence INTEGER NOT NULL,
     candidate_commit TEXT,
     parent_best_commit TEXT,
-    status TEXT NOT NULL DEFAULT 'preparing',
+    status TEXT NOT NULL DEFAULT '"preparing"',
     runner_backend TEXT NOT NULL,
     exit_code INTEGER,
     metrics_json TEXT NOT NULL DEFAULT '{}',
@@ -446,7 +458,7 @@ CREATE TABLE IF NOT EXISTS experiment_leases (
     campaign_id TEXT NOT NULL REFERENCES experiment_campaigns(id) ON DELETE CASCADE,
     trial_id TEXT NOT NULL REFERENCES experiment_trials(id) ON DELETE CASCADE,
     runner_profile_id TEXT NOT NULL REFERENCES experiment_runner_profiles(id) ON DELETE CASCADE,
-    status TEXT NOT NULL DEFAULT 'pending',
+    status TEXT NOT NULL DEFAULT '"pending"',
     token_hash TEXT NOT NULL,
     job_payload TEXT NOT NULL DEFAULT '{}',
     credentials_payload TEXT NOT NULL DEFAULT '{}',
@@ -1527,12 +1539,12 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
     LibsqlColumnUpgrade {
         version: 16,
         description: "Add autonomy mode to experiment projects",
-        sql: "ALTER TABLE experiment_projects ADD COLUMN autonomy_mode TEXT NOT NULL DEFAULT 'autonomous'",
+        sql: "ALTER TABLE experiment_projects ADD COLUMN autonomy_mode TEXT NOT NULL DEFAULT '\"autonomous\"'",
     },
     LibsqlColumnUpgrade {
         version: 17,
         description: "Add readiness class to experiment runners",
-        sql: "ALTER TABLE experiment_runner_profiles ADD COLUMN readiness_class TEXT NOT NULL DEFAULT 'manual_only'",
+        sql: "ALTER TABLE experiment_runner_profiles ADD COLUMN readiness_class TEXT NOT NULL DEFAULT '\"manual_only\"'",
     },
     LibsqlColumnUpgrade {
         version: 17,
@@ -1869,6 +1881,27 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         description: "Index active tool failure incidents",
         sql: "CREATE INDEX IF NOT EXISTS idx_tool_failures_active_incident ON tool_failures(tool_name) WHERE repaired_at IS NULL AND quarantined_at IS NULL",
     },
+    // ── V31: experiment project/runner ownership ────────────────────────
+    LibsqlColumnUpgrade {
+        version: 31,
+        description: "Add experiment project owner",
+        sql: "ALTER TABLE experiment_projects ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT 'default'",
+    },
+    LibsqlColumnUpgrade {
+        version: 31,
+        description: "Add experiment runner owner",
+        sql: "ALTER TABLE experiment_runner_profiles ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT 'default'",
+    },
+    LibsqlColumnUpgrade {
+        version: 31,
+        description: "Index experiment projects by owner",
+        sql: "CREATE INDEX IF NOT EXISTS idx_experiment_projects_owner_updated ON experiment_projects(owner_user_id, updated_at DESC)",
+    },
+    LibsqlColumnUpgrade {
+        version: 31,
+        description: "Index experiment runners by owner",
+        sql: "CREATE INDEX IF NOT EXISTS idx_experiment_runner_profiles_owner_updated ON experiment_runner_profiles(owner_user_id, updated_at DESC)",
+    },
 ];
 
 /// Idempotent data repairs for legacy libSQL databases.
@@ -1879,6 +1912,40 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
 /// every startup after `SCHEMA` so null/empty legacy identity fields are
 /// repaired in place.
 pub const DATA_REPAIRS: &[&str] = &[
+    r#"
+    UPDATE experiment_projects
+    SET owner_user_id = (
+        SELECT MIN(experiment_campaigns.owner_user_id)
+        FROM experiment_campaigns
+        WHERE experiment_campaigns.project_id = experiment_projects.id
+    )
+    WHERE owner_user_id = 'default'
+      AND NOT EXISTS (SELECT 1 FROM _migrations WHERE version = 31)
+      AND 1 = (
+          SELECT COUNT(DISTINCT experiment_campaigns.owner_user_id)
+          FROM experiment_campaigns
+          WHERE experiment_campaigns.project_id = experiment_projects.id
+      )
+    "#,
+    r#"
+    UPDATE experiment_runner_profiles
+    SET owner_user_id = (
+        SELECT MIN(experiment_campaigns.owner_user_id)
+        FROM experiment_campaigns
+        WHERE experiment_campaigns.runner_profile_id = experiment_runner_profiles.id
+    )
+    WHERE owner_user_id = 'default'
+      AND NOT EXISTS (SELECT 1 FROM _migrations WHERE version = 31)
+      AND 1 = (
+          SELECT COUNT(DISTINCT experiment_campaigns.owner_user_id)
+          FROM experiment_campaigns
+          WHERE experiment_campaigns.runner_profile_id = experiment_runner_profiles.id
+      )
+    "#,
+    r#"
+    INSERT OR IGNORE INTO _migrations(version, name)
+    VALUES (31, 'experiment project and runner ownership')
+    "#,
     r#"
     UPDATE conversations
     SET actor_id = COALESCE(NULLIF(actor_id, ''), user_id),
@@ -1950,6 +2017,90 @@ pub const DATA_REPAIRS: &[&str] = &[
         embedding_dim = COALESCE(embedding_dim, 1536)
     WHERE embedding IS NOT NULL
       AND (embedding_blob IS NULL OR embedding_dim IS NULL)
+    "#,
+    r#"
+    WITH ordered_documents AS (
+        SELECT *
+        FROM memory_documents
+        WHERE agent_id IS NULL
+        ORDER BY created_at ASC, id ASC
+    ), duplicate_groups AS (
+        SELECT user_id,
+               path,
+               MIN(id) AS keep_id,
+               group_concat(NULLIF(content, ''), char(10) || char(10)) AS merged_content,
+               MAX(updated_at) AS newest_update
+        FROM ordered_documents
+        GROUP BY user_id, path
+        HAVING COUNT(*) > 1
+    )
+    UPDATE memory_documents
+    SET content = COALESCE(
+            (SELECT merged_content FROM duplicate_groups WHERE keep_id = memory_documents.id),
+            ''
+        ),
+        updated_at = COALESCE(
+            (SELECT newest_update FROM duplicate_groups WHERE keep_id = memory_documents.id),
+            updated_at
+        ),
+        metadata = json_set(
+            CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+            '$.index_dirty', json('true')
+        )
+    WHERE id IN (SELECT keep_id FROM duplicate_groups)
+    "#,
+    r#"
+    DELETE FROM memory_chunks
+    WHERE document_id IN (
+        SELECT document.id
+        FROM memory_documents AS document
+        JOIN (
+            SELECT user_id, path
+            FROM memory_documents
+            WHERE agent_id IS NULL
+            GROUP BY user_id, path
+            HAVING COUNT(*) > 1
+        ) AS duplicate
+          ON duplicate.user_id = document.user_id
+         AND duplicate.path = document.path
+        WHERE document.agent_id IS NULL
+    )
+    "#,
+    r#"
+    DELETE FROM memory_documents
+    WHERE agent_id IS NULL
+      AND id NOT IN (
+          SELECT MIN(id)
+          FROM memory_documents
+          WHERE agent_id IS NULL
+          GROUP BY user_id, path
+      )
+    "#,
+    r#"
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_documents_shared_path_unique
+    ON memory_documents(user_id, path)
+    WHERE agent_id IS NULL
+    "#,
+    r#"
+    CREATE INDEX IF NOT EXISTS idx_conversations_ingress_direct
+    ON conversations(user_id, actor_id, channel, thread_id, last_activity DESC)
+    WHERE conversation_kind = 'direct'
+    "#,
+    r#"
+    CREATE INDEX IF NOT EXISTS idx_conversations_ingress_group
+    ON conversations(user_id, conversation_scope_id, last_activity DESC)
+    WHERE conversation_kind = 'group'
+    "#,
+    r#"
+    UPDATE memory_documents
+    SET metadata = json_set(
+        CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+        '$.index_dirty', json('true')
+    )
+    WHERE json_extract(
+        CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+        '$.index_dirty'
+    ) IS NULL
     "#,
     r#"
     INSERT INTO conversation_messages_fts(conversation_messages_fts)

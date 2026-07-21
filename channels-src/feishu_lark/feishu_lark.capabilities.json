@@ -29,6 +29,10 @@
         {
           "host": "open.feishu.cn",
           "path_prefix": "/open-apis/"
+        },
+        {
+          "host": "open.larksuite.com",
+          "path_prefix": "/open-apis/"
         }
       ],
       "credentials": {

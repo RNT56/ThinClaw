@@ -77,11 +77,16 @@ impl RemoteGatewayProxy {
         &self,
         session_key: &str,
         limit: u32,
+        before: Option<&str>,
     ) -> Result<serde_json::Value, String> {
         let mut query = format!("/api/chat/history?limit={}", limit);
         if session_key != "agent:main" && !session_key.trim().is_empty() {
             query.push_str("&thread_id=");
             query.push_str(&urlencoding::encode(session_key));
+        }
+        if let Some(before) = before {
+            query.push_str("&before=");
+            query.push_str(&urlencoding::encode(before));
         }
         self.get_json(&query).await
     }

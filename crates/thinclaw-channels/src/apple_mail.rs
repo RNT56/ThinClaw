@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
@@ -24,7 +25,7 @@ use thinclaw_channels_core::{
 };
 use thinclaw_types::error::ChannelError;
 
-use crate::util::{floor_char_boundary, output_with_timeout};
+use crate::util::{decode_sqlite_hex, floor_char_boundary, output_with_timeout};
 
 /// Channel name constant.
 const NAME: &str = "apple_mail";
@@ -35,7 +36,60 @@ const POLL_INTERVAL_SECS: u64 = 10;
 /// Maximum email body length.
 const MAX_BODY_LENGTH: usize = 100_000;
 
+const MAX_OUTBOUND_ATTACHMENTS: usize = 10;
+const MAX_OUTBOUND_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+const MAX_OUTBOUND_ATTACHMENTS_TOTAL_BYTES: usize = 50 * 1024 * 1024;
+
 const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+const MARK_READ_APPLESCRIPT: &str = r#"on run argv
+    set wantedSubject to item 1 of argv
+    set wantedSender to item 2 of argv
+    tell application "Mail"
+        set foundMessages to (every message of inbox whose subject is my wantedSubject and sender contains my wantedSender)
+        repeat with msg in foundMessages
+            set read status of msg to true
+        end repeat
+    end tell
+end run"#;
+
+const SEND_EMAIL_APPLESCRIPT: &str = r#"on run argv
+    set recipientAddress to item 1 of argv
+    set messageSubject to item 2 of argv
+    set messageBody to item 3 of argv
+    tell application "Mail"
+        set newMessage to make new outgoing message with properties {subject:my messageSubject, content:my messageBody, visible:false}
+        tell newMessage
+            make new to recipient at end of to recipients with properties {address:my recipientAddress}
+        end tell
+        if (count of argv) > 3 then
+            repeat with attachmentIndex from 4 to count of argv
+                set attachmentPath to item attachmentIndex of argv
+                tell newMessage to make new attachment with properties {file name:POSIX file (my attachmentPath)} at after last paragraph
+            end repeat
+        end if
+        send newMessage
+    end tell
+end run"#;
+
+const SEND_REPLY_APPLESCRIPT: &str = r#"on run argv
+    set recipientAddress to item 1 of argv
+    set messageSubject to "Re: " & (item 2 of argv)
+    set messageBody to item 3 of argv
+    tell application "Mail"
+        set newMessage to make new outgoing message with properties {subject:my messageSubject, content:my messageBody, visible:false}
+        tell newMessage
+            make new to recipient at end of to recipients with properties {address:my recipientAddress}
+        end tell
+        if (count of argv) > 3 then
+            repeat with attachmentIndex from 4 to count of argv
+                set attachmentPath to item attachmentIndex of argv
+                tell newMessage to make new attachment with properties {file name:POSIX file (my attachmentPath)} at after last paragraph
+            end repeat
+        end if
+        send newMessage
+    end tell
+end run"#;
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -173,9 +227,9 @@ impl AppleMailChannel {
         }
 
         // Check sqlite3
-        let sqlite3_available = tokio::process::Command::new("sqlite3")
-            .arg("--version")
-            .output()
+        let mut sqlite3_check = tokio::process::Command::new("sqlite3");
+        sqlite3_check.arg("--version");
+        let sqlite3_available = output_with_timeout(&mut sqlite3_check, "sqlite3 diagnostic")
             .await
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -184,10 +238,9 @@ impl AppleMailChannel {
         }
 
         // Check osascript
-        let osascript_available = tokio::process::Command::new("osascript")
-            .arg("-e")
-            .arg("return \"ok\"")
-            .output()
+        let mut osascript_check = tokio::process::Command::new("osascript");
+        osascript_check.arg("-e").arg("return \"ok\"");
+        let osascript_available = output_with_timeout(&mut osascript_check, "osascript diagnostic")
             .await
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -196,10 +249,9 @@ impl AppleMailChannel {
         }
 
         // Check Mail.app running
-        let mail_running = tokio::process::Command::new("pgrep")
-            .arg("-x")
-            .arg("Mail")
-            .output()
+        let mut pgrep = tokio::process::Command::new("pgrep");
+        pgrep.arg("-x").arg("Mail");
+        let mail_running = output_with_timeout(&mut pgrep, "pgrep Mail diagnostic")
             .await
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -209,12 +261,12 @@ impl AppleMailChannel {
 
         // Get total message count
         let total_messages = if db_exists && sqlite3_available {
-            tokio::process::Command::new("sqlite3")
-                .arg(&db_path)
-                .arg("SELECT COUNT(*) FROM messages;")
-                .output()
+            let mut count = tokio::process::Command::new("sqlite3");
+            count.arg(&db_path).arg("SELECT COUNT(*) FROM messages;");
+            output_with_timeout(&mut count, "sqlite3 Mail count diagnostic")
                 .await
                 .ok()
+                .filter(|output| output.status.success())
                 .and_then(|o| {
                     String::from_utf8_lossy(&o.stdout)
                         .trim()
@@ -287,12 +339,12 @@ impl AppleMailChannel {
 
         let query = format!(
             "SELECT m.ROWID, \
-                    REPLACE(COALESCE(sub.subject, '(no subject)'), '|', ' '), \
-                    COALESCE(a.address, 'unknown'), \
-                    COALESCE(summ.summary, ''), \
+                    hex(CAST(COALESCE(sub.subject, '(no subject)') AS TEXT)), \
+                    hex(CAST(COALESCE(a.address, 'unknown') AS TEXT)), \
+                    hex(CAST(COALESCE(summ.summary, '') AS TEXT)), \
                     COALESCE(m.date_received, 0), \
                     COALESCE(m.read, 0), \
-                    COALESCE(m.message_id, 0) \
+                    hex(CAST(COALESCE(m.message_id, '') AS TEXT)) \
              FROM messages m \
              LEFT JOIN subjects sub ON m.subject = sub.ROWID \
              LEFT JOIN summaries summ ON m.summary = summ.ROWID \
@@ -334,10 +386,17 @@ impl AppleMailChannel {
                 Ok(r) => r,
                 Err(_) => continue,
             };
-            let subject = parts[1].to_string();
-            let sender = parts[2].to_string();
+            let (Some(subject), Some(sender), Some(decoded_body), Some(message_id)) = (
+                decode_sqlite_hex(parts[1]),
+                decode_sqlite_hex(parts[2]),
+                decode_sqlite_hex(parts[3]),
+                decode_sqlite_hex(parts[6]),
+            ) else {
+                tracing::warn!(rowid, "Apple Mail: skipping row with malformed hex text");
+                continue;
+            };
             let body = {
-                let b = parts[3];
+                let b = decoded_body.as_str();
                 if b.len() > MAX_BODY_LENGTH {
                     // Round down to a char boundary; slicing mid-codepoint panics.
                     let end = floor_char_boundary(b, MAX_BODY_LENGTH);
@@ -348,7 +407,6 @@ impl AppleMailChannel {
             };
             let date_received: i64 = parts[4].parse().unwrap_or(0);
             let is_read = parts[5] == "1";
-            let message_id = parts[6].to_string();
 
             messages.push(MailMessage {
                 rowid,
@@ -366,20 +424,12 @@ impl AppleMailChannel {
 
     /// Mark a message as read via AppleScript.
     async fn mark_as_read_applescript(subject: &str, sender: &str) -> Result<(), ChannelError> {
-        let escaped_subject = escape_applescript(subject);
-        let escaped_sender = escape_applescript(sender);
-
-        let script = format!(
-            r#"tell application "Mail"
-    set foundMessages to (every message of inbox whose subject is "{escaped_subject}" and sender contains "{escaped_sender}")
-    repeat with msg in foundMessages
-        set read status of msg to true
-    end repeat
-end tell"#
-        );
-
         let mut cmd = tokio::process::Command::new("osascript");
-        cmd.arg("-e").arg(&script);
+        cmd.arg("-e")
+            .arg(MARK_READ_APPLESCRIPT)
+            .arg("--")
+            .arg(subject)
+            .arg(sender);
         let output = output_with_timeout(&mut cmd, "osascript mark-as-read")
             .await
             .map_err(|reason| ChannelError::SendFailed {
@@ -402,25 +452,16 @@ end tell"#
         body: &str,
         attachments: &[thinclaw_media::MediaContent],
     ) -> Result<(), ChannelError> {
-        let escaped_to = escape_applescript(to);
-        let escaped_subject = escape_applescript(subject);
-        let escaped_body = escape_applescript(body);
         let temp_files = write_temp_attachments(attachments).await?;
-        let attachment_script = applescript_attachment_lines(&temp_files);
-
-        let script = format!(
-            r#"tell application "Mail"
-    set newMessage to make new outgoing message with properties {{subject:"Re: {escaped_subject}", content:"{escaped_body}", visible:false}}
-    tell newMessage
-        make new to recipient at end of to recipients with properties {{address:"{escaped_to}"}}
-{attachment_script}
-    end tell
-    send newMessage
-end tell"#
-        );
 
         let mut cmd = tokio::process::Command::new("osascript");
-        cmd.arg("-e").arg(&script);
+        cmd.arg("-e")
+            .arg(SEND_REPLY_APPLESCRIPT)
+            .arg("--")
+            .arg(to)
+            .arg(subject)
+            .arg(body)
+            .args(&temp_files);
         let send_result = output_with_timeout(&mut cmd, "osascript send")
             .await
             .map_err(|reason| ChannelError::SendFailed {
@@ -450,25 +491,16 @@ end tell"#
         body: &str,
         attachments: &[thinclaw_media::MediaContent],
     ) -> Result<(), ChannelError> {
-        let escaped_to = escape_applescript(to);
-        let escaped_subject = escape_applescript(subject);
-        let escaped_body = escape_applescript(body);
         let temp_files = write_temp_attachments(attachments).await?;
-        let attachment_script = applescript_attachment_lines(&temp_files);
-
-        let script = format!(
-            r#"tell application "Mail"
-    set newMessage to make new outgoing message with properties {{subject:"{escaped_subject}", content:"{escaped_body}", visible:false}}
-    tell newMessage
-        make new to recipient at end of to recipients with properties {{address:"{escaped_to}"}}
-{attachment_script}
-    end tell
-    send newMessage
-end tell"#
-        );
 
         let mut cmd = tokio::process::Command::new("osascript");
-        cmd.arg("-e").arg(&script);
+        cmd.arg("-e")
+            .arg(SEND_EMAIL_APPLESCRIPT)
+            .arg("--")
+            .arg(to)
+            .arg(subject)
+            .arg(body)
+            .args(&temp_files);
         let send_result = output_with_timeout(&mut cmd, "osascript send")
             .await
             .map_err(|reason| ChannelError::SendFailed {
@@ -752,41 +784,97 @@ fn find_envelope_index() -> Result<PathBuf, ChannelError> {
     )))
 }
 
-/// Escape text for safe inclusion in AppleScript strings.
-fn escape_applescript(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 async fn write_temp_attachments(
     attachments: &[thinclaw_media::MediaContent],
 ) -> Result<Vec<std::path::PathBuf>, ChannelError> {
+    if attachments.len() > MAX_OUTBOUND_ATTACHMENTS {
+        return Err(ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: format!("at most {MAX_OUTBOUND_ATTACHMENTS} attachments may be sent at once"),
+        });
+    }
+
     let mut paths = Vec::new();
+    let mut total_bytes = 0_usize;
     for attachment in attachments {
+        if attachment.data.len() > MAX_OUTBOUND_ATTACHMENT_BYTES {
+            cleanup_temp_attachments(&paths).await;
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: format!(
+                    "attachment exceeds the {MAX_OUTBOUND_ATTACHMENT_BYTES}-byte limit"
+                ),
+            });
+        }
+        total_bytes = total_bytes
+            .checked_add(attachment.data.len())
+            .ok_or_else(|| ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "attachment byte count overflowed".to_string(),
+            })?;
+        if total_bytes > MAX_OUTBOUND_ATTACHMENTS_TOTAL_BYTES {
+            cleanup_temp_attachments(&paths).await;
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: format!(
+                    "attachments exceed the {MAX_OUTBOUND_ATTACHMENTS_TOTAL_BYTES}-byte total limit"
+                ),
+            });
+        }
+
         let filename = attachment.filename.as_deref().unwrap_or("attachment");
-        let safe_name = filename.replace(['/', '\\', ':'], "_");
+        let safe_name = safe_attachment_filename(filename);
         let path =
             std::env::temp_dir().join(format!("thinclaw-{}-{safe_name}", uuid::Uuid::new_v4()));
-        tokio::fs::write(&path, &attachment.data)
-            .await
-            .map_err(|e| ChannelError::SendFailed {
+
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let write_result = async {
+            let mut file = options.open(&path).await?;
+            file.write_all(&attachment.data).await?;
+            file.sync_all().await
+        }
+        .await;
+        if let Err(error) = write_result {
+            let _ = tokio::fs::remove_file(&path).await;
+            cleanup_temp_attachments(&paths).await;
+            return Err(ChannelError::SendFailed {
                 name: NAME.to_string(),
-                reason: format!("failed to write temp attachment {}: {e}", path.display()),
-            })?;
+                reason: format!(
+                    "failed to write temp attachment {}: {error}",
+                    path.display()
+                ),
+            });
+        }
         paths.push(path);
     }
     Ok(paths)
 }
 
-fn applescript_attachment_lines(paths: &[std::path::PathBuf]) -> String {
-    paths
-        .iter()
-        .map(|path| {
-            format!(
-                "        make new attachment with properties {{file name:POSIX file \"{}\"}} at after last paragraph\n",
-                escape_applescript(&path.to_string_lossy())
-            )
+fn safe_attachment_filename(filename: &str) -> String {
+    let base = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("attachment");
+    let sanitized = base
+        .chars()
+        .take(128)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
         })
-        .collect::<String>()
+        .collect::<String>();
+    let sanitized = sanitized.trim_matches('.');
+    if sanitized.is_empty() {
+        "attachment".to_string()
+    } else {
+        sanitized.to_string()
+    }
 }
 
 async fn cleanup_temp_attachments(paths: &[std::path::PathBuf]) {
@@ -813,12 +901,11 @@ pub async fn ensure_app_running(app_name: &str) -> bool {
 
     tracing::info!("{app_name}.app is not running — launching it...");
 
-    // Launch the app minimized (no window activation on headless)
-    let mut launch = tokio::process::Command::new("osascript");
-    launch
-        .arg("-e")
-        .arg(format!(r#"tell application "{app_name}" to launch"#));
-    let result = output_with_timeout(&mut launch, "osascript launch").await;
+    // `open` receives the application name as an argv value, so even a future
+    // non-constant caller cannot turn it into executable AppleScript source.
+    let mut launch = tokio::process::Command::new("open");
+    launch.args(["-g", "-j", "-a"]).arg(app_name);
+    let result = output_with_timeout(&mut launch, "open application").await;
 
     match result {
         Ok(output) if output.status.success() => {
@@ -939,13 +1026,6 @@ mod tests {
                 std::env::remove_var("HOME");
             },
         }
-    }
-
-    #[test]
-    fn test_escape_applescript() {
-        assert_eq!(escape_applescript(r#"say "hello""#), r#"say \"hello\""#);
-        assert_eq!(escape_applescript("back\\slash"), "back\\\\slash");
-        assert_eq!(escape_applescript("normal"), "normal");
     }
 
     #[test]

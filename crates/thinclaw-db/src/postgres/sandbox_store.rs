@@ -30,8 +30,22 @@ impl SandboxStore for PgBackend {
             .await
     }
 
-    async fn cleanup_stale_sandbox_jobs(&self) -> Result<u64, DatabaseError> {
-        self.store.cleanup_stale_sandbox_jobs().await
+    async fn finalize_sandbox_job_status(
+        &self,
+        id: Uuid,
+        status: &str,
+        success: bool,
+        message: Option<&str>,
+        completed_at: DateTime<Utc>,
+        event_data: &serde_json::Value,
+    ) -> Result<bool, DatabaseError> {
+        self.store
+            .finalize_sandbox_job_status(id, status, success, message, completed_at, event_data)
+            .await
+    }
+
+    async fn cleanup_stale_sandbox_jobs(&self, runtime_scope: &str) -> Result<u64, DatabaseError> {
+        self.store.cleanup_stale_sandbox_jobs(runtime_scope).await
     }
 
     async fn sandbox_job_summary(&self) -> Result<SandboxJobSummary, DatabaseError> {

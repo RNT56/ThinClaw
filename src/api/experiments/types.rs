@@ -79,9 +79,12 @@ pub(super) async fn research_provider_api_key(
     if let Some(default_name) = adapters::gpu_cloud_secret_name(runner.backend) {
         names.push(default_name.to_string());
     }
-    for name in &runner.secret_references {
-        if !names.iter().any(|entry| entry == name) {
-            names.push(name.clone());
+    for reference in &runner.secret_references {
+        let Some((name, _)) = parse_secret_reference(reference) else {
+            continue;
+        };
+        if !names.iter().any(|entry| entry == &name) {
+            names.push(name);
         }
     }
     for name in names {

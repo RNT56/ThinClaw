@@ -23,6 +23,8 @@ use uuid::Uuid;
 
 const LLM_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 pub(crate) const LLM_RATE_LIMIT_MAX_REQUESTS: usize = 60;
+const EVENT_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const EVENT_RATE_LIMIT_MAX_REQUESTS: usize = 1_200;
 
 /// In-memory store for per-job authentication tokens and credential grants.
 #[derive(Clone)]
@@ -34,6 +36,7 @@ pub struct TokenStore {
     /// Per-job LLM proxy request timestamps. Tokens are one-per-job, so this is
     /// effectively per-token and follows the same revocation lifecycle.
     llm_rate_limits: Arc<RwLock<HashMap<Uuid, VecDeque<Instant>>>>,
+    event_rate_limits: Arc<RwLock<HashMap<Uuid, VecDeque<Instant>>>>,
 }
 
 impl TokenStore {
@@ -42,6 +45,7 @@ impl TokenStore {
             tokens: Arc::new(RwLock::new(HashMap::new())),
             credential_grants: Arc::new(RwLock::new(HashMap::new())),
             llm_rate_limits: Arc::new(RwLock::new(HashMap::new())),
+            event_rate_limits: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -67,6 +71,7 @@ impl TokenStore {
         self.tokens.write().await.remove(&job_id);
         self.credential_grants.write().await.remove(&job_id);
         self.llm_rate_limits.write().await.remove(&job_id);
+        self.event_rate_limits.write().await.remove(&job_id);
     }
 
     /// Get the number of active tokens (for diagnostics).
@@ -98,6 +103,24 @@ impl TokenStore {
             timestamps.pop_front();
         }
         if timestamps.len() >= LLM_RATE_LIMIT_MAX_REQUESTS {
+            return false;
+        }
+        timestamps.push_back(now);
+        true
+    }
+
+    /// Bound high-volume worker telemetry separately from expensive LLM calls.
+    pub async fn check_event_rate_limit(&self, job_id: Uuid) -> bool {
+        let now = Instant::now();
+        let mut limits = self.event_rate_limits.write().await;
+        let timestamps = limits.entry(job_id).or_default();
+        while timestamps
+            .front()
+            .is_some_and(|seen| now.duration_since(*seen) >= EVENT_RATE_LIMIT_WINDOW)
+        {
+            timestamps.pop_front();
+        }
+        if timestamps.len() >= EVENT_RATE_LIMIT_MAX_REQUESTS {
             return false;
         }
         timestamps.push_back(now);
@@ -343,5 +366,18 @@ mod tests {
         store.revoke(job_id).await;
         assert!(!store.validate(job_id, &token).await);
         assert!(store.check_llm_rate_limit(job_id).await);
+    }
+
+    #[tokio::test]
+    async fn event_rate_limit_is_bounded_per_job_and_cleared_on_revoke() {
+        let store = TokenStore::new();
+        let job_id = Uuid::new_v4();
+        let _token = store.create_token(job_id).await;
+        for _ in 0..EVENT_RATE_LIMIT_MAX_REQUESTS {
+            assert!(store.check_event_rate_limit(job_id).await);
+        }
+        assert!(!store.check_event_rate_limit(job_id).await);
+        store.revoke(job_id).await;
+        assert!(store.check_event_rate_limit(job_id).await);
     }
 }

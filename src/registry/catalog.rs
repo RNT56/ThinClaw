@@ -1,10 +1,17 @@
 //! Registry catalog: loads manifests from disk, provides list/search/resolve operations.
 
 use std::collections::HashMap;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use crate::registry::embedded;
 use crate::registry::manifest::{BundleDefinition, BundlesFile, ExtensionManifest, ManifestKind};
+
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_BUNDLES_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_MANIFESTS: usize = 4_096;
+const MAX_BUNDLES: usize = 1_024;
+const MAX_BUNDLE_EXTENSIONS: usize = 256;
 
 /// Error type for registry operations.
 #[derive(Debug, thiserror::Error)]
@@ -156,6 +163,8 @@ impl RegistryCatalog {
         // Fall back to embedded catalog
         let manifests = embedded::load_embedded();
         let bundles = embedded::load_embedded_bundles();
+        Self::validate_manifest_map(&manifests)?;
+        validate_bundles(&bundles)?;
 
         tracing::info!(
             "Loaded embedded registry catalog ({} extensions, {} bundles)",
@@ -180,43 +189,114 @@ impl RegistryCatalog {
     /// └── _bundles.json
     /// ```
     pub fn load(registry_dir: &Path) -> Result<Self, RegistryError> {
-        if !registry_dir.exists() {
-            return Err(RegistryError::DirectoryNotFound(registry_dir.to_path_buf()));
+        let root_metadata = match std::fs::symlink_metadata(registry_dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(RegistryError::DirectoryNotFound(registry_dir.to_path_buf()));
+            }
+            Err(error) => {
+                return Err(RegistryError::ManifestRead {
+                    path: registry_dir.to_path_buf(),
+                    reason: error.to_string(),
+                });
+            }
+        };
+        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+            return Err(RegistryError::ManifestRead {
+                path: registry_dir.to_path_buf(),
+                reason: "registry root must be a real directory".to_string(),
+            });
         }
 
         let mut manifests = HashMap::new();
 
         // Load tools
         let tools_dir = registry_dir.join("tools");
-        if tools_dir.is_dir() {
-            Self::load_manifests_from_dir(&tools_dir, "tools", &mut manifests)?;
-        }
+        Self::load_manifest_directory_if_present(&tools_dir, "tools", &mut manifests)?;
 
         // Load channels
         let channels_dir = registry_dir.join("channels");
-        if channels_dir.is_dir() {
-            Self::load_manifests_from_dir(&channels_dir, "channels", &mut manifests)?;
-        }
+        Self::load_manifest_directory_if_present(&channels_dir, "channels", &mut manifests)?;
 
         // Load bundles
         let bundles_path = registry_dir.join("_bundles.json");
-        let bundles = if bundles_path.is_file() {
-            let content = std::fs::read_to_string(&bundles_path).map_err(|e| {
-                RegistryError::BundlesRead(format!("{}: {}", bundles_path.display(), e))
-            })?;
-            let bundles_file: BundlesFile = serde_json::from_str(&content).map_err(|e| {
-                RegistryError::BundlesRead(format!("{}: {}", bundles_path.display(), e))
-            })?;
-            bundles_file.bundles
-        } else {
-            HashMap::new()
+        let bundles = match std::fs::symlink_metadata(&bundles_path) {
+            Ok(_) => {
+                let content = read_regular_text_bounded(&bundles_path, MAX_BUNDLES_BYTES).map_err(
+                    |error| {
+                        RegistryError::BundlesRead(format!("{}: {}", bundles_path.display(), error))
+                    },
+                )?;
+                let bundles_file: BundlesFile =
+                    serde_json::from_str(&content).map_err(|error| {
+                        RegistryError::BundlesRead(format!("{}: {}", bundles_path.display(), error))
+                    })?;
+                bundles_file.bundles
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => {
+                return Err(RegistryError::BundlesRead(format!(
+                    "{}: {}",
+                    bundles_path.display(),
+                    error
+                )));
+            }
         };
+        Self::validate_manifest_map(&manifests)?;
+        validate_bundles(&bundles)?;
 
         Ok(Self {
             manifests,
             bundles,
             root: registry_dir.to_path_buf(),
         })
+    }
+
+    fn load_manifest_directory_if_present(
+        dir: &Path,
+        kind_prefix: &str,
+        manifests: &mut HashMap<String, ExtensionManifest>,
+    ) -> Result<(), RegistryError> {
+        match std::fs::symlink_metadata(dir) {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => {
+                Self::load_manifests_from_dir(dir, kind_prefix, manifests)
+            }
+            Ok(_) => Err(RegistryError::ManifestRead {
+                path: dir.to_path_buf(),
+                reason: "manifest collection must be a real directory".to_string(),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(RegistryError::ManifestRead {
+                path: dir.to_path_buf(),
+                reason: error.to_string(),
+            }),
+        }
+    }
+
+    fn validate_manifest_map(
+        manifests: &HashMap<String, ExtensionManifest>,
+    ) -> Result<(), RegistryError> {
+        if manifests.len() > MAX_MANIFESTS {
+            return Err(RegistryError::ManifestRead {
+                path: PathBuf::new(),
+                reason: format!("registry exceeds the {MAX_MANIFESTS}-manifest limit"),
+            });
+        }
+        for (key, manifest) in manifests {
+            crate::registry::installer::validate_manifest_install_inputs(manifest)?;
+            let expected_prefix = match manifest.kind {
+                ManifestKind::Tool => "tools",
+                ManifestKind::Channel => "channels",
+            };
+            if key != &format!("{expected_prefix}/{}", manifest.name) {
+                return Err(RegistryError::InvalidManifest {
+                    name: manifest.name.clone(),
+                    field: "name/kind",
+                    reason: format!("does not match catalog key '{key}'"),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn load_manifests_from_dir(
@@ -230,21 +310,32 @@ impl RegistryCatalog {
         })?;
 
         for entry in entries {
+            if manifests.len() >= MAX_MANIFESTS {
+                return Err(RegistryError::ManifestRead {
+                    path: dir.to_path_buf(),
+                    reason: format!("registry exceeds the {MAX_MANIFESTS}-manifest limit"),
+                });
+            }
             let entry = entry.map_err(|e| RegistryError::ManifestRead {
                 path: dir.to_path_buf(),
                 reason: e.to_string(),
             })?;
 
             let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
+            let file_type = entry.file_type().map_err(|e| RegistryError::ManifestRead {
+                path: path.clone(),
+                reason: e.to_string(),
+            })?;
+            if !file_type.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
 
-            let content =
-                std::fs::read_to_string(&path).map_err(|e| RegistryError::ManifestRead {
+            let content = read_regular_text_bounded(&path, MAX_MANIFEST_BYTES).map_err(|e| {
+                RegistryError::ManifestRead {
                     path: path.clone(),
                     reason: e.to_string(),
-                })?;
+                }
+            })?;
 
             let manifest: ExtensionManifest =
                 serde_json::from_str(&content).map_err(|e| RegistryError::ManifestParse {
@@ -252,8 +343,31 @@ impl RegistryCatalog {
                     reason: e.to_string(),
                 })?;
 
+            crate::registry::installer::validate_manifest_install_inputs(&manifest)?;
+            let expected_kind = match kind_prefix {
+                "tools" => ManifestKind::Tool,
+                "channels" => ManifestKind::Channel,
+                _ => {
+                    return Err(RegistryError::ManifestRead {
+                        path: dir.to_path_buf(),
+                        reason: format!("unsupported manifest directory '{kind_prefix}'"),
+                    });
+                }
+            };
+            if manifest.kind != expected_kind {
+                return Err(RegistryError::InvalidManifest {
+                    name: manifest.name.clone(),
+                    field: "kind",
+                    reason: format!("does not match its '{kind_prefix}' directory"),
+                });
+            }
             let key = format!("{}/{}", kind_prefix, manifest.name);
-            manifests.insert(key, manifest);
+            if manifests.insert(key.clone(), manifest).is_some() {
+                return Err(RegistryError::ManifestRead {
+                    path: path.clone(),
+                    reason: format!("duplicate registry manifest key '{key}'"),
+                });
+            }
         }
 
         Ok(())
@@ -314,26 +428,21 @@ impl RegistryCatalog {
             return Ok(m);
         }
 
-        let has_tool = self.manifests.contains_key(&format!("tools/{}", name));
-        let has_channel = self.manifests.contains_key(&format!("channels/{}", name));
+        let tool_key = format!("tools/{name}");
+        let channel_key = format!("channels/{name}");
+        let tool = self.manifests.get(&tool_key);
+        let channel = self.manifests.get(&channel_key);
 
-        match (has_tool, has_channel) {
-            (true, true) => Err(RegistryError::AmbiguousName {
+        match (tool, channel) {
+            (Some(_), Some(_)) => Err(RegistryError::AmbiguousName {
                 name: name.to_string(),
                 kind_a: "tool",
                 prefix_a: "tools",
                 kind_b: "channel",
                 prefix_b: "channels",
             }),
-            (true, false) => Ok(self
-                .manifests
-                .get(&format!("tools/{}", name))
-                .expect("key existence verified by contains_key check")),
-            (false, true) => Ok(self
-                .manifests
-                .get(&format!("channels/{}", name))
-                .expect("key existence verified by contains_key check")),
-            (false, false) => Err(RegistryError::ExtensionNotFound(name.to_string())),
+            (Some(manifest), None) | (None, Some(manifest)) => Ok(manifest),
+            (None, None) => Err(RegistryError::ExtensionNotFound(name.to_string())),
         }
     }
 
@@ -478,6 +587,91 @@ impl RegistryCatalog {
         let manifest = self.get_strict(name)?;
         Ok((vec![manifest], None))
     }
+}
+
+fn read_regular_text_bounded(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > max_bytes {
+        return Err(std::io::Error::other(format!(
+            "must be a regular file no larger than {max_bytes} bytes"
+        )));
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file() || opened_metadata.len() > max_bytes {
+        return Err(std::io::Error::other(
+            "registry file changed or exceeded its limit while being opened",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.by_ref()
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(std::io::Error::other(
+            "registry file exceeds its size limit",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| std::io::Error::other("registry file is not valid UTF-8"))
+}
+
+fn validate_bundles(bundles: &HashMap<String, BundleDefinition>) -> Result<(), RegistryError> {
+    if bundles.len() > MAX_BUNDLES {
+        return Err(RegistryError::BundlesRead(format!(
+            "bundle count exceeds the {MAX_BUNDLES}-entry limit"
+        )));
+    }
+    for (name, bundle) in bundles {
+        let mut unique = std::collections::HashSet::with_capacity(bundle.extensions.len());
+        let valid_extensions = bundle.extensions.len() <= MAX_BUNDLE_EXTENSIONS
+            && bundle.extensions.iter().all(|extension| {
+                let Some((prefix, extension_name)) = extension.split_once('/') else {
+                    return false;
+                };
+                matches!(prefix, "tools" | "channels")
+                    && valid_catalog_identifier(extension_name, 128)
+                    && unique.insert(extension)
+            });
+        if !valid_catalog_identifier(name, 128)
+            || !valid_catalog_text(&bundle.display_name, 256, false)
+            || bundle
+                .description
+                .as_deref()
+                .is_some_and(|value| !valid_catalog_text(value, 4 * 1024, false))
+            || !valid_extensions
+            || bundle
+                .shared_auth
+                .as_deref()
+                .is_some_and(|value| !valid_catalog_identifier(value, 128))
+        {
+            return Err(RegistryError::BundlesRead(format!(
+                "bundle '{name}' contains invalid or unbounded metadata"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn valid_catalog_identifier(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
+fn valid_catalog_text(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
+    (allow_empty || !value.trim().is_empty())
+        && value.len() <= max_bytes
+        && !value.chars().any(char::is_control)
 }
 
 #[cfg(test)]

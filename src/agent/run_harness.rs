@@ -41,8 +41,16 @@ impl RootRunMemorySyncObserver {
 
 #[async_trait]
 impl RunMemorySyncObserver for RootRunMemorySyncObserver {
-    async fn after_turn_sync(&self, user_id: &str, artifact: &AgentRunArtifact) {
-        self.manager.after_turn_sync(user_id, artifact).await;
+    async fn after_turn_sync(&self, _user_id: &str, artifact: &AgentRunArtifact) {
+        let Some(access) = crate::agent::learning::provider_access_context_from_artifact(artifact)
+        else {
+            tracing::debug!(
+                run_id = %artifact.run_id,
+                "External-memory sync skipped because the run artifact lacks canonical identity scope"
+            );
+            return;
+        };
+        self.manager.after_turn_sync(&access, artifact).await;
     }
 }
 

@@ -393,6 +393,7 @@ pub enum SubmissionResponsePlan {
 pub struct AgentResponsePayload {
     pub content: String,
     pub attachments: Vec<MediaContent>,
+    response_transform_applied: bool,
 }
 
 impl AgentResponsePayload {
@@ -400,6 +401,7 @@ impl AgentResponsePayload {
         Self {
             content: content.into(),
             attachments: Vec::new(),
+            response_transform_applied: false,
         }
     }
 
@@ -407,11 +409,24 @@ impl AgentResponsePayload {
         Self {
             content: content.into(),
             attachments,
+            response_transform_applied: false,
         }
     }
 
     pub fn is_empty(&self) -> bool {
         self.content.is_empty() && self.attachments.is_empty()
+    }
+
+    /// Whether the TransformResponse policy hook has already inspected this
+    /// payload. This prevents command-level finalization from applying a
+    /// non-idempotent transform twice while still letting all response paths
+    /// pass through the same final policy gate.
+    pub fn response_transform_applied(&self) -> bool {
+        self.response_transform_applied
+    }
+
+    pub fn mark_response_transform_applied(&mut self) {
+        self.response_transform_applied = true;
     }
 }
 

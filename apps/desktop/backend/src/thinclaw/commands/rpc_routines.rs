@@ -132,6 +132,10 @@ pub async fn thinclaw_cron_history(
     key: String,
     limit: u32,
 ) -> Result<serde_json::Value, String> {
+    if key.trim().is_empty() || key.len() > 256 || key.chars().any(char::is_control) {
+        return Err("Routine key is empty, malformed, or oversized".to_string());
+    }
+    let limit = limit.clamp(1, 500);
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let routine_id = remote_resolve_routine_id(&proxy, &key).await?;
         let runs = proxy.get_routine_history(&routine_id, limit).await?;
@@ -161,7 +165,7 @@ pub async fn thinclaw_cron_history(
     };
 
     let runs = store
-        .list_routine_runs(routine_id, limit as i64)
+        .list_routine_runs(routine_id, i64::from(limit))
         .await
         .map_err(|e| format!("Failed to list routine runs: {}", e))?;
 
@@ -520,11 +524,24 @@ pub async fn thinclaw_routine_audit_list(
     limit: Option<u32>,
     outcome: Option<String>,
 ) -> Result<Vec<super::types::RoutineAuditEntry>, String> {
+    if routine_key.trim().is_empty()
+        || routine_key.len() > 256
+        || routine_key.chars().any(char::is_control)
+    {
+        return Err("Routine key is empty, malformed, or oversized".to_string());
+    }
+    if outcome.as_deref().is_some_and(|value| {
+        !matches!(
+            value,
+            "success" | "ok" | "failure" | "failed" | "attention" | "running"
+        )
+    }) {
+        return Err("Unknown routine outcome filter".to_string());
+    }
+    let limit = limit.unwrap_or(50).clamp(1, 500);
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let routine_id = remote_resolve_routine_id(&proxy, &routine_key).await?;
-        let runs = proxy
-            .get_routine_history(&routine_id, limit.unwrap_or(50))
-            .await?;
+        let runs = proxy.get_routine_history(&routine_id, limit).await?;
         return Ok(remote_runs_to_audit_entries(
             &routine_key,
             &runs,
@@ -555,7 +572,7 @@ pub async fn thinclaw_routine_audit_list(
         None => return Ok(vec![]),
     };
 
-    let db_limit = limit.unwrap_or(50) as i64;
+    let db_limit = i64::from(limit);
     let runs = store
         .list_routine_runs(routine_id, db_limit)
         .await
@@ -571,7 +588,7 @@ pub async fn thinclaw_routine_audit_list(
                     "failure" | "failed" => status_str == "failed",
                     "attention" => status_str == "attention",
                     "running" => status_str == "running",
-                    _ => true,
+                    _ => false,
                 }
             } else {
                 true

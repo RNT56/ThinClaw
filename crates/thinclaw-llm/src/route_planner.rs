@@ -641,6 +641,7 @@ impl RoutePlanner {
         let executor_identity =
             preferred_lane_identity_candidate(&evaluation.ranked, PreferredLaneRole::Cheap)
                 .or_else(|| executor.clone());
+        let executor = executor.or_else(|| executor_identity.clone());
         let request_primary = evaluation
             .ranked
             .iter()
@@ -665,6 +666,7 @@ impl RoutePlanner {
             PreferredLaneRole::Primary,
         )
         .or_else(|| advisor.clone());
+        let advisor = advisor.or_else(|| advisor_identity.clone());
 
         let primary_fallback = request_primary
             .clone()
@@ -760,8 +762,19 @@ impl RoutePlanner {
             };
         }
 
-        let executor = executor.expect("executor checked above");
-        let advisor = advisor.expect("advisor checked above");
+        let (Some(executor), Some(advisor)) = (executor, advisor) else {
+            let mut fallback = RouteDecision::primary(
+                "AdvisorExecutor degraded because a selected lane disappeared",
+            );
+            fallback.candidate_list = combined_candidate_list;
+            fallback.rejections = combined_rejections;
+            fallback.score_breakdown = combined_score_breakdown;
+            fallback.diagnostics = combined_diagnostics;
+            fallback
+                .diagnostics
+                .push("ADVISOR_DISABLED: selected lane disappeared".to_string());
+            return fallback;
+        };
         let advisor_target = advisor.target.clone();
         let executor_identity_target = executor_identity
             .as_ref()

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -780,11 +780,9 @@ fn relative_path_policy_blocks_traversal() {
 
 #[test]
 fn package_file_json_reports_relative_paths_and_sizes() {
-    let files = vec![SkillPackageFile {
-        relative_path: "SKILL.md".to_string(),
-        source_path: PathBuf::from("SKILL.md"),
-        bytes: 42,
-    }];
+    let package = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("SKILL.md"), vec![b'x'; 42]).unwrap();
+    let files = collect_skill_package_files(package.path()).unwrap();
 
     assert_eq!(
         package_file_json(&files),

@@ -1,20 +1,116 @@
 use super::*;
 
-pub(super) fn load_json_file<T: DeserializeOwned>(path: &Path) -> Option<T> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+const MAX_AUTONOMY_STATE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+pub(super) fn autonomy_state_sidecar(path: &Path) -> Result<PathBuf, String> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "autonomy state path has no valid filename".to_string())?;
+    Ok(path.with_file_name(format!(".{name}.state-sidecar")))
+}
+
+pub(super) fn read_autonomy_file_sync(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    use std::io::Read as _;
+
+    let sidecar = autonomy_state_sidecar(path)?;
+    thinclaw_platform::recover_file_pair_sync(path, &sidecar)
+        .map_err(|error| format!("failed to recover {}: {error}", path.display()))?;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("failed to inspect {}: {error}", path.display())),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_AUTONOMY_STATE_FILE_BYTES
+    {
+        return Err(format!(
+            "autonomy state file {} is not a bounded regular file",
+            path.display()
+        ));
+    }
+    let _guard = thinclaw_platform::acquire_artifact_read_lock_sync(path)
+        .map_err(|error| format!("failed to lock {}: {error}", path.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+    if !opened_metadata.is_file()
+        || opened_metadata.len() != metadata.len()
+        || opened_metadata.len() > MAX_AUTONOMY_STATE_FILE_BYTES
+    {
+        return Err(format!("autonomy state file {} changed", path.display()));
+    }
+    let opened_len = usize::try_from(opened_metadata.len())
+        .map_err(|_| "autonomy state file does not fit this platform".to_string())?;
+    let mut bytes = Vec::with_capacity(opened_len);
+    file.take(MAX_AUTONOMY_STATE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    if bytes.len() != opened_len {
+        return Err(format!("autonomy state file {} changed", path.display()));
+    }
+    Ok(Some(bytes))
+}
+
+pub(super) async fn read_autonomy_file(path: PathBuf) -> Result<Option<Vec<u8>>, String> {
+    tokio::task::spawn_blocking(move || read_autonomy_file_sync(&path))
+        .await
+        .map_err(|error| format!("autonomy state reader panicked: {error}"))?
+}
+
+pub(super) async fn write_autonomy_file(path: PathBuf, bytes: Vec<u8>) -> Result<(), String> {
+    if bytes.len() > MAX_AUTONOMY_STATE_FILE_BYTES as usize {
+        return Err("autonomy state file exceeds its size limit".to_string());
+    }
+    let sidecar = autonomy_state_sidecar(&path)?;
+    thinclaw_platform::publish_file_pair(
+        path,
+        sidecar,
+        bytes,
+        None,
+        thinclaw_platform::ExistingPairPolicy::Replace,
+    )
+    .await
+    .map_err(|error| format!("failed to publish autonomy state: {error}"))
+}
+
+pub(super) async fn remove_autonomy_file(path: PathBuf) -> Result<(), String> {
+    let sidecar = autonomy_state_sidecar(&path)?;
+    thinclaw_platform::remove_file_pair(path, sidecar)
+        .await
+        .map_err(|error| format!("failed to remove autonomy state: {error}"))
+}
+
+pub(super) fn load_json_file_sync<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
+    let Some(raw) = read_autonomy_file_sync(path)? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&raw)
+        .map(Some)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))
 }
 
 pub(super) async fn load_json_file_async<T: DeserializeOwned>(
     path: PathBuf,
 ) -> Result<Option<T>, String> {
-    match tokio::fs::read_to_string(&path).await {
-        Ok(raw) => serde_json::from_str(&raw)
-            .map(Some)
-            .map_err(|e| format!("failed to parse {}: {e}", path.display())),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(format!("failed to read {}: {err}", path.display())),
-    }
+    let raw = read_autonomy_file(path.clone()).await?;
+    raw.map(|bytes| {
+        serde_json::from_slice(&bytes)
+            .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+    })
+    .transpose()
 }
 
 pub(super) fn bootstrap_report_checks(
@@ -116,11 +212,9 @@ pub(super) async fn run_command_check(name: &str, command: &mut Command) -> Auto
 pub async fn run_shadow_canary_entrypoint(
     manifest_path: &Path,
 ) -> Result<DesktopCanaryReport, String> {
-    let raw = tokio::fs::read_to_string(manifest_path)
-        .await
-        .map_err(|e| format!("failed to read canary manifest: {e}"))?;
-    let manifest: DesktopCanaryManifest =
-        serde_json::from_str(&raw).map_err(|e| format!("failed to parse canary manifest: {e}"))?;
+    let manifest: DesktopCanaryManifest = load_json_file_async(manifest_path.to_path_buf())
+        .await?
+        .ok_or_else(|| "canary manifest does not exist".to_string())?;
 
     let settings = crate::settings::Settings::default();
     let desktop_config = DesktopAutonomyConfig::resolve(&settings).map_err(|e| e.to_string())?;
@@ -140,13 +234,41 @@ pub async fn run_shadow_canary_entrypoint(
 }
 
 pub(super) async fn run_cmd(command: &mut Command) -> Result<String, String> {
-    let output = command
-        .output()
-        .await
-        .map_err(|e| format!("failed to spawn command: {e}"))?;
+    const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+    const COMMAND_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+    const ERROR_PREVIEW_LIMIT: usize = 32 * 1024;
+
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never")
+        .env("GIT_PAGER", "cat")
+        .env("GIT_CONFIG_COUNT", "2")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env(
+            "GIT_CONFIG_VALUE_0",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_KEY_1", "commit.gpgSign")
+        .env("GIT_CONFIG_VALUE_1", "false");
+    let output = thinclaw_platform::bounded_command_output(
+        command,
+        COMMAND_TIMEOUT,
+        COMMAND_OUTPUT_LIMIT,
+        COMMAND_OUTPUT_LIMIT,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr_bytes = output
+            .stderr
+            .get(..ERROR_PREVIEW_LIMIT)
+            .unwrap_or(&output.stderr);
+        let stdout_bytes = output
+            .stdout
+            .get(..ERROR_PREVIEW_LIMIT)
+            .unwrap_or(&output.stdout);
+        let stderr = String::from_utf8_lossy(stderr_bytes).trim().to_string();
+        let stdout = String::from_utf8_lossy(stdout_bytes).trim().to_string();
         let detail = if stderr.is_empty() { stdout } else { stderr };
         return Err(if detail.is_empty() {
             format!("command exited with status {}", output.status)
@@ -158,44 +280,70 @@ pub(super) async fn run_cmd(command: &mut Command) -> Result<String, String> {
 }
 
 pub(super) fn command_on_path(name: &str) -> bool {
-    std::process::Command::new("sh")
-        .arg("-lc")
-        .arg(format!("command -v {name} >/dev/null 2>&1"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && thinclaw_platform::find_executable_in_path(name).is_some()
 }
 
-pub(super) fn python_module_on_path(module: &str) -> bool {
-    std::process::Command::new("python3")
-        .arg("-c")
-        .arg(format!("import {module}"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+pub(super) async fn python_module_on_path(module: &str) -> bool {
+    if module.is_empty()
+        || !module.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+    {
+        return false;
+    }
+    run_cmd(
+        Command::new("python3")
+            .arg("-c")
+            .arg(format!("import {module}")),
+    )
+    .await
+    .is_ok()
 }
 
 pub(super) fn permissions_report_passed(report: &serde_json::Value) -> bool {
-    let object = report.as_object().cloned().unwrap_or_default();
-    object.values().all(|value| {
-        value.as_bool().unwrap_or_else(|| {
-            value
-                .as_str()
-                .map(|text| !matches!(text, "denied" | "false"))
-                .unwrap_or(true)
-        })
-    })
+    let Some(object) = report.as_object() else {
+        return false;
+    };
+    if object
+        .get("accessibility")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+        || object
+            .get("screen_recording")
+            .and_then(|value| value.as_bool())
+            != Some(true)
+    {
+        return false;
+    }
+
+    let available = |key: &str, allowed: &[&str]| {
+        object
+            .get(key)
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| allowed.contains(&value))
+    };
+    match object.get("platform").and_then(|value| value.as_str()) {
+        Some("macos") => available("calendar", &["authorized"]),
+        Some("windows") => {
+            available("calendar", &["available"])
+                && available("excel", &["available"])
+                && available("word", &["available"])
+                && available("ocr", &["available"])
+        }
+        Some("linux") => available("calendar", &["available"]) && available("ocr", &["available"]),
+        _ => false,
+    }
 }
 
 pub(super) fn bridge_report_passed(report: &serde_json::Value) -> bool {
-    report
-        .get("ok")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(true)
+    report.as_object().is_some() && report.get("ok").and_then(|value| value.as_bool()) == Some(true)
 }
 
 pub(super) fn trim_failed_canaries(entries: &mut Vec<DateTime<Utc>>) {
@@ -301,29 +449,89 @@ pub(super) fn shell_single_quote(raw: &str) -> String {
 }
 
 pub(super) fn linux_user_home(username: &str) -> Option<PathBuf> {
-    let output = std::process::Command::new("getent")
-        .arg("passwd")
-        .arg(username)
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    if username.is_empty()
+        || username.len() > 256
+        || !username
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
         return None;
     }
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let home = raw.trim_end().split(':').nth(5)?;
-    if home.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(home))
-    }
+    let bytes =
+        thinclaw_platform::read_regular_file_bounded(Path::new("/etc/passwd"), 4 * 1024 * 1024)
+            .ok()?;
+    let raw = std::str::from_utf8(&bytes).ok()?;
+    let home = raw.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next()? == username)
+            .then(|| fields.nth(4))
+            .flatten()
+    })?;
+    let home = PathBuf::from(home);
+    home.is_absolute().then_some(home)
 }
 
 pub(super) fn copy_fixture_path(src: &Path, dst: &Path) -> Result<(), String> {
-    let metadata = std::fs::metadata(src)
+    let mut budget = FixtureCopyBudget::default();
+    copy_fixture_path_inner(src, dst, 0, &mut budget)
+}
+
+#[derive(Default)]
+struct FixtureCopyBudget {
+    entries: usize,
+    bytes: u64,
+}
+
+fn copy_fixture_path_inner(
+    src: &Path,
+    dst: &Path,
+    depth: usize,
+    budget: &mut FixtureCopyBudget,
+) -> Result<(), String> {
+    const MAX_FIXTURE_DEPTH: usize = 64;
+    const MAX_FIXTURE_ENTRIES: usize = 20_000;
+    const MAX_FIXTURE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+    const MAX_FIXTURE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+
+    if depth > MAX_FIXTURE_DEPTH {
+        return Err("fixture package exceeds its nesting limit".to_string());
+    }
+    budget.entries = budget
+        .entries
+        .checked_add(1)
+        .ok_or_else(|| "fixture entry count overflowed".to_string())?;
+    if budget.entries > MAX_FIXTURE_ENTRIES {
+        return Err("fixture package exceeds its entry limit".to_string());
+    }
+
+    let metadata = std::fs::symlink_metadata(src)
         .map_err(|e| format!("failed to inspect fixture {}: {e}", src.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "fixture {} is a symlink and cannot be copied",
+            src.display()
+        ));
+    }
     if metadata.is_dir() {
-        std::fs::create_dir_all(dst)
-            .map_err(|e| format!("failed to create fixture dir {}: {e}", dst.display()))?;
+        match std::fs::symlink_metadata(dst) {
+            Ok(existing) if existing.file_type().is_symlink() || !existing.is_dir() => {
+                return Err(format!(
+                    "fixture destination {} is not a real directory",
+                    dst.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(dst)
+                    .map_err(|e| format!("failed to create fixture dir {}: {e}", dst.display()))?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect fixture destination {}: {error}",
+                    dst.display()
+                ));
+            }
+        }
         for entry in std::fs::read_dir(src)
             .map_err(|e| format!("failed to read fixture dir {}: {e}", src.display()))?
         {
@@ -331,25 +539,94 @@ pub(super) fn copy_fixture_path(src: &Path, dst: &Path) -> Result<(), String> {
                 .map_err(|e| format!("failed to read fixture entry in {}: {e}", src.display()))?;
             let child_src = entry.path();
             let child_dst = dst.join(entry.file_name());
-            copy_fixture_path(&child_src, &child_dst)?;
+            copy_fixture_path_inner(&child_src, &child_dst, depth + 1, budget)?;
         }
         return Ok(());
     }
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "failed to create fixture parent dir {}: {e}",
-                parent.display()
-            )
-        })?;
+    if !metadata.is_file() || metadata.len() > MAX_FIXTURE_FILE_BYTES {
+        return Err(format!(
+            "fixture {} is not a bounded regular file",
+            src.display()
+        ));
     }
-    std::fs::copy(src, dst).map_err(|e| {
+    budget.bytes = budget
+        .bytes
+        .checked_add(metadata.len())
+        .ok_or_else(|| "fixture byte count overflowed".to_string())?;
+    if budget.bytes > MAX_FIXTURE_TOTAL_BYTES {
+        return Err("fixture package exceeds its total size limit".to_string());
+    }
+    let parent = dst
+        .parent()
+        .ok_or_else(|| "fixture destination has no parent".to_string())?;
+    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
         format!(
-            "failed to copy fixture {} -> {}: {e}",
-            src.display(),
+            "failed to inspect fixture parent {}: {error}",
+            parent.display()
+        )
+    })?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(format!(
+            "fixture destination parent {} is not a real directory",
+            parent.display()
+        ));
+    }
+
+    let mut source_options = std::fs::OpenOptions::new();
+    source_options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        source_options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut source = source_options
+        .open(src)
+        .map_err(|error| format!("failed to open fixture {}: {error}", src.display()))?;
+    let opened_metadata = source
+        .metadata()
+        .map_err(|error| format!("failed to re-inspect fixture {}: {error}", src.display()))?;
+    if opened_metadata.len() != metadata.len() {
+        return Err(format!("fixture {} changed while copying", src.display()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if opened_metadata.dev() != metadata.dev() || opened_metadata.ino() != metadata.ino() {
+            return Err(format!("fixture {} changed while opening", src.display()));
+        }
+    }
+    let mut destination_options = std::fs::OpenOptions::new();
+    destination_options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        destination_options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut destination = destination_options.open(dst).map_err(|error| {
+        format!(
+            "failed to create fixture destination {}: {error}",
             dst.display()
         )
     })?;
+    let mut limited_source = std::io::Read::take(&mut source, metadata.len() + 1);
+    let copy_result = std::io::copy(&mut limited_source, &mut destination).and_then(|copied| {
+        if copied == metadata.len() {
+            destination.sync_all()
+        } else {
+            Err(std::io::Error::other("fixture changed while copying"))
+        }
+    });
+    if let Err(error) = copy_result {
+        drop(destination);
+        let _ = std::fs::remove_file(dst);
+        return Err(format!(
+            "failed to copy fixture {} -> {}: {error}",
+            src.display(),
+            dst.display()
+        ));
+    }
     Ok(())
 }
 

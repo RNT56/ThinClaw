@@ -56,6 +56,35 @@ pub struct PricingCache {
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 const PRICING_DB_NAMESPACE: &str = "system";
 const PRICING_DB_KEY: &str = "pricing_cache";
+const MAX_PRICING_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PRICING_MODELS: usize = 10_000;
+const MAX_MODEL_ID_BYTES: usize = 256;
+const MAX_PRICE_STRING_BYTES: usize = 64;
+
+fn valid_model_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_MODEL_ID_BYTES && !id.chars().any(char::is_control)
+}
+
+fn parse_price_pair(id: &str, input: &str, output: &str) -> Option<(Decimal, Decimal)> {
+    if !valid_model_id(id)
+        || input.len() > MAX_PRICE_STRING_BYTES
+        || output.len() > MAX_PRICE_STRING_BYTES
+    {
+        return None;
+    }
+    let input = input.parse::<Decimal>().ok()?;
+    let output = output.parse::<Decimal>().ok()?;
+    let maximum = Decimal::from(100_u32);
+    if input.is_sign_negative()
+        || output.is_sign_negative()
+        || input > maximum
+        || output > maximum
+        || (input.is_zero() && output.is_zero())
+    {
+        return None;
+    }
+    Some((input, output))
+}
 
 /// Fetch current pricing from OpenRouter's public API.
 ///
@@ -64,6 +93,10 @@ const PRICING_DB_KEY: &str = "pricing_cache";
 pub async fn fetch_openrouter_pricing() -> Result<HashMap<String, (Decimal, Decimal)>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .user_agent(concat!("thinclaw/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
@@ -72,7 +105,7 @@ pub async fn fetch_openrouter_pricing() -> Result<HashMap<String, (Decimal, Deci
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| format!("Failed to fetch OpenRouter models: {}", e))?;
+        .map_err(|e| format!("Failed to fetch OpenRouter models: {}", e.without_url()))?;
 
     if !response.status().is_success() {
         return Err(format!(
@@ -81,14 +114,14 @@ pub async fn fetch_openrouter_pricing() -> Result<HashMap<String, (Decimal, Deci
         ));
     }
 
-    let body: OpenRouterResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse OpenRouter response: {}", e))?;
+    let body: OpenRouterResponse =
+        crate::http_response::bounded_json(response, MAX_PRICING_RESPONSE_BYTES)
+            .await
+            .map_err(|e| format!("Failed to parse OpenRouter response: {}", e))?;
 
     let mut pricing = HashMap::new();
 
-    for model in body.data {
+    for model in body.data.into_iter().take(MAX_PRICING_MODELS) {
         let Some(price) = model.pricing else {
             continue;
         };
@@ -99,18 +132,11 @@ pub async fn fetch_openrouter_pricing() -> Result<HashMap<String, (Decimal, Deci
             continue;
         };
 
-        // Parse as Decimal for precision
-        let Ok(input_cost) = prompt_str.parse::<Decimal>() else {
+        let Some((input_cost, output_cost)) =
+            parse_price_pair(&model.id, &prompt_str, &completion_str)
+        else {
             continue;
         };
-        let Ok(output_cost) = completion_str.parse::<Decimal>() else {
-            continue;
-        };
-
-        // Skip free/zero-cost models (local models handled by static table)
-        if input_cost.is_zero() && output_cost.is_zero() {
-            continue;
-        }
 
         pricing.insert(model.id, (input_cost, output_cost));
     }
@@ -129,7 +155,13 @@ fn to_cache(pricing: &HashMap<String, (Decimal, Decimal)>) -> PricingCache {
         fetched_at: chrono::Utc::now().to_rfc3339(),
         models: pricing
             .iter()
-            .map(|(id, (input, output))| (id.clone(), (input.to_string(), output.to_string())))
+            .filter_map(|(id, (input, output))| {
+                let input = input.to_string();
+                let output = output.to_string();
+                parse_price_pair(id, &input, &output)?;
+                Some((id.clone(), (input, output)))
+            })
+            .take(MAX_PRICING_MODELS)
             .collect(),
     }
 }
@@ -139,9 +171,9 @@ fn from_cache(cache: &PricingCache) -> HashMap<String, (Decimal, Decimal)> {
     cache
         .models
         .iter()
+        .take(MAX_PRICING_MODELS)
         .filter_map(|(id, (input_str, output_str))| {
-            let input = input_str.parse::<Decimal>().ok()?;
-            let output = output_str.parse::<Decimal>().ok()?;
+            let (input, output) = parse_price_pair(id, input_str, output_str)?;
             Some((id.clone(), (input, output)))
         })
         .collect()
@@ -151,10 +183,19 @@ fn from_cache(cache: &PricingCache) -> HashMap<String, (Decimal, Decimal)> {
 pub async fn load_cache_from_db(db: &dyn crate::db::Database) -> Option<PricingCache> {
     match db.get_setting(PRICING_DB_NAMESPACE, PRICING_DB_KEY).await {
         Ok(Some(json_value)) => match serde_json::from_value::<PricingCache>(json_value) {
-            Ok(cache) => {
+            Ok(mut cache) => {
+                if cache.fetched_at.len() > 128
+                    || chrono::DateTime::parse_from_rfc3339(&cache.fetched_at).is_err()
+                {
+                    tracing::warn!("Pricing cache has an invalid fetch timestamp");
+                    return None;
+                }
+                cache.models = from_cache(&cache)
+                    .into_iter()
+                    .map(|(id, (input, output))| (id, (input.to_string(), output.to_string())))
+                    .collect();
                 tracing::info!(
                     models = cache.models.len(),
-                    fetched_at = %cache.fetched_at,
                     "Loaded pricing cache from database"
                 );
                 Some(cache)
@@ -235,8 +276,14 @@ pub async fn sync_once(db: Option<&dyn crate::db::Database>) -> bool {
 pub fn spawn_pricing_sync(
     db: Option<std::sync::Arc<dyn crate::db::Database>>,
 ) -> tokio::task::JoinHandle<()> {
-    let (_shutdown_tx, shutdown_rx) = oneshot::channel();
-    spawn_pricing_sync_with_shutdown(db, shutdown_rx)
+    tokio::spawn(async move {
+        // Keep the sender alive inside the owned task. Dropping it before
+        // spawning makes a oneshot receiver immediately readable and used to
+        // terminate desktop pricing sync before its first cache load.
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let _shutdown_tx = shutdown_tx;
+        run_pricing_sync(db, shutdown_rx).await;
+    })
 }
 
 /// Spawn the background pricing sync task with cooperative shutdown.
@@ -246,57 +293,62 @@ pub fn spawn_pricing_sync(
 /// to wait on OpenRouter network I/O.
 pub fn spawn_pricing_sync_with_shutdown(
     db: Option<std::sync::Arc<dyn crate::db::Database>>,
-    mut shutdown_rx: oneshot::Receiver<()>,
+    shutdown_rx: oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        // Step 1: Try loading from DB cache for instant startup pricing
-        if let Some(ref db) = db
-            && let Some(cache) = tokio::select! {
-                _ = &mut shutdown_rx => {
-                    tracing::info!("Pricing sync stopped before loading DB cache");
-                    return;
-                }
-                cache = load_cache_from_db(db.as_ref()) => cache,
-            }
-        {
-            let fetched_at = chrono::DateTime::parse_from_rfc3339(&cache.fetched_at)
-                .ok()
-                .map(|dt| dt.with_timezone(&chrono::Utc));
-            let cached = from_cache(&cache);
-            costs::set_dynamic_pricing_with_fetched_at(cached, fetched_at);
-        }
+    tokio::spawn(run_pricing_sync(db, shutdown_rx))
+}
 
-        // Step 2: Fetch fresh pricing from OpenRouter
-        let db_ref = db.as_deref();
+async fn run_pricing_sync(
+    db: Option<std::sync::Arc<dyn crate::db::Database>>,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) {
+    // Step 1: Try loading from DB cache for instant startup pricing
+    if let Some(ref db) = db
+        && let Some(cache) = tokio::select! {
+            _ = &mut shutdown_rx => {
+                tracing::info!("Pricing sync stopped before loading DB cache");
+                return;
+            }
+            cache = load_cache_from_db(db.as_ref()) => cache,
+        }
+    {
+        let fetched_at = chrono::DateTime::parse_from_rfc3339(&cache.fetched_at)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc));
+        let cached = from_cache(&cache);
+        costs::set_dynamic_pricing_with_fetched_at(cached, fetched_at);
+    }
+
+    // Step 2: Fetch fresh pricing from OpenRouter
+    let db_ref = db.as_deref();
+    tokio::select! {
+        _ = &mut shutdown_rx => {
+            tracing::info!("Pricing sync stopped before initial fetch");
+            return;
+        }
+        _ = sync_once(db_ref) => {}
+    }
+
+    // Step 3: Refresh every 24 hours
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+    interval.tick().await; // skip the immediate first tick (already did sync above)
+
+    loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
-                tracing::info!("Pricing sync stopped before initial fetch");
-                return;
+                tracing::info!("Pricing sync stopped");
+                break;
+            }
+            _ = interval.tick() => {}
+        }
+        tokio::select! {
+            _ = &mut shutdown_rx => {
+                tracing::info!("Pricing sync stopped before scheduled fetch");
+                break;
             }
             _ = sync_once(db_ref) => {}
         }
-
-        // Step 3: Refresh every 24 hours
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
-        interval.tick().await; // skip the immediate first tick (already did sync above)
-
-        loop {
-            tokio::select! {
-                _ = &mut shutdown_rx => {
-                    tracing::info!("Pricing sync stopped");
-                    break;
-                }
-                _ = interval.tick() => {}
-            }
-            tokio::select! {
-                _ = &mut shutdown_rx => {
-                    tracing::info!("Pricing sync stopped before scheduled fetch");
-                    break;
-                }
-                _ = sync_once(db_ref) => {}
-            }
-        }
-    })
+    }
 }
 
 #[cfg(test)]
@@ -346,6 +398,31 @@ mod tests {
         assert!(restored.contains_key("good-model"));
     }
 
+    #[test]
+    fn pricing_policy_rejects_negative_extreme_and_oversized_values() {
+        assert!(parse_price_pair("model", "0.001", "0.002").is_some());
+        assert!(parse_price_pair("model", "-0.001", "0.002").is_none());
+        assert!(parse_price_pair("model", "101", "0.002").is_none());
+        assert!(parse_price_pair("model", "0", "0").is_none());
+        assert!(parse_price_pair(&"x".repeat(MAX_MODEL_ID_BYTES + 1), "1", "1").is_none());
+        assert!(parse_price_pair("model", &"1".repeat(MAX_PRICE_STRING_BYTES + 1), "1").is_none());
+    }
+
+    #[test]
+    fn cache_policy_drops_poisoned_prices() {
+        let cache = PricingCache {
+            fetched_at: "2026-04-07T00:00:00Z".to_string(),
+            models: HashMap::from([
+                ("negative".to_string(), ("-1".to_string(), "1".to_string())),
+                ("free".to_string(), ("0".to_string(), "0".to_string())),
+                ("valid".to_string(), ("0.1".to_string(), "0.2".to_string())),
+            ]),
+        };
+        let restored = from_cache(&cache);
+        assert_eq!(restored.len(), 1);
+        assert!(restored.contains_key("valid"));
+    }
+
     #[tokio::test]
     async fn test_pricing_sync_with_shutdown_exits_before_fetch() {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -358,5 +435,17 @@ mod tests {
             .await
             .expect("pricing sync should stop promptly")
             .expect("pricing sync task should not panic");
+    }
+
+    #[tokio::test]
+    async fn no_signal_pricing_sync_does_not_self_cancel() {
+        let handle = spawn_pricing_sync(None);
+        tokio::task::yield_now().await;
+        assert!(
+            !handle.is_finished(),
+            "no-signal pricing sync must remain alive for scheduled refreshes"
+        );
+        handle.abort();
+        let _ = handle.await;
     }
 }

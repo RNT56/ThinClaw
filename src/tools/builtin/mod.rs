@@ -58,7 +58,7 @@ pub use agent_management::{
 };
 pub use apple_mail::AppleMailTool;
 #[cfg(feature = "browser")]
-pub use browser::BrowserTool;
+pub use browser::{BrowserTool, RootBrowserEgressRuntime};
 #[cfg(feature = "browser")]
 pub use browser_a11y::AgentBrowserTool;
 pub use camera_capture::CameraCaptureTool;

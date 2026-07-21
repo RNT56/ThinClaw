@@ -5,10 +5,22 @@ use thinclaw_types::error::ConfigError;
 
 use crate::helpers::optional_env;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct CloudflareTunnelConfig {
     /// Token from the Cloudflare Zero Trust dashboard.
     pub token: String,
+    /// Public HTTPS hostname configured for the named tunnel.
+    pub hostname: String,
+}
+
+impl std::fmt::Debug for CloudflareTunnelConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CloudflareTunnelConfig")
+            .field("token", &"[REDACTED]")
+            .field("hostname", &self.hostname)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -19,7 +31,7 @@ pub struct TailscaleTunnelConfig {
     pub hostname: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct NgrokTunnelConfig {
     /// ngrok auth token.
     pub auth_token: String,
@@ -27,7 +39,17 @@ pub struct NgrokTunnelConfig {
     pub domain: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+impl std::fmt::Debug for NgrokTunnelConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NgrokTunnelConfig")
+            .field("auth_token", &"[REDACTED]")
+            .field("domain", &self.domain)
+            .finish()
+    }
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct CustomTunnelConfig {
     /// Shell command with `{port}` and `{host}` placeholders.
     pub start_command: String,
@@ -35,6 +57,20 @@ pub struct CustomTunnelConfig {
     pub health_url: Option<String>,
     /// Substring to match in stdout for URL extraction.
     pub url_pattern: Option<String>,
+}
+
+impl std::fmt::Debug for CustomTunnelConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CustomTunnelConfig")
+            .field("start_command", &"[REDACTED COMMAND]")
+            .field(
+                "health_url",
+                &self.health_url.as_ref().map(|_| "[REDACTED URL]"),
+            )
+            .field("url_pattern", &self.url_pattern)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -47,12 +83,25 @@ pub struct TunnelProviderConfig {
     pub custom: Option<CustomTunnelConfig>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct TunnelConfig {
     /// Public URL from tunnel provider.
     pub public_url: Option<String>,
     /// Provider configuration for lifecycle-managed tunnels.
     pub provider: Option<TunnelProviderConfig>,
+}
+
+impl std::fmt::Debug for TunnelConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TunnelConfig")
+            .field(
+                "public_url",
+                &self.public_url.as_ref().map(|_| "[REDACTED URL]"),
+            )
+            .field("provider", &self.provider)
+            .finish()
+    }
 }
 
 impl TunnelConfig {
@@ -78,9 +127,41 @@ impl TunnelConfig {
         } else {
             Some(TunnelProviderConfig {
                 provider: provider_name.clone(),
-                cloudflare: optional_env("TUNNEL_CF_TOKEN")?
+                cloudflare: match optional_env("TUNNEL_CF_TOKEN")?
                     .or_else(|| settings.tunnel.cf_token.clone())
-                    .map(|token| CloudflareTunnelConfig { token }),
+                {
+                    Some(token) => {
+                        let hostname = optional_env("TUNNEL_CF_HOSTNAME")?
+                            .or_else(|| settings.tunnel.cf_hostname.clone())
+                            .ok_or_else(|| ConfigError::InvalidValue {
+                                key: "TUNNEL_CF_HOSTNAME".to_string(),
+                                message: "is required for a managed Cloudflare named tunnel"
+                                    .to_string(),
+                            })?;
+                        let parsed = url::Url::parse(&hostname).map_err(|error| {
+                            ConfigError::InvalidValue {
+                                key: "TUNNEL_CF_HOSTNAME".to_string(),
+                                message: format!("must be a valid HTTPS URL: {error}"),
+                            }
+                        })?;
+                        if parsed.scheme() != "https"
+                            || parsed.host_str().is_none()
+                            || !parsed.username().is_empty()
+                            || parsed.password().is_some()
+                            || parsed.query().is_some()
+                            || parsed.fragment().is_some()
+                        {
+                            return Err(ConfigError::InvalidValue {
+                                key: "TUNNEL_CF_HOSTNAME".to_string(),
+                                message:
+                                    "must be an HTTPS URL without credentials, query, or fragment"
+                                        .to_string(),
+                            });
+                        }
+                        Some(CloudflareTunnelConfig { token, hostname })
+                    }
+                    None => None,
+                },
                 tailscale: Some(TailscaleTunnelConfig {
                     funnel: optional_env("TUNNEL_TS_FUNNEL")?
                         .map(|s| s == "true" || s == "1")

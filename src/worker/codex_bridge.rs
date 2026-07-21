@@ -8,14 +8,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::BufReader;
 use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::error::WorkerError;
 use crate::worker::api::{CompletionReport, JobEventPayload, WorkerHttpClient};
 use crate::worker::bridge_common::{
-    copy_auth_dir_from_mount, poll_for_prompt, post_job_event, truncate,
+    MAX_BRIDGE_SESSION_ID_BYTES, MAX_BRIDGE_STATUS_LINE_BYTES, MAX_BRIDGE_STDOUT_LINE_BYTES,
+    OwnedBridgeChild, OwnedBridgeTask, bridge_secret_values, copy_auth_dir_from_mount,
+    poll_for_prompt, post_job_event, read_bounded_line, sanitize_bridge_status,
 };
 
 pub struct CodexBridgeConfig {
@@ -65,8 +67,8 @@ impl CodexBridgeRuntime {
         let job = self.client.get_job().await?;
         tracing::info!(
             job_id = %self.config.job_id,
-            "Starting Codex bridge for: {}",
-            truncate(&job.description, 100)
+            description_bytes = job.description.len(),
+            "Starting Codex bridge"
         );
 
         let credentials = self.client.fetch_credentials().await?;
@@ -231,6 +233,13 @@ impl CodexBridgeRuntime {
         resume_session_id: Option<&str>,
         extra_env: &std::collections::HashMap<String, String>,
     ) -> Result<Option<String>, WorkerError> {
+        if resume_session_id.is_some_and(|session_id| {
+            session_id.is_empty() || session_id.len() > MAX_BRIDGE_SESSION_ID_BYTES
+        }) {
+            return Err(WorkerError::ExecutionFailed {
+                reason: "refusing invalid Codex resume session ID".to_string(),
+            });
+        }
         let mut cmd = Command::new("codex");
         cmd.args(codex_args(&self.config.model, prompt, resume_session_id))
             .env("CODEX_HOME", CODEX_HOME_PATH)
@@ -239,80 +248,123 @@ impl CodexBridgeRuntime {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|e| WorkerError::ExecutionFailed {
-            reason: format!("failed to spawn codex: {}", e),
-        })?;
+        let mut child =
+            OwnedBridgeChild::spawn(&mut cmd).map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to spawn codex: {}", e),
+            })?;
 
         let stdout = child
-            .stdout
-            .take()
+            .take_stdout()
             .ok_or_else(|| WorkerError::ExecutionFailed {
                 reason: "failed to capture codex stdout".to_string(),
             })?;
 
         let stderr = child
-            .stderr
-            .take()
+            .take_stderr()
             .ok_or_else(|| WorkerError::ExecutionFailed {
                 reason: "failed to capture codex stderr".to_string(),
             })?;
 
         let client_for_stderr = Arc::clone(&self.client);
         let job_id = self.config.job_id;
-        let stderr_handle = tokio::spawn(async move {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(job_id = %job_id, "codex stderr: {}", line);
+        let stderr_secrets = bridge_secret_values(extra_env, &["OPENAI_API_KEY"]);
+        let mut stderr_task = OwnedBridgeTask::new(tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            loop {
+                let line = match read_bounded_line(&mut reader, MAX_BRIDGE_STATUS_LINE_BYTES).await
+                {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::debug!(job_id = %job_id, %error, "Failed to read codex stderr");
+                        break;
+                    }
+                };
+                let message = if line.truncated {
+                    format!("{} [truncated]", line.text)
+                } else {
+                    line.text
+                };
+                let message = sanitize_bridge_status(&message, &stderr_secrets);
+                tracing::debug!(job_id = %job_id, message_bytes = message.len(), "Codex CLI wrote stderr");
                 post_job_event(
                     &client_for_stderr,
                     "status",
-                    &serde_json::json!({ "message": line }),
+                    &serde_json::json!({ "message": message }),
                 )
                 .await;
             }
-        });
+        }));
 
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
+        let mut reader = BufReader::new(stdout);
         let mut session_id = resume_session_id.map(ToOwned::to_owned);
+        let session = async {
+            loop {
+                let Some(line) = read_bounded_line(&mut reader, MAX_BRIDGE_STDOUT_LINE_BYTES)
+                    .await
+                    .map_err(|error| WorkerError::ExecutionFailed {
+                        reason: format!("failed reading codex stdout: {error}"),
+                    })?
+                else {
+                    break;
+                };
+                if line.truncated {
+                    self.report_event(
+                        "status",
+                        &serde_json::json!({
+                            "message": "Codex emitted an oversized output record; record discarded"
+                        }),
+                    )
+                    .await;
+                    continue;
+                }
+                let line = line.text.trim();
+                if line.is_empty() {
+                    continue;
+                }
 
-        while let Ok(Some(line)) = lines.next_line().await {
-            let line = line.trim().to_string();
-            if line.is_empty() {
-                continue;
-            }
+                match serde_json::from_str::<Value>(line) {
+                    Ok(event) => {
+                        let (captured_id, payloads) = codex_event_to_payloads(&event);
+                        if let Some(captured_id) = captured_id {
+                            if captured_id.is_empty()
+                                || captured_id.len() > MAX_BRIDGE_SESSION_ID_BYTES
+                            {
+                                return Err(WorkerError::ExecutionFailed {
+                                    reason: "codex emitted an invalid session ID".to_string(),
+                                });
+                            }
+                            session_id = Some(captured_id);
+                        }
 
-            match serde_json::from_str::<Value>(&line) {
-                Ok(event) => {
-                    let (captured_id, payloads) = codex_event_to_payloads(&event);
-                    if captured_id.is_some() {
-                        session_id = captured_id;
+                        for payload in payloads {
+                            self.report_event(&payload.event_type, &payload.data).await;
+                        }
                     }
-
-                    for payload in payloads {
-                        self.report_event(&payload.event_type, &payload.data).await;
+                    Err(e) => {
+                        tracing::debug!(
+                            job_id = %self.config.job_id,
+                            "Non-JSON codex output: {} (parse error: {})",
+                            line,
+                            e
+                        );
+                        self.report_event("status", &serde_json::json!({ "message": line }))
+                            .await;
                     }
                 }
-                Err(e) => {
-                    tracing::debug!(
-                        job_id = %self.config.job_id,
-                        "Non-JSON codex output: {} (parse error: {})",
-                        line,
-                        e
-                    );
-                    self.report_event("status", &serde_json::json!({ "message": line }))
-                        .await;
-                }
             }
-        }
-
-        let status = match tokio::time::timeout(self.config.timeout, child.wait()).await {
-            Ok(wait_result) => wait_result.map_err(|e| WorkerError::ExecutionFailed {
-                reason: format!("failed waiting for codex: {}", e),
-            })?,
+            child
+                .wait()
+                .await
+                .map_err(|e| WorkerError::ExecutionFailed {
+                    reason: format!("failed waiting for codex: {}", e),
+                })
+        };
+        let status = match tokio::time::timeout(self.config.timeout, session).await {
+            Ok(result) => result?,
             Err(_) => {
-                let _ = child.kill().await;
+                child.terminate().await;
+                stderr_task.finish().await;
                 return Err(WorkerError::ExecutionFailed {
                     reason: format!(
                         "codex session timed out after {} seconds",
@@ -321,8 +373,7 @@ impl CodexBridgeRuntime {
                 });
             }
         };
-
-        let _ = stderr_handle.await;
+        stderr_task.finish().await;
 
         if !status.success() {
             let code = status.code().unwrap_or(-1);

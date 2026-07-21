@@ -29,6 +29,7 @@ mod onboarding;
 mod policy;
 mod prompt;
 mod providers;
+mod redaction;
 mod repo_projects;
 mod root;
 mod safety;

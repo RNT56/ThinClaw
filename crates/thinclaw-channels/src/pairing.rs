@@ -5,13 +5,12 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
 use rand::RngExt;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 const PAIRING_CODE_LENGTH: usize = 8;
@@ -23,6 +22,11 @@ const PAIRING_PENDING_MAX: usize = 3;
 const PAIRING_APPROVE_RATE_LIMIT: usize = 10;
 /// Time window for rate limit (seconds).
 const PAIRING_APPROVE_RATE_WINDOW_SECS: u64 = 5 * 60;
+const MAX_PAIRING_FILE_BYTES: usize = 1024 * 1024;
+const MAX_PAIRING_ID_BYTES: usize = 1024;
+const MAX_PAIRING_META_BYTES: usize = 256 * 1024;
+const MAX_ACCESS_ENTRIES: usize = 4096;
+const MAX_APPROVE_ATTEMPTS: usize = 128;
 
 /// Error from pairing store operations.
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +39,9 @@ pub enum PairingStoreError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("Invalid pairing data: {0}")]
+    InvalidData(String),
 
     #[error("Rate limit: too many failed approve attempts; try again later")]
     ApproveRateLimited,
@@ -84,21 +91,18 @@ fn default_pairing_dir() -> PathBuf {
 
 fn safe_channel_key(channel: &str) -> Result<String, PairingStoreError> {
     let raw = channel.trim().to_lowercase();
-    if raw.is_empty() {
-        return Err(PairingStoreError::InvalidChannel("empty".to_string()));
-    }
-    let safe = raw
-        .chars()
-        .map(|c| match c {
-            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            _ => c,
+    if !(1..=64).contains(&raw.len())
+        || !raw
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        || !raw.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
         })
-        .collect::<String>()
-        .replace("..", "_");
-    if safe.is_empty() || safe == "_" {
+    {
         return Err(PairingStoreError::InvalidChannel(channel.to_string()));
     }
-    Ok(safe)
+    Ok(raw)
 }
 
 fn pairing_path(base_dir: &Path, channel: &str) -> Result<PathBuf, PairingStoreError> {
@@ -119,6 +123,110 @@ fn approve_attempts_path(base_dir: &Path, channel: &str) -> Result<PathBuf, Pair
 fn block_from_path(base_dir: &Path, channel: &str) -> Result<PathBuf, PairingStoreError> {
     let key = safe_channel_key(channel)?;
     Ok(base_dir.join(format!("{}-blockFrom.json", key)))
+}
+
+fn channel_lock_path(base_dir: &Path, channel: &str) -> Result<PathBuf, PairingStoreError> {
+    let key = safe_channel_key(channel)?;
+    Ok(base_dir.join(format!("{key}-pairing.lock")))
+}
+
+fn validate_identity(value: &str) -> Result<String, PairingStoreError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > MAX_PAIRING_ID_BYTES
+        || trimmed.chars().any(char::is_control)
+    {
+        return Err(PairingStoreError::InvalidData(
+            "identity is empty, oversized, or contains control characters".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn read_bounded_file(path: &Path) -> Result<Option<Vec<u8>>, PairingStoreError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(PairingStoreError::InvalidData(
+            "pairing path is not a regular file".to_string(),
+        ));
+    }
+    if metadata.len() > MAX_PAIRING_FILE_BYTES as u64 {
+        return Err(PairingStoreError::InvalidData(
+            "pairing file exceeds the size limit".to_string(),
+        ));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() > MAX_PAIRING_FILE_BYTES as u64 {
+        return Err(PairingStoreError::InvalidData(
+            "opened pairing file is invalid or oversized".to_string(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(opened.len())
+            .unwrap_or(MAX_PAIRING_FILE_BYTES)
+            .min(MAX_PAIRING_FILE_BYTES),
+    );
+    std::io::Read::by_ref(&mut file)
+        .take((MAX_PAIRING_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PAIRING_FILE_BYTES {
+        return Err(PairingStoreError::InvalidData(
+            "pairing file exceeds the size limit".to_string(),
+        ));
+    }
+    Ok(Some(bytes))
+}
+
+fn atomic_write_file(path: &Path, bytes: &[u8]) -> Result<(), PairingStoreError> {
+    if bytes.len() > MAX_PAIRING_FILE_BYTES {
+        return Err(PairingStoreError::InvalidData(
+            "serialized pairing file exceeds the size limit".to_string(),
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        PairingStoreError::InvalidData("pairing path has no parent directory".to_string())
+    })?;
+    fs::create_dir_all(parent)?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            PairingStoreError::InvalidData("pairing path has no valid filename".to_string())
+        })?;
+    let tmp_path = parent.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> Result<(), std::io::Error> {
+        let mut file = options.open(&tmp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp_path, path)?;
+        if let Ok(directory) = fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result.map_err(PairingStoreError::from)
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -177,17 +285,6 @@ fn generate_unique_code(existing: &HashSet<String>) -> String {
     format!("{}{:04}", random_code(), rng.random_range(0..10000))
 }
 
-fn parse_json_or_default<T>(content: &str, default: T) -> Result<T, PairingStoreError>
-where
-    T: DeserializeOwned,
-{
-    if content.trim().is_empty() {
-        Ok(default)
-    } else {
-        serde_json::from_str(content).map_err(PairingStoreError::from)
-    }
-}
-
 /// Pairing store for a channel.
 #[derive(Debug, Clone)]
 pub struct PairingStore {
@@ -207,24 +304,189 @@ impl PairingStore {
         Self { base_dir }
     }
 
-    /// List pending pairing requests for a channel.
-    pub fn list_pending(&self, channel: &str) -> Result<Vec<PairingRequest>, PairingStoreError> {
-        let path = pairing_path(&self.base_dir, channel)?;
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Vec::new());
-            }
-            Err(e) => return Err(e.into()),
-        };
+    fn lock_channel(&self, channel: &str) -> Result<fs::File, PairingStoreError> {
+        let path = channel_lock_path(&self.base_dir, channel)?;
+        let parent = path.parent().ok_or_else(|| {
+            PairingStoreError::InvalidData("pairing lock path has no parent".to_string())
+        })?;
+        fs::create_dir_all(parent)?;
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(path)?;
+        file.lock_exclusive()?;
+        Ok(file)
+    }
 
-        let file: PairingStoreFile = parse_json_or_default(
-            &content,
+    fn read_pairing_file(&self, channel: &str) -> Result<PairingStoreFile, PairingStoreError> {
+        let path = pairing_path(&self.base_dir, channel)?;
+        let Some(bytes) = read_bounded_file(&path)? else {
+            return Ok(PairingStoreFile {
+                version: 1,
+                requests: Vec::new(),
+            });
+        };
+        let file: PairingStoreFile = if bytes.iter().all(u8::is_ascii_whitespace) {
             PairingStoreFile {
                 version: 1,
                 requests: Vec::new(),
-            },
-        )?;
+            }
+        } else {
+            serde_json::from_slice(&bytes)?
+        };
+        if file.version != 1 || file.requests.len() > PAIRING_PENDING_MAX {
+            return Err(PairingStoreError::InvalidData(
+                "pairing request file has an unsupported version or too many entries".to_string(),
+            ));
+        }
+        for request in &file.requests {
+            validate_identity(&request.id)?;
+            if request.code.is_empty()
+                || request.code.len() > 16
+                || !request
+                    .code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric())
+                || request.created_at.len() > 64
+                || request.last_seen_at.len() > 64
+                || parse_timestamp(&request.created_at).is_none()
+                || parse_timestamp(&request.last_seen_at).is_none()
+                || request.meta.as_ref().is_some_and(|meta| {
+                    serde_json::to_vec(meta)
+                        .map(|bytes| bytes.len() > MAX_PAIRING_META_BYTES)
+                        .unwrap_or(true)
+                })
+            {
+                return Err(PairingStoreError::InvalidData(
+                    "pairing request contains malformed or oversized data".to_string(),
+                ));
+            }
+        }
+        Ok(file)
+    }
+
+    fn write_pairing_requests(
+        &self,
+        channel: &str,
+        requests: &[PairingRequest],
+    ) -> Result<(), PairingStoreError> {
+        if requests.len() > PAIRING_PENDING_MAX {
+            return Err(PairingStoreError::InvalidData(
+                "too many pending pairing requests".to_string(),
+            ));
+        }
+        let bytes = serde_json::to_vec_pretty(&PairingStoreFile {
+            version: 1,
+            requests: requests.to_vec(),
+        })?;
+        atomic_write_file(&pairing_path(&self.base_dir, channel)?, &bytes)
+    }
+
+    fn read_access_entries(
+        &self,
+        path: &Path,
+        allow: bool,
+    ) -> Result<Vec<String>, PairingStoreError> {
+        let Some(bytes) = read_bounded_file(path)? else {
+            return Ok(Vec::new());
+        };
+        let entries = if allow {
+            let file: AllowFromStoreFile = serde_json::from_slice(&bytes)?;
+            if file.version != 1 {
+                return Err(PairingStoreError::InvalidData(
+                    "unsupported allow-list version".to_string(),
+                ));
+            }
+            file.allow_from
+        } else {
+            let file: BlockFromStoreFile = serde_json::from_slice(&bytes)?;
+            if file.version != 1 {
+                return Err(PairingStoreError::InvalidData(
+                    "unsupported block-list version".to_string(),
+                ));
+            }
+            file.block_from
+        };
+        if entries.len() > MAX_ACCESS_ENTRIES {
+            return Err(PairingStoreError::InvalidData(
+                "access list exceeds the entry limit".to_string(),
+            ));
+        }
+        for entry in &entries {
+            validate_identity(entry)?;
+        }
+        Ok(entries)
+    }
+
+    fn write_access_entries(
+        &self,
+        path: &Path,
+        entries: &[String],
+        allow: bool,
+    ) -> Result<(), PairingStoreError> {
+        if entries.len() > MAX_ACCESS_ENTRIES {
+            return Err(PairingStoreError::InvalidData(
+                "access list exceeds the entry limit".to_string(),
+            ));
+        }
+        for entry in entries {
+            validate_identity(entry)?;
+        }
+        let bytes = if allow {
+            serde_json::to_vec_pretty(&AllowFromStoreFile {
+                version: 1,
+                allow_from: entries.to_vec(),
+            })?
+        } else {
+            serde_json::to_vec_pretty(&BlockFromStoreFile {
+                version: 1,
+                block_from: entries.to_vec(),
+            })?
+        };
+        atomic_write_file(path, &bytes)
+    }
+
+    fn read_approve_attempts(
+        &self,
+        channel: &str,
+    ) -> Result<ApproveAttemptsFile, PairingStoreError> {
+        let path = approve_attempts_path(&self.base_dir, channel)?;
+        let Some(bytes) = read_bounded_file(&path)? else {
+            return Ok(ApproveAttemptsFile::default());
+        };
+        let data: ApproveAttemptsFile = serde_json::from_slice(&bytes)?;
+        if data.failed_at.len() > MAX_APPROVE_ATTEMPTS {
+            return Err(PairingStoreError::InvalidData(
+                "approval-attempt file exceeds the entry limit".to_string(),
+            ));
+        }
+        Ok(data)
+    }
+
+    fn write_approve_attempts(
+        &self,
+        channel: &str,
+        data: &ApproveAttemptsFile,
+    ) -> Result<(), PairingStoreError> {
+        if data.failed_at.len() > MAX_APPROVE_ATTEMPTS {
+            return Err(PairingStoreError::InvalidData(
+                "approval-attempt file exceeds the entry limit".to_string(),
+            ));
+        }
+        atomic_write_file(
+            &approve_attempts_path(&self.base_dir, channel)?,
+            &serde_json::to_vec_pretty(data)?,
+        )
+    }
+
+    /// List pending pairing requests for a channel.
+    pub fn list_pending(&self, channel: &str) -> Result<Vec<PairingRequest>, PairingStoreError> {
+        let _lock = self.lock_channel(channel)?;
+        let file = self.read_pairing_file(channel)?;
 
         let now = now_secs();
         let original_len = file.requests.len();
@@ -235,7 +497,7 @@ impl PairingStore {
             .collect();
 
         if requests.len() != original_len {
-            self.write_pairing_file(channel, &requests)?;
+            self.write_pairing_requests(channel, &requests)?;
         }
 
         requests.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -249,34 +511,21 @@ impl PairingStore {
         id: &str,
         meta: Option<serde_json::Value>,
     ) -> Result<UpsertResult, PairingStoreError> {
-        let path = pairing_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
-
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-
-        file.lock_exclusive()?;
-
-        let content = fs::read_to_string(&path)?;
-        let mut store: PairingStoreFile = parse_json_or_default(
-            &content,
-            PairingStoreFile {
-                version: 1,
-                requests: Vec::new(),
-            },
-        )?;
+        let id = validate_identity(id)?;
+        if meta.as_ref().is_some_and(|value| {
+            serde_json::to_vec(value)
+                .map(|bytes| bytes.len() > MAX_PAIRING_META_BYTES)
+                .unwrap_or(true)
+        }) {
+            return Err(PairingStoreError::InvalidData(
+                "pairing metadata exceeds the size limit".to_string(),
+            ));
+        }
+        let _lock = self.lock_channel(channel)?;
+        let mut store = self.read_pairing_file(channel)?;
 
         let now = now_iso();
         let now_secs = now_secs();
-        let id = id.trim().to_string();
-        if id.is_empty() {
-            fs4::FileExt::unlock(&file)?;
-            return Err(PairingStoreError::InvalidChannel("empty id".to_string()));
-        }
 
         store.requests.retain(|r| !is_expired(r, now_secs));
         let existing_codes: HashSet<String> = store
@@ -297,8 +546,7 @@ impl PairingStore {
             if let Some(m) = meta {
                 req.meta = Some(m);
             }
-            self.write_pairing_file_locked(&mut file, channel, &store.requests)?;
-            fs4::FileExt::unlock(&file)?;
+            self.write_pairing_requests(channel, &store.requests)?;
             return Ok(UpsertResult {
                 code,
                 created: false,
@@ -306,7 +554,6 @@ impl PairingStore {
         }
 
         if store.requests.len() >= PAIRING_PENDING_MAX {
-            fs4::FileExt::unlock(&file)?;
             return Ok(UpsertResult {
                 code: String::new(),
                 created: false,
@@ -322,8 +569,7 @@ impl PairingStore {
             meta,
         });
 
-        self.write_pairing_file_locked(&mut file, channel, &store.requests)?;
-        fs4::FileExt::unlock(&file)?;
+        self.write_pairing_requests(channel, &store.requests)?;
 
         Ok(UpsertResult {
             code,
@@ -332,49 +578,26 @@ impl PairingStore {
     }
 
     fn is_approve_rate_limited(&self, channel: &str) -> Result<bool, PairingStoreError> {
-        let path = approve_attempts_path(&self.base_dir, channel)?;
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(e.into()),
-        };
-        let mut data: ApproveAttemptsFile = parse_json_or_default(&content, Default::default())?;
+        let mut data = self.read_approve_attempts(channel)?;
         let now = now_secs();
         let cutoff = now.saturating_sub(PAIRING_APPROVE_RATE_WINDOW_SECS);
+        let original_len = data.failed_at.len();
         data.failed_at.retain(|&t| t >= cutoff);
+        if data.failed_at.len() != original_len {
+            self.write_approve_attempts(channel, &data)?;
+        }
         Ok(data.failed_at.len() >= PAIRING_APPROVE_RATE_LIMIT)
     }
 
     fn record_failed_approve(&self, channel: &str) -> Result<(), PairingStoreError> {
-        let path = approve_attempts_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
-
-        // Open (or create) and lock before reading so concurrent callers
-        // don't clobber each other's writes.
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-        file.lock_exclusive()?;
-
-        let existing = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(e.into()),
-        };
-        let mut data: ApproveAttemptsFile = parse_json_or_default(&existing, Default::default())?;
+        let mut data = self.read_approve_attempts(channel)?;
 
         let now = now_secs();
         data.failed_at.push(now);
         let cutoff = now.saturating_sub(PAIRING_APPROVE_RATE_WINDOW_SECS);
         data.failed_at.retain(|&t| t >= cutoff);
 
-        let json = serde_json::to_string_pretty(&data)?;
-        fs::write(&path, json)?;
-        fs4::FileExt::unlock(&file)?;
-        Ok(())
+        self.write_approve_attempts(channel, &data)
     }
 
     /// Approve a pairing code and add the sender to allowFrom.
@@ -387,57 +610,50 @@ impl PairingStore {
         if code.is_empty() {
             return Ok(None);
         }
+        if code.len() > 16 || !code.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return Ok(None);
+        }
+
+        let _lock = self.lock_channel(channel)?;
 
         if self.is_approve_rate_limited(channel)? {
             return Err(PairingStoreError::ApproveRateLimited);
         }
 
         let path = pairing_path(&self.base_dir, channel)?;
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(false)
-            .open(&path)
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    PairingStoreError::InvalidChannel("no pairing file".to_string())
-                } else {
-                    PairingStoreError::Io(e)
-                }
-            })?;
-
-        file.lock_exclusive()?;
-
-        let content = fs::read_to_string(&path)?;
-        let mut store: PairingStoreFile = parse_json_or_default(
-            &content,
-            PairingStoreFile {
-                version: 1,
-                requests: Vec::new(),
-            },
-        )?;
+        if read_bounded_file(&path)?.is_none() {
+            return Err(PairingStoreError::InvalidChannel(
+                "no pairing file".to_string(),
+            ));
+        }
+        let mut store = self.read_pairing_file(channel)?;
 
         let now_secs = now_secs();
+        let before_expiry = store.requests.len();
         store.requests.retain(|r| !is_expired(r, now_secs));
 
-        let idx = store
-            .requests
-            .iter()
-            .position(|r| r.code.to_uppercase() == code);
+        let idx = store.requests.iter().position(|request| {
+            use subtle::ConstantTimeEq as _;
+            request.code.len() == code.len()
+                && bool::from(request.code.as_bytes().ct_eq(code.as_bytes()))
+        });
 
         let entry = match idx {
             Some(i) => store.requests.remove(i),
             None => {
-                fs4::FileExt::unlock(&file)?;
+                if store.requests.len() != before_expiry {
+                    self.write_pairing_requests(channel, &store.requests)?;
+                }
                 self.record_failed_approve(channel)?;
                 return Ok(None);
             }
         };
 
-        self.write_pairing_file_locked(&mut file, channel, &store.requests)?;
-        fs4::FileExt::unlock(&file)?;
-
-        self.add_allow_from(channel, &entry.id)?;
+        // Publish authorization first. If the subsequent pending-file write
+        // fails, the caller is still safely authorized and can retry cleanup;
+        // the inverse order could lose a valid approval entirely.
+        self.add_allow_from_unlocked(channel, &entry.id)?;
+        self.write_pairing_requests(channel, &store.requests)?;
 
         Ok(Some(entry))
     }
@@ -465,61 +681,49 @@ impl PairingStore {
         channel: &str,
         request: &PairingRequest,
     ) -> Result<(), PairingStoreError> {
-        let path = pairing_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
-
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-
-        file.lock_exclusive()?;
-
-        let content = fs::read_to_string(&path)?;
-        let mut store: PairingStoreFile = parse_json_or_default(
-            &content,
-            PairingStoreFile {
-                version: 1,
-                requests: Vec::new(),
-            },
-        )?;
+        validate_identity(&request.id)?;
+        if request.code.is_empty()
+            || request.code.len() > 16
+            || !request
+                .code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric())
+            || request.meta.as_ref().is_some_and(|value| {
+                serde_json::to_vec(value)
+                    .map(|bytes| bytes.len() > MAX_PAIRING_META_BYTES)
+                    .unwrap_or(true)
+            })
+        {
+            return Err(PairingStoreError::InvalidData(
+                "restored pairing request is malformed or oversized".to_string(),
+            ));
+        }
+        let _lock = self.lock_channel(channel)?;
+        let mut store = self.read_pairing_file(channel)?;
 
         store.requests.retain(|existing| existing.id != request.id);
+        if store.requests.len() >= PAIRING_PENDING_MAX {
+            return Err(PairingStoreError::InvalidData(
+                "too many pending pairing requests".to_string(),
+            ));
+        }
         store.requests.push(request.clone());
 
-        self.write_pairing_file_locked(&mut file, channel, &store.requests)?;
-        fs4::FileExt::unlock(&file)?;
-        Ok(())
+        self.write_pairing_requests(channel, &store.requests)
     }
 
     /// Read the allowFrom list for a channel.
     pub fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, PairingStoreError> {
         let path = allow_from_path(&self.base_dir, channel)?;
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Vec::new());
-            }
-            Err(e) => return Err(e.into()),
-        };
-
-        let file: AllowFromStoreFile = parse_json_or_default(
-            &content,
-            AllowFromStoreFile {
-                version: 1,
-                allow_from: Vec::new(),
-            },
-        )?;
-
-        Ok(file.allow_from)
+        self.read_access_entries(&path, true)
     }
 
     /// Ensure an entry exists in the allowFrom list without requiring a
     /// pending pairing request first.
     pub fn ensure_allow_from(&self, channel: &str, entry: &str) -> Result<(), PairingStoreError> {
-        self.add_allow_from(channel, entry)
+        let entry = validate_identity(entry)?;
+        let _lock = self.lock_channel(channel)?;
+        self.add_allow_from_unlocked(channel, &entry)
     }
 
     /// Check if a sender is allowed (by id or username).
@@ -536,13 +740,18 @@ impl PairingStore {
         if self.is_sender_blocked(channel, id, username)? {
             return Ok(false);
         }
+        let Ok(id) = validate_identity(id) else {
+            return Ok(false);
+        };
         let allow = self.read_allow_from(channel)?;
-        let id = id.trim();
         let id_ok = allow.iter().any(|e| e.trim() == id);
         if id_ok {
             return Ok(true);
         }
         if let Some(u) = username {
+            let Ok(u) = validate_identity(u) else {
+                return Ok(false);
+            };
             let u = u.trim().to_lowercase();
             let u_norm = u.strip_prefix('@').unwrap_or(&u);
             if allow.iter().any(|e| {
@@ -559,114 +768,23 @@ impl PairingStore {
     /// Read the blockFrom list for a channel.
     pub fn read_block_from(&self, channel: &str) -> Result<Vec<String>, PairingStoreError> {
         let path = block_from_path(&self.base_dir, channel)?;
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Vec::new());
-            }
-            Err(e) => return Err(e.into()),
-        };
-
-        let file: BlockFromStoreFile = parse_json_or_default(
-            &content,
-            BlockFromStoreFile {
-                version: 1,
-                block_from: Vec::new(),
-            },
-        )?;
-
-        Ok(file.block_from)
+        self.read_access_entries(&path, false)
     }
 
     /// Add an entry to the blockFrom list for a channel.
     pub fn add_block_from(&self, channel: &str, entry: &str) -> Result<(), PairingStoreError> {
-        let entry = entry.trim().to_string();
-        if entry.is_empty() {
-            return Ok(());
-        }
-
-        let path = block_from_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-        file.lock_exclusive()?;
-
-        let mut content = String::new();
-        let mut reader = file.try_clone()?;
-        reader.read_to_string(&mut content)?;
-        let mut store: BlockFromStoreFile = parse_json_or_default(
-            &content,
-            BlockFromStoreFile {
-                version: 1,
-                block_from: Vec::new(),
-            },
-        )?;
-
-        let normalized = entry.to_lowercase();
-        if store
-            .block_from
-            .iter()
-            .any(|e| e.to_lowercase() == normalized)
-        {
-            fs4::FileExt::unlock(&file)?;
-            return Ok(());
-        }
-
-        store.block_from.push(entry);
-        let json = serde_json::to_string_pretty(&store)?;
-        let tmp_path = path.with_extension("json.tmp");
-        fs::write(&tmp_path, json)?;
-        fs::rename(&tmp_path, &path)?;
-
-        fs4::FileExt::unlock(&file)?;
-        Ok(())
+        let entry = validate_identity(entry)?;
+        let _lock = self.lock_channel(channel)?;
+        self.add_access_entry_unlocked(channel, &entry, false)
     }
 
     /// Remove an entry from the blockFrom list for a channel.
     pub fn remove_block_from(&self, channel: &str, entry: &str) -> Result<bool, PairingStoreError> {
-        let entry_lower = entry.trim().to_lowercase();
-        if entry_lower.is_empty() {
+        let Ok(entry) = validate_identity(entry) else {
             return Ok(false);
-        }
-
-        let path = block_from_path(&self.base_dir, channel)?;
-        let file = match fs::OpenOptions::new().read(true).write(true).open(&path) {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(e.into()),
         };
-        file.lock_exclusive()?;
-        let mut content = String::new();
-        let mut reader = file.try_clone()?;
-        reader.read_to_string(&mut content)?;
-
-        let mut store: BlockFromStoreFile = parse_json_or_default(
-            &content,
-            BlockFromStoreFile {
-                version: 1,
-                block_from: Vec::new(),
-            },
-        )?;
-
-        let orig_len = store.block_from.len();
-        store
-            .block_from
-            .retain(|e| e.trim().to_lowercase() != entry_lower);
-        let removed = store.block_from.len() != orig_len;
-
-        if removed {
-            let json = serde_json::to_string_pretty(&store)?;
-            let tmp_path = path.with_extension("json.tmp");
-            fs::write(&tmp_path, json)?;
-            fs::rename(&tmp_path, &path)?;
-        }
-
-        fs4::FileExt::unlock(&file)?;
-        Ok(removed)
+        let _lock = self.lock_channel(channel)?;
+        self.remove_access_entry_unlocked(channel, &entry, false)
     }
 
     /// Check if a sender is on the block list (by id or username).
@@ -680,11 +798,16 @@ impl PairingStore {
         if blocked.is_empty() {
             return Ok(false);
         }
-        let id = id.trim();
+        let Ok(id) = validate_identity(id) else {
+            return Ok(false);
+        };
         if blocked.iter().any(|e| e.trim() == id) {
             return Ok(true);
         }
         if let Some(u) = username {
+            let Ok(u) = validate_identity(u) else {
+                return Ok(false);
+            };
             let u = u.trim().to_lowercase();
             let u_norm = u.strip_prefix('@').unwrap_or(&u);
             if blocked.iter().any(|e| {
@@ -696,130 +819,67 @@ impl PairingStore {
         Ok(false)
     }
 
-    fn add_allow_from(&self, channel: &str, entry: &str) -> Result<(), PairingStoreError> {
-        let entry = entry.trim().to_string();
-        if entry.is_empty() {
-            return Ok(());
-        }
-
-        let path = allow_from_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
-
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-
-        file.lock_exclusive()?;
-
-        let mut content = String::new();
-        let mut reader = file.try_clone()?;
-        reader.read_to_string(&mut content)?;
-        let mut store: AllowFromStoreFile = parse_json_or_default(
-            &content,
-            AllowFromStoreFile {
-                version: 1,
-                allow_from: Vec::new(),
-            },
-        )?;
-
-        let normalized = entry.to_lowercase();
-        if store
-            .allow_from
-            .iter()
-            .any(|e| e.to_lowercase() == normalized)
-        {
-            fs4::FileExt::unlock(&file)?;
-            return Ok(());
-        }
-
-        store.allow_from.push(entry);
-        let json = serde_json::to_string_pretty(&store)?;
-        let tmp_path = path.with_extension("json.tmp");
-        fs::write(&tmp_path, json)?;
-        fs::rename(&tmp_path, &path)?;
-
-        fs4::FileExt::unlock(&file)?;
-        Ok(())
+    fn add_allow_from_unlocked(&self, channel: &str, entry: &str) -> Result<(), PairingStoreError> {
+        self.add_access_entry_unlocked(channel, entry, true)
     }
 
     pub fn remove_allow_from(&self, channel: &str, entry: &str) -> Result<bool, PairingStoreError> {
-        let entry_lower = entry.trim().to_lowercase();
-        if entry_lower.is_empty() {
+        let Ok(entry) = validate_identity(entry) else {
             return Ok(false);
-        }
-
-        let path = allow_from_path(&self.base_dir, channel)?;
-        let file = match fs::OpenOptions::new().read(true).write(true).open(&path) {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(e.into()),
         };
-        file.lock_exclusive()?;
-        let mut content = String::new();
-        let mut reader = file.try_clone()?;
-        reader.read_to_string(&mut content)?;
-
-        let mut store: AllowFromStoreFile = parse_json_or_default(
-            &content,
-            AllowFromStoreFile {
-                version: 1,
-                allow_from: Vec::new(),
-            },
-        )?;
-
-        let original_len = store.allow_from.len();
-        store
-            .allow_from
-            .retain(|value| value.trim().to_lowercase() != entry_lower);
-        let removed = store.allow_from.len() != original_len;
-
-        if removed {
-            let json = serde_json::to_string_pretty(&store)?;
-            let tmp_path = path.with_extension("json.tmp");
-            fs::write(&tmp_path, json)?;
-            fs::rename(&tmp_path, &path)?;
-        }
-
-        fs4::FileExt::unlock(&file)?;
-        Ok(removed)
+        let _lock = self.lock_channel(channel)?;
+        self.remove_access_entry_unlocked(channel, &entry, true)
     }
 
-    fn write_pairing_file(
+    fn add_access_entry_unlocked(
         &self,
         channel: &str,
-        requests: &[PairingRequest],
+        entry: &str,
+        allow: bool,
     ) -> Result<(), PairingStoreError> {
-        let path = pairing_path(&self.base_dir, channel)?;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)?;
-        file.lock_exclusive()?;
-        self.write_pairing_file_locked(&mut file, channel, requests)?;
-        fs4::FileExt::unlock(&file)?;
-        Ok(())
+        let entry = validate_identity(entry)?;
+        let path = if allow {
+            allow_from_path(&self.base_dir, channel)?
+        } else {
+            block_from_path(&self.base_dir, channel)?
+        };
+        let mut entries = self.read_access_entries(&path, allow)?;
+        let normalized = entry.to_lowercase();
+        if entries
+            .iter()
+            .any(|existing| existing.to_lowercase() == normalized)
+        {
+            return Ok(());
+        }
+        if entries.len() >= MAX_ACCESS_ENTRIES {
+            return Err(PairingStoreError::InvalidData(
+                "access list exceeds the entry limit".to_string(),
+            ));
+        }
+        entries.push(entry);
+        self.write_access_entries(&path, &entries, allow)
     }
 
-    fn write_pairing_file_locked(
+    fn remove_access_entry_unlocked(
         &self,
-        file: &mut fs::File,
-        _channel: &str,
-        requests: &[PairingRequest],
-    ) -> Result<(), PairingStoreError> {
-        let store = PairingStoreFile {
-            version: 1,
-            requests: requests.to_vec(),
+        channel: &str,
+        entry: &str,
+        allow: bool,
+    ) -> Result<bool, PairingStoreError> {
+        let path = if allow {
+            allow_from_path(&self.base_dir, channel)?
+        } else {
+            block_from_path(&self.base_dir, channel)?
         };
-        let json = serde_json::to_string_pretty(&store)?;
-        file.set_len(0)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(json.as_bytes())?;
-        file.sync_all()?;
-        Ok(())
+        let mut entries = self.read_access_entries(&path, allow)?;
+        let normalized = entry.trim().to_lowercase();
+        let original_len = entries.len();
+        entries.retain(|value| value.trim().to_lowercase() != normalized);
+        if entries.len() == original_len {
+            return Ok(false);
+        }
+        self.write_access_entries(&path, &entries, allow)?;
+        Ok(true)
     }
 }
 

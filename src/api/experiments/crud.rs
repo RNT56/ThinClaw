@@ -135,17 +135,53 @@ pub(super) async fn resolved_secret_env_pairs(
     pairs
 }
 
+pub(super) fn validate_runner_env_grants(value: &serde_json::Value) -> ApiResult<()> {
+    let map = value.as_object().ok_or_else(|| {
+        ApiError::InvalidInput("Runner env_grants must be a JSON object.".to_string())
+    })?;
+    if map.len() > 256 {
+        return Err(ApiError::InvalidInput(
+            "Runner env_grants contains more than 256 entries.".to_string(),
+        ));
+    }
+    let mut total_bytes = 0usize;
+    for (key, value) in map {
+        let Some(value) = value.as_str() else {
+            return Err(ApiError::InvalidInput(
+                "Runner env_grants values must be strings.".to_string(),
+            ));
+        };
+        if !crate::experiments::valid_env_name(key) || value.len() > 64 * 1024 {
+            return Err(ApiError::InvalidInput(
+                "Runner env_grants contains an invalid environment entry.".to_string(),
+            ));
+        }
+        total_bytes = total_bytes
+            .saturating_add(key.len())
+            .saturating_add(value.len());
+    }
+    if total_bytes > 2 * 1024 * 1024 {
+        return Err(ApiError::InvalidInput(
+            "Runner env_grants exceeds the 2 MiB limit.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) async fn resolved_runner_env_grants(
     user_id: &str,
     runner: &ExperimentRunnerProfile,
-) -> serde_json::Value {
+) -> ApiResult<serde_json::Value> {
+    validate_runner_env_grants(&runner.env_grants)?;
     let mut merged = runner.env_grants.as_object().cloned().unwrap_or_default();
     for (env_name, value) in resolved_secret_env_pairs(user_id, runner).await {
         merged
             .entry(env_name)
             .or_insert_with(|| serde_json::json!(value));
     }
-    serde_json::Value::Object(merged)
+    let merged = serde_json::Value::Object(merged);
+    validate_runner_env_grants(&merged)?;
+    Ok(merged)
 }
 
 pub async fn list_projects(
@@ -154,7 +190,7 @@ pub async fn list_projects(
 ) -> ApiResult<ExperimentProjectListResponse> {
     ensure_experiments_enabled(store, user_id).await?;
     let projects = store
-        .list_experiment_projects()
+        .list_experiment_projects_for_owner(user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(ExperimentProjectListResponse { projects })
@@ -167,7 +203,7 @@ pub async fn get_project(
 ) -> ApiResult<ExperimentProject> {
     ensure_experiments_enabled(store, user_id).await?;
     store
-        .get_experiment_project(id)
+        .get_experiment_project_for_owner(id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| ApiError::SessionNotFound(experiment_project_not_found_message(id)))
@@ -179,9 +215,13 @@ pub async fn create_project(
     req: CreateExperimentProjectRequest,
 ) -> ApiResult<ExperimentProject> {
     let settings = ensure_experiments_enabled(store, user_id).await?;
+    if let Some(runner_id) = req.default_runner_profile_id {
+        get_runner(store, user_id, runner_id).await?;
+    }
     let now = Utc::now();
     let mut project = ExperimentProject {
         id: Uuid::new_v4(),
+        owner_user_id: user_id.to_string(),
         name: req.name,
         workspace_path: req.workspace_path,
         git_remote_name: req.git_remote_name,
@@ -273,6 +313,9 @@ pub async fn update_project(
         project.stop_policy = value;
     }
     if req.default_runner_profile_id.is_some() {
+        if let Some(runner_id) = req.default_runner_profile_id {
+            get_runner(store, user_id, runner_id).await?;
+        }
         project.default_runner_profile_id = req.default_runner_profile_id;
     }
     if let Some(value) = req.promotion_mode {
@@ -295,7 +338,7 @@ pub async fn update_project(
 pub async fn delete_project(store: &Arc<dyn Database>, user_id: &str, id: Uuid) -> ApiResult<bool> {
     ensure_experiments_enabled(store, user_id).await?;
     store
-        .delete_experiment_project(id)
+        .delete_experiment_project_for_owner(id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))
 }
@@ -306,7 +349,7 @@ pub async fn list_runners(
 ) -> ApiResult<ExperimentRunnerListResponse> {
     ensure_experiments_enabled(store, user_id).await?;
     let runners = store
-        .list_experiment_runner_profiles()
+        .list_experiment_runner_profiles_for_owner(user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(ExperimentRunnerListResponse { runners })
@@ -319,7 +362,7 @@ pub async fn get_runner(
 ) -> ApiResult<ExperimentRunnerProfile> {
     ensure_experiments_enabled(store, user_id).await?;
     store
-        .get_experiment_runner_profile(id)
+        .get_experiment_runner_profile_for_owner(id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| ApiError::SessionNotFound(experiment_runner_not_found_message(id)))
@@ -331,9 +374,13 @@ pub async fn create_runner(
     req: CreateExperimentRunnerProfileRequest,
 ) -> ApiResult<ExperimentRunnerProfile> {
     ensure_experiments_enabled(store, user_id).await?;
+    validate_runner_env_grants(&req.env_grants)?;
+    crate::experiments::validate_secret_references(&req.secret_references)
+        .map_err(ApiError::InvalidInput)?;
     let now = Utc::now();
     let runner = ExperimentRunnerProfile {
         id: Uuid::new_v4(),
+        owner_user_id: user_id.to_string(),
         name: req.name,
         backend: req.backend,
         backend_config: req.backend_config,
@@ -379,9 +426,11 @@ pub async fn update_runner(
         runner.gpu_requirements = value;
     }
     if let Some(value) = req.env_grants {
+        validate_runner_env_grants(&value)?;
         runner.env_grants = value;
     }
     if let Some(value) = req.secret_references {
+        crate::experiments::validate_secret_references(&value).map_err(ApiError::InvalidInput)?;
         runner.secret_references = value;
     }
     if let Some(value) = req.cache_policy {
@@ -401,7 +450,7 @@ pub async fn update_runner(
 pub async fn delete_runner(store: &Arc<dyn Database>, user_id: &str, id: Uuid) -> ApiResult<bool> {
     ensure_experiments_enabled(store, user_id).await?;
     store
-        .delete_experiment_runner_profile(id)
+        .delete_experiment_runner_profile_for_owner(id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))
 }
@@ -471,7 +520,16 @@ pub async fn list_trials(
     let trials = store
         .list_experiment_trials_for_owner(campaign.id, user_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .into_iter()
+        .map(|mut trial| {
+            trial.provider_job_metadata = adapters::sanitize_provider_job_metadata(
+                trial.runner_backend,
+                &trial.provider_job_metadata,
+            );
+            trial
+        })
+        .collect();
     Ok(ExperimentTrialListResponse { trials })
 }
 
@@ -481,11 +539,15 @@ pub async fn get_trial(
     id: Uuid,
 ) -> ApiResult<ExperimentTrial> {
     ensure_experiments_enabled(store, user_id).await?;
-    let trial = store
+    let mut trial = store
         .get_experiment_trial_for_owner(id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| ApiError::SessionNotFound(experiment_trial_not_found_message(id)))?;
+    trial.provider_job_metadata = adapters::sanitize_provider_job_metadata(
+        trial.runner_backend,
+        &trial.provider_job_metadata,
+    );
     Ok(trial)
 }
 
@@ -771,6 +833,7 @@ pub async fn list_model_usage(
     limit: usize,
 ) -> ApiResult<ExperimentModelUsageListResponse> {
     ensure_experiments_enabled(store, user_id).await?;
+    let limit = limit.clamp(1, 500);
     let usage = store
         .list_experiment_model_usage(limit)
         .await
@@ -784,6 +847,9 @@ pub async fn list_opportunities(
     limit: usize,
 ) -> ApiResult<ExperimentOpportunityListResponse> {
     ensure_experiments_enabled(store, user_id).await?;
+    // This shared API is also called directly by the desktop backend and tests,
+    // so transport-level query clamping is not a sufficient safety boundary.
+    let limit = limit.clamp(1, 500);
     let usage = store
         .list_experiment_model_usage(limit)
         .await
@@ -805,7 +871,7 @@ pub async fn list_opportunities(
             source_kind: None,
             source_id: None,
             thread_id: None,
-            limit: ((limit.max(25)) * 8) as i64,
+            limit: limit.max(25).saturating_mul(8) as i64,
         })
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -817,7 +883,7 @@ pub async fn list_opportunities(
         crate::workspace::paths::USER,
     ));
     sort_experiment_opportunities(&mut opportunities);
-    opportunities.truncate(limit.max(1));
+    opportunities.truncate(limit);
     Ok(ExperimentOpportunityListResponse { opportunities })
 }
 

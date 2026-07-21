@@ -20,6 +20,14 @@ use thinclaw_types::error::DatabaseError;
 use super::Store;
 
 #[cfg(feature = "postgres")]
+const MAX_EXPERIMENT_USAGE_QUERY_RESULTS: usize = 10_000;
+
+#[cfg(feature = "postgres")]
+fn bounded_usage_query_limit(limit: usize) -> i64 {
+    limit.min(MAX_EXPERIMENT_USAGE_QUERY_RESULTS) as i64
+}
+
+#[cfg(feature = "postgres")]
 impl Store {
     pub async fn create_experiment_project(
         &self,
@@ -33,13 +41,15 @@ impl Store {
                 strategy_prompt, workdir, prepare_command, run_command,
                 mutable_paths, fixed_paths, primary_metric, secondary_metrics,
                 comparison_policy, stop_policy, default_runner_profile_id,
-                promotion_mode, autonomy_mode, status, created_at, updated_at
+                promotion_mode, autonomy_mode, status, created_at, updated_at,
+                owner_user_id
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, $9, $10,
                 $11, $12, $13, $14,
                 $15, $16, $17,
-                $18, $19, $20, $21, $22
+                $18, $19, $20, $21, $22,
+                $23
             )
             "#,
             &[
@@ -67,6 +77,7 @@ impl Store {
                 &status_json(project.status),
                 &project.created_at,
                 &project.updated_at,
+                &project.owner_user_id,
             ],
         )
         .await?;
@@ -90,6 +101,35 @@ impl Store {
             .query(
                 "SELECT * FROM experiment_projects ORDER BY updated_at DESC, name ASC",
                 &[],
+            )
+            .await?;
+        rows.iter().map(row_to_experiment_project).collect()
+    }
+
+    pub async fn get_experiment_project_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentProject>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT * FROM experiment_projects WHERE id = $1 AND owner_user_id = $2",
+                &[&id, &owner_user_id],
+            )
+            .await?;
+        row.map(|row| row_to_experiment_project(&row)).transpose()
+    }
+
+    pub async fn list_experiment_projects_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentProject>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT * FROM experiment_projects WHERE owner_user_id = $1 ORDER BY updated_at DESC, name ASC",
+                &[&owner_user_id],
             )
             .await?;
         rows.iter().map(row_to_experiment_project).collect()
@@ -123,7 +163,7 @@ impl Store {
                 autonomy_mode = $19,
                 status = $20,
                 updated_at = $21
-            WHERE id = $1
+            WHERE id = $1 AND owner_user_id = $22
             "#,
             &[
                 &project.id,
@@ -149,6 +189,7 @@ impl Store {
                 &status_json(project.autonomy_mode),
                 &status_json(project.status),
                 &project.updated_at,
+                &project.owner_user_id,
             ],
         )
         .await?;
@@ -163,6 +204,21 @@ impl Store {
         Ok(count > 0)
     }
 
+    pub async fn delete_experiment_project_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let count = conn
+            .execute(
+                "DELETE FROM experiment_projects WHERE id = $1 AND owner_user_id = $2",
+                &[&id, &owner_user_id],
+            )
+            .await?;
+        Ok(count > 0)
+    }
+
     pub async fn create_experiment_runner_profile(
         &self,
         profile: &ExperimentRunnerProfile,
@@ -173,11 +229,13 @@ impl Store {
             INSERT INTO experiment_runner_profiles (
                 id, name, backend, backend_config, image_or_runtime,
                 gpu_requirements, env_grants, secret_references,
-                cache_policy, status, readiness_class, launch_eligible, created_at, updated_at
+                cache_policy, status, readiness_class, launch_eligible, created_at, updated_at,
+                owner_user_id
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8,
-                $9, $10, $11, $12, $13, $14
+                $9, $10, $11, $12, $13, $14,
+                $15
             )
             "#,
             &[
@@ -195,6 +253,7 @@ impl Store {
                 &profile.launch_eligible,
                 &profile.created_at,
                 &profile.updated_at,
+                &profile.owner_user_id,
             ],
         )
         .await?;
@@ -229,6 +288,36 @@ impl Store {
         rows.iter().map(row_to_experiment_runner_profile).collect()
     }
 
+    pub async fn get_experiment_runner_profile_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentRunnerProfile>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT * FROM experiment_runner_profiles WHERE id = $1 AND owner_user_id = $2",
+                &[&id, &owner_user_id],
+            )
+            .await?;
+        row.map(|row| row_to_experiment_runner_profile(&row))
+            .transpose()
+    }
+
+    pub async fn list_experiment_runner_profiles_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentRunnerProfile>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT * FROM experiment_runner_profiles WHERE owner_user_id = $1 ORDER BY updated_at DESC, name ASC",
+                &[&owner_user_id],
+            )
+            .await?;
+        rows.iter().map(row_to_experiment_runner_profile).collect()
+    }
+
     pub async fn update_experiment_runner_profile(
         &self,
         profile: &ExperimentRunnerProfile,
@@ -249,7 +338,7 @@ impl Store {
                 readiness_class = $11,
                 launch_eligible = $12,
                 updated_at = $13
-            WHERE id = $1
+            WHERE id = $1 AND owner_user_id = $14
             "#,
             &[
                 &profile.id,
@@ -265,6 +354,7 @@ impl Store {
                 &status_json(profile.readiness_class),
                 &profile.launch_eligible,
                 &profile.updated_at,
+                &profile.owner_user_id,
             ],
         )
         .await?;
@@ -277,6 +367,21 @@ impl Store {
             .execute(
                 "DELETE FROM experiment_runner_profiles WHERE id = $1",
                 &[&id],
+            )
+            .await?;
+        Ok(count > 0)
+    }
+
+    pub async fn delete_experiment_runner_profile_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let count = conn
+            .execute(
+                "DELETE FROM experiment_runner_profiles WHERE id = $1 AND owner_user_id = $2",
+                &[&id, &owner_user_id],
             )
             .await?;
         Ok(count > 0)
@@ -961,7 +1066,7 @@ impl Store {
         let rows = conn
             .query(
                 "SELECT * FROM experiment_model_usage_records ORDER BY created_at DESC LIMIT $1",
-                &[&(limit as i64)],
+                &[&bounded_usage_query_limit(limit)],
             )
             .await?;
         rows.iter().map(row_to_experiment_model_usage).collect()
@@ -976,7 +1081,10 @@ impl Store {
         let rows = conn
             .query(
                 "SELECT * FROM experiment_model_usage_records WHERE metadata->>'experiment_campaign_id' = $1 ORDER BY created_at ASC LIMIT $2",
-                &[&campaign_id.to_string(), &(limit as i64)],
+                &[
+                    &campaign_id.to_string(),
+                    &bounded_usage_query_limit(limit),
+                ],
             )
             .await?;
         rows.iter().map(row_to_experiment_model_usage).collect()
@@ -991,7 +1099,10 @@ impl Store {
         let rows = conn
             .query(
                 "SELECT * FROM experiment_model_usage_records WHERE metadata->>'experiment_trial_id' = $1 ORDER BY created_at ASC LIMIT $2",
-                &[&trial_id.to_string(), &(limit as i64)],
+                &[
+                    &trial_id.to_string(),
+                    &bounded_usage_query_limit(limit),
+                ],
             )
             .await?;
         rows.iter().map(row_to_experiment_model_usage).collect()
@@ -1108,6 +1219,9 @@ fn row_to_experiment_project(
 ) -> Result<ExperimentProject, DatabaseError> {
     Ok(ExperimentProject {
         id: row.try_get("id")?,
+        owner_user_id: row
+            .try_get("owner_user_id")
+            .unwrap_or_else(|_| "default".to_string()),
         name: row.try_get("name")?,
         workspace_path: row.try_get("workspace_path")?,
         git_remote_name: row.try_get("git_remote_name")?,
@@ -1142,6 +1256,9 @@ fn row_to_experiment_runner_profile(
 ) -> Result<ExperimentRunnerProfile, DatabaseError> {
     Ok(ExperimentRunnerProfile {
         id: row.try_get("id")?,
+        owner_user_id: row
+            .try_get("owner_user_id")
+            .unwrap_or_else(|_| "default".to_string()),
         name: row.try_get("name")?,
         backend: from_json_value(row.try_get("backend")?)?,
         backend_config: row.try_get("backend_config")?,

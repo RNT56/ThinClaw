@@ -27,8 +27,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::extract::DefaultBodyLimit;
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
+use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
@@ -57,6 +59,19 @@ const MAX_TEXT_LENGTH: usize = 4000;
 /// Maximum inbound attachment we buffer into memory (20 MB), matching the
 /// iMessage/Discord caps. Without it a large/lying payload can exhaust memory.
 const MAX_INBOUND_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_SIZE: usize = 40 * 1024 * 1024;
+const MAX_ATTACHMENTS: usize = 10;
+const MAX_API_RESPONSE_SIZE: usize = 4 * 1024 * 1024;
+const MAX_WEBHOOK_BODY_SIZE: usize = 1024 * 1024;
+const MAX_INBOUND_TEXT_SIZE: usize = 256 * 1024;
+const MAX_OUTBOUND_TEXT_SIZE: usize = 256 * 1024;
+const MAX_IDENTIFIER_SIZE: usize = 4096;
+const MAX_GUID_SIZE: usize = 1024;
+const MAX_PASSWORD_SIZE: usize = 4096;
+const MAX_ALLOW_FROM_ENTRIES: usize = 4096;
+const MAX_GUID_CACHE_ENTRIES: usize = 2048;
+const MAX_WEBHOOK_CONCURRENCY: usize = 16;
+const MAX_SERVER_DNS_ADDRESSES: usize = 64;
 
 /// BlueBubbles webhook event types that carry messages.
 const MESSAGE_EVENTS: &[&str] = &["new-message", "message", "updated-message"];
@@ -208,21 +223,22 @@ impl SeenGuids {
         }
         true
     }
+
+    fn remove(&mut self, guid: &str) {
+        if self.set.remove(guid) {
+            self.order.retain(|value| value != guid);
+        }
+    }
 }
 
 impl BlueBubblesChannel {
     /// Create a new BlueBubbles channel.
     pub async fn new(config: BlueBubblesConfig) -> Result<Self, ChannelError> {
-        if config.server_url.is_empty() {
-            return Err(ChannelError::Configuration(
-                "BlueBubbles server URL is required".to_string(),
-            ));
-        }
+        let mut config = config;
+        config.server_url = normalize_server_url(&config.server_url);
+        validate_bluebubbles_config(&config)?;
 
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| ChannelError::Configuration(format!("HTTP client error: {e}")))?;
+        let client = build_bluebubbles_client(&config.server_url).await?;
 
         // Pre-create the mpsc channel for incoming messages.
         // tx is cloned into the webhook handler; rx is taken by start().
@@ -274,10 +290,12 @@ impl BlueBubblesChannel {
             });
         }
 
-        res.json().await.map_err(|e| ChannelError::Disconnected {
-            name: NAME.to_string(),
-            reason: format!("API GET {path} parse error: {}", e.without_url()),
-        })
+        crate::response::bounded_json(res, MAX_API_RESPONSE_SIZE)
+            .await
+            .map_err(|e| ChannelError::Disconnected {
+                name: NAME.to_string(),
+                reason: format!("BlueBubbles API returned invalid JSON: {e}"),
+            })
     }
 
     /// POST request to the BlueBubbles API.
@@ -305,10 +323,12 @@ impl BlueBubblesChannel {
             });
         }
 
-        res.json().await.map_err(|e| ChannelError::SendFailed {
-            name: NAME.to_string(),
-            reason: format!("API POST {path} parse error: {}", e.without_url()),
-        })
+        crate::response::bounded_json(res, MAX_API_RESPONSE_SIZE)
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: format!("BlueBubbles API returned invalid JSON: {e}"),
+            })
     }
 
     // ── Connection ──────────────────────────────────────────────────
@@ -322,7 +342,7 @@ impl BlueBubblesChannel {
                 name: NAME.to_string(),
                 reason: format!(
                     "Cannot reach BlueBubbles server at {}: {e}",
-                    self.config.server_url
+                    redact_url(&self.config.server_url)
                 ),
             })?;
 
@@ -366,6 +386,12 @@ impl BlueBubblesChannel {
         if target.is_empty() {
             return Ok(None);
         }
+        if !valid_bluebubbles_identifier(target, MAX_IDENTIFIER_SIZE) {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "BlueBubbles chat identifier is malformed or oversized".to_string(),
+            });
+        }
 
         // Already a raw GUID
         if target.contains(';') {
@@ -390,7 +416,7 @@ impl BlueBubblesChannel {
         match self.api_post("/api/v1/chat/query", &payload).await {
             Ok(res) => {
                 if let Some(chats) = res.get("data").and_then(|d| d.as_array()) {
-                    for chat in chats {
+                    for chat in chats.iter().take(1000) {
                         let guid = chat
                             .get("guid")
                             .or(chat.get("chatGuid"))
@@ -402,9 +428,12 @@ impl BlueBubblesChannel {
 
                         if identifier == Some(target)
                             && let Some(g) = guid
+                                .filter(|g| valid_bluebubbles_identifier(g, MAX_IDENTIFIER_SIZE))
                         {
                             let mut cache = self.guid_cache.write().await;
-                            cache.insert(target.to_string(), g.to_string());
+                            if cache.len() < MAX_GUID_CACHE_ENTRIES {
+                                cache.insert(target.to_string(), g.to_string());
+                            }
                             return Ok(Some(g.to_string()));
                         }
 
@@ -412,14 +441,18 @@ impl BlueBubblesChannel {
                         if let Some(participants) =
                             chat.get("participants").and_then(|p| p.as_array())
                         {
-                            for part in participants {
+                            for part in participants.iter().take(1000) {
                                 let addr =
                                     part.get("address").and_then(|a| a.as_str()).unwrap_or("");
                                 if addr.trim() == target
-                                    && let Some(g) = guid
+                                    && let Some(g) = guid.filter(|g| {
+                                        valid_bluebubbles_identifier(g, MAX_IDENTIFIER_SIZE)
+                                    })
                                 {
                                     let mut cache = self.guid_cache.write().await;
-                                    cache.insert(target.to_string(), g.to_string());
+                                    if cache.len() < MAX_GUID_CACHE_ENTRIES {
+                                        cache.insert(target.to_string(), g.to_string());
+                                    }
                                     return Ok(Some(g.to_string()));
                                 }
                             }
@@ -442,6 +475,11 @@ impl BlueBubblesChannel {
         let host = match self.config.webhook_host.as_str() {
             "0.0.0.0" | "::" => "localhost",
             h => h,
+        };
+        let host = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+            format!("[{host}]")
+        } else {
+            host.to_string()
         };
         let password = urlencoding::encode(self.config.password.expose_secret());
         format!(
@@ -524,7 +562,10 @@ impl BlueBubblesChannel {
                     );
                 }
                 Err(e) => {
-                    tracing::debug!("BlueBubbles: webhook unregister failed (non-critical): {e}");
+                    tracing::debug!(
+                        error = %e.without_url(),
+                        "BlueBubbles: webhook unregister failed (non-critical)"
+                    );
                 }
             }
         }
@@ -542,31 +583,41 @@ impl BlueBubblesChannel {
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<(), ChannelError> {
+        if !valid_bluebubbles_identifier(chat_guid, MAX_IDENTIFIER_SIZE)
+            || text.len() > MAX_OUTBOUND_TEXT_SIZE
+            || reply_to.is_some_and(|value| !valid_bluebubbles_identifier(value, MAX_GUID_SIZE))
+        {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "BlueBubbles message is malformed or oversized".to_string(),
+            });
+        }
         let chunks = split_message(text, MAX_TEXT_LENGTH);
         for chunk in chunks {
-            let mut payload = serde_json::json!({
-                "chatGuid": chat_guid,
-                "tempGuid": format!("temp-{}", uuid::Uuid::new_v4()),
-                "message": chunk,
-            });
+            let mut payload = serde_json::Map::from_iter([
+                ("chatGuid".to_string(), serde_json::json!(chat_guid)),
+                (
+                    "tempGuid".to_string(),
+                    serde_json::json!(format!("temp-{}", uuid::Uuid::new_v4())),
+                ),
+                ("message".to_string(), serde_json::json!(chunk)),
+            ]);
 
             // Thread the reply if Private API is available
             if let Some(original_guid) = reply_to
                 && self.private_api.load(Ordering::Relaxed)
                 && self.helper_connected.load(Ordering::Relaxed)
             {
-                let obj = payload
-                    .as_object_mut()
-                    .expect("payload was created as a JSON object literal");
-                obj.insert("method".into(), serde_json::json!("private-api"));
-                obj.insert(
+                payload.insert("method".into(), serde_json::json!("private-api"));
+                payload.insert(
                     "selectedMessageGuid".into(),
                     serde_json::json!(original_guid),
                 );
-                obj.insert("partIndex".into(), serde_json::json!(0));
+                payload.insert("partIndex".into(), serde_json::json!(0));
             }
 
-            self.api_post("/api/v1/message/text", &payload).await?;
+            self.api_post("/api/v1/message/text", &serde_json::Value::Object(payload))
+                .await?;
         }
         Ok(())
     }
@@ -586,6 +637,21 @@ impl BlueBubblesChannel {
         caption: Option<&str>,
         is_audio_message: bool,
     ) -> Result<(), ChannelError> {
+        if !valid_bluebubbles_identifier(chat_guid, MAX_IDENTIFIER_SIZE)
+            || data.len() > MAX_INBOUND_ATTACHMENT_SIZE as usize
+            || filename.is_empty()
+            || filename.len() > 255
+            || filename.chars().any(char::is_control)
+            || filename.contains(['/', '\\'])
+            || mime.is_empty()
+            || mime.len() > 256
+            || mime.chars().any(char::is_control)
+        {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "BlueBubbles attachment is malformed or oversized".to_string(),
+            });
+        }
         let url = self.api_url("/api/v1/message/attachment");
 
         let file_part = reqwest::multipart::Part::bytes(data)
@@ -615,7 +681,7 @@ impl BlueBubblesChannel {
             .await
             .map_err(|e| ChannelError::SendFailed {
                 name: NAME.to_string(),
-                reason: format!("Attachment upload failed: {e}"),
+                reason: format!("Attachment upload failed: {}", e.without_url()),
             })?;
 
         if !res.status().is_success() {
@@ -751,16 +817,20 @@ impl BlueBubblesChannel {
             .send()
             .await
         {
-            Ok(res) if res.status().is_success() => match res.bytes().await {
-                Ok(data) => {
-                    let mc = thinclaw_media::MediaContent::new(data.to_vec(), mime);
-                    Some(mc)
+            Ok(res) if res.status().is_success() => {
+                match crate::response::bounded_bytes(res, MAX_INBOUND_ATTACHMENT_SIZE as usize)
+                    .await
+                {
+                    Ok(data) => {
+                        let mc = thinclaw_media::MediaContent::new(data.to_vec(), mime);
+                        Some(mc)
+                    }
+                    Err(e) => {
+                        tracing::warn!("BlueBubbles: attachment body read failed: {e}");
+                        None
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("BlueBubbles: attachment body read failed: {e}");
-                    None
-                }
-            },
+            }
             Ok(res) => {
                 tracing::warn!(
                     status = %res.status(),
@@ -769,7 +839,10 @@ impl BlueBubblesChannel {
                 None
             }
             Err(e) => {
-                tracing::warn!("BlueBubbles: attachment download failed: {e}");
+                tracing::warn!(
+                    error = %e.without_url(),
+                    "BlueBubbles: attachment download failed"
+                );
                 None
             }
         }
@@ -801,6 +874,10 @@ impl BlueBubblesChannel {
                 axum::routing::post(handle_webhook),
             )
             .with_state(state)
+            .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_SIZE))
+            .layer(tower::limit::ConcurrencyLimitLayer::new(
+                MAX_WEBHOOK_CONCURRENCY,
+            ))
     }
 
     /// Spawn (or respawn) the webhook HTTP listener, draining any prior one
@@ -820,7 +897,7 @@ impl BlueBubblesChannel {
 
         let handle = tokio::spawn(async move {
             let addr = format!("{host}:{port}");
-            let listener = match tokio::net::TcpListener::bind(&addr).await {
+            let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
                 Ok(l) => l,
                 Err(e) => {
                     tracing::error!(
@@ -893,29 +970,33 @@ impl Channel for BlueBubblesChannel {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        validate_outgoing_attachments(&response.attachments)?;
         let chat_id_for_att = msg
             .metadata
             .get("chat_guid")
             .and_then(|v| v.as_str())
             .or_else(|| msg.metadata.get("chat_id").and_then(|v| v.as_str()))
             .unwrap_or(&msg.user_id);
-        if let Some(resolved_att) = self.resolve_chat_guid(chat_id_for_att).await? {
+        let resolved_attachment_chat = self.resolve_chat_guid(chat_id_for_att).await?;
+        if !response.attachments.is_empty() && resolved_attachment_chat.is_none() {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "BlueBubbles could not resolve the attachment destination".to_string(),
+            });
+        }
+        if let Some(resolved_att) = resolved_attachment_chat.as_deref() {
             for att in &response.attachments {
                 let fname = att.filename.as_deref().unwrap_or("attachment");
                 let is_audio = att.mime_type.starts_with("audio/");
-                if let Err(e) = self
-                    .send_attachment(
-                        &resolved_att,
-                        att.data.clone(),
-                        fname,
-                        &att.mime_type,
-                        None,
-                        is_audio,
-                    )
-                    .await
-                {
-                    tracing::warn!(error = %e, "BlueBubbles: failed to send attachment");
-                }
+                self.send_attachment(
+                    resolved_att,
+                    att.data.clone(),
+                    fname,
+                    &att.mime_type,
+                    None,
+                    is_audio,
+                )
+                .await?;
             }
         }
 
@@ -923,8 +1004,22 @@ impl Channel for BlueBubblesChannel {
         if response.attachments.is_empty()
             && let Some(attachments) = msg.metadata.get("response_attachments")
             && let Some(arr) = attachments.as_array()
-            && let Some(resolved_att) = self.resolve_chat_guid(chat_id_for_att).await?
         {
+            let resolved_att =
+                resolved_attachment_chat
+                    .as_deref()
+                    .ok_or_else(|| ChannelError::SendFailed {
+                        name: NAME.to_string(),
+                        reason: "BlueBubbles could not resolve the legacy attachment destination"
+                            .to_string(),
+                    })?;
+            if arr.len() > MAX_ATTACHMENTS {
+                return Err(ChannelError::SendFailed {
+                    name: NAME.to_string(),
+                    reason: "BlueBubbles response contains too many legacy attachments".to_string(),
+                });
+            }
+            let mut total_bytes = 0usize;
             for att in arr {
                 let data_b64 = att.get("data").and_then(|d| d.as_str()).unwrap_or("");
                 let fname = att
@@ -935,15 +1030,23 @@ impl Channel for BlueBubblesChannel {
                     .get("mime_type")
                     .and_then(|m| m.as_str())
                     .unwrap_or("application/octet-stream");
-                if let Ok(bytes) = base64_decode(data_b64) {
-                    let is_audio = mime.starts_with("audio/");
-                    if let Err(e) = self
-                        .send_attachment(&resolved_att, bytes, fname, mime, None, is_audio)
-                        .await
-                    {
-                        tracing::warn!(error = %e, "BlueBubbles: failed to send attachment");
+                let bytes = base64_decode_bounded(data_b64, MAX_INBOUND_ATTACHMENT_SIZE as usize)?;
+                total_bytes = total_bytes.checked_add(bytes.len()).ok_or_else(|| {
+                    ChannelError::SendFailed {
+                        name: NAME.to_string(),
+                        reason: "BlueBubbles legacy attachment size overflow".to_string(),
                     }
+                })?;
+                if total_bytes > MAX_TOTAL_ATTACHMENT_SIZE {
+                    return Err(ChannelError::SendFailed {
+                        name: NAME.to_string(),
+                        reason: "BlueBubbles legacy attachments exceed the total size limit"
+                            .to_string(),
+                    });
                 }
+                let is_audio = mime.starts_with("audio/");
+                self.send_attachment(resolved_att, bytes, fname, mime, None, is_audio)
+                    .await?;
             }
         }
 
@@ -1001,31 +1104,36 @@ impl Channel for BlueBubblesChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        validate_outgoing_attachments(&response.attachments)?;
         // Resolve the user_id to a chat GUID
         match self.resolve_chat_guid(user_id).await? {
             Some(guid) => {
                 for att in &response.attachments {
                     let fname = att.filename.as_deref().unwrap_or("attachment");
                     let is_audio = att.mime_type.starts_with("audio/");
-                    if let Err(e) = self
-                        .send_attachment(
-                            &guid,
-                            att.data.clone(),
-                            fname,
-                            &att.mime_type,
-                            None,
-                            is_audio,
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "BlueBubbles: failed to send broadcast attachment");
-                    }
+                    self.send_attachment(
+                        &guid,
+                        att.data.clone(),
+                        fname,
+                        &att.mime_type,
+                        None,
+                        is_audio,
+                    )
+                    .await?;
                 }
                 self.send_text(&guid, &response.content, None).await
             }
             None => {
                 // Try creating a new chat if it looks like a valid address
                 if user_id.contains('@') || user_id.starts_with('+') {
+                    if !response.attachments.is_empty() {
+                        return Err(ChannelError::SendFailed {
+                            name: NAME.to_string(),
+                            reason:
+                                "BlueBubbles cannot attach files until the new chat is available"
+                                    .to_string(),
+                        });
+                    }
                     let payload = serde_json::json!({
                         "addresses": [user_id],
                         "message": response.content,
@@ -1114,7 +1222,12 @@ async fn handle_webhook(
         .or(params.get("guid"))
         .map(|s| s.as_str())
         .unwrap_or("");
-    if token != state.password.expose_secret() {
+    if token
+        .as_bytes()
+        .ct_eq(state.password.expose_secret().as_bytes())
+        .unwrap_u8()
+        != 1
+    {
         return axum::http::StatusCode::UNAUTHORIZED;
     }
 
@@ -1184,9 +1297,12 @@ async fn handle_webhook(
 
     // Drop duplicate deliveries. BlueBubbles resends the full message on edits
     // (`updated-message`); without this the agent answers the same message twice.
-    if let Some(guid) = record.get("guid").and_then(|v| v.as_str())
-        && !guid.is_empty()
-    {
+    let dedupe_guid = record
+        .get("guid")
+        .and_then(|v| v.as_str())
+        .filter(|guid| valid_bluebubbles_identifier(guid, MAX_GUID_SIZE))
+        .map(String::from);
+    if let Some(guid) = dedupe_guid.as_deref() {
         let mut seen = state.seen.lock().unwrap_or_else(|p| p.into_inner());
         if !seen.insert_new(guid) {
             return axum::http::StatusCode::OK;
@@ -1200,6 +1316,9 @@ async fn handle_webhook(
         record.get("body"),
     ])
     .unwrap_or_default();
+    if text.len() > MAX_INBOUND_TEXT_SIZE || text.chars().any(|value| value == '\0') {
+        return axum::http::StatusCode::PAYLOAD_TOO_LARGE;
+    }
 
     // Extract attachments
     let attachments = record
@@ -1207,6 +1326,9 @@ async fn handle_webhook(
         .and_then(|a| a.as_array())
         .cloned()
         .unwrap_or_default();
+    if attachments.len() > MAX_ATTACHMENTS {
+        return axum::http::StatusCode::PAYLOAD_TOO_LARGE;
+    }
 
     if text.is_empty() && attachments.is_empty() {
         return axum::http::StatusCode::OK;
@@ -1256,14 +1378,18 @@ async fn handle_webhook(
         .or_else(|| chat_guid.clone());
 
     let sender = match sender {
-        Some(s) => s,
+        Some(s) if valid_bluebubbles_identifier(&s, MAX_IDENTIFIER_SIZE) => s,
         None => return axum::http::StatusCode::BAD_REQUEST,
+        Some(_) => return axum::http::StatusCode::BAD_REQUEST,
     };
 
     let session_chat_id = chat_guid
         .as_deref()
         .or(chat_identifier.as_deref())
         .unwrap_or(&sender);
+    if !valid_bluebubbles_identifier(session_chat_id, MAX_IDENTIFIER_SIZE) {
+        return axum::http::StatusCode::BAD_REQUEST;
+    }
 
     // Check allow-list
     if !state.allow_from.is_empty() && !state.allow_from.iter().any(|a| a == "*" || a == &sender) {
@@ -1272,15 +1398,19 @@ async fn handle_webhook(
 
     // Download attachments
     let mut media_attachments = Vec::new();
+    let mut total_attachment_bytes = 0usize;
     for att in &attachments {
         let att_guid = att.get("guid").and_then(|g| g.as_str()).unwrap_or("");
-        if att_guid.is_empty() {
+        if !valid_bluebubbles_identifier(att_guid, MAX_GUID_SIZE) {
             continue;
         }
         let mime = att
             .get("mimeType")
             .and_then(|m| m.as_str())
             .unwrap_or("application/octet-stream");
+        if mime.is_empty() || mime.len() > 256 || mime.chars().any(char::is_control) {
+            continue;
+        }
 
         let encoded = urlencoding::encode(att_guid);
         let password = urlencoding::encode(state.config.password.expose_secret());
@@ -1297,27 +1427,16 @@ async fn handle_webhook(
             .await
         {
             Ok(res) if res.status().is_success() => {
-                // Reject before buffering if the server declares an oversized body.
-                if res
-                    .content_length()
-                    .is_some_and(|len| len > MAX_INBOUND_ATTACHMENT_SIZE)
+                if let Ok(data) =
+                    crate::response::bounded_bytes(res, MAX_INBOUND_ATTACHMENT_SIZE as usize).await
                 {
-                    tracing::warn!(
-                        att_guid = %redact_pii(att_guid),
-                        "BlueBubbles: attachment exceeds size limit, skipping"
-                    );
-                    continue;
-                }
-                if let Ok(data) = res.bytes().await {
-                    // Guard against a lying/absent Content-Length.
-                    if data.len() as u64 > MAX_INBOUND_ATTACHMENT_SIZE {
-                        tracing::warn!(
-                            att_guid = %redact_pii(att_guid),
-                            "BlueBubbles: attachment body exceeds size limit, skipping"
-                        );
-                        continue;
+                    if total_attachment_bytes.saturating_add(data.len()) > MAX_TOTAL_ATTACHMENT_SIZE
+                    {
+                        tracing::warn!("BlueBubbles: total attachment size limit reached");
+                        break;
                     }
-                    let mc = thinclaw_media::MediaContent::new(data.to_vec(), mime);
+                    total_attachment_bytes += data.len();
+                    let mc = thinclaw_media::MediaContent::new(data, mime);
                     media_attachments.push(mc);
                 }
             }
@@ -1370,10 +1489,19 @@ async fn handle_webhook(
         .with_attachments(media_attachments);
 
     // Send to channel
-    if let Some(ref tx) = state.tx
-        && tx.send(incoming).await.is_err()
-    {
-        tracing::warn!("BlueBubbles: incoming message channel dropped");
+    if let Some(ref tx) = state.tx {
+        let sent = tokio::time::timeout(Duration::from_secs(5), tx.send(incoming)).await;
+        if !matches!(sent, Ok(Ok(()))) {
+            if let Some(guid) = dedupe_guid.as_deref() {
+                state
+                    .seen
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(guid);
+            }
+            tracing::warn!("BlueBubbles: incoming message channel unavailable");
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE;
+        }
     }
 
     // Fire-and-forget read receipt
@@ -1381,19 +1509,17 @@ async fn handle_webhook(
         && state.private_api.load(Ordering::Relaxed)
         && state.helper_connected.load(Ordering::Relaxed)
     {
-        let client = state.client.clone();
         let password = urlencoding::encode(state.config.password.expose_secret()).to_string();
         let server_url = state.config.server_url.clone();
         let chat = session_chat_id.to_string();
-        tokio::spawn(async move {
-            let encoded = urlencoding::encode(&chat);
-            let url = format!("{server_url}/api/v1/chat/{encoded}/read?password={password}");
-            let _ = client
-                .post(&url)
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
-                .await;
-        });
+        let encoded = urlencoding::encode(&chat);
+        let url = format!("{server_url}/api/v1/chat/{encoded}/read?password={password}");
+        let _ = state
+            .client
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await;
     }
 
     axum::http::StatusCode::OK
@@ -1424,6 +1550,163 @@ impl BlueBubblesChannel {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+fn validate_bluebubbles_config(config: &BlueBubblesConfig) -> Result<(), ChannelError> {
+    if config.server_url.is_empty() {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles server URL is required".to_string(),
+        ));
+    }
+    if config.server_url.len() > 4096 {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles server URL is oversized".to_string(),
+        ));
+    }
+
+    let parsed = url::Url::parse(&config.server_url).map_err(|_| {
+        ChannelError::Configuration("BlueBubbles server URL is malformed".to_string())
+    })?;
+    let host = parsed.host_str().ok_or_else(|| {
+        ChannelError::Configuration("BlueBubbles server URL requires a host".to_string())
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles server URL must be an HTTP(S) origin without credentials, path, query, or fragment"
+                .to_string(),
+        ));
+    }
+    if parsed.scheme() == "http" && !is_local_bluebubbles_host(host) {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles requires HTTPS for non-local servers".to_string(),
+        ));
+    }
+
+    let password = config.password.expose_secret();
+    if password.is_empty()
+        || password.len() > MAX_PASSWORD_SIZE
+        || password.chars().any(char::is_control)
+    {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles password is missing, malformed, or oversized".to_string(),
+        ));
+    }
+    if config.webhook_port == 0
+        || config.webhook_host.is_empty()
+        || config.webhook_host.len() > 255
+        || config.webhook_host.chars().any(char::is_control)
+        || config.webhook_host.contains(['/', '?', '#', '@'])
+        || !config.webhook_path.starts_with('/')
+        || config.webhook_path.len() > 256
+        || config.webhook_path.contains(['?', '#'])
+        || config.webhook_path.chars().any(char::is_control)
+        || config.allow_from.len() > MAX_ALLOW_FROM_ENTRIES
+        || config
+            .allow_from
+            .iter()
+            .any(|value| value != "*" && !valid_bluebubbles_identifier(value, MAX_IDENTIFIER_SIZE))
+    {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles webhook or allow-list configuration is malformed or oversized".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn build_bluebubbles_client(server_url: &str) -> Result<Client, ChannelError> {
+    let parsed = url::Url::parse(server_url).map_err(|_| {
+        ChannelError::Configuration("BlueBubbles server URL is malformed".to_string())
+    })?;
+    let host = parsed.host_str().ok_or_else(|| {
+        ChannelError::Configuration("BlueBubbles server URL requires a host".to_string())
+    })?;
+    let port = parsed.port_or_known_default().ok_or_else(|| {
+        ChannelError::Configuration("BlueBubbles server URL has no port".to_string())
+    })?;
+    let resolved = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((host, port)),
+    )
+    .await
+    .map_err(|_| {
+        ChannelError::Configuration("BlueBubbles server DNS lookup timed out".to_string())
+    })?
+    .map_err(|_| ChannelError::Configuration("BlueBubbles server DNS lookup failed".to_string()))?;
+    let mut addresses = resolved.collect::<Vec<_>>();
+    addresses.sort_unstable();
+    addresses.dedup();
+    if addresses.is_empty()
+        || addresses.len() > MAX_SERVER_DNS_ADDRESSES
+        || addresses.iter().any(|address| {
+            let ip = address.ip();
+            ip.is_unspecified()
+                || ip.is_multicast()
+                || matches!(ip, std::net::IpAddr::V4(ip) if ip.is_broadcast())
+                || parsed.scheme() == "http" && thinclaw_tools_core::is_public_outbound_ip(ip)
+        })
+    {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles server resolved to an invalid address".to_string(),
+        ));
+    }
+
+    Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .resolve_to_addrs(host, &addresses)
+        .build()
+        .map_err(|e| ChannelError::Configuration(format!("HTTP client error: {e}")))
+}
+
+fn is_local_bluebubbles_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".local")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| !thinclaw_tools_core::is_public_outbound_ip(ip))
+}
+
+fn valid_bluebubbles_identifier(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
+}
+
+fn validate_outgoing_attachments(
+    attachments: &[thinclaw_media::MediaContent],
+) -> Result<(), ChannelError> {
+    if attachments.len() > MAX_ATTACHMENTS {
+        return Err(ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: "BlueBubbles response contains too many attachments".to_string(),
+        });
+    }
+    let total = attachments
+        .iter()
+        .try_fold(0usize, |total, attachment| {
+            total.checked_add(attachment.data.len())
+        })
+        .ok_or_else(|| ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: "BlueBubbles attachment size overflow".to_string(),
+        })?;
+    if total > MAX_TOTAL_ATTACHMENT_SIZE
+        || attachments
+            .iter()
+            .any(|attachment| attachment.data.len() > MAX_INBOUND_ATTACHMENT_SIZE as usize)
+    {
+        return Err(ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: "BlueBubbles attachments exceed the configured size limit".to_string(),
+        });
+    }
+    Ok(())
+}
+
 async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
     tokio::select! {
         result = &mut handle => {
@@ -1445,7 +1728,8 @@ fn normalize_server_url(raw: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    let with_scheme = if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+    let lower = trimmed.to_ascii_lowercase();
+    let with_scheme = if !lower.starts_with("http://") && !lower.starts_with("https://") {
         format!("http://{trimmed}")
     } else {
         trimmed.to_string()
@@ -1546,14 +1830,37 @@ fn redact_pii(text: &str) -> String {
 }
 
 /// Decode a base64-encoded string to bytes.
+#[cfg(test)]
 fn base64_decode(input: &str) -> Result<Vec<u8>, ChannelError> {
+    base64_decode_bounded(input, MAX_INBOUND_ATTACHMENT_SIZE as usize)
+}
+
+fn base64_decode_bounded(input: &str, limit: usize) -> Result<Vec<u8>, ChannelError> {
     use base64::Engine;
-    base64::engine::general_purpose::STANDARD
+    let max_encoded = limit
+        .checked_mul(4)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_add(4))
+        .unwrap_or(usize::MAX);
+    if input.len() > max_encoded {
+        return Err(ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: "base64 attachment exceeds the configured size limit".to_string(),
+        });
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
         .decode(input)
         .map_err(|e| ChannelError::SendFailed {
             name: NAME.to_string(),
             reason: format!("base64 decode error: {e}"),
-        })
+        })?;
+    if decoded.len() > limit {
+        return Err(ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: "decoded attachment exceeds the configured size limit".to_string(),
+        });
+    }
+    Ok(decoded)
 }
 
 #[cfg(test)]

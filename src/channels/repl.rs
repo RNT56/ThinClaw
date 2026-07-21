@@ -422,7 +422,11 @@ impl Channel for ReplChannel {
         std::thread::spawn(move || {
             // Single message mode: send it and return
             if let Some(msg) = single_message {
-                let incoming = IncomingMessage::new("repl", "default", &msg);
+                let incoming = IncomingMessage::new("repl", "default", &msg)
+                    .with_metadata(
+                        serde_json::json!({"conversation_kind": "direct", "principal_admin": true}),
+                    )
+                    .with_actor_identity("default", "default");
                 let _ = tx.blocking_send(incoming);
                 return;
             }
@@ -500,7 +504,9 @@ impl Channel for ReplChannel {
                             ReplInputAction::Quit => {
                                 // Forward shutdown command so the agent loop exits even
                                 // when other channels (e.g. web gateway) are still active.
-                                let msg = IncomingMessage::new("repl", "default", "/quit");
+                                let msg = IncomingMessage::new("repl", "default", "/quit")
+                                    .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
+                                    .with_actor_identity("default", "default");
                                 let _ = tx.blocking_send(msg);
                                 break;
                             }
@@ -565,7 +571,9 @@ impl Channel for ReplChannel {
                                 continue;
                             }
                             ReplInputAction::Submit(message) => {
-                                let msg = IncomingMessage::new("repl", "default", &message);
+                                let msg = IncomingMessage::new("repl", "default", &message)
+                                    .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
+                                    .with_actor_identity("default", "default");
                                 if tx.blocking_send(msg).is_err() {
                                     break;
                                 }
@@ -575,20 +583,26 @@ impl Channel for ReplChannel {
                     Err(ReadlineError::Interrupted) => {
                         if esc_interrupt_triggered_for_thread.swap(false, Ordering::Relaxed) {
                             // Esc: interrupt current operation and keep REPL open.
-                            let msg = IncomingMessage::new("repl", "default", "/interrupt");
+                            let msg = IncomingMessage::new("repl", "default", "/interrupt")
+                                .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
+                                .with_actor_identity("default", "default");
                             if tx.blocking_send(msg).is_err() {
                                 break;
                             }
                         } else {
                             // Ctrl+C (VINTR): request graceful shutdown.
-                            let msg = IncomingMessage::new("repl", "default", "/quit");
+                            let msg = IncomingMessage::new("repl", "default", "/quit")
+                                .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
+                                .with_actor_identity("default", "default");
                             let _ = tx.blocking_send(msg);
                             break;
                         }
                     }
                     Err(ReadlineError::Eof) => {
                         // Ctrl+D: send /quit so the agent loop runs graceful shutdown
-                        let msg = IncomingMessage::new("repl", "default", "/quit");
+                        let msg = IncomingMessage::new("repl", "default", "/quit")
+                            .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
+                            .with_actor_identity("default", "default");
                         let _ = tx.blocking_send(msg);
                         break;
                     }
