@@ -116,7 +116,7 @@ impl MediaCache {
         let metadata = std::fs::symlink_metadata(&path).ok()?;
         if metadata.file_type().is_symlink()
             || !metadata.is_file()
-            || !metadata_has_single_link(&metadata)
+            || !thinclaw_platform::fs::regular_file_has_single_link(&path).ok()?
             || metadata.len() > self.max_entry_bytes()
         {
             return None;
@@ -229,7 +229,7 @@ impl MediaCache {
             if valid_name
                 && !metadata.file_type().is_symlink()
                 && metadata.is_file()
-                && metadata_has_single_link(&metadata)
+                && thinclaw_platform::fs::regular_file_has_single_link(&path)?
                 && metadata.len() <= self.max_entry_bytes()
             {
                 let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
@@ -252,20 +252,21 @@ impl MediaCache {
                 ));
             }
             let entry = entry?;
+            let path = entry.path();
             let valid_name = entry.file_name().to_str().is_some_and(|name| {
                 name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
             });
-            let metadata = std::fs::symlink_metadata(entry.path())?;
+            let metadata = std::fs::symlink_metadata(&path)?;
 
             if valid_name
                 && !metadata.file_type().is_symlink()
                 && metadata.is_file()
-                && metadata_has_single_link(&metadata)
+                && thinclaw_platform::fs::regular_file_has_single_link(&path)?
                 && let Ok(modified) = metadata.modified()
                 && let Ok(age) = now.duration_since(modified)
                 && age > self.config.ttl
             {
-                let _ = std::fs::remove_file(entry.path());
+                let _ = std::fs::remove_file(path);
                 pruned += 1;
             }
         }
@@ -292,23 +293,6 @@ impl MediaCache {
     fn max_entry_bytes(&self) -> u64 {
         self.config.max_bytes.min(MAX_CACHE_ENTRY_BYTES)
     }
-}
-
-#[cfg(unix)]
-fn metadata_has_single_link(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-    metadata.nlink() == 1
-}
-
-#[cfg(windows)]
-fn metadata_has_single_link(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-    metadata.number_of_links() == Some(1)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn metadata_has_single_link(_metadata: &std::fs::Metadata) -> bool {
-    false
 }
 
 /// Cache statistics.

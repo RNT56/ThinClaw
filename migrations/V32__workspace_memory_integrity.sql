@@ -1,4 +1,4 @@
--- Make the shared (agent_id IS NULL) workspace namespace genuinely unique.
+-- Ensure the shared (agent_id IS NULL) workspace namespace is genuinely unique.
 -- SQL UNIQUE constraints treat NULL values as distinct, so the original
 -- (user_id, agent_id, path) constraint allowed duplicate shared documents
 -- during concurrent creation.

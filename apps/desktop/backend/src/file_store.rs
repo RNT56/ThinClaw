@@ -20,23 +20,6 @@ use tracing::{debug, info, warn};
 /// smaller, format-specific limit.
 pub const DEFAULT_MAX_FILESTORE_READ_BYTES: usize = 512 * 1024 * 1024;
 
-#[cfg(unix)]
-fn metadata_has_single_link(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-    metadata.nlink() == 1
-}
-
-#[cfg(windows)]
-fn metadata_has_single_link(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-    metadata.number_of_links() == Some(1)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn metadata_has_single_link(_metadata: &std::fs::Metadata) -> bool {
-    false
-}
-
 /// The operating mode for the file store.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FileStoreMode {
@@ -243,24 +226,7 @@ impl FileStore {
     ) -> FileStoreResult<(tokio::fs::File, std::fs::Metadata)> {
         let path = path.to_path_buf();
         let std_file = tokio::task::spawn_blocking(move || {
-            let mut options = std::fs::OpenOptions::new();
-            options.read(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_NOFOLLOW);
-            }
-            #[cfg(not(unix))]
-            {
-                let metadata = std::fs::symlink_metadata(&path)?;
-                if metadata.file_type().is_symlink() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "symbolic-link inputs are not allowed",
-                    ));
-                }
-            }
-            options.open(path)
+            thinclaw_platform::fs::open_regular_file_nofollow(&path)
         })
         .await
         .map_err(|error| {
@@ -269,7 +235,9 @@ impl FileStore {
             )))
         })??;
         let metadata = std_file.metadata()?;
-        if !metadata.is_file() || !metadata_has_single_link(&metadata) {
+        if !metadata.is_file()
+            || !thinclaw_platform::fs::opened_file_has_single_link(&std_file, &metadata)?
+        {
             return Err(FileStoreError::InvalidPath(
                 "store path is not a single-link regular file".to_string(),
             ));
@@ -590,7 +558,6 @@ impl FileStore {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink()
                     || !metadata.is_file()
-                    || !metadata_has_single_link(&metadata)
                 {
                     return Err(FileStoreError::InvalidPath(format!(
                         "store path is not a regular file: {relative_path}"
@@ -738,14 +705,16 @@ impl FileStore {
         match tokio::fs::symlink_metadata(&full_path).await {
             Ok(metadata)
                 if metadata.file_type().is_symlink()
-                    || !metadata.is_file()
-                    || !metadata_has_single_link(&metadata) =>
+                    || !metadata.is_file() =>
             {
                 return Err(FileStoreError::InvalidPath(format!(
                     "store path is not a regular file: {relative_path}"
                 )));
             }
-            Ok(_) => return Ok(full_path),
+            Ok(_) => {
+                let _ = Self::open_regular_nofollow(&full_path).await?;
+                return Ok(full_path);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }

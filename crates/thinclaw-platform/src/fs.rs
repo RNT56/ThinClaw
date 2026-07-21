@@ -40,6 +40,69 @@ pub fn read_regular_file_bounded_single_link(
     read_regular_file_bounded_impl(path, max_bytes, true)
 }
 
+/// Open a regular file for reading without following a final-component
+/// symlink or Windows reparse point on supported desktop platforms.
+pub fn open_regular_file_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+    let initial = std::fs::symlink_metadata(path)?;
+    if initial.file_type().is_symlink() || !initial.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "path is not a regular file",
+        ));
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "opened path is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+/// Check that `path` currently resolves to a regular file with exactly one
+/// hard link, without following a final-component symlink or reparse point.
+///
+/// Stable Rust does not expose the Windows link count through `Metadata`, so
+/// this check opens the path and queries the resulting OS handle on Windows.
+pub fn regular_file_has_single_link(path: &Path) -> std::io::Result<bool> {
+    let initial = std::fs::symlink_metadata(path)?;
+    if initial.file_type().is_symlink() || !initial.is_file() {
+        return Ok(false);
+    }
+
+    let file = open_regular_file_nofollow(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != initial.len() {
+        return Ok(false);
+    }
+    opened_file_has_single_link(&file, &opened)
+}
+
+/// Check the hard-link count of an already-open regular file.
+///
+/// Callers should keep using the same handle for subsequent reads so the
+/// check and the operation cannot be separated by a path-replacement race.
+pub fn opened_file_has_single_link(
+    file: &std::fs::File,
+    metadata: &std::fs::Metadata,
+) -> std::io::Result<bool> {
+    opened_file_has_single_link_impl(file, metadata)
+}
+
 fn read_regular_file_bounded_impl(
     path: &Path,
     max_bytes: u64,
@@ -57,21 +120,7 @@ fn read_regular_file_bounded_impl(
         ));
     }
 
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        // Open the reparse point itself so a last-moment junction/symlink
-        // replacement cannot redirect the read.
-        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let mut file = options.open(path)?;
+    let mut file = open_regular_file_nofollow(path)?;
     let opened = file.metadata()?;
     let opened_has_single_link =
         !require_single_link || opened_file_has_single_link(&file, &opened)?;
@@ -124,7 +173,7 @@ fn preopen_metadata_has_single_link(_metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(unix)]
-fn opened_file_has_single_link(
+fn opened_file_has_single_link_impl(
     _file: &std::fs::File,
     metadata: &std::fs::Metadata,
 ) -> std::io::Result<bool> {
@@ -133,7 +182,7 @@ fn opened_file_has_single_link(
 }
 
 #[cfg(windows)]
-fn opened_file_has_single_link(
+fn opened_file_has_single_link_impl(
     file: &std::fs::File,
     _metadata: &std::fs::Metadata,
 ) -> std::io::Result<bool> {
@@ -156,7 +205,7 @@ fn opened_file_has_single_link(
 }
 
 #[cfg(not(any(unix, windows)))]
-fn opened_file_has_single_link(
+fn opened_file_has_single_link_impl(
     _file: &std::fs::File,
     _metadata: &std::fs::Metadata,
 ) -> std::io::Result<bool> {
@@ -667,8 +716,11 @@ mod tests {
         let target = temp.path().join("target");
         let link = temp.path().join("link");
         std::fs::write(&target, b"secret").unwrap();
+        assert!(regular_file_has_single_link(&target).unwrap());
         std::fs::hard_link(&target, &link).unwrap();
 
+        assert!(!regular_file_has_single_link(&target).unwrap());
+        assert!(!regular_file_has_single_link(&link).unwrap());
         assert!(read_regular_file_bounded_single_link(&link, 64).is_err());
         assert_eq!(read_regular_file_bounded(&link, 64).unwrap(), b"secret");
     }

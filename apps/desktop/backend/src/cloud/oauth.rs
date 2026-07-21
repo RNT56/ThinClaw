@@ -35,6 +35,7 @@ const MAX_OAUTH_CALLBACK_ATTEMPTS: usize = 16;
 const MAX_OAUTH_TOKEN_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_OAUTH_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_OAUTH_CODE_BYTES: usize = 16 * 1024;
+#[cfg(target_os = "macos")]
 const MAX_OAUTH_KEYCHAIN_BYTES: usize = 256 * 1024;
 
 // ── OAuth Configuration ──────────────────────────────────────────────────
@@ -897,6 +898,7 @@ fn validate_token_value(label: &str, value: &str) -> Result<(), CloudError> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn validate_stored_tokens(tokens: &OAuthTokens) -> Result<(), CloudError> {
     validate_token_value("access token", &tokens.access_token)?;
     if let Some(refresh_token) = tokens.refresh_token.as_deref() {

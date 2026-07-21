@@ -273,28 +273,7 @@ fn is_real_directory(path: &Path) -> bool {
 }
 
 fn is_single_link_regular_file(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
-        metadata.is_file()
-            && !metadata.file_type().is_symlink()
-            && metadata_has_single_link(&metadata)
-    })
-}
-
-#[cfg(unix)]
-fn metadata_has_single_link(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-    metadata.nlink() == 1
-}
-
-#[cfg(windows)]
-fn metadata_has_single_link(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-    metadata.number_of_links() == Some(1)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn metadata_has_single_link(_metadata: &std::fs::Metadata) -> bool {
-    false
+    thinclaw_platform::fs::regular_file_has_single_link(path).is_ok_and(|single| single)
 }
 
 #[async_trait]

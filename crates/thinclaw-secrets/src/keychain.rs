@@ -929,6 +929,7 @@ pub const CLAUDE_CODE_API_KEY_ACCOUNT: &str = "claude_code_api_key";
 pub const CODEX_CODE_API_KEY_ACCOUNT: &str = "codex_code_api_key";
 
 /// Parse a hex string to bytes.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, SecretError> {
     if !hex.len().is_multiple_of(2) {
         return Err(SecretError::KeychainError(
