@@ -165,10 +165,19 @@ public actor GatewaySession {
     // MARK: - Actions
 
     /// Send a message. Returns the gateway-issued message id.
-    public func send(_ text: String, in thread: ThreadID?) async throws -> MessageID {
+    public func send(
+        _ text: String,
+        in thread: ThreadID?,
+        clientMessageID: UUID? = nil
+    ) async throws -> MessageID {
         do {
             let output = try await client.chatSendHandler(
-                .init(body: .json(.init(content: text, threadId: thread?.rawValue))))
+                .init(
+                    body: .json(
+                        .init(
+                            clientMessageId: clientMessageID?.uuidString,
+                            content: text,
+                            threadId: thread?.rawValue))))
             let response = try output.accepted.body.json
             return GatewayMapping.messageID(from: response)
         } catch {

@@ -39,6 +39,16 @@
   --color-chart-4: hsl(var(--chart-4));
   --color-chart-5: hsl(var(--chart-5));
 
+  /* Shared Direct Workbench / Agent Cockpit surface contract. */
+  --color-surface-canvas: var(--surface-canvas);
+  --color-surface-panel: var(--surface-panel);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-surface-subtle: var(--surface-subtle);
+  --color-content-primary: var(--content-primary);
+  --color-content-muted: var(--content-muted);
+  --color-surface-outline: var(--surface-outline);
+  --color-surface-focus: var(--surface-focus);
+
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
@@ -125,6 +135,17 @@
 
     --radius: 0.5rem;
 
+    /* Stable cross-surface design tokens. */
+    --space-control-x: 0.75rem;
+    --radius-control: 0.625rem;
+    --radius-panel: 0.875rem;
+    --radius-dialog: 1rem;
+    --control-height: 2.5rem;
+    --control-height-compact: 2rem;
+    --motion-fast: 120ms;
+    --motion-normal: 180ms;
+    --motion-slow: 260ms;
+
     /* Theme-derived accent palette fallbacks (Zinc) */
     --chart-1: 240 10% 35%;
     --chart-2: 240 8% 50%;
@@ -135,6 +156,16 @@
     /* Syntax Highlighting Fallbacks */
     --hljs-bg: 0 0% 99%;
     --hljs-color: 240 10% 20%;
+
+    /* ThemeProvider replaces these with the active palette at runtime. */
+    --surface-canvas: hsl(var(--background));
+    --surface-panel: hsl(var(--card));
+    --surface-elevated: hsl(var(--popover));
+    --surface-subtle: hsl(var(--muted));
+    --content-primary: hsl(var(--foreground));
+    --content-muted: hsl(var(--muted-foreground));
+    --surface-outline: hsl(var(--border));
+    --surface-focus: hsl(var(--ring));
   }
 
   .dark {
@@ -173,6 +204,12 @@
     --chart-4: 260 12% 62%;
     --chart-5: 220 10% 55%;
   }
+
+  :root[data-density="compact"] {
+    --space-control-x: 0.625rem;
+    --control-height: 2.125rem;
+    --control-height-compact: 1.75rem;
+  }
 }
 
 @layer base {
@@ -188,6 +225,15 @@
     font-family: 'Outfit', sans-serif;
   }
 
+  :focus-visible {
+    outline: 2px solid var(--surface-focus);
+    outline-offset: 2px;
+  }
+
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
   /* Spotlight window needs to be fully transparent */
   body.spotlight-window,
   body.spotlight-window #root {
@@ -196,6 +242,35 @@
     border: none !important;
     outline: none !important;
     box-shadow: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:focus-within {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 2px solid Highlight;
+  }
+
+  button,
+  [role="button"],
+  input,
+  select,
+  textarea {
+    forced-color-adjust: auto;
   }
 }
 

@@ -91,9 +91,8 @@ impl SftpProvider {
             builder = builder.key(key_path);
         }
 
-        Ok(Operator::new(builder)
-            .map_err(|e| CloudError::Provider(format!("Failed to create SFTP operator: {}", e)))?
-            .finish())
+        Operator::new(builder)
+            .map_err(|e| CloudError::Provider(format!("Failed to create SFTP operator: {}", e)))
     }
 
     async fn read_key(

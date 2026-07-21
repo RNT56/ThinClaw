@@ -32,7 +32,7 @@ public enum PairingPayloadError: Error, Equatable {
 ///
 /// Unknown *extra* fields are ignored (forward compatible); an unknown `v`
 /// is rejected (the payload semantics may have changed incompatibly).
-public struct PairingPayload: Sendable, Equatable {
+public struct PairingPayload: Sendable, Equatable, Codable {
     public static let expectedScheme = "thinclaw"
     public static let expectedHost = "pair"
     public static let supportedVersion = 1

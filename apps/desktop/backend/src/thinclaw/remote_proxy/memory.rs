@@ -49,7 +49,10 @@ impl RemoteGatewayProxy {
     /// Read a workspace file.
     ///
     /// Remote endpoint: GET /api/memory/read?path={path}
-    pub async fn get_file(&self, path: &str) -> Result<String, String> {
+    pub async fn get_file(
+        &self,
+        path: &str,
+    ) -> Result<String, crate::thinclaw::bridge::BridgeError> {
         let (target_path, scope) = memory_target_for_path(path)?;
         let resp = self
             .get_json(&format!(
@@ -70,7 +73,11 @@ impl RemoteGatewayProxy {
     /// Write a workspace file.
     ///
     /// Remote endpoint: POST /api/memory/write
-    pub async fn write_file(&self, path: &str, content: &str) -> Result<(), String> {
+    pub async fn write_file(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         let (target_path, scope) = memory_target_for_path(path)?;
         self.post_json(
             "/api/memory/write",
@@ -85,7 +92,10 @@ impl RemoteGatewayProxy {
     }
 
     /// Delete a workspace file.
-    pub async fn delete_file(&self, path: &str) -> Result<(), String> {
+    pub async fn delete_file(
+        &self,
+        path: &str,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
         let (target_path, scope) = memory_target_for_path(path)?;
         self.post_json(
             "/api/memory/delete",
@@ -101,7 +111,7 @@ impl RemoteGatewayProxy {
     /// List all workspace files.
     ///
     /// Remote endpoint: GET /api/memory/list
-    pub async fn list_files(&self) -> Result<Vec<String>, String> {
+    pub async fn list_files(&self) -> Result<Vec<String>, crate::thinclaw::bridge::BridgeError> {
         // The desktop Brain is a deliberate composite view: trusted runtime
         // control files plus the current actor's caller-relative knowledge.
         // Never expose sibling actor or group namespaces merely because the
@@ -144,7 +154,7 @@ impl RemoteGatewayProxy {
         &self,
         query: &str,
         limit: u32,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.post_json(
             "/api/memory/search",
             &serde_json::json!({

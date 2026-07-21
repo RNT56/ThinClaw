@@ -140,7 +140,7 @@ impl ResourceLimiter for WasmResourceLimiter {
         current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, wasmtime::Error> {
         let desired_u64 = desired as u64;
 
         if desired_u64 > self.memory_limit {
@@ -168,7 +168,7 @@ impl ResourceLimiter for WasmResourceLimiter {
         current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, wasmtime::Error> {
         // A table's first growth call starts from zero elements; treat that as a
         // newly created table and enforce the configured table-count limit. This
         // makes `max_tables` actually apply rather than being a declared-but-unused

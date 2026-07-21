@@ -13,10 +13,11 @@ import { toast } from 'sonner';
 import { WebSearchBubble, WebStatusState, WebSource } from './WebSearchBubble';
 import { StatusIndicator } from './StatusIndicator'; // New Import
 import { createPortal } from 'react-dom';
-import { revealPath } from '../../lib/thinclaw';
+import { revealFile } from '../../lib/thinclaw';
 import { ThinkingDots } from './ThinkingDots';
 import { useInferenceBackends } from '../../hooks/use-inference-backends';
 import { parseStatusTaggedContent } from '../../lib/status-tags';
+import { bridgeErrorMessage } from '../../lib/command-errors';
 
 function extractText(node: any): string {
     if (typeof node === 'string' || typeof node === 'number') return String(node);
@@ -383,7 +384,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
         try {
             const res = await directCommands.directMediaTtsSynthesize(sanitizedContent, null);
             if (res.status === 'error') {
-                toast.error('TTS failed', { description: res.error });
+                toast.error('TTS failed', { description: bridgeErrorMessage(res.error) });
                 setIsSpeaking(false);
                 return;
             }
@@ -650,7 +651,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                                                                 e.stopPropagation();
                                                                 if (isLocalPath && href) {
                                                                     e.preventDefault();
-                                                                    revealPath(href.replace('file://', ''));
+                                                                    revealFile(href.replace('file://', ''));
                                                                     toast.info("Revealing in Finder", { description: href });
                                                                 } else if (isExternalUrl && href) {
                                                                     e.preventDefault();

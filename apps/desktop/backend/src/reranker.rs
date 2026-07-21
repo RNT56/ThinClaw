@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
-use ndarray::Array2;
 use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::value::Tensor;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -139,13 +139,13 @@ impl Reranker {
                 .map_err(|error| anyhow!("failed to configure tokenizer truncation: {error}"))?;
 
             let session = Session::builder()
-                .context("failed to construct ONNX session builder")?
+                .map_err(|error| anyhow!("failed to construct ONNX session builder: {error}"))?
                 .with_optimization_level(GraphOptimizationLevel::Level3)
-                .context("failed to configure ONNX graph optimization")?
+                .map_err(|error| anyhow!("failed to configure ONNX graph optimization: {error}"))?
                 .with_intra_threads(1)
-                .context("failed to configure ONNX worker count")?
+                .map_err(|error| anyhow!("failed to configure ONNX worker count: {error}"))?
                 .commit_from_file(&model_path)
-                .context("failed to load verified reranker model")?;
+                .map_err(|error| anyhow!("failed to load verified reranker model: {error}"))?;
             Ok(Self {
                 session: Mutex::new(session),
                 tokenizer,
@@ -224,7 +224,7 @@ impl Reranker {
             return Ok(Vec::new());
         }
         validate_rerank_input(query, documents)?;
-        let session = self.session.lock().unwrap_or_else(|lock| lock.into_inner());
+        let mut session = self.session.lock().unwrap_or_else(|lock| lock.into_inner());
 
         let encodings: Vec<_> = documents
             .iter()
@@ -262,25 +262,25 @@ impl Reranker {
             }
         }
 
-        let input_ids = Array2::from_shape_vec((batch_size, max_len), input_ids)
+        let input_ids = Tensor::from_array(([batch_size, max_len], input_ids))
             .context("failed to shape reranker input IDs")?;
-        let attention_mask = Array2::from_shape_vec((batch_size, max_len), attention_mask)
+        let attention_mask = Tensor::from_array(([batch_size, max_len], attention_mask))
             .context("failed to shape reranker attention mask")?;
-        let token_type_ids = Array2::from_shape_vec((batch_size, max_len), token_type_ids)
+        let token_type_ids = Tensor::from_array(([batch_size, max_len], token_type_ids))
             .context("failed to shape reranker token-type IDs")?;
         let outputs = session
             .run(ort::inputs![
                 "input_ids" => input_ids,
                 "attention_mask" => attention_mask,
                 "token_type_ids" => token_type_ids,
-            ]?)
+            ])
             .context("reranker inference failed")?;
 
         let logits = outputs
             .get("logits")
             .ok_or_else(|| anyhow!("reranker model returned no logits output"))?;
         let (shape, values) = logits
-            .try_extract_raw_tensor::<f32>()
+            .try_extract_tensor::<f32>()
             .context("reranker logits are not a float tensor")?;
         if shape.len() != 2 || shape[0] != batch_size as i64 || shape[1] < 1 {
             bail!("reranker returned an unexpected logits shape");

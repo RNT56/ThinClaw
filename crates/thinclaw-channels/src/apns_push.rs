@@ -266,7 +266,7 @@ fn unregistered_reason(body: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_lifecycle_clients::{NativeHttpResponse, test_support::EC_PRIVATE_KEY};
+    use crate::native_lifecycle_clients::{NativeHttpResponse, test_support::ec_private_key};
     use async_trait::async_trait;
     use tokio::sync::Mutex;
 
@@ -313,7 +313,7 @@ mod tests {
             team_id: "TEAMID1234".to_string(),
             key_id: "KEYID1234".to_string(),
             bundle_id: "com.example.thinclaw".to_string(),
-            private_key_pem: EC_PRIVATE_KEY.to_string(),
+            private_key_pem: ec_private_key(),
             sandbox: true,
         }
     }

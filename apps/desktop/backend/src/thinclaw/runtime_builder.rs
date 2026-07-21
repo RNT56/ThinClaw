@@ -714,6 +714,7 @@ pub(crate) async fn build_inner(
         None
     };
 
+    let sandbox_config = config.sandbox.clone();
     let mut builder = AppBuilder::new(
         config,
         AppBuilderFlags::default(),
@@ -1491,6 +1492,7 @@ pub(crate) async fn build_inner(
         manifest_validator,
         oauth_credential_sync: components.oauth_credential_sync,
         llm_runtime: components.llm_runtime.clone(),
+        sandbox_config,
         auxiliary_tasks,
     })
 }

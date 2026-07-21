@@ -94,7 +94,7 @@ struct PendingApprovalsView: View {
                 Text("Open the app to pair").font(.caption2).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .widgetURL(URL(string: "thinclaw://approvals"))
+            .widgetURL(AppRoute.approvals(requestID: nil, threadID: nil).url)
         } else {
             Label("No pending approvals", systemImage: "checkmark.shield")
                 .font(.caption)
@@ -165,13 +165,6 @@ private struct ApprovalRow: View {
     }
 
     private func approvalDeepLink(_ item: PendingApprovalsSnapshot.PendingApproval) -> URL {
-        var components = URLComponents()
-        components.scheme = "thinclaw"
-        components.host = "approve"
-        components.queryItems = [URLQueryItem(name: "request", value: item.id)]
-        if let threadID = item.threadID {
-            components.queryItems?.append(URLQueryItem(name: "thread", value: threadID))
-        }
-        return components.url ?? URL(string: "thinclaw://approvals")!
+        AppRoute.approvals(requestID: item.id, threadID: item.threadID).url
     }
 }

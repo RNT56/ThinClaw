@@ -23,7 +23,9 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::manager::{IncomingEvent, normalize_incoming_event};
 use crate::native_lifecycle_clients::NativeEndpointRegistry;
-use thinclaw_channels_core::{Channel, IncomingMessage, MessageStream, OutgoingResponse};
+use thinclaw_channels_core::{
+    Channel, ConfigSchema, IncomingMessage, MessageStream, OutgoingResponse,
+};
 use thinclaw_types::error::ChannelError;
 
 const MAX_NATIVE_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
@@ -66,6 +68,23 @@ impl NativeLifecycleKind {
             Self::VoiceCall => "Use short spoken sentences. Avoid tables and dense formatting.",
             Self::Apns => "Use brief push-notification text. Put the important action first.",
             Self::BrowserPush => "Use concise browser notification text with a clear action.",
+        }
+    }
+
+    fn host_config_help(self) -> &'static str {
+        match self {
+            Self::Matrix => {
+                "Matrix native lifecycle credentials are host-managed with MATRIX_HOMESERVER and MATRIX_ACCESS_TOKEN. An installed Matrix WASM adapter exposes its encrypted manifest setup here instead."
+            }
+            Self::VoiceCall => {
+                "Voice-call transport is host-managed with VOICE_CALL_RESPONSE_URL and VOICE_CALL_WEBHOOK_SECRET. Restart the host after changing them."
+            }
+            Self::Apns => {
+                "APNs signing identity is host-managed with APNS_TEAM_ID, APNS_KEY_ID, APNS_BUNDLE_ID, and APNS_PRIVATE_KEY. Device tokens are registered through the companion-device API."
+            }
+            Self::BrowserPush => {
+                "Browser-push VAPID identity is host-managed with BROWSER_PUSH_PUBLIC_KEY, BROWSER_PUSH_PRIVATE_KEY, and BROWSER_PUSH_SUBJECT. Subscriptions are registered through the companion-device API."
+            }
         }
     }
 }
@@ -763,6 +782,27 @@ impl Channel for NativeLifecycleChannel {
         self.kind.channel_name()
     }
 
+    fn config_schema(&self) -> Option<ConfigSchema> {
+        Some(ConfigSchema {
+            channel_id: self.kind.channel_name().to_string(),
+            channel_name: self
+                .kind
+                .channel_name()
+                .split('-')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+            fields: Vec::new(),
+            help: Some(self.kind.host_config_help().to_string()),
+        })
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         self.client.validate().await?;
         let rx = self
@@ -852,6 +892,15 @@ mod tests {
         async fn diagnostics(&self) -> serde_json::Value {
             serde_json::json!({"mock": true})
         }
+    }
+
+    #[test]
+    fn native_lifecycle_schema_is_an_honest_host_managed_state() {
+        let channel = NativeLifecycleChannel::apns(Arc::new(MockNativeClient::default()));
+        let schema = channel.config_schema().unwrap();
+        assert_eq!(schema.channel_id, "apns");
+        assert!(schema.fields.is_empty());
+        assert!(schema.help.unwrap().contains("APNS_PRIVATE_KEY"));
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 #[specta::specta]
 pub async fn thinclaw_cron_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let routines = proxy.list_routines().await?;
         return Ok(serde_json::json!(remote_routines_to_cron_jobs(&routines)));
@@ -75,7 +75,7 @@ pub async fn thinclaw_cron_list(
         })
         .collect();
 
-    serde_json::to_value(jobs).map_err(|e| e.to_string())
+    Ok(serde_json::to_value(jobs).map_err(|e| e.to_string())?)
 }
 
 #[tauri::command]
@@ -83,7 +83,7 @@ pub async fn thinclaw_cron_list(
 pub async fn thinclaw_cron_run(
     ironclaw: State<'_, ThinClawRuntimeState>,
     key: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let routine_id = remote_resolve_routine_id(&proxy, &key).await?;
         let mut response = proxy.trigger_routine(&routine_id).await?;
@@ -131,9 +131,11 @@ pub async fn thinclaw_cron_history(
     ironclaw: State<'_, ThinClawRuntimeState>,
     key: String,
     limit: u32,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if key.trim().is_empty() || key.len() > 256 || key.chars().any(char::is_control) {
-        return Err("Routine key is empty, malformed, or oversized".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Routine key is empty, malformed, or oversized".to_string(),
+        });
     }
     let limit = limit.clamp(1, 500);
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -198,7 +200,7 @@ pub async fn thinclaw_cron_history(
 pub async fn thinclaw_clear_routine_runs(
     ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let routine_id = match key.as_deref() {
             Some(key) => Some(remote_resolve_routine_id(&proxy, key).await?),
@@ -229,7 +231,7 @@ pub async fn thinclaw_clear_routine_runs(
                 .delete_routine_runs(id)
                 .await
                 .map_err(|e| format!("Failed to delete routine runs: {}", e))?,
-            None => return Err(format!("Routine '{}' not found", key)),
+            None => return Err(format!("Routine '{}' not found", key).into()),
         }
     } else {
         store
@@ -252,15 +254,16 @@ pub async fn thinclaw_clear_routine_runs(
 #[specta::specta]
 pub async fn thinclaw_channels_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_status().await?;
         let channels = remote_channels_from_gateway_status(&status);
         if channels.is_empty() {
-            return Err(
-                "unavailable: remote ThinClaw gateway did not include channel setup status"
-                    .to_string(),
-            );
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message:
+                    "unavailable: remote ThinClaw gateway did not include channel setup status"
+                        .to_string(),
+            });
         }
         return Ok(serde_json::json!({ "channels": channels }));
     }
@@ -297,27 +300,51 @@ pub async fn thinclaw_routine_create(
     description: String,
     schedule: String,
     task: String,
-) -> Result<serde_json::Value, String> {
+    trigger_type: Option<String>,
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
+    let trigger_type = trigger_type.unwrap_or_else(|| "cron".to_string());
+    if !matches!(trigger_type.as_str(), "cron" | "system_event") {
+        return Err(format!(
+            "Invalid routine trigger type '{}'; expected 'cron' or 'system_event'",
+            trigger_type
+        )
+        .into());
+    }
+    if trigger_type == "system_event" && task.trim().is_empty() {
+        return Err("System event message cannot be empty".into());
+    }
+
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
-            .create_routine(&name, &description, &schedule, &task)
+            .create_routine(&name, &description, &schedule, &task, &trigger_type)
             .await;
     }
 
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
 
-    // Normalize 5/6-field cron to 7-field, then validate
-    let schedule = thinclaw_core::agent::routine::normalize_cron_expr(&schedule);
-    let _ = thinclaw_core::agent::routine::next_cron_fire(&schedule)
-        .map_err(|e| format!("Invalid cron expression '{}': {}", schedule, e))?;
+    // Use the runtime's canonical parser so local and remote creation accept
+    // the same cron and interval schedule forms.
+    let schedule = thinclaw_core::agent::routine::canonicalize_schedule_expr(&schedule)
+        .map_err(|error| format!("Invalid schedule '{}': {error}", schedule))?;
+
+    let trigger = if trigger_type == "system_event" {
+        thinclaw_core::agent::routine::Trigger::SystemEvent {
+            message: task.trim().to_string(),
+            schedule: Some(schedule.clone()),
+        }
+    } else {
+        thinclaw_core::agent::routine::Trigger::Cron {
+            schedule: schedule.clone(),
+        }
+    };
 
     // Build a full Routine object
     let now = chrono::Utc::now();
     let routine_id = uuid::Uuid::new_v4();
 
-    // Compute next fire time from cron schedule
-    let next_fire = thinclaw_core::agent::routine::next_cron_fire(&schedule)
+    // Compute next fire time from the canonical schedule.
+    let next_fire = thinclaw_core::agent::routine::next_schedule_fire(&schedule)
         .map_err(|e| format!("Failed to compute next fire time: {}", e))?;
 
     let routine = thinclaw_core::agent::routine::Routine {
@@ -327,9 +354,7 @@ pub async fn thinclaw_routine_create(
         user_id: "local_user".to_string(), // Matches Tauri chat channel user_id (api/chat.rs)
         actor_id: "local_user".to_string(),
         enabled: true,
-        trigger: thinclaw_core::agent::routine::Trigger::Cron {
-            schedule: schedule.clone(),
-        },
+        trigger,
         action: thinclaw_core::agent::routine::RoutineAction::FullJob {
             title: name.clone(),
             description: task.clone(),
@@ -358,8 +383,8 @@ pub async fn thinclaw_routine_create(
         .map_err(|e| format!("Failed to create routine: {}", e))?;
 
     info!(
-        "[thinclaw-runtime] Created routine '{}' (id={}) with schedule '{}'",
-        name, routine_id, schedule
+        "[thinclaw-runtime] Created {} routine '{}' (id={}) with schedule '{}'",
+        trigger_type, name, routine_id, schedule
     );
 
     Ok(serde_json::json!({
@@ -381,7 +406,9 @@ pub async fn thinclaw_routine_create(
 /// This is a frontend-facing version of `thinclaw cron lint`.
 #[tauri::command]
 #[specta::specta]
-pub async fn thinclaw_cron_lint(expression: String) -> Result<serde_json::Value, String> {
+pub async fn thinclaw_cron_lint(
+    expression: String,
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     // Normalize 5/6-field to 7-field before parsing
     let normalized = thinclaw_core::agent::routine::normalize_cron_expr(&expression);
 
@@ -420,7 +447,7 @@ pub async fn thinclaw_cron_lint(expression: String) -> Result<serde_json::Value,
 pub async fn thinclaw_routine_delete(
     ironclaw: State<'_, ThinClawRuntimeState>,
     routine_id: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let id = remote_resolve_routine_id(&proxy, &routine_id).await?;
         return proxy.delete_routine(&id).await;
@@ -461,7 +488,7 @@ pub async fn thinclaw_routine_toggle(
     ironclaw: State<'_, ThinClawRuntimeState>,
     routine_id: String,
     enabled: bool,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let id = remote_resolve_routine_id(&proxy, &routine_id).await?;
         let response = proxy.toggle_routine(&id, enabled).await?;
@@ -523,12 +550,14 @@ pub async fn thinclaw_routine_audit_list(
     routine_key: String,
     limit: Option<u32>,
     outcome: Option<String>,
-) -> Result<Vec<super::types::RoutineAuditEntry>, String> {
+) -> Result<Vec<super::types::RoutineAuditEntry>, crate::thinclaw::bridge::BridgeError> {
     if routine_key.trim().is_empty()
         || routine_key.len() > 256
         || routine_key.chars().any(char::is_control)
     {
-        return Err("Routine key is empty, malformed, or oversized".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Routine key is empty, malformed, or oversized".to_string(),
+        });
     }
     if outcome.as_deref().is_some_and(|value| {
         !matches!(
@@ -536,7 +565,9 @@ pub async fn thinclaw_routine_audit_list(
             "success" | "ok" | "failure" | "failed" | "attention" | "running"
         )
     }) {
-        return Err("Unknown routine outcome filter".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Unknown routine outcome filter".to_string(),
+        });
     }
     let limit = limit.unwrap_or(50).clamp(1, 500);
     if let Some(proxy) = ironclaw.remote_proxy().await {

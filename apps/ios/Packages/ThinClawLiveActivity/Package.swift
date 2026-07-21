@@ -23,7 +23,7 @@ let package = Package(
     name: "ThinClawLiveActivity",
     platforms: [
         .macOS(.v14),
-        .iOS(.v26),
+        .iOS(.v18),
     ],
     products: [
         .library(name: "ThinClawLiveActivity", targets: ["ThinClawLiveActivity"])

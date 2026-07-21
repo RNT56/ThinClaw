@@ -26,7 +26,7 @@ Required for release install:
 Required for source builds:
 
 - Xcode Command Line Tools: `xcode-select --install`
-- Rust 1.92+ through `rustup`
+- Rust 1.94+ through `rustup`
 - Git
 - `wasm32-wasip2` when building bundled WASM extensions
 

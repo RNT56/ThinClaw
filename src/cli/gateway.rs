@@ -7,7 +7,7 @@
 //! - `gateway access` — print WebUI access URLs and SSH tunnel guidance
 
 use clap::Subcommand;
-use fs4::FileExt as _;
+use fs4::{FileExt, TryLockError};
 use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
 
 use crate::platform::gateway_access::GatewayAccessInfo;
@@ -46,15 +46,15 @@ impl GatewayOperationLock {
         }
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            match file.try_lock_exclusive() {
+            match FileExt::try_lock(&file) {
                 Ok(()) => return Ok(Self(file)),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(TryLockError::WouldBlock) => {
                     if tokio::time::Instant::now() >= deadline {
                         anyhow::bail!("timed out waiting for another gateway operation");
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
-                Err(error) => return Err(error.into()),
+                Err(TryLockError::Error(error)) => return Err(error.into()),
             }
         }
     }
@@ -62,7 +62,7 @@ impl GatewayOperationLock {
 
 impl Drop for GatewayOperationLock {
     fn drop(&mut self) {
-        let _ = fs4::FileExt::unlock(&self.0);
+        let _ = FileExt::unlock(&self.0);
     }
 }
 

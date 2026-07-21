@@ -36,7 +36,7 @@ pub mod tts;
 
 use std::collections::{HashMap, HashSet};
 
-pub use model_discovery::CloudModelRegistry;
+pub use model_discovery::{ModelProviderRegistry, ModelProviderRegistry as CloudModelRegistry};
 pub use router::InferenceRouter;
 
 use serde::{Deserialize, Serialize};
@@ -242,7 +242,7 @@ pub struct ModalityBackends {
 pub async fn direct_inference_get_backends(
     router: tauri::State<'_, InferenceRouter>,
     config_manager: tauri::State<'_, crate::config::ConfigManager>,
-) -> Result<Vec<ModalityBackends>, String> {
+) -> Result<Vec<ModalityBackends>, crate::thinclaw::bridge::BridgeError> {
     let config = config_manager.get_config();
     let active_list = router.active_backends(&config).await;
     let mut result = Vec::with_capacity(5);
@@ -273,7 +273,7 @@ pub async fn direct_inference_update_backend(
     vector_manager: tauri::State<'_, crate::vector_store::VectorStoreManager>,
     modality: Modality,
     backend_id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     tracing::info!(
         "[inference] Updating {} backend to '{}'",
         modality,
@@ -288,7 +288,8 @@ pub async fn direct_inference_update_backend(
     if !selection.available {
         return Err(format!(
             "The selected {modality} backend does not have an available credential"
-        ));
+        )
+        .into());
     }
 
     let previous_config = config_manager.get_config();
@@ -307,7 +308,9 @@ pub async fn direct_inference_update_backend(
     let result = router.reconfigure(&config).await;
     if modality == Modality::Embedding && backend_id != "local" && result.new_embedding_dims == 0 {
         router.reconfigure(&previous_config).await;
-        return Err("The configured cloud embedding model is not supported".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "The configured cloud embedding model is not supported".to_string(),
+        });
     }
     if modality == Modality::Diffusion
         && backend_id != "local"
@@ -317,7 +320,9 @@ pub async fn direct_inference_update_backend(
             .is_none_or(|backend| !backend.info().available)
     {
         router.reconfigure(&previous_config).await;
-        return Err("The configured cloud image model is not supported".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "The configured cloud image model is not supported".to_string(),
+        });
     }
     if modality == Modality::Embedding {
         let (profile, dimensions) = if let Some(backend) = router.embedding_backend().await {
@@ -341,7 +346,7 @@ pub async fn direct_inference_update_backend(
         .await
         {
             router.reconfigure(&previous_config).await;
-            return Err(format!("Failed to activate embedding backend: {error}"));
+            return Err(format!("Failed to activate embedding backend: {error}").into());
         }
         config.vector_dimensions = u32::try_from(dimensions)
             .map_err(|_| "Embedding dimension exceeds the supported range".to_string())?;
@@ -516,7 +521,7 @@ fn remote_model_option_to_entry(
 async fn remote_discover_cloud_models(
     proxy: crate::thinclaw::remote_proxy::RemoteGatewayProxy,
     providers: Vec<String>,
-) -> Result<model_discovery::types::DiscoveryResult, String> {
+) -> Result<model_discovery::types::DiscoveryResult, crate::thinclaw::bridge::BridgeError> {
     let config = proxy.get_providers_config().await?;
     let slugs = remote_provider_slugs(&config, &providers);
     let mut provider_results = Vec::new();
@@ -557,7 +562,7 @@ pub async fn direct_inference_discover_cloud_models(
     ironclaw: tauri::State<'_, crate::thinclaw::runtime_bridge::ThinClawRuntimeState>,
     registry: tauri::State<'_, CloudModelRegistry>,
     providers: Vec<String>,
-) -> Result<model_discovery::types::DiscoveryResult, String> {
+) -> Result<model_discovery::types::DiscoveryResult, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return remote_discover_cloud_models(proxy, providers).await;
     }
@@ -587,7 +592,7 @@ pub async fn direct_inference_refresh_cloud_models(
     ironclaw: tauri::State<'_, crate::thinclaw::runtime_bridge::ThinClawRuntimeState>,
     registry: tauri::State<'_, CloudModelRegistry>,
     provider: String,
-) -> Result<model_discovery::types::ProviderDiscoveryResult, String> {
+) -> Result<model_discovery::types::ProviderDiscoveryResult, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy
             .get_provider_models(&provider)

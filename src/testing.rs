@@ -400,6 +400,7 @@ impl TestHarnessBuilder {
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
             external_scanner_require_verified: false,
+            allow_temp_paths: false,
         }));
 
         let hooks = Arc::new(HookRegistry::new());

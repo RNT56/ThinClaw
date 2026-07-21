@@ -10,11 +10,14 @@ import { cn } from '../../lib/utils';
 import { ThemeToggle, useTheme } from '../theme-provider';
 import { DARK_SYNTAX_THEMES, LIGHT_SYNTAX_THEMES, SyntaxTheme } from '../../lib/syntax-themes';
 import { APP_THEMES, AppTheme } from '../../lib/app-themes';
+import { LOCALE_LABELS, useI18n } from '../i18n-provider';
 
 function SyntaxThemeOption({ theme, isActive, onClick }: { theme: SyntaxTheme, isActive: boolean, onClick: () => void }) {
     return (
         <button
             onClick={onClick}
+            aria-label={`Use ${theme.label} syntax palette`}
+            aria-pressed={isActive}
             className={cn(
                 "group relative flex flex-col items-start p-4 rounded-xl border transition-all duration-200 text-left w-full",
                 isActive
@@ -50,6 +53,8 @@ function AppThemeOption({ theme, isActive, onClick, currentMode }: { theme: AppT
     return (
         <button
             onClick={onClick}
+            aria-label={`Use ${theme.label} application palette`}
+            aria-pressed={isActive}
             className={cn(
                 "group relative flex flex-col items-start p-4 rounded-xl border transition-all duration-200 text-left w-full",
                 isActive
@@ -79,13 +84,16 @@ function AppThemeOption({ theme, isActive, onClick, currentMode }: { theme: AppT
 }
 
 export function AppearanceSettings() {
+    const { locale, availableLocales, setLocale, t } = useI18n();
     const {
         theme,
         darkSyntaxTheme,
         lightSyntaxTheme,
         setSyntaxTheme,
         appThemeId,
-        setAppThemeId
+        setAppThemeId,
+        density,
+        setDensity,
     } = useTheme();
 
     const [config, setConfig] = useState<UserConfig | null>(null);
@@ -98,7 +106,7 @@ export function AppearanceSettings() {
         if (!config) return;
         const newConfig = { ...config, spotlight_shortcut: val };
         setConfig(newConfig);
-        await commands.updateUserConfig(newConfig);
+        await commands.updateUserConfig({ spotlight_shortcut: val });
     };
 
     const effectiveMode = theme === 'system'
@@ -107,6 +115,47 @@ export function AppearanceSettings() {
 
     return (
         <div className="space-y-10">
+            <div className="p-6 border rounded-2xl bg-card/50 border-border/50 flex items-center justify-between gap-6">
+                <div className="space-y-1">
+                    <h3 className="font-bold text-lg">{t("settings.appearance")}</h3>
+                    <p className="text-sm text-muted-foreground">Interface language updates every Desktop window immediately.</p>
+                </div>
+                <label className="grid gap-1 text-xs font-medium text-muted-foreground">
+                    {t("settings.language")}
+                    <select
+                        value={locale}
+                        onChange={(event) => setLocale(event.currentTarget.value)}
+                        className="h-10 min-w-44 rounded-lg border border-border bg-background px-3 text-sm text-foreground"
+                    >
+                        {availableLocales.map((code) => (
+                            <option key={code} value={code}>{LOCALE_LABELS[code] ?? code}</option>
+                        ))}
+                    </select>
+                </label>
+            </div>
+
+            <div className="p-6 border rounded-2xl bg-card/50 border-border/50 flex items-center justify-between gap-6">
+                <div className="space-y-1">
+                    <h3 className="font-bold text-lg">{t("settings.density")}</h3>
+                    <p className="text-sm text-muted-foreground">Choose roomier controls or fit more operational detail on screen.</p>
+                </div>
+                <div role="radiogroup" aria-label={t("settings.density")} className="flex rounded-lg border border-border bg-muted/30 p-1">
+                    {(['comfortable', 'compact'] as const).map((option) => (
+                        <button
+                            key={option}
+                            role="radio"
+                            aria-checked={density === option}
+                            onClick={() => setDensity(option)}
+                            className={cn(
+                                "h-8 rounded-md px-3 text-xs font-medium capitalize transition-colors",
+                                density === option ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                            )}
+                        >
+                            {option}
+                        </button>
+                    ))}
+                </div>
+            </div>
             {/* UI Theme Group */}
             <div className="p-8 border rounded-2xl bg-linear-to-br from-card to-background shadow-xl border-border/30 flex items-center justify-between">
                 <div className="space-y-1">

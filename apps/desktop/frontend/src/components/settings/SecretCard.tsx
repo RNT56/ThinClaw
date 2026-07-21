@@ -70,6 +70,7 @@ export function SecretCard({
         setLoading(true);
         try {
             await onDelete();
+            await reloadSecrets().catch(() => { /* engine may be stopped */ });
             setKey('');
             setShowKey(false);
             setShowConfirm(false);

@@ -18,10 +18,31 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use thinclaw_llm_core::ToolDefinition;
+
+const POLICY_CACHE_TTL: Duration = Duration::from_secs(1);
+
+struct CachedToolPolicy {
+    loaded_at: Instant,
+    manager: ToolPolicyManager,
+}
+
+static TOOL_POLICY_CACHE: LazyLock<Mutex<Option<CachedToolPolicy>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+fn fresh_cached_policy(
+    cache: Option<&CachedToolPolicy>,
+    now: Instant,
+) -> Option<ToolPolicyManager> {
+    let cached = cache?;
+    let age = now.checked_duration_since(cached.loaded_at)?;
+    (age < POLICY_CACHE_TTL).then(|| cached.manager.clone())
+}
 
 /// Policy controlling which tools are accessible.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -237,6 +258,40 @@ impl ToolPolicyManager {
     /// Load the effective policy manager using runtime precedence:
     /// env var > TOML config > persisted settings > defaults.
     pub fn load_from_settings() -> Self {
+        let now = Instant::now();
+        if let Ok(cache) = TOOL_POLICY_CACHE.lock()
+            && let Some(manager) = fresh_cached_policy(cache.as_ref(), now)
+        {
+            return manager;
+        }
+
+        let manager = Self::load_from_settings_uncached();
+        match TOOL_POLICY_CACHE.lock() {
+            Ok(mut cache) => {
+                *cache = Some(CachedToolPolicy {
+                    loaded_at: now,
+                    manager: manager.clone(),
+                });
+            }
+            Err(poisoned) => {
+                *poisoned.into_inner() = Some(CachedToolPolicy {
+                    loaded_at: now,
+                    manager: manager.clone(),
+                });
+            }
+        }
+        manager
+    }
+
+    /// Invalidate the short-lived runtime cache after an in-process settings update.
+    pub fn invalidate_runtime_cache() {
+        match TOOL_POLICY_CACHE.lock() {
+            Ok(mut cache) => *cache = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+    }
+
+    fn load_from_settings_uncached() -> Self {
         let persisted = crate::Settings::load();
         let toml_path = crate::Settings::default_toml_path();
         let fail_open = Self::fail_open_overrides_enabled();
@@ -594,5 +649,21 @@ mod tests {
             .expect("tool policy override present");
         assert!(resolved.is_allowed("search", None, None));
         assert!(!resolved.is_allowed("search", Some("web"), None));
+    }
+
+    #[test]
+    fn runtime_policy_cache_honors_its_ttl() {
+        let mut cached = ToolPolicyManager::new();
+        cached.set_default(ToolAccessPolicy::deny(["shell"]));
+        let loaded_at = Instant::now();
+        let cache = CachedToolPolicy {
+            loaded_at,
+            manager: cached,
+        };
+
+        let fresh = fresh_cached_policy(Some(&cache), loaded_at + Duration::from_millis(999))
+            .expect("cache entry should still be fresh");
+        assert!(!fresh.is_allowed("shell", None, None));
+        assert!(fresh_cached_policy(Some(&cache), loaded_at + POLICY_CACHE_TTL).is_none());
     }
 }

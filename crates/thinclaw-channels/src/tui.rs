@@ -93,6 +93,10 @@ impl From<StatusUpdate> for TuiUpdate {
             },
             StatusUpdate::ToolCompleted { .. } => TuiUpdate::Status("Ready".to_string()),
             StatusUpdate::Status(text) => TuiUpdate::Status(text),
+            StatusUpdate::ContextPressure {
+                level,
+                usage_percent,
+            } => TuiUpdate::Status(format!("Context pressure: {level} ({usage_percent:.1}%)")),
             StatusUpdate::Plan { entries } => TuiUpdate::Status(
                 serde_json::to_string(&entries).unwrap_or_else(|_| "Plan updated".to_string()),
             ),

@@ -30,9 +30,10 @@ use thinclaw_gateway::web::routines::{
     verify_routine_webhook_signature,
 };
 use thinclaw_gateway::web::submission::submit_gateway_message;
+use thinclaw_gateway::web::types::RoutineCreateTriggerType;
 
 async fn refresh_event_cache_if_present(state: &GatewayState) {
-    if let Some(ref engine) = state.routine_engine {
+    if let Some(engine) = state.routine_engine() {
         engine.refresh_event_cache().await;
     }
 }
@@ -82,6 +83,23 @@ pub(crate) async fn routines_create_handler(
         .map_err(routine_invalid_schedule_error)?;
     let now = chrono::Utc::now();
     let routine_id = Uuid::new_v4();
+    let trigger = match req.trigger_type {
+        RoutineCreateTriggerType::Cron => crate::agent::routine::Trigger::Cron {
+            schedule: schedule.clone(),
+        },
+        RoutineCreateTriggerType::SystemEvent => {
+            if req.task.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "System event message cannot be empty".to_string(),
+                ));
+            }
+            crate::agent::routine::Trigger::SystemEvent {
+                message: req.task.trim().to_string(),
+                schedule: Some(schedule.clone()),
+            }
+        }
+    };
     let routine = crate::agent::routine::Routine {
         id: routine_id,
         name: req.name.clone(),
@@ -89,9 +107,7 @@ pub(crate) async fn routines_create_handler(
         user_id: request_identity.principal_id.clone(),
         actor_id: request_identity.actor_id.clone(),
         enabled: true,
-        trigger: crate::agent::routine::Trigger::Cron {
-            schedule: schedule.clone(),
-        },
+        trigger,
         action: crate::agent::routine::RoutineAction::FullJob {
             title: req.name.clone(),
             description: req.task.clone(),
@@ -255,8 +271,9 @@ pub(crate) async fn routines_event_replay_handler(
         ));
     };
 
-    let engine_available = state.routine_engine.is_some();
-    let fired_routines = if let Some(engine) = state.routine_engine.as_ref() {
+    let routine_engine = state.routine_engine();
+    let engine_available = routine_engine.is_some();
+    let fired_routines = if let Some(engine) = routine_engine {
         engine.drain_pending_event_queue().await
     } else {
         0
@@ -416,8 +433,7 @@ pub(crate) async fn routines_trigger_handler(
     }
 
     let engine = state
-        .routine_engine
-        .as_ref()
+        .routine_engine()
         .ok_or_else(routine_engine_unavailable_error)?;
 
     engine.fire_manual(routine_id).await.map_err(|error| {
@@ -681,7 +697,7 @@ pub(crate) async fn webhook_routine_trigger_handler(
     // a delimited data block before injecting it into the prompt.
     let payload = webhook_payload_from_body(&body);
 
-    if let Some(ref engine) = state.routine_engine {
+    if let Some(engine) = state.routine_engine() {
         let run_id = engine
             .fire_manual_with_payload(routine_id, payload)
             .await

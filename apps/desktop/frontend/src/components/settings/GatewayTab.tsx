@@ -782,8 +782,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             onClick={async () => {
                                 if (status.stateDir) {
                                     try {
-                                        const baseDir = status.stateDir.replace(/\/state$/, '');
-                                        await thinclaw.revealPath(`${baseDir}/workspace`);
+                                        await thinclaw.revealWorkspace();
                                     } catch (e) { toast.error('Directory access denied'); }
                                 }
                             }}
@@ -1225,7 +1224,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                             <button
                                                 onClick={() => thinclaw.copyGatewayToken()
                                                     .then(() => toast.success('Access Token copied to clipboard'))
-                                                    .catch((error) => toast.error('Failed to copy Access Token', {
+                                                    .catch((error: unknown) => toast.error('Failed to copy Access Token', {
                                                         description: String(error),
                                                     }))}
                                                 className="p-1 hover:bg-primary/10 rounded-lg transition-colors"

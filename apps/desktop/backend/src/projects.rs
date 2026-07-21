@@ -75,7 +75,7 @@ pub struct CreateProjectRequest {
 pub async fn create_project(
     pool: State<'_, SqlitePool>,
     mut request: CreateProjectRequest,
-) -> Result<Project, String> {
+) -> Result<Project, crate::thinclaw::bridge::BridgeError> {
     validate_project_name(&request.name)?;
     if let Some(description) = &request.description {
         validate_project_description(description)?;
@@ -109,7 +109,9 @@ pub async fn create_project(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn list_projects(pool: State<'_, SqlitePool>) -> Result<Vec<Project>, String> {
+pub async fn list_projects(
+    pool: State<'_, SqlitePool>,
+) -> Result<Vec<Project>, crate::thinclaw::bridge::BridgeError> {
     let projects = sqlx::query_as::<_, Project>(
         "SELECT * FROM projects ORDER BY sort_order ASC, updated_at DESC LIMIT 10001",
     )
@@ -118,7 +120,9 @@ pub async fn list_projects(pool: State<'_, SqlitePool>) -> Result<Vec<Project>, 
     .map_err(|e| e.to_string())?;
 
     if projects.len() > 10_000 {
-        return Err("Project count exceeds the supported limit".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Project count exceeds the supported limit".to_string(),
+        });
     }
 
     Ok(projects)
@@ -131,7 +135,7 @@ pub async fn delete_project(
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
     file_store: State<'_, crate::file_store::FileStore>,
     id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     validate_identifier("Project", &id)?;
     let update_guard = vector_manager.lock_updates().await;
     let conversation_ids: Vec<String> =
@@ -141,7 +145,9 @@ pub async fn delete_project(
             .await
             .map_err(|error| error.to_string())?;
     if conversation_ids.len() > 10_000 {
-        return Err("Project conversation count exceeds the deletion limit".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Project conversation count exceeds the deletion limit".to_string(),
+        });
     }
     let document_paths: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT path FROM documents WHERE project_id = ? OR (project_id IS NULL AND chat_id IN (SELECT id FROM conversations WHERE project_id = ?))",
@@ -248,7 +254,8 @@ pub async fn delete_project(
     if cleanup_failures > 0 {
         return Err(format!(
             "Project data was deleted, but {cleanup_failures} backing file(s) could not be removed"
-        ));
+        )
+        .into());
     }
 
     Ok(())
@@ -261,7 +268,7 @@ pub async fn update_project(
     id: String,
     name: Option<String>,
     description: Option<String>,
-) -> Result<Project, String> {
+) -> Result<Project, crate::thinclaw::bridge::BridgeError> {
     validate_identifier("Project", &id)?;
     if let Some(name) = &name {
         validate_project_name(name)?;
@@ -304,7 +311,7 @@ pub async fn update_project(
 pub async fn get_project_documents(
     pool: State<'_, SqlitePool>,
     project_id: String,
-) -> Result<Vec<Document>, String> {
+) -> Result<Vec<Document>, crate::thinclaw::bridge::BridgeError> {
     validate_identifier("Project", &project_id)?;
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?)")
         .bind(&project_id)
@@ -312,7 +319,9 @@ pub async fn get_project_documents(
         .await
         .map_err(|error| error.to_string())?;
     if !exists {
-        return Err("Project does not exist".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Project does not exist".to_string(),
+        });
     }
     let docs = sqlx::query_as::<_, Document>("SELECT id, path, status, created_at, updated_at, project_id FROM documents WHERE project_id = ? ORDER BY created_at DESC LIMIT 10001")
         .bind(&project_id)
@@ -320,7 +329,9 @@ pub async fn get_project_documents(
         .await
         .map_err(|e| e.to_string())?;
     if docs.len() > 10_000 {
-        return Err("Project document count exceeds the supported limit".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Project document count exceeds the supported limit".to_string(),
+        });
     }
     Ok(docs)
 }
@@ -332,7 +343,7 @@ pub async fn delete_document(
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
     file_store: State<'_, crate::file_store::FileStore>,
     id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     validate_identifier("Document", &id)?;
     let update_guard = vector_manager.lock_updates().await;
     let document: Option<(String, Option<String>, Option<String>)> =
@@ -379,7 +390,8 @@ pub async fn delete_document(
         let _ = vector_manager.delete_scope(&scope);
         return Err(format!(
             "Document was deleted but its vector scope could not be rebuilt: {error}"
-        ));
+        )
+        .into());
     }
     drop(update_guard);
 
@@ -406,15 +418,19 @@ pub async fn delete_document(
 pub async fn update_projects_order(
     pool: State<'_, SqlitePool>,
     orders: Vec<(String, i32)>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if orders.len() > MAX_PROJECT_ORDER_UPDATES {
-        return Err("Project order update exceeds the supported limit".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Project order update exceeds the supported limit".to_string(),
+        });
     }
     let mut seen = std::collections::HashSet::with_capacity(orders.len());
     for (id, order) in &orders {
         validate_identifier("Project", id)?;
         if *order < 0 || !seen.insert(id) {
-            return Err("Project order entries are invalid or duplicated".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Project order entries are invalid or duplicated".to_string(),
+            });
         }
     }
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
@@ -426,7 +442,7 @@ pub async fn update_projects_order(
             .await
             .map_err(|e| e.to_string())?;
         if result.rows_affected() != 1 {
-            return Err(format!("Project {id} does not exist"));
+            return Err(format!("Project {id} does not exist").into());
         }
     }
     tx.commit().await.map_err(|e| e.to_string())?;

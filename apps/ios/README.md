@@ -11,7 +11,7 @@ milestones) and [`docs/MOBILE_SECURITY.md`](../../docs/MOBILE_SECURITY.md)
 
 ## Status
 
-**All planned milestones have landed in code (R0→M5, B1→B3).** The SPM
+**Production hardening and live-service certification are in progress.** The SPM
 packages, the onboarding flow, chat + sessions, the risk-tiered approvals
 surface, the home-screen widgets, the agent-run Live Activity manager, the App
 Group snapshot pipeline, the watch surface (relay bridge, companion
@@ -19,11 +19,11 @@ provisioning, wrist approvals/dictation, status complication), the read-only
 jobs glance, in-app device management (self + companions only), per-category
 notification preview controls, the app-switcher redaction overlay, accessibility
 passes, and the credential-gated TestFlight archive pipeline are all wired. The
-whole `ThinClaw` app target plus its widget and Notification Service Extension
-embeds **build for the iOS 26 simulator** (a CI hard gate, green on `main`), and
-the `ThinClawWatch` app plus its WidgetKit complication **build for the watchOS 26
-simulator** (verified locally with `xcodebuild`; gated in CI by the `watch-build`
-job). The gateway-side backends (device identity B1, push B2, discovery B3,
+whole `ThinClaw` app target supports iOS 18+ and the watch surface supports
+watchOS 11+, with availability-gated iOS/watchOS 26 styling. Simulator and
+generic-device compilation are CI gates. Every iOS-only feature package has a
+direct simulator test target in addition to the pure store/reducer suites. The
+gateway-side backends (device identity B1, push B2, discovery B3,
 companion tokens M4) are **landed and Rust-tested**. All pure-logic packages pass
 `swift test` on macOS with no
 simulator; the logic behind every feature store (`ChatStore`, `SessionsStore`,
@@ -31,8 +31,8 @@ simulator; the logic behind every feature store (`ChatStore`, `SessionsStore`,
 `RunTracker`/`LiveActivityManager`, the `SnapshotPublisher`, and the watch
 relay/route seams is unit-tested.
 
-**What remains is bring-up, not new milestones — and not compilation.** Every
-target now compiles under a CI hard gate: the iOS app, its widget/NSE extensions
+**Release status is intentionally not “complete.”** Every target compiles under
+a CI hard gate: the iOS app, its widget/NSE extensions
 (ActivityKit/WidgetKit/`BGTaskScheduler` included), and the watchOS app +
 complication. The `ThinClawWatchBridge` relay proxy is wired live into `WatchApp`
 (`RouterGatewayProxy`; the read-only `MirroredSnapshotProxy` is kept only as the
@@ -40,23 +40,24 @@ non-WatchConnectivity fallback). What has **not** happened is on-hardware bring-
 no real-device or live-gateway end-to-end run; no live phone↔watch
 WatchConnectivity round-trip (that transport does not function in the simulator,
 so it needs physically paired hardware); live APNs / Live Activity delivery is
-untested against Apple; and the TestFlight archive has never actually run because
-**the repo carries no Apple team**. See the caveats below the table and
+untested against Apple; and no signed TestFlight archive has run because **the
+repo carries no Apple team**. The unsigned `0.2.0` archive validation does pass.
+See the caveats below the table and
 [`docs/MOBILE_APP.md`](../../docs/MOBILE_APP.md) → Remaining work.
 
 | Piece | Status |
 |---|---|
 | `ThinClawTransport` (SSE parser, event decoder, reconnect, `GatewaySession`/`GatewayStream`, reconcile) | ✅ implemented + fixture-tested (100 tests) |
-| `ThinClawCore` (domain models, chunk coalescer, `ChatTimelineReducer`, `ComposerCooldown`, `SessionsListModel`, `ReconcileResult`, `SnapshotPublisher`/`SnapshotPrivacyPolicy`/`SnapshotStoreSink`) | ✅ implemented + tested (129 tests) |
-| `ThinClawSnapshotKit` (App Group snapshots, Live Activity attributes) | ✅ implemented + tested (15 tests) |
+| `ThinClawCore` (domain models, chunk coalescer, `ChatTimelineReducer`, `ComposerCooldown`, `SessionsListModel`, `ReconcileResult`, `SnapshotPublisher`/`SnapshotPrivacyPolicy`/`SnapshotStoreSink`) | ✅ implemented + tested (131 tests) |
+| `ThinClawSnapshotKit` (App Group snapshots, Live Activity attributes) | ✅ implemented + tested (13 tests) |
 | `ThinClawLiveActivity` (`RunTracker` reducer + `RunInputClassifier`, `LiveActivityManager` over `ActivityController`/`LiveActivityRegistrar`) | ✅ implemented (M3); pure logic tested on macOS (30 tests); the ActivityKit widget compiles in the `build-app` hard gate |
 | `ThinClawAuth` (pairing parse, Secure-Enclave keypair, SPKI pinning, connection policy, Keychain) | ✅ implemented + tested (38 tests) |
 | `ThinClawAPI` (generated REST client + auth/error shell) | ✅ generated + tested (13 tests) |
-| `ThinClawPersistence` (GRDB WAL store + in-memory store, parameterized `TranscriptStoring` parity) | ✅ implemented + tested (11 tests) |
-| `FeatureOnboarding` (pairing state machine, QR scanner, app wiring) | ✅ implemented; store unit-tested on the iOS simulator (32 tests), run in CI by the `feature-tests` job (`scripts/feature-tests.sh`) |
-| `FeatureChat` / `FeatureSessions` (`ChatStore`, `SessionsStore` over the live session + cache) | ✅ implemented; pure logic tested on macOS, async orchestration not yet UI-tested |
-| `App` composition (`AppDependencies` real graph, `AppRouter` deep links, `PushCoordinator`, `AppDelegate`, scenePhase lifecycle) | ✅ wired; whole app target builds for the iOS 26 simulator |
-| `FeatureApprovals` (risk-tiered cards over `ApprovalsStore`: cold-load + live fan-out + `POST /api/chat/approval`, Face-ID gate on high-risk approve) | ✅ implemented (M2); pure store logic tested on macOS |
+| `ThinClawPersistence` (GRDB WAL store + in-memory store, parameterized `TranscriptStoring` parity) | ✅ implemented + tested (13 tests) |
+| `FeatureOnboarding` (pairing state machine, QR scanner, app wiring) | ✅ implemented; store unit-tested on the iOS simulator (36 tests), run in CI by the `feature-tests` job (`scripts/feature-tests.sh`) |
+| `FeatureChat` / `FeatureSessions` (`ChatStore`, `SessionsStore` over the live session + cache) | ✅ implemented; pure logic tested on macOS and presentation/routing seams tested in each feature's simulator target; live async orchestration is not yet gateway-E2E-tested |
+| `App` composition (`AppCoordinator`, `AppDependencies` real graph, typed `AppRouter` deep links, `PushCoordinator`, `AppDelegate`, scenePhase lifecycle) | ✅ wired; 10 app/NSE/UI tests pass on the latest simulator and generic-device builds are gated |
+| `FeatureApprovals` (risk-tiered cards over `ApprovalsStore`: cold-load + live fan-out + `POST /api/chat/approval`, Face-ID gate on high-risk approve) | ✅ implemented (M2); pure store logic tested on macOS and risk presentation tested on the iOS simulator |
 | iOS push client (`AppDelegate` APNs register/`PUT`/`DELETE`, `PushCoordinator` risk-split categories, `ThinClawNotificationService` NSE content rewrite) | ✅ implemented (M2); the whole app + NSE extension compile in the `build-app` hard gate; live APNs delivery against Apple pending (needs a real device + APNs cert) |
 | B3 discovery consumption (`BonjourBrowser` `NWBrowser` + TXT parse, `DiscoveryStore`, onboarding "Discover on this network") | ✅ wired (B3); locator-only, tested with a scripted browser; no live-LAN run |
 | Widgets (`AgentStatusWidget`, `PendingApprovalsWidget`, `QuickAskWidget`, `AgentRunLiveActivity`) | ✅ implemented (M3); read App Group snapshots via `WidgetSnapshotAccess`, inline Approve/Deny gated to low-risk rows (high/unknown → Deny + deep link), Dynamic Island renders the content-free run state; the WidgetKit extension compiles in the `build-app` hard gate |
@@ -64,11 +65,11 @@ untested against Apple; and the TestFlight archive has never actually run becaus
 | `ThinClawWatchBridge` (phone-side `WatchRelayHost` + companion provisioning) | ✅ implemented (M4); `WCSessionDelegate` mints the watch a companion over the pinned parent client, delivers it (token + URLs + SPKI pin + instance id) via `updateApplicationContext`, forwards relayed approve/quick-ask with the **watch's own token opaquely** (never the phone's), fails closed to `reprovisionRequired` on 401/403; `DELETE`s the companion on unpair. Pure seams tested on macOS (39 tests); the watchOS whole target compiles in the new `watch-build` hard gate (the `WCSession` transport itself only runs on paired hardware) |
 | Watch UI (`Watch/Sources`: `WatchRootView`, `ApprovalsListView`, `AskView`) | ✅ implemented (M4); glanceable status (mirrored `AgentStatusSnapshot` + pending count + relay/direct/queued route badge), approvals list offering Approve/Deny for **low-risk** entries only (high/unknown → "Approve on iPhone" hand-off, deny always allowed) with `WKInterfaceDevice` haptics + round-trip spinner, and a dictated quick-ask; all I/O behind a `WatchGatewayProxy` seam (relay-first, watch's own reduced-scope token). The live `RouterGatewayProxy` is now wired into `WatchApp` (the read-only `MirroredSnapshotProxy` is kept only as the non-WatchConnectivity fallback). Compiles for watchOS 26 in the `watch-build` hard gate |
 | Watch complication (`WatchWidgets/Sources/StatusComplication`) | ✅ implemented (M4); real WidgetKit complication (circular/corner/inline) reading the watch App Group mirror, resilient to a missing snapshot ("open watch app"); compiles in the `watch-build` hard gate |
-| `FeatureJobs` (read-only jobs glance over `ThinClawCore.JobsStore`) | ✅ implemented (M5); lists jobs + summary and loads detail over the generated client (`GET /api/jobs`, `/api/jobs/{id}`, `jobs:read`), tails events by **polling** `GET /api/jobs/{id}/events` (JSON snapshot, not SSE) with an id-cursor fold + backoff; UI has pull-to-refresh, summary chips, empty state, a "view only — can't cancel/restart from this device" footer, and a detail tail. `JobsStore` macOS-tested; the SwiftUI screen compiles in the `build-app` hard gate |
-| `FeatureSettings` (device management + notification prefs over `ThinClawCore.SettingsStore`) | ✅ implemented (M5); shows this device (`GET /api/devices/me`), lists companions with per-companion Revoke (`DELETE /api/devices/me/companions/{id}`), Unpairs (`AppDependencies.unpair()`) — **no self-rename/rotate** (admin-only routes reject a device token). Per-category notification preview prefs persist to shared App Group defaults the NSE reads; connection row from live `GatewaySession` state + Keychain identity (never `/api/gateway/status`); URL/pin reveal Face-ID-gated (D-K3); "Enhanced protection" drives `GRDBTranscriptStore.applyFileProtection(enhanced:)` (file-protection class only; the app-switcher overlay is always on). Stores macOS-tested; the SwiftUI screen compiles in the `build-app` hard gate |
+| `FeatureJobs` (read-only jobs glance over `ThinClawCore.JobsStore`) | ✅ implemented (M5); lists jobs + summary and loads detail over the generated client (`GET /api/jobs`, `/api/jobs/{id}`, `jobs:read`), tails events by **polling** `GET /api/jobs/{id}/events` (JSON snapshot, not SSE) with an id-cursor fold + backoff; UI has pull-to-refresh, summary chips, empty state, a "view only — can't cancel/restart from this device" footer, and a detail tail. `JobsStore` is macOS-tested and phase presentation is simulator-tested |
+| `FeatureSettings` (device management + notification prefs over `ThinClawCore.SettingsStore`) | ✅ implemented (M5); shows this device, revokes companions, and offers explicit remote-revoke+erase versus local-only unpair. Per-category notification preview prefs share App Group defaults with the NSE; URL/pin reveal is Face-ID-gated. Enhanced Protection is reapplied before stores open and after atomic replacements through the central `DataProtectionPolicy`; privacy-label presentation is simulator-tested |
 | Accessibility + app-switcher redaction (`PrivacyRedactionPolicy`, `TimelineAccessibility`, `App/Sources/PrivacyOverlay`) | ✅ implemented (M5); pure redaction/VoiceOver logic macOS-tested, overlay always covers the window on background/inactive `scenePhase`, `FeatureChat`/`ThinClawDesign` honor VoiceOver + Reduce Motion; the overlay compiles in the `build-app` hard gate |
-| TestFlight archive pipeline (`scripts/archive.sh`, `Config/ExportOptions.plist`, CI `archive` job) | ✅ implemented (M5); fastlane-free `xcodebuild archive` → `-exportArchive` → `xcrun altool`, App Store Connect API key auth, tag-triggered (`ios-v*`), credential-gated no-op-with-message when secrets absent. actionlint-validated; real archive unrun (no Apple team in repo) |
-| Tuist manifests / CI build jobs | ✅ `build-app` is a hard gate, **green on `main`** (the `scripts/tuist-generate.sh` fix — it creates the declared-but-empty `App/Resources` dir before `tuist generate` — resolved the graph-construction failure). A new `watch-build` hard gate compiles the `ThinClawWatch` scheme for the watchOS simulator, and every `ios.yml` job now carries a bounded `timeout-minutes` |
+| TestFlight archive pipeline (`scripts/archive.sh`, `Config/ExportOptions.plist`, CI `archive-validation` + `testflight-upload` jobs) | ✅ implemented (M5); unsigned validation is separate from the credentialed fastlane-free `xcodebuild archive` → `-exportArchive` → `xcrun altool` upload. Real signed archive/upload remains unrun (no Apple team in repo) |
+| Tuist manifests / CI build jobs | ✅ simulator, generic iOS/watchOS device, app/NSE/UI test, strict-warning, generated-client, format, and unsigned-archive gates run with bounded timeouts; minimum-runtime and TestFlight upload lanes remain tag-only by design |
 
 **M1 caveat:** the onboarding **and** chat/sessions flows are wired end to end
 in code. `OnboardingStore` is a real state machine (parse → confirm + D-X2
@@ -76,7 +77,7 @@ transport badge → pair via `PairingService` → persist → done/pending/faile
 the camera scanner uses VisionKit behind availability + a permission gate with
 an always-present manual path (paste link, or gateway URL + short code); and the
 app flips between onboarding and the tab shell from the Keychain credential with
-an unpair seam (`AppDependencies.unpair()` best-effort self-revokes then erases).
+an unpair seam that distinguishes remote revoke-and-erase from local-only recovery.
 `ChatStore.send`/`apply` are **implemented, not stubs**: `ChatStore` folds live
 `GatewaySession` events through the pure `ChatTimelineReducer` (stream→final
 swap, tool rows, thread routing), sends optimistically with an offline outbox,
@@ -84,8 +85,9 @@ applies a 429 composer cooldown, offers failure-row retry, pages history, and
 reconciles after reconnect; `SessionsStore` hydrates from the `ThinClawPersistence`
 cache then refreshes via `threads()`, and a Sessions tap routes into Chat.
 Transcript persistence is the GRDB WAL `DatabasePool` store. The whole `ThinClaw`
-app target builds for the iOS 26 simulator (the `build-app` CI hard gate), and the
-onboarding store carries 32 simulator-run tests.
+app target builds for the latest supported simulator (the `build-app` CI hard
+gate), and all six feature packages carry direct simulator-run tests
+(`FeatureOnboarding` has 36).
 
 **M2 caveat:** the approvals surface and push client are **implemented and
 compile-verified, not yet live-verified against Apple**. `ApprovalsStore`
@@ -185,7 +187,7 @@ biometric-gated connection-detail reveal, "Enhanced protection", and accessibili
 passes are all wired; the pure logic and stores (`JobsStore`, `SettingsStore`,
 `NotificationPreferences`, `PrivacyRedactionPolicy`, `TimelineAccessibility`) are
 `swift test`-covered on macOS. The fastlane-free archive pipeline is wired and
-actionlint-validated but **has never actually run** — the repo carries no Apple
+workflow-validated but **has never actually run** — the repo carries no Apple
 team, so cutting a TestFlight build requires an operator's own Apple Developer
 team + App Store Connect API key. The SwiftUI screens and the overlay compile in
 the `build-app` hard gate; only the archive itself remains operator work (it needs
@@ -247,19 +249,18 @@ The SSE parser suite replays recorded gateway fixtures at adversarial
 chunkings (byte-by-byte, mid-UTF-8 splits, CRLF variants) — extend fixtures
 with `scripts/record-fixtures.sh` against a local gateway.
 
-The Feature packages (`Packages/Features/*`) are `.iOS(.v26)`-only, so
+The Feature packages (`Packages/Features/*`) are iOS 18+-only, so
 `swift test` (which builds for the host Mac) cannot run them. Their XCTest
-targets run on a concrete iOS 26 simulator via `xcodebuild test`:
+targets run on the newest installed iOS 18+ simulator via `xcodebuild test`:
 
 ```bash
-scripts/feature-tests.sh   # auto-discovers feature packages that have tests
+scripts/feature-tests.sh   # runs all feature packages plus WidgetKitShared
 ```
 
-The script picks (and boots) an available iOS 26 simulator, then runs
+The script picks (and boots) the newest available iOS 18+ simulator, then runs
 `xcodebuild test -scheme <Package>` per package (no Tuist workspace needed —
-SPM emits a scheme per package). If the machine has no iOS 26 runtime it
-soft-skips with a warning and exits 0; set `FEATURE_TESTS_REQUIRE_SIM=1` to
-make a missing simulator a hard failure. To run one package by hand:
+SPM emits a scheme per package). CI sets `FEATURE_TESTS_REQUIRE_SIM=1`, so a
+missing required runtime is a hard failure. To run one package by hand:
 
 ```bash
 cd Packages/Features/FeatureOnboarding
@@ -267,9 +268,9 @@ xcodebuild test -scheme FeatureOnboarding \
   -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest'
 ```
 
-Whole-app UI compiles through the Tuist workspace (`xcodebuild build` with an
-iOS 26 simulator destination). The watch app compiles the same way against the
-watchOS simulator:
+Whole-app UI compiles through the Tuist workspace for the latest simulator and
+generic iOS device destinations. The watch app compiles the same way against
+watchOS simulator and generic-device destinations:
 
 ```bash
 xcodebuild build -workspace ThinClaw.xcworkspace -scheme ThinClawWatch \
@@ -284,12 +285,12 @@ need Swift 6.2 / Xcode 26; the runner default is older), and every job carries a
 bounded `timeout-minutes` so a hung simulator or build can never hold a run open
 for hours. The hard gates are:
 
-- **swift test** matrix — the macOS-testable packages (Transport, Core,
-  SnapshotKit, Auth, API, Persistence).
-- **feature package tests** — the `.iOS(.v26)`-only Feature packages on a
-  concrete iOS 26 simulator via `scripts/feature-tests.sh` (soft-skips if the
-  runner has no iOS 26 runtime; see Testing). Bounded to 30 min so a stuck
-  simulator boot times out instead of hanging the run.
+- **swift test** matrix — every macOS-testable package, including Live Activity
+  and Watch Bridge pure seams.
+- **feature package tests** — iOS-only packages on the newest installed iOS 18+
+  simulator via `scripts/feature-tests.sh`; missing required runtimes fail.
+- **app tests** — the Tuist app, NSE unit, routing, launch, screenshot, dark
+  mode, and accessibility-size paths with `.xcresult` artifacts.
 - **generated client drift** — `scripts/check-generated-drift.sh`.
 - **swift-format lint**.
 - **tuist build** — `scripts/tuist-generate.sh` + `xcodebuild build` of the
@@ -300,9 +301,7 @@ for hours. The hard gates are:
   no files there, and git does not track empty directories, so on a fresh
   checkout the directory is absent and `tuist generate` errors during graph
   construction. The generator script now creates the declared-but-empty resource
-  directory first, so this is a hard gate (verified locally by deleting
-  `App/Resources`: generate goes from exit 1 to exit 0, then the app builds).
-  Now **green on `main`**.
+  directory first, so this is a hard gate.
 - **watchOS build** — `scripts/tuist-generate.sh` + `xcodebuild build` of the
   `ThinClawWatch` scheme for the watchOS simulator. The watch app + its
   complication are a separate watchOS product the iOS `build-app` job never
@@ -310,14 +309,15 @@ for hours. The hard gates are:
   WatchConnectivity relay wiring and the complication a real compile gate. A
   full phone↔watch round-trip still needs paired hardware.
 
-The tag-triggered **TestFlight archive** job (see below) reuses the same
-`scripts/tuist-generate.sh` so it inherits the fix.
+Unsigned **archive validation** is separate from the tag-triggered,
+credentialed **TestFlight upload** job, so missing secrets cannot masquerade as
+archive success.
 
 ## API client generation
 
 The gateway's OpenAPI snapshot is generated **from Rust** and committed at
 `clients/openapi/thinclaw-gateway.openapi.json` (repo root; regenerate with
-`cargo run --bin export-openapi -- generate`). Then:
+`cargo run --example export-openapi -- generate`). Then:
 
 ```bash
 scripts/generate-api.sh   # vendors the spec, runs swift-openapi-generator
@@ -349,7 +349,7 @@ export APP_STORE_CONNECT_KEY_P8="$(base64 -i AuthKey_XXXXXXXXXX.p8 | tr -d '\n')
 scripts/archive.sh --upload      # omit --upload to just produce the .ipa
 ```
 
-CI cuts a build when you push an `ios-v*` tag (the `archive` job in
+CI cuts a build when you push an `ios-v*` tag (the `testflight-upload` job in
 `.github/workflows/ios.yml`), reading the same four values from GitHub secrets
 (`APPLE_DEVELOPMENT_TEAM`, `APP_STORE_CONNECT_KEY_ID`,
 `APP_STORE_CONNECT_ISSUER_ID`, `APP_STORE_CONNECT_KEY_P8`). The pipeline is

@@ -328,7 +328,7 @@ pub async fn direct_chat_stream(
     pool: State<'_, SqlitePool>,
     payload: ChatPayload,
     on_event: Channel<StreamChunk>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     validate_chat_payload(&payload)?;
     info!("[direct_chat_stream] Starting direct_chat_stream command...");
 
@@ -424,7 +424,8 @@ pub async fn direct_chat_stream(
                 if image_ids.len() > MAX_CURRENT_TURN_IMAGES {
                     return Err(format!(
                         "A chat turn supports at most {MAX_CURRENT_TURN_IMAGES} distinct images"
-                    ));
+                    )
+                    .into());
                 }
                 // Current turn: embed full base64 image data
                 info!(
@@ -447,7 +448,8 @@ pub async fn direct_chat_stream(
                             if total_base64_bytes > MAX_MULTIMODAL_BASE64_BYTES {
                                 return Err(format!(
                                     "Current-turn images exceed the {MAX_MULTIMODAL_BASE64_BYTES}-byte encoded limit"
-                                ));
+                                )
+                                .into());
                             }
                             info!(
                                 "[chat] Image loaded as {}, base64 length: {}",
@@ -462,7 +464,7 @@ pub async fn direct_chat_stream(
                             }));
                         }
                         Err(error) => {
-                            return Err(format!("Failed to load a chat image: {error}"));
+                            return Err(format!("Failed to load a chat image: {error}").into());
                         }
                     }
                 }
@@ -924,11 +926,13 @@ pub async fn direct_chat_count_tokens(
     state: State<'_, SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     conversation_id: String,
-) -> Result<TokenUsage, String> {
+) -> Result<TokenUsage, crate::thinclaw::bridge::BridgeError> {
     use tauri::Manager;
 
     if !valid_chat_field(&conversation_id, false) {
-        return Err("Conversation identifier is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Conversation identifier is invalid".to_string(),
+        });
     }
 
     // 1. Fetch Messages from DB
@@ -949,9 +953,7 @@ pub async fn direct_chat_count_tokens(
     .await
     .map_err(|e| format!("DB Error: {}", e))?;
     if messages.len() > MAX_CHAT_MESSAGES {
-        return Err(format!(
-            "Conversation contains more than {MAX_CHAT_MESSAGES} messages"
-        ));
+        return Err(format!("Conversation contains more than {MAX_CHAT_MESSAGES} messages").into());
     }
     let mut total_bytes = 0_usize;
     for message in &messages {
@@ -960,7 +962,9 @@ pub async fn direct_chat_count_tokens(
             "system" | "user" | "assistant" | "tool"
         ) || message.content.len() > MAX_CHAT_MESSAGE_BYTES
         {
-            return Err("Conversation contains invalid or oversized messages".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Conversation contains invalid or oversized messages".to_string(),
+            });
         }
         total_bytes = total_bytes
             .checked_add(message.content.len())
@@ -968,7 +972,8 @@ pub async fn direct_chat_count_tokens(
         if total_bytes > MAX_CHAT_TOTAL_BYTES {
             return Err(format!(
                 "Conversation content exceeds the {MAX_CHAT_TOTAL_BYTES}-byte limit"
-            ));
+            )
+            .into());
         }
     }
 
@@ -1025,7 +1030,7 @@ pub async fn direct_chat_completion(
     secret_store: State<'_, crate::secret_store::SecretStore>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     payload: ChatPayload,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     validate_chat_payload(&payload)?;
     info!("[direct_chat_completion] Starting direct_chat_completion...");
 

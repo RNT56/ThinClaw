@@ -149,7 +149,7 @@ pub struct Settings {
     #[serde(default)]
     pub claude_code_enabled: bool,
 
-    /// Claude Code model (e.g., "claude-sonnet-4-6", "claude-opus-4-5").
+    /// Claude Code model (e.g., "claude-sonnet-5", "claude-opus-4-5").
     #[serde(default)]
     pub claude_code_model: Option<String>,
 

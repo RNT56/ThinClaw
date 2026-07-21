@@ -1,7 +1,7 @@
 //! Shell command security validation.
 //!
 //! Extracted from `shell.rs` to separate security concerns from execution logic.
-//! All validation functions, blocked command patterns, and safe-bins lists live here.
+//! All validation functions, blocked command patterns, and executable policy lists live here.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -134,8 +134,8 @@ const TRUSTED_SCANNER_KEYS: &[(&str, &str)] = &[(
 #[serde(rename_all = "snake_case")]
 pub enum ExternalScannerMode {
     Off,
-    #[default]
     FailOpen,
+    #[default]
     FailClosed,
 }
 
@@ -276,41 +276,28 @@ struct InstallFailureMarker {
     reason: String,
 }
 
-/// Safe binaries allowed when `THINCLAW_SAFE_BINS_ONLY=true`.
-///
-/// When this mode is active, only commands whose first token (the binary name)
-/// matches one of these entries are allowed. Additional binaries can be added
-/// via the `THINCLAW_EXTRA_BINS` env var (comma-separated).
-pub const SAFE_BINS: &[&str] = &[
+/// Read-only executables allowed by workspace-confined command policies.
+pub const READ_ONLY_EXECUTABLES: &[&str] = &[
     // File inspection
-    "ls",
-    "cat",
-    "head",
-    "tail",
-    "less",
-    "more",
-    "wc",
-    "file",
-    "stat",
-    "find",
-    "tree",
-    "du",
-    "df",
+    "ls", "cat", "head", "tail", "less", "more", "wc", "file", "stat", "find", "tree", "du", "df",
     // Text processing
-    "grep",
-    "rg",
-    "ag",
-    "awk",
-    "sed",
-    "sort",
-    "uniq",
-    "cut",
-    "tr",
-    "diff",
+    "grep", "rg", "ag", "awk", "sed", "sort", "uniq", "cut", "tr", "diff", "jq", "yq", "date",
+    "which", "whereis", "where", "whoami", "printenv", "true", "false", "test", "realpath",
+    "basename", "dirname", "man", "pbpaste", // macOS clipboard read
+];
+
+/// Network-capable executables. They remain allowlisted, but are routed through
+/// the shell approval lane instead of being described as intrinsically safe.
+pub const NETWORK_EXECUTABLES: &[&str] = &[
+    "curl", "wget", "ping", "dig", "nslookup", "docker", "podman",
+];
+
+/// Executables that can mutate the workspace, host state, or launch arbitrary
+/// code. They remain available for development workflows but are routed through
+/// the shell approval lane.
+pub const MUTATING_EXECUTABLES: &[&str] = &[
     "patch",
-    "jq",
-    "yq",
-    // Build tools
+    // Build tools and interpreters
     "cargo",
     "rustc",
     "rustfmt",
@@ -334,72 +321,106 @@ pub const SAFE_BINS: &[&str] = &[
     "g++",
     "clang",
     "clang++",
-    // Version control
+    // Version control and shell utilities
     "git",
-    // Shell utilities
     "echo",
     "printf",
-    "date",
-    "which",
-    "whereis",
-    "where",
-    "whoami",
     "env",
-    "printenv",
-    "true",
-    "false",
-    "test",
     "mkdir",
     "cp",
     "mv",
     "touch",
     "ln",
-    // Networking (read-only)
-    "curl",
-    "wget",
-    "ping",
-    "dig",
-    "nslookup",
     // Archival
     "tar",
     "zip",
     "unzip",
     "gzip",
     "gunzip",
-    // Container
-    "docker",
-    "podman",
-    // Documentation
-    "man",
     // Desktop (open files in default app)
     "open",     // macOS
     "xdg-open", // Linux
     "explorer", // Windows
     // Clipboard
-    "pbcopy",  // macOS
-    "pbpaste", // macOS
-    "xclip",   // Linux
-    "clip",    // Windows
-    "cmd",     // Windows
+    "pbcopy", // macOS
+    "xclip",  // Linux
+    "clip",   // Windows
+    "cmd",    // Windows
     "powershell",
     "pwsh",
     // Common utilities
     "tee",
     "xargs",
     "chmod",
-    "realpath",
-    "basename",
-    "dirname",
 ];
 
-/// Check whether safe-bins-only mode is enabled.
-pub fn is_safe_bins_only() -> bool {
-    // IC-007: Use optional_env to see bridge-injected vars (not just real env)
-    thinclaw_config::helpers::optional_env("THINCLAW_SAFE_BINS_ONLY")
+fn configured_bool(primary: &str, legacy: &str) -> bool {
+    thinclaw_config::helpers::optional_env(primary)
         .ok()
         .flatten()
-        .map(|v| v == "true" || v == "1")
+        .or_else(|| {
+            thinclaw_config::helpers::optional_env(legacy)
+                .ok()
+                .flatten()
+        })
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
+}
+
+/// Check whether allowed-executables-only mode is enabled.
+pub fn is_allowed_executables_only() -> bool {
+    // Keep the old name as a compatibility alias for existing deployments.
+    configured_bool(
+        "THINCLAW_ALLOWED_EXECUTABLES_ONLY",
+        "THINCLAW_SAFE_BINS_ONLY",
+    )
+}
+
+fn extra_executables() -> Vec<String> {
+    thinclaw_config::helpers::optional_env("THINCLAW_EXTRA_EXECUTABLES")
+        .ok()
+        .flatten()
+        .or_else(|| {
+            thinclaw_config::helpers::optional_env("THINCLAW_EXTRA_BINS")
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn is_allowed_executable(binary: &str) -> bool {
+    READ_ONLY_EXECUTABLES.contains(&binary)
+        || NETWORK_EXECUTABLES.contains(&binary)
+        || MUTATING_EXECUTABLES.contains(&binary)
+        || extra_executables().iter().any(|extra| extra == binary)
+}
+
+/// Return the approval-lane reason for a network-capable or mutating command.
+pub fn executable_approval_reason(cmd: &str) -> Option<&'static str> {
+    let binaries = extract_command_executables(cmd)?;
+    if binaries
+        .iter()
+        .any(|binary| NETWORK_EXECUTABLES.contains(&binary.as_str()))
+    {
+        return Some("network-capable executable");
+    }
+    if binaries
+        .iter()
+        .any(|binary| MUTATING_EXECUTABLES.contains(&binary.as_str()))
+    {
+        return Some("mutating executable");
+    }
+    None
 }
 
 /// Extract the binary name from a command string (first token, basename only).
@@ -414,11 +435,63 @@ pub fn extract_binary_name(cmd: &str) -> Option<String> {
                 .rsplit(['/', '\\'])
                 .next()
                 .unwrap_or(token)
-                .trim_matches('"');
+                .trim_matches(['"', '\'']);
             return Some(basename.to_string());
         }
     }
     None
+}
+
+/// Extract the leading executable from each unquoted shell command segment.
+/// This prevents an allowlisted first command from hiding a later executable
+/// behind `;`, `&&`, `||`, a pipe, a newline, or a subshell boundary.
+fn extract_command_executables(cmd: &str) -> Option<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for ch in cmd.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            current.push(ch);
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+            current.push(ch);
+            continue;
+        }
+        if quote.is_none() && matches!(ch, ';' | '|' | '&' | '\n' | '(' | ')') {
+            if !current.trim().is_empty() {
+                segments.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(ch);
+    }
+
+    if quote.is_some() || escaped {
+        return None;
+    }
+    if !current.trim().is_empty() {
+        segments.push(current);
+    }
+
+    let executables: Vec<String> = segments
+        .iter()
+        .filter_map(|segment| extract_binary_name(segment.trim_start_matches(['!', ' '])))
+        .collect();
+    (!executables.is_empty()).then_some(executables)
 }
 
 /// Normalize a shell command before running safety checks.
@@ -1189,63 +1262,43 @@ pub fn detect_library_injection(cmd: &str) -> Option<&'static str> {
     None
 }
 
-/// Check whether a command's binary is in the safe bins allowlist.
+/// Check whether a command's executable is in the configured allowlist.
 ///
 /// Returns None if allowed, Some(reason) if blocked.
-pub fn check_safe_bins(cmd: &str) -> Option<String> {
-    if !is_safe_bins_only() {
+pub fn check_allowed_executables(cmd: &str) -> Option<String> {
+    if !is_allowed_executables_only() {
         return None;
     }
 
-    let binary = match extract_binary_name(cmd) {
-        Some(b) => b,
-        None => return Some("could not determine binary name".to_string()),
+    let binaries = match extract_command_executables(cmd) {
+        Some(binaries) => binaries,
+        None => return Some("could not safely parse command executables".to_string()),
     };
 
-    // Check built-in list
-    if SAFE_BINS.contains(&binary.as_str()) {
-        return None;
+    if let Some(binary) = binaries
+        .into_iter()
+        .find(|binary| !is_allowed_executable(binary))
+    {
+        return Some(format!(
+            "executable '{}' is not allowed (set THINCLAW_EXTRA_EXECUTABLES to extend)",
+            binary
+        ));
     }
-
-    // Check user-extended list
-    if let Ok(extra) = std::env::var("THINCLAW_EXTRA_BINS") {
-        let extras: Vec<&str> = extra.split(',').map(|s| s.trim()).collect();
-        if extras.contains(&binary.as_str()) {
-            return None;
-        }
-    }
-
-    Some(format!(
-        "binary '{}' not in safe bins allowlist (set THINCLAW_EXTRA_BINS to extend)",
-        binary
-    ))
+    None
 }
 
-/// Same as `check_safe_bins` but always enforced (for sandbox base_dir mode).
+/// Same as [`check_allowed_executables`] but always enforced for workspace confinement.
 ///
-/// When `ShellTool::base_dir` is set, the safe bins allowlist is mandatory —
-/// the `THINCLAW_SAFE_BINS_ONLY` env var check is skipped.
+/// When `ShellTool::base_dir` is set, the executable allowlist is mandatory and
+/// the environment toggle is intentionally skipped.
 /// Returns `true` if the command should be BLOCKED.
-pub fn check_safe_bins_forced(cmd: &str) -> bool {
-    let binary = match extract_binary_name(cmd) {
-        Some(b) => b,
+pub fn check_allowed_executables_forced(cmd: &str) -> bool {
+    let binaries = match extract_command_executables(cmd) {
+        Some(binaries) => binaries,
         None => return true, // Can't determine binary → block
     };
 
-    // Check built-in list
-    if SAFE_BINS.contains(&binary.as_str()) {
-        return false;
-    }
-
-    // Check user-extended list
-    if let Ok(extra) = std::env::var("THINCLAW_EXTRA_BINS") {
-        let extras: Vec<&str> = extra.split(',').map(|s| s.trim()).collect();
-        if extras.contains(&binary.as_str()) {
-            return false;
-        }
-    }
-
-    true // Not in allowlist → block
+    binaries.iter().any(|binary| !is_allowed_executable(binary))
 }
 
 /// Scan a command string for absolute paths outside the sandbox base directory.
@@ -1260,8 +1313,8 @@ pub fn check_safe_bins_forced(cmd: &str) -> bool {
 /// - Paths constructed in code (`python -c "open('/etc/passwd')"`)
 /// - Variable expansions (`cat $HOME/.ssh/id_rsa`)
 ///
-/// Those are handled by the safe-bins allowlist + user approval system.
-pub fn detect_path_escape(cmd: &str, base_dir: &Path) -> Option<String> {
+/// Those are handled by the executable allowlist + user approval system.
+pub fn detect_path_escape(cmd: &str, base_dir: &Path, allow_temp_paths: bool) -> Option<String> {
     let base_str = base_dir.to_string_lossy();
     let windows_temp_dir = std::env::temp_dir().to_string_lossy().to_string();
 
@@ -1296,8 +1349,12 @@ pub fn detect_path_escape(cmd: &str, base_dir: &Path) -> Option<String> {
             continue;
         }
 
-        // Allow the base_dir itself and anything under it
-        if token.starts_with(base_str.as_ref()) {
+        // Allow the base_dir itself and anything under it. Compare path
+        // components instead of string prefixes so `/workspace-evil` cannot
+        // masquerade as a child of `/workspace`.
+        if (!is_windows_absolute && Path::new(token).starts_with(base_dir))
+            || (is_windows_absolute && path_has_prefix(token, base_str.as_ref()))
+        {
             continue;
         }
 
@@ -1306,21 +1363,21 @@ pub fn detect_path_escape(cmd: &str, base_dir: &Path) -> Option<String> {
             continue;
         }
 
-        // Allow `/tmp` (frequently needed for temp files in builds)
-        if token.starts_with("/tmp") {
+        // Temp access is outside the workspace and therefore opt-in. Traversal
+        // components were rejected above before this exemption is considered.
+        if allow_temp_paths
+            && (Path::new(token).starts_with(Path::new("/tmp"))
+                || path_has_prefix(token, &windows_temp_dir))
+        {
             continue;
         }
 
-        if is_windows_absolute {
-            if token.starts_with(base_str.as_ref()) || token.starts_with(&windows_temp_dir) {
-                continue;
-            }
-            if token.starts_with(r"C:\Windows\System32")
+        if is_windows_absolute
+            && (token.starts_with(r"C:\Windows\System32")
                 || token.starts_with(r"C:\Program Files")
-                || token.starts_with(r"C:\Program Files (x86)")
-            {
-                continue;
-            }
+                || token.starts_with(r"C:\Program Files (x86)"))
+        {
+            continue;
         }
 
         // Allow common tool paths that are invoked, not accessed
@@ -1337,6 +1394,15 @@ pub fn detect_path_escape(cmd: &str, base_dir: &Path) -> Option<String> {
     }
 
     None
+}
+
+fn path_has_prefix(candidate: &str, root: &str) -> bool {
+    let candidate = candidate.trim_end_matches(['/', '\\']);
+    let root = root.trim_end_matches(['/', '\\']);
+    candidate == root
+        || candidate
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
 }
 
 /// Check whether a shell command contains patterns that must never be auto-approved.
@@ -1721,13 +1787,55 @@ mod tests {
     fn detect_path_escape_understands_windows_absolute_paths() {
         let base = Path::new(r"C:\Users\alice\.thinclaw\projects");
         assert!(
-            detect_path_escape(r#"type "C:\Users\alice\.thinclaw\projects\demo.txt""#, base)
-                .is_none()
+            detect_path_escape(
+                r#"type "C:\Users\alice\.thinclaw\projects\demo.txt""#,
+                base,
+                false,
+            )
+            .is_none()
         );
-        assert!(detect_path_escape(r#"type C:\Windows\System32\cmd.exe"#, base).is_none());
+        assert!(detect_path_escape(r#"type C:\Windows\System32\cmd.exe"#, base, false).is_none());
         assert_eq!(
-            detect_path_escape(r#"type \\server\share\secrets.txt"#, base),
+            detect_path_escape(r#"type \\server\share\secrets.txt"#, base, false),
             Some(r#"\\server\share\secrets.txt"#.to_string())
         );
+    }
+
+    #[test]
+    fn scanner_defaults_fail_closed() {
+        assert_eq!(
+            ExternalScannerMode::default(),
+            ExternalScannerMode::FailClosed
+        );
+    }
+
+    #[test]
+    fn executable_categories_route_risky_commands_to_approval() {
+        assert_eq!(
+            executable_approval_reason("curl https://example.com"),
+            Some("network-capable executable")
+        );
+        assert_eq!(
+            executable_approval_reason("docker ps"),
+            Some("network-capable executable")
+        );
+        assert_eq!(
+            executable_approval_reason("cargo test"),
+            Some("mutating executable")
+        );
+        assert_eq!(executable_approval_reason("ls -la"), None);
+    }
+
+    #[test]
+    fn executable_policy_checks_every_shell_segment() {
+        assert!(!check_allowed_executables_forced("ls && cargo test"));
+        assert!(check_allowed_executables_forced("ls; ruby exploit.rb"));
+        assert!(check_allowed_executables_forced(
+            "printf '%s' ok | unknown-filter"
+        ));
+        assert!(!check_allowed_executables_forced(
+            "printf 'semicolon; inside quotes'"
+        ));
+        assert!(check_allowed_executables_forced("printf 'unterminated"));
     }
 }

@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
-import { commands, Document as ProjectDocument } from "../../lib/bindings";
+import { commands } from "../../lib/bindings";
+import type { Document as ProjectDocument, Project } from "../../lib/bindings";
 import { directCommands } from "../../lib/generated/direct-commands";
 import { Folder, FileText, Trash2, Upload, AlertTriangle, CheckCircle2, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
@@ -11,33 +12,36 @@ import { unwrap } from "../../lib/utils";
 interface ProjectSettingsDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
-    projectId: string;
-    projectName: string;
-    onProjectUpdated: () => void;
+    project: Project;
+    onProjectUpdated: (project: Project) => void;
     onProjectDeleted: () => void;
 }
 
 export function ProjectSettingsDialog({
     open,
     onOpenChange,
-    projectId,
-    projectName,
+    project,
     onProjectUpdated,
     onProjectDeleted
 }: ProjectSettingsDialogProps) {
     const [docs, setDocs] = useState<ProjectDocument[]>([]);
     const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
     const { currentEmbeddingModelPath } = useModelContext();
 
-    const [editName, setEditName] = useState(projectName);
-    const [editDesc, setEditDesc] = useState(""); // TODO: fetch desc
+    const [editName, setEditName] = useState(project.name);
+    const [editDesc, setEditDesc] = useState(project.description ?? "");
+    const normalizedName = editName.trim();
+    const normalizedDescription = editDesc.trim();
+    const hasChanges = normalizedName !== project.name
+        || normalizedDescription !== (project.description ?? "");
 
     // Fetch documents
     const fetchDocs = useCallback(async () => {
-        if (!projectId) return;
+        if (!project.id) return;
         try {
             setLoading(true);
-            const res = await commands.getProjectDocuments(projectId);
+            const res = await commands.getProjectDocuments(project.id);
             setDocs(unwrap(res));
         } catch (e) {
             console.error(e);
@@ -45,14 +49,15 @@ export function ProjectSettingsDialog({
         } finally {
             setLoading(false);
         }
-    }, [projectId]);
+    }, [project.id]);
 
     useEffect(() => {
         if (open) {
-            setEditName(projectName);
+            setEditName(project.name);
+            setEditDesc(project.description ?? "");
             fetchDocs();
         }
-    }, [open, projectId, projectName, fetchDocs]);
+    }, [open, project, fetchDocs]);
 
     const handleUpload = async () => {
         if (!currentEmbeddingModelPath) {
@@ -78,7 +83,7 @@ export function ProjectSettingsDialog({
 
                     toast.loading(`Indexing ${file.name}...`, { id: toastId });
                     // Pass embedding model path — backend auto-starts server if needed
-                    const ingestRes = await directCommands.directRagIngestDocument(savedPath, null, projectId, currentEmbeddingModelPath || null);
+                    const ingestRes = await directCommands.directRagIngestDocument(savedPath, null, project.id, currentEmbeddingModelPath || null);
                     unwrap(ingestRes);
 
                     toast.success("Added to Knowledge Base", { id: toastId });
@@ -104,19 +109,33 @@ export function ProjectSettingsDialog({
     };
 
     const handleUpdateProject = async () => {
+        if (!normalizedName) {
+            toast.error("Project name cannot be empty");
+            return;
+        }
+
         try {
-            unwrap(await commands.updateProject(projectId, editName, null)); // Desc todo
+            setSaving(true);
+            const updatedProject = unwrap(await commands.updateProject(
+                project.id,
+                normalizedName,
+                normalizedDescription,
+            ));
+            setEditName(updatedProject.name);
+            setEditDesc(updatedProject.description ?? "");
             toast.success("Project updated");
-            onProjectUpdated();
+            onProjectUpdated(updatedProject);
         } catch (e) {
             toast.error("Failed to update project");
+        } finally {
+            setSaving(false);
         }
     };
 
     const handleDeleteProject = async () => {
         if (!confirm("Are you sure? This will delete the project and ALL its chats and documents. This cannot be undone.")) return;
         try {
-            unwrap(await commands.deleteProject(projectId));
+            unwrap(await commands.deleteProject(project.id));
             toast.success("Project deleted");
             onProjectDeleted();
             onOpenChange(false);
@@ -133,7 +152,7 @@ export function ProjectSettingsDialog({
                     <div className="flex flex-col space-y-1.5 text-center sm:text-left mb-2">
                         <Dialog.Title className="text-xl font-semibold leading-none tracking-tight flex items-center gap-2">
                             <Folder className="w-5 h-5 text-blue-500" />
-                            {projectName}
+                            {project.name}
                         </Dialog.Title>
                         <Dialog.Description className="text-sm text-muted-foreground">
                             Manage project knowledge base and settings.
@@ -209,26 +228,28 @@ export function ProjectSettingsDialog({
 
                         <Tabs.Content value="settings" className="space-y-6">
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Project Name</label>
+                                <label htmlFor="project-settings-name" className="text-sm font-medium">Project Name</label>
                                 <div className="flex gap-2">
                                     <input
+                                        id="project-settings-name"
                                         value={editName}
                                         onChange={(e) => setEditName(e.target.value)}
                                         className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                                     />
                                     <button
                                         onClick={handleUpdateProject}
-                                        disabled={editName === projectName}
+                                        disabled={saving || !normalizedName || !hasChanges}
                                         className="inline-flex items-center justify-center rounded-md text-sm font-medium h-10 px-4 bg-secondary text-secondary-foreground hover:bg-secondary/80 disabled:opacity-50"
                                     >
-                                        Save
+                                        {saving ? "Saving..." : "Save"}
                                     </button>
                                 </div>
                             </div>
 
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Description</label>
+                                <label htmlFor="project-settings-description" className="text-sm font-medium">Description</label>
                                 <textarea
+                                    id="project-settings-description"
                                     value={editDesc}
                                     onChange={(e) => setEditDesc(e.target.value)}
                                     placeholder="Optional project description..."

@@ -727,6 +727,22 @@ fn test_classify_status_update_status_notify() {
 }
 
 #[test]
+fn test_classify_status_update_context_pressure_notify() {
+    let update = StatusUpdate {
+        status: StatusType::ContextPressure,
+        message: "Context pressure: critical (97.0%)".to_string(),
+        metadata_json: r#"{"level":"critical","usage_percent":97.0}"#.to_string(),
+    };
+
+    assert_eq!(
+        classify_status_update(&update),
+        Some(TelegramStatusAction::Notify(
+            "Context pressure: critical (97.0%)".to_string()
+        ))
+    );
+}
+
+#[test]
 fn test_parse_subagent_event_spawned_legacy() {
     assert_eq!(
         parse_subagent_event("[subagent:spawned:agent-1] Researcher - Check brave search"),

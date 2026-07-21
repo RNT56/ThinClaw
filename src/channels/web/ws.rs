@@ -344,7 +344,7 @@ async fn handle_client_message(
             // enforced server-side so a compromised watch client cannot approve
             // a destructive tool over the WebSocket. Mirrors the HTTP
             // `/api/chat/approval` gate; only an approve/always is gated (deny is
-            // always allowed) and a cache miss fails closed (treated high-risk).
+            // always allowed) and a registry miss fails closed (treated high-risk).
             if approved && device_ctx.is_some_and(|ctx| ctx.is_watch_companion()) {
                 let cached_risk = state
                     .pending_approvals
@@ -408,7 +408,7 @@ async fn handle_client_message(
                     })
                     .await;
             } else if let Ok(mut cache) = state.pending_approvals.lock() {
-                // Drain the pull-endpoint cache so a resolved approval stops
+                // Drain the durable registry so a resolved approval stops
                 // showing as pending (mirrors chat_approval_handler).
                 cache.remove(&request_id);
             }
@@ -1251,7 +1251,7 @@ mod tests {
             pair_complete_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 300),
             registry_entries: Vec::new(),
             cost_guard: None,
-            routine_engine: None,
+            routine_engine: Arc::new(std::sync::RwLock::new(None)),
             repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
@@ -1262,9 +1262,9 @@ mod tests {
             metrics_registry: None,
             response_cache: None,
             device_registry: crate::channels::web::server::test_device_registry(),
-            pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            pending_approvals: Arc::new(
+                crate::channels::web::server::PendingApprovalsStore::in_memory(),
+            ),
         }
     }
 }

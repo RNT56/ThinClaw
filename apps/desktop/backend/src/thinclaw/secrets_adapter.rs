@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use secrecy::ExposeSecret;
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock, RwLock};
 use uuid::Uuid;
 
@@ -28,6 +29,7 @@ use thinclaw_core::secrets::{
     SecretError, SecretRef, SecretsCrypto, SecretsStore,
 };
 
+use crate::secret_store::{AgentCustomSecretGrant, SecretStore};
 use crate::thinclaw::config::keychain;
 use crate::thinclaw::config::{CustomSecret, ThinClawConfig};
 
@@ -550,9 +552,9 @@ impl KeychainSecretsAdapter {
             key_salt: Vec::new(),
             provider,
             encryption_version: 2,
-            key_version: 1,
-            cipher: "macos-keychain".to_string(),
-            kdf: "os-managed".to_string(),
+            key_version: keychain::encryption_key_version(),
+            cipher: "aes-256-gcm".to_string(),
+            kdf: "hkdf-sha256".to_string(),
             aad_version: 1,
             created_by: Some("thinclaw-desktop".to_string()),
             rotated_at: None,
@@ -689,6 +691,91 @@ impl SecretGrantSnapshot {
     }
 }
 
+impl SecretStore {
+    /// Publish the persisted Desktop grant policy to every clone of the
+    /// application-wide secret store. Runtime reads therefore observe one
+    /// atomic grant snapshot instead of a mixture of old and new flags.
+    pub fn apply_thinclaw_config(&self, config: &ThinClawConfig) {
+        let snapshot = SecretGrantSnapshot::from_config(config);
+        let keychain_keys = SECRET_POLICIES
+            .iter()
+            .filter(|policy| snapshot.is_granted(policy.keychain_key))
+            .map(|policy| policy.keychain_key.to_string())
+            .collect::<HashSet<_>>();
+        let custom_secrets = config
+            .custom_secrets
+            .iter()
+            .filter(|secret| secret.granted)
+            .map(|secret| AgentCustomSecretGrant {
+                id: secret.id.clone(),
+                name: secret.name.clone(),
+            })
+            .collect();
+        self.replace_agent_grants(keychain_keys, custom_secrets);
+    }
+
+    fn ensure_agent_granted(&self, name: &str) -> Result<(), SecretError> {
+        if self.is_agent_granted(name) {
+            Ok(())
+        } else {
+            Err(SecretError::AccessDenied)
+        }
+    }
+
+    fn is_agent_granted(&self, name: &str) -> bool {
+        policy_for_name(name)
+            .map(|policy| self.is_agent_key_granted(policy.keychain_key))
+            .unwrap_or_else(|| self.resolve_agent_custom_secret(name).is_some())
+    }
+
+    fn agent_keychain_key_for_name(&self, name: &str) -> String {
+        self.resolve_agent_custom_secret(name)
+            .map(|secret| secret.id)
+            .unwrap_or_else(|| map_key_name(name).to_string())
+    }
+
+    fn is_agent_secret_allowed(&self, secret_name: &str, allowed_secrets: &[String]) -> bool {
+        if secret_name_allowed_by_patterns(secret_name, allowed_secrets) {
+            return true;
+        }
+        self.resolve_agent_custom_secret(secret_name)
+            .is_some_and(|secret| {
+                allowed_secrets.iter().any(|pattern| {
+                    pattern_matches(pattern, &secret.id) || pattern_matches(pattern, &secret.name)
+                })
+            })
+    }
+
+    fn agent_secret_record(
+        user_id: &str,
+        name: String,
+        provider: Option<String>,
+        expires_at: Option<chrono::DateTime<Utc>>,
+    ) -> Secret {
+        let now = Utc::now();
+        Secret {
+            id: Uuid::new_v4(),
+            user_id: user_id.to_string(),
+            name,
+            encrypted_value: Vec::new(),
+            key_salt: Vec::new(),
+            provider,
+            encryption_version: 2,
+            key_version: keychain::encryption_key_version(),
+            cipher: "aes-256-gcm".to_string(),
+            kdf: "hkdf-sha256".to_string(),
+            aad_version: 1,
+            created_by: Some("thinclaw-desktop".to_string()),
+            rotated_at: None,
+            expires_at,
+            last_used_at: None,
+            usage_count: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
 #[async_trait]
 impl SecretsStore for KeychainSecretsAdapter {
     /// Create/update a secret in the Keychain.
@@ -811,15 +898,17 @@ impl SecretsStore for KeychainSecretsAdapter {
         Ok(existed)
     }
 
-    /// No-op — ThinClaw Desktop delegates encryption and rotation to the OS Keychain.
+    /// Re-encrypt the shared authenticated envelope under the supplied key.
     async fn rotate_master_key(
         &self,
-        _new_crypto: Arc<SecretsCrypto>,
+        new_crypto: Arc<SecretsCrypto>,
     ) -> Result<MasterKeyRotationReport, SecretError> {
+        let (old_key_version, new_key_version, rotated_secrets) =
+            keychain::rotate_encryption_key(new_crypto).map_err(SecretError::KeychainError)?;
         Ok(MasterKeyRotationReport {
-            old_key_version: 1,
-            new_key_version: 1,
-            rotated_secrets: 0,
+            old_key_version,
+            new_key_version,
+            rotated_secrets,
         })
     }
 
@@ -843,6 +932,135 @@ impl SecretsStore for KeychainSecretsAdapter {
             return Ok(false);
         }
         self.exists(_user_id, secret_name).await
+    }
+}
+
+/// The production runtime uses the same app-wide store as direct inference
+/// consumers. Clones share live grant state while all values still come from
+/// the single authenticated keychain envelope.
+#[async_trait]
+impl SecretsStore for SecretStore {
+    async fn create(
+        &self,
+        user_id: &str,
+        params: CreateSecretParams,
+    ) -> Result<Secret, SecretError> {
+        params.validate(user_id)?;
+        self.ensure_agent_granted(&params.name)?;
+        let key = self.agent_keychain_key_for_name(&params.name);
+        keychain::set_key(&key, Some(params.value.expose_secret()))
+            .map_err(SecretError::KeychainError)?;
+        Ok(Self::agent_secret_record(
+            user_id,
+            params.name,
+            params.provider,
+            params.expires_at,
+        ))
+    }
+
+    async fn get(&self, user_id: &str, name: &str) -> Result<Secret, SecretError> {
+        self.ensure_agent_granted(name)?;
+        let key = self.agent_keychain_key_for_name(name);
+        keychain::get_key(&key).ok_or_else(|| SecretError::NotFound(name.to_string()))?;
+        Ok(Self::agent_secret_record(
+            user_id,
+            name.to_string(),
+            None,
+            None,
+        ))
+    }
+
+    async fn get_decrypted(
+        &self,
+        _user_id: &str,
+        name: &str,
+    ) -> Result<DecryptedSecret, SecretError> {
+        self.ensure_agent_granted(name)?;
+        let key = self.agent_keychain_key_for_name(name);
+        let value = keychain::get_key(&key)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| SecretError::NotFound(name.to_string()))?;
+        DecryptedSecret::from_bytes(value.into_bytes())
+    }
+
+    async fn get_for_injection(
+        &self,
+        user_id: &str,
+        name: &str,
+        _context: SecretAccessContext,
+    ) -> Result<DecryptedSecret, SecretError> {
+        self.ensure_agent_granted(name)?;
+        self.get_decrypted(user_id, name).await
+    }
+
+    async fn exists(&self, _user_id: &str, name: &str) -> Result<bool, SecretError> {
+        if !self.is_agent_granted(name) {
+            return Ok(false);
+        }
+        let key = self.agent_keychain_key_for_name(name);
+        Ok(keychain::get_key(&key).is_some_and(|value| !value.is_empty()))
+    }
+
+    async fn list(&self, _user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
+        let mut refs = Vec::new();
+        for policy in SECRET_POLICIES {
+            if matches!(
+                policy.grant,
+                GrantFlag::Unsupported | GrantFlag::GoogleWorkspace
+            ) || !self.is_agent_granted(policy.keychain_key)
+            {
+                continue;
+            }
+            if keychain::get_key(policy.keychain_key).is_some_and(|value| !value.is_empty()) {
+                refs.push(SecretRef::new(policy.thinclaw_names[0]));
+            }
+        }
+        for secret in self.granted_agent_custom_secrets() {
+            if keychain::get_key(&secret.id).is_some_and(|value| !value.is_empty()) {
+                refs.push(SecretRef::new(secret.id));
+            }
+        }
+        Ok(refs)
+    }
+
+    async fn delete(&self, _user_id: &str, name: &str) -> Result<bool, SecretError> {
+        self.ensure_agent_granted(name)?;
+        let key = self.agent_keychain_key_for_name(name);
+        let existed = keychain::get_key(&key).is_some();
+        keychain::set_key(&key, None).map_err(SecretError::KeychainError)?;
+        self.revoke_agent_grant(&key);
+        Ok(existed)
+    }
+
+    async fn rotate_master_key(
+        &self,
+        new_crypto: Arc<SecretsCrypto>,
+    ) -> Result<MasterKeyRotationReport, SecretError> {
+        let (old_key_version, new_key_version, rotated_secrets) =
+            keychain::rotate_encryption_key(new_crypto).map_err(SecretError::KeychainError)?;
+        Ok(MasterKeyRotationReport {
+            old_key_version,
+            new_key_version,
+            rotated_secrets,
+        })
+    }
+
+    async fn record_usage(&self, _secret_id: Uuid) -> Result<(), SecretError> {
+        Ok(())
+    }
+
+    async fn is_accessible(
+        &self,
+        user_id: &str,
+        secret_name: &str,
+        allowed_secrets: &[String],
+    ) -> Result<bool, SecretError> {
+        if !self.is_agent_granted(secret_name)
+            || !self.is_agent_secret_allowed(secret_name, allowed_secrets)
+        {
+            return Ok(false);
+        }
+        SecretsStore::exists(self, user_id, secret_name).await
     }
 }
 

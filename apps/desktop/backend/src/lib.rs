@@ -75,6 +75,7 @@ pub mod file_store;
 pub mod gguf;
 pub mod hf_hub;
 mod history;
+pub mod i18n;
 pub mod image_gen;
 pub mod images;
 pub mod imagine;
@@ -105,10 +106,8 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 
-#[cfg(debug_assertions)]
-pub fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
-    let mut source = std::fs::read_to_string(path)?;
-    let original = source.clone();
+pub(crate) fn sanitize_typescript_bindings_source(source: &str) -> String {
+    let mut source = source.to_string();
 
     source = source.replace(
         "export type TAURI_CHANNEL<TSend> = null",
@@ -183,6 +182,14 @@ export type TokenUsage = DirectTokenUsage & {
     }
     source = lines.join("\n");
     source.push('\n');
+
+    source
+}
+
+#[cfg(debug_assertions)]
+pub fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
+    let original = std::fs::read_to_string(path)?;
+    let source = sanitize_typescript_bindings_source(&original);
 
     if source != original {
         std::fs::write(path, source)?;
@@ -427,11 +434,9 @@ pub fn run() {
             // or any other code that calls keychain::get_key().
             // ── App-wide secret store (reads from the just-loaded keychain) ───
             let secret_store = secret_store::SecretStore::new();
-            // InferenceRouter needs an Arc handle to the store.  Since
-            // SecretStore is a zero-state wrapper over keychain (module-level
-            // Mutex cache), a second instance is safe — they share the same
-            // underlying cache.
-            let secret_store_for_router = std::sync::Arc::new(secret_store::SecretStore::new());
+            // Every consumer shares both the one keychain cache and the live
+            // agent-grant snapshot carried by cloned SecretStore handles.
+            let secret_store_for_router = std::sync::Arc::new(secret_store.clone());
             handle.manage(secret_store);
 
             // ── Inference Router — routes all AI modalities to backends ───
@@ -595,10 +600,14 @@ pub fn run() {
 
             // Init ThinClaw config (critical for paths to work before engine start)
             let thinclaw_state = handle.state::<thinclaw::ThinClawManager>();
-            if let Err(e) = thinclaw_state.init_config().await {
-                eprintln!("[main] Failed to init ThinClaw config: {}", e);
-            } else {
-                // ThinClaw is in-process — no separate gateway to auto-start
+            match thinclaw_state.init_config().await {
+                Err(error) => eprintln!("[main] Failed to init ThinClaw config: {error}"),
+                Ok(config) => {
+                    handle
+                        .state::<secret_store::SecretStore>()
+                        .apply_thinclaw_config(&config);
+                    // ThinClaw is in-process — no separate gateway to auto-start
+                }
             }
 
             // ── ThinClaw Engine Init (async — safe now that libsql bootstrap ran) ──
@@ -687,11 +696,12 @@ pub fn run() {
                     }
                 }
 
-                // Bridge ThinClaw Desktop's macOS Keychain to ThinClaw's SecretsStore trait.
+                // Feed the shared, live grant-aware Desktop secret service to
+                // the embedded runtime.
                 let secrets_store: Option<
                     std::sync::Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
                 > = Some(std::sync::Arc::new(
-                    thinclaw::secrets_adapter::KeychainSecretsAdapter::new(),
+                    (*ironclaw_handle.state::<secret_store::SecretStore>()).clone(),
                 ));
 
                 let state =

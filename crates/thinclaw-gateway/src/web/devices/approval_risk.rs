@@ -34,13 +34,13 @@
 //! screen without biometric confirmation). This matches the spec's
 //! least-privilege intent for the biometric gate.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Risk tier for a tool approval, computed gateway-side. Serialised
 /// snake_case (`"low"` / `"high"`) on approval events and used to pick the push
 /// category. Carried on [`crate::web::types::SseEvent::ApprovalNeeded`] and
 /// [`crate::web::types::PendingApprovalEntry`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum ApprovalRisk {

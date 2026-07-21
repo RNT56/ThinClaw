@@ -12,7 +12,7 @@ use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 #[specta::specta]
 pub async fn thinclaw_canvas_panels_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     let agent = ironclaw.agent().await?;
     let store = agent.canvas_store().ok_or("Canvas store not available")?;
     let panels = store.list().await;
@@ -34,7 +34,7 @@ pub async fn thinclaw_canvas_panels_list(
 pub async fn thinclaw_canvas_panel_get(
     ironclaw: State<'_, ThinClawRuntimeState>,
     panel_id: String,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     let agent = ironclaw.agent().await?;
     let store = agent.canvas_store().ok_or("Canvas store not available")?;
     match store.get(&panel_id).await {
@@ -54,7 +54,7 @@ pub async fn thinclaw_canvas_panel_get(
 pub async fn thinclaw_canvas_panel_dismiss(
     ironclaw: State<'_, ThinClawRuntimeState>,
     panel_id: String,
-) -> Result<bool, String> {
+) -> Result<bool, crate::thinclaw::bridge::BridgeError> {
     let agent = ironclaw.agent().await?;
     let store = agent.canvas_store().ok_or("Canvas store not available")?;
     Ok(store.dismiss(&panel_id).await)
@@ -70,7 +70,7 @@ pub async fn thinclaw_canvas_panel_action(
     panel_id: String,
     action: String,
     values: HashMap<String, serde_json::Value>,
-) -> Result<ThinClawRpcResponse, String> {
+) -> Result<ThinClawRpcResponse, crate::thinclaw::bridge::BridgeError> {
     let agent = ironclaw.agent().await?;
     let store = agent.canvas_store().ok_or("Canvas store not available")?;
     let panel = store

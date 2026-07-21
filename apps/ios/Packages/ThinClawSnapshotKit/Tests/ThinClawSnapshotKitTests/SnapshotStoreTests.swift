@@ -34,6 +34,22 @@ struct SnapshotRoundTripTests {
         #expect(try store.load(AgentStatusSnapshot.self) == snapshot)
     }
 
+    @Test("gateway-scoped stale metadata round-trips")
+    func gatewayMetadataRoundTrip() throws {
+        let store = try makeTempStore()
+        let snapshot = AgentStatusSnapshot(
+            gatewayInstanceID: "gateway-a",
+            stale: true,
+            generatedAt: date(1_750_000_000),
+            phase: .idle)
+
+        try store.save(snapshot)
+        let loaded = try store.load(AgentStatusSnapshot.self)
+
+        #expect(loaded?.gatewayInstanceID == "gateway-a")
+        #expect(loaded?.isKnownStale == true)
+    }
+
     @Test("PendingApprovalsSnapshot round-trips exactly")
     func pendingApprovalsRoundTrip() throws {
         let store = try makeTempStore()

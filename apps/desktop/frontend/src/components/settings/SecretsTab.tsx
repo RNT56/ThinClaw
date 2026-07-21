@@ -6,17 +6,8 @@ import { useConfig } from '../../hooks/use-config';
 import { SecretCard } from './SecretCard';
 import { BedrockCredentialsCard } from './BedrockCredentialsCard';
 import { AddSecretForm } from './AddSecretForm';
-
-// Typed bridge gate (BridgeError): render the reason (+ remediation) instead
-// of "[object Object]". thinclawSaveBraveKey returns BridgeError while the
-// other secret commands still return plain strings.
-function bridgeErrorMessage(err: import('../../lib/bindings').BridgeError): string {
-    if (err.kind === 'unavailable') {
-        const head = [err.capability, err.reason].filter(Boolean).join(': ');
-        return err.remediation ? `${head} — ${err.remediation}` : head || 'Unavailable';
-    }
-    return err.message;
-}
+import { RecoveryKeyPanel } from './storage/RecoveryKeyPanel';
+import { bridgeErrorMessage } from '../../lib/command-errors';
 
 export function SecretsTab() {
     const [status, setStatus] = useState<ThinClawStatus | null>(null);
@@ -64,7 +55,7 @@ export function SecretsTab() {
             if (value) await toggleProviderVisibility('anthropic', true);
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -85,7 +76,7 @@ export function SecretsTab() {
             if (value) await toggleProviderVisibility('openai', true);
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -96,7 +87,7 @@ export function SecretsTab() {
             if (value) await toggleProviderVisibility('openrouter', true);
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -107,7 +98,7 @@ export function SecretsTab() {
             if (value) await toggleProviderVisibility('gemini', true);
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -118,7 +109,7 @@ export function SecretsTab() {
             if (value) await toggleProviderVisibility('groq', true);
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -171,7 +162,7 @@ export function SecretsTab() {
         if (res.status === 'ok') {
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -189,7 +180,7 @@ export function SecretsTab() {
         if (res.status === 'ok') {
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -198,7 +189,7 @@ export function SecretsTab() {
         if (res.status === 'ok') {
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -207,7 +198,7 @@ export function SecretsTab() {
         if (res.status === 'ok') {
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -216,7 +207,7 @@ export function SecretsTab() {
         if (res.status === 'ok') {
             await loadStatus();
         } else {
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -227,7 +218,7 @@ export function SecretsTab() {
             toast.success(`${name} secret added`);
         } else {
             toast.error("Failed to add secret: " + res.error);
-            throw new Error(res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -237,6 +228,16 @@ export function SecretsTab() {
             await loadStatus();
         } else {
             toast.error("Failed to remove secret: " + res.error);
+        }
+    };
+
+    const handleUpdateCustomSecret = async (id: string, value: string) => {
+        const res = await commands.thinclawUpdateCustomSecret(id, value);
+        if (res.status === 'ok') {
+            await loadStatus();
+        } else {
+            toast.error("Failed to update secret: " + res.error);
+            throw new Error(bridgeErrorMessage(res.error));
         }
     };
 
@@ -818,11 +819,7 @@ export function SecretsTab() {
                                     placeholder="••••••••••••••••"
                                     hasKey={true}
                                     granted={secret.granted}
-                                    onSave={async (_key) => {
-                                        // Update logic for custom secrets?
-                                        // For now let's just use it as is, maybe disable update if we don't have it implemented.
-                                        toast.info("Update for custom secrets not implemented yet, please re-add if needed.");
-                                    }}
+                                    onSave={(value) => handleUpdateCustomSecret(secret.id, value)}
                                     onToggle={(g) => handleToggleCustomSecret(secret.id, g)}
                                     onFetch={async () => null} // Custom secret values are not sent from backend (#[serde(skip)])
                                     onDelete={() => handleRemoveCustomSecret(secret.id)}
@@ -835,13 +832,17 @@ export function SecretsTab() {
                 <div className="pt-4 border-t border-border/50">
                     <AddSecretForm onAdd={handleAddCustomSecret} />
                 </div>
+
+                <div className="pt-4 border-t border-border/50">
+                    <RecoveryKeyPanel mode="secrets" />
+                </div>
             </div>
 
             <div className="p-4 rounded-xl border border-primary/10 bg-primary/5 text-muted-foreground text-sm flex gap-3 items-center">
                 <ShieldCheck className="w-5 h-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
                 <p>
-                    <span className="font-bold text-foreground">Privacy First:</span> Your secrets are stored in a secure local directory and
-                    <strong> strictly isolated</strong> from the agent process unless access is explicitly granted above.
+                    <span className="font-bold text-foreground">Privacy First:</span> Your secrets are stored in the operating system keychain.
+                    <strong> ThinClaw agent access stays denied</strong> unless you explicitly grant it above.
                 </p>
             </div>
         </div>

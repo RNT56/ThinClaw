@@ -132,9 +132,10 @@ pub(crate) async fn chat_approval_handler(
     // all, but the gateway enforces the rule server-side so a compromised or
     // spoofed watch client cannot approve a destructive action from the wrist.
     // The risk tier is the gateway-side single source of truth carried in the
-    // pending-approvals cache (populated from the `ApprovalNeeded` broadcast).
+    // durable pending-approvals registry populated at the central
+    // `ApprovalNeeded` broadcast boundary.
     // Only an *approve* is gated — a companion may always DENY. The check runs
-    // before the cache entry is dropped below. `always` implies approve, so it
+    // before the registry entry is dropped below. `always` implies approve, so it
     // is gated too. Denies fall through regardless of risk.
     let is_watch_companion = device_ctx
         .as_ref()
@@ -145,8 +146,8 @@ pub(crate) async fn chat_approval_handler(
             .lock()
             .ok()
             .and_then(|cache| cache.get(&req.request_id).map(|entry| entry.risk));
-        // Fail closed: an unknown/absent risk (cache miss — e.g. a stale
-        // request_id or a post-restart gap) is treated as high-risk and
+        // Fail closed: an unknown/absent risk (registry miss — e.g. a stale
+        // request_id) is treated as high-risk and
         // refused, matching the classifier's own least-privilege default.
         let is_low = matches!(
             cached_risk,
@@ -160,15 +161,6 @@ pub(crate) async fn chat_approval_handler(
                 "this device may only approve low-risk actions".to_string(),
             ));
         }
-    }
-
-    // Best-effort pending-approvals cache (milestone B1, `GET
-    // /api/chat/approvals`): the decision is about to be submitted, so drop
-    // the cached entry regardless of the submission's outcome below — a
-    // stale "still pending" entry is worse than a dropped one a client
-    // could re-request via the SSE stream.
-    if let Ok(mut cache) = state.pending_approvals.lock() {
-        cache.remove(&req.request_id);
     }
 
     let approval = crate::agent::submission::Submission::ExecApproval {
@@ -202,15 +194,21 @@ pub(crate) async fn chat_approval_handler(
         .await
         .map_err(gateway_submission_error)?;
 
+    // Remove only after the agent loop accepted the decision. A transport or
+    // submission failure leaves the request pending so another surface can
+    // retry. The durable guard persists this mutation atomically.
+    if let Ok(mut approvals) = state.pending_approvals.lock() {
+        approvals.remove(&req.request_id);
+    }
+
     Ok((StatusCode::ACCEPTED, Json(send_message_response(msg_id))))
 }
 
-/// Pull-based fallback for pending tool approvals (milestone B1): a mobile
+/// Authoritative pull surface for pending tool approvals: a mobile
 /// client that was not holding an open SSE/WS stream when
 /// `SseEvent::ApprovalNeeded` was broadcast can poll this endpoint instead of
-/// missing the approval entirely. **Best-effort and lossy** — see
-/// `PendingApprovalEntry`'s doc comment: the backing cache lives only in
-/// gateway process memory, is not persisted, and is cleared on restart.
+/// missing the approval entirely. The registry is persisted across restarts
+/// and drained only after an approval decision is accepted.
 #[utoipa::path(
     get,
     path = "/api/chat/approvals",
@@ -224,6 +222,7 @@ pub(crate) async fn chat_approval_handler(
 pub(crate) async fn chat_approvals_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Json<PendingApprovalsResponse> {
+    crate::channels::web::server::reconcile_pending_approvals(&state).await;
     let entries = match state.pending_approvals.lock() {
         Ok(cache) => cache.values().cloned().collect(),
         Err(_) => Vec::new(),
@@ -1119,7 +1118,7 @@ mod tests {
             cost_tracker: None,
             metrics_registry: None,
             response_cache: None,
-            routine_engine: None,
+            routine_engine: Arc::new(std::sync::RwLock::new(None)),
             repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
@@ -1127,9 +1126,9 @@ mod tests {
             channel_manager: None,
             hooks: None,
             device_registry: crate::channels::web::server::test_device_registry(),
-            pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            pending_approvals: Arc::new(
+                crate::channels::web::server::PendingApprovalsStore::in_memory(),
+            ),
         })
     }
 
@@ -1242,7 +1241,7 @@ mod tests {
         // A DENY is never gated by the low-risk rule — it must pass the watch
         // check regardless of risk. It reaches submission; with no configured
         // agent loop that fails 503, but crucially NOT 403 (the watch gate did
-        // not block it) and the cache entry is dropped (decision submitted).
+        // not block it). The durable entry remains pending until accepted.
         let session_manager = Arc::new(crate::agent::SessionManager::new());
         let state = test_gateway_state(session_manager, None);
         let request_id = Uuid::new_v4().to_string();
@@ -1269,9 +1268,10 @@ mod tests {
                 "deny must not hit the watch gate"
             );
         }
-        // Decision path was entered: the cache entry was dropped.
+        // Submission did not reach the agent loop, so the durable entry stays
+        // pending for retry from this or another surface.
         assert!(
-            !state
+            state
                 .pending_approvals
                 .lock()
                 .unwrap()

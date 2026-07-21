@@ -15,7 +15,7 @@ use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 pub async fn thinclaw_channel_config_schema(
     ironclaw: State<'_, ThinClawRuntimeState>,
     channel_id: String,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let channel_id = urlencoding::encode(&channel_id);
         return proxy
@@ -32,7 +32,7 @@ pub async fn thinclaw_channel_config_schema(
 #[specta::specta]
 pub async fn thinclaw_channel_config_schemas(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.get_json("/api/channels/config-schemas").await;
     }

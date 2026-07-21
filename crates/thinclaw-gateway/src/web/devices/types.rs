@@ -354,6 +354,11 @@ pub struct PairStartResponse {
     pub qr_payload: QrPairingPayload,
     /// Rendered `thinclaw://pair?d=<base64url(json)>` URI.
     pub qr_uri: String,
+    /// Self-contained SVG rendering of `qr_uri` for the authenticated gateway
+    /// pairing panel. Optional so newer clients remain compatible with older
+    /// gateways and non-visual gateway hosts can omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qr_svg: Option<String>,
     /// Short human-typable code (no-camera fallback), same lockout as the
     /// QR secret.
     pub human_code: String,

@@ -37,8 +37,10 @@ Do not treat all integrations as if they had the same isolation guarantees.
 - Keeps general OS keychain secret caching disabled by default; provider/API-key caching is opt-in via `THINCLAW_KEYCHAIN_CACHE=1`, and master-key caching is disabled unless explicitly enabled
 - Uses policy and validation layers around dangerous tools and external content
 - Sanitizes prompt-bound workspace and identity context by stripping invisible Unicode, replacing detected prompt-injection spans or lines, and redacting known PII/secrets before they reach the model
-- Adds a first-party pre-exec shell scanner ahead of approval for high-risk shell commands, with explicit fail-open or fail-closed operator control
+- Adds a first-party pre-exec shell scanner ahead of approval for high-risk shell commands; it fails closed by default, and the weaker fail-open mode remains an explicit operator choice
 - Verifies bundled and cached external shell scanner binaries with manifest hash/signature metadata; set `safety.external_scanner_require_verified = true` or `SAFETY_EXTERNAL_SCANNER_REQUIRE_VERIFIED=1` to reject configured or PATH scanners that do not carry verified provenance
+- Confines workspace-scoped shell paths to the workspace by default. Host temp paths require `safety.allow_temp_paths = true` or `SAFETY_ALLOW_TEMP_PATHS=1`; traversal components remain blocked even when that exception is enabled
+- Separates read-only executables from network-capable and mutating executables, routing the latter through the approval lane. `THINCLAW_ALLOWED_EXECUTABLES_ONLY=1` enables the allowlist and `THINCLAW_EXTRA_EXECUTABLES` extends it; the former `SAFE_BINS` variable names remain compatibility aliases
 - Supports network controls and allowlists
 - Keeps execution-surface guarantees mode-aware: background `process` is disabled in restricted workspace modes, `execute_code` only runs in `sandboxed` mode when an actual Docker sandbox backend is available, and research `local_docker` trials use the same Docker-backed execution path
 - Separates sandboxed extension paths from operator-trusted external paths

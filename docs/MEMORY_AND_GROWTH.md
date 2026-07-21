@@ -74,6 +74,8 @@ The external memory layer still supports active-provider recall/export flows, bu
 
 - provider-specific stable prompt blocks
 - provider setup/off through agent tools
+- secret-safe provider setup/off and health inspection through Desktop Learning
+  Review (environment-variable references only; raw API keys are not accepted)
 - optional Honcho user-modeling injection via `cadence`, `depth`, and `user_modeling_enabled`
 - first-class provider adapters for `mem0`, `openmemory`, `letta`, `chroma`, and `qdrant`
 - `custom_http` provider support through the registry-backed config map
@@ -84,3 +86,9 @@ Backwards compatibility is preserved for legacy `learning.providers.honcho` and 
 `custom_http` expects either `base_url` or explicit `recall_url` / `sync_url` values. Recall requests are POSTed as `{ user_id, query, limit }`; sync requests are POSTed as `{ user_id, payload }`. Responses may be an array or an object with `results`/`memories`, where each item exposes `summary`, `text`, or `content`.
 
 `mem0` defaults to the hosted Mem0 API and accepts `api_key` or `api_key_env`. `openmemory` defaults to a local Mem0/OpenMemory REST server at `http://localhost:8888`. `letta` requires `agent_id` and uses archival memory search/export paths. `chroma` and `qdrant` require `embedding_url` plus `collection_id` or `collection` respectively, because their native APIs need vectors for recall and upsert.
+
+Desktop provider mutation intentionally runs only against the embedded local
+runtime because the gateway exposes health but not credential-bearing provider
+configuration. The panel persists `api_key_env` / `embedding_api_key_env` names,
+never secret values, and the generated IPC route returns a typed local-only gate
+when Desktop is connected to a remote gateway.

@@ -179,7 +179,7 @@ impl DeviceStore {
         let lock_file = lock_options.open(self.lock_path())?;
         #[cfg(unix)]
         lock_file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-        lock_file.lock_exclusive()?;
+        FileExt::lock(&lock_file)?;
 
         let data = self.read_data_file()?;
         validate_devices_file(&data)?;

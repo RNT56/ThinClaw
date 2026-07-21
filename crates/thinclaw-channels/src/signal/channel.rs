@@ -926,11 +926,29 @@ impl SignalChannel {
 #[async_trait]
 impl Channel for SignalChannel {
     fn config_schema(&self) -> Option<thinclaw_channels_core::ConfigSchema> {
-        use thinclaw_channels_core::{ConfigField, ConfigSchema};
+        use thinclaw_channels_core::{ConfigField, ConfigOption, ConfigSchema};
         Some(ConfigSchema {
             channel_id: "signal".to_string(),
             channel_name: "Signal".to_string(),
             fields: vec![
+                ConfigField {
+                    id: "http_url".to_string(),
+                    label: "signal-cli HTTP URL".to_string(),
+                    field_type: "text".to_string(),
+                    required: true,
+                    help_text: Some("The local signal-cli daemon endpoint.".to_string()),
+                    default_value: Some(serde_json::Value::String(self.config.http_url.clone())),
+                    options: None,
+                },
+                ConfigField {
+                    id: "account".to_string(),
+                    label: "Signal account".to_string(),
+                    field_type: "text".to_string(),
+                    required: true,
+                    help_text: Some("The registered E.164 account number.".to_string()),
+                    default_value: Some(serde_json::Value::String(self.config.account.clone())),
+                    options: None,
+                },
                 ConfigField {
                     id: "allow_from".to_string(),
                     label: "Allowed senders".to_string(),
@@ -940,7 +958,57 @@ impl Channel for SignalChannel {
                         "One sender per line (phone number or UUID). Empty allows all senders."
                             .to_string(),
                     ),
-                    default_value: None,
+                    default_value: Some(serde_json::Value::String(
+                        self.config.allow_from.join("\n"),
+                    )),
+                    options: None,
+                },
+                ConfigField {
+                    id: "allow_from_groups".to_string(),
+                    label: "Allowed groups".to_string(),
+                    field_type: "textarea".to_string(),
+                    required: false,
+                    help_text: Some("One Signal group ID per line. Empty denies groups.".to_string()),
+                    default_value: Some(serde_json::Value::String(
+                        self.config.allow_from_groups.join("\n"),
+                    )),
+                    options: None,
+                },
+                ConfigField {
+                    id: "dm_policy".to_string(),
+                    label: "Direct-message policy".to_string(),
+                    field_type: "select".to_string(),
+                    required: true,
+                    help_text: Some("Pair unknown senders, require the allowlist, or allow every DM.".to_string()),
+                    default_value: Some(serde_json::Value::String(self.config.dm_policy.clone())),
+                    options: Some(vec![
+                        ConfigOption { value: "pairing".to_string(), label: "Pairing".to_string() },
+                        ConfigOption { value: "allowlist".to_string(), label: "Allowlist".to_string() },
+                        ConfigOption { value: "open".to_string(), label: "Open".to_string() },
+                    ]),
+                },
+                ConfigField {
+                    id: "group_policy".to_string(),
+                    label: "Group policy".to_string(),
+                    field_type: "select".to_string(),
+                    required: true,
+                    help_text: Some("Disable groups, require allowlists, or allow every group.".to_string()),
+                    default_value: Some(serde_json::Value::String(self.config.group_policy.clone())),
+                    options: Some(vec![
+                        ConfigOption { value: "disabled".to_string(), label: "Disabled".to_string() },
+                        ConfigOption { value: "allowlist".to_string(), label: "Allowlist".to_string() },
+                        ConfigOption { value: "open".to_string(), label: "Open".to_string() },
+                    ]),
+                },
+                ConfigField {
+                    id: "group_allow_from".to_string(),
+                    label: "Allowed group senders".to_string(),
+                    field_type: "textarea".to_string(),
+                    required: false,
+                    help_text: Some("One sender per line. Empty inherits the DM allowlist.".to_string()),
+                    default_value: Some(serde_json::Value::String(
+                        self.config.group_allow_from.join("\n"),
+                    )),
                     options: None,
                 },
                 ConfigField {
@@ -949,7 +1017,9 @@ impl Channel for SignalChannel {
                     field_type: "checkbox".to_string(),
                     required: false,
                     help_text: Some("Skip downloading attached files.".to_string()),
-                    default_value: Some(serde_json::Value::Bool(false)),
+                    default_value: Some(serde_json::Value::Bool(
+                        self.config.ignore_attachments,
+                    )),
                     options: None,
                 },
                 ConfigField {
@@ -958,13 +1028,12 @@ impl Channel for SignalChannel {
                     field_type: "checkbox".to_string(),
                     required: false,
                     help_text: Some("Ignore Signal stories.".to_string()),
-                    default_value: Some(serde_json::Value::Bool(false)),
+                    default_value: Some(serde_json::Value::Bool(self.config.ignore_stories)),
                     options: None,
                 },
             ],
             help: Some(
-                "Configure which Signal senders the agent responds to and how it handles \
-                 attachments and stories."
+                "Configure the signal-cli endpoint, sender policies, and media behavior. Changes are persisted and apply after a channel restart."
                     .to_string(),
             ),
         })

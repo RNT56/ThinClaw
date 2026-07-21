@@ -296,6 +296,203 @@ pub struct UserConfig {
     pub selected_model_context_size: Option<u32>,
 }
 
+/// Presence-aware update payload for [`UserConfig`]. Missing fields retain
+/// their latest backend value; `PatchField<Option<T>>` also preserves the
+/// distinction between omission and an explicit `null` clear operation.
+#[derive(Debug, Default)]
+enum PatchField<T> {
+    #[default]
+    Missing,
+    Value(T),
+}
+
+impl<'de, T> Deserialize<'de> for PatchField<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        T::deserialize(deserializer).map(Self::Value)
+    }
+}
+
+#[derive(Debug, Default, Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct UserConfigPatch {
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    search_concurrency_limit: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    scrape_concurrency_limit: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    max_search_results: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    max_scrape_chars: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    scrape_timeout_secs: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    default_context_window: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    summarization_chunk_size: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = f32)]
+    llm_temperature: PatchField<f32>,
+    #[serde(default)]
+    #[specta(optional, type = f32)]
+    llm_top_p: PatchField<f32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    vector_dimensions: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    sd_threads: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = Vec<KnowledgeBit>)]
+    knowledge_bits: PatchField<Vec<KnowledgeBit>>,
+    #[serde(default)]
+    #[specta(optional, type = Vec<CustomPersona>)]
+    custom_personas: PatchField<Vec<CustomPersona>>,
+    #[serde(default)]
+    #[specta(optional, type = bool)]
+    image_prompt_enhance_enabled: PatchField<bool>,
+    #[serde(default)]
+    #[specta(optional, type = String)]
+    selected_persona: PatchField<String>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    selected_chat_provider: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    memory_reservation_gb: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = bool)]
+    enable_memory_reservation: PatchField<bool>,
+    #[serde(default)]
+    #[specta(optional, type = bool)]
+    mlock: PatchField<bool>,
+    #[serde(default)]
+    #[specta(optional, type = bool)]
+    quantize_kv: PatchField<bool>,
+    #[serde(default)]
+    #[specta(optional, type = String)]
+    spotlight_shortcut: PatchField<String>,
+    #[serde(default)]
+    #[specta(optional, type = String)]
+    ptt_shortcut: PatchField<String>,
+    #[serde(default)]
+    #[specta(optional, type = Vec<String>)]
+    disabled_providers: PatchField<Vec<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    mcp_base_url: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    mcp_auth_token: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = bool)]
+    mcp_sandbox_enabled: PatchField<bool>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    mcp_cache_ttl_secs: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = u32)]
+    mcp_tool_result_max_chars: PatchField<u32>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    chat_backend: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    embedding_backend: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    tts_backend: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    stt_backend: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<String>)]
+    diffusion_backend: PatchField<Option<String>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<std::collections::HashMap<String, String>>)]
+    inference_models: PatchField<Option<std::collections::HashMap<String, String>>>,
+    #[serde(default)]
+    #[specta(optional, type = Option<u32>)]
+    selected_model_context_size: PatchField<Option<u32>>,
+}
+
+impl UserConfigPatch {
+    fn into_json(self) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
+        serde_json::to_value(self)
+            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
+    }
+}
+
+impl Serialize for UserConfigPatch {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap as _;
+
+        let mut map = serializer.serialize_map(None)?;
+        macro_rules! serialize_present {
+            ($($field:ident),+ $(,)?) => {
+                $(
+                    if let PatchField::Value(value) = &self.$field {
+                        map.serialize_entry(stringify!($field), value)?;
+                    }
+                )+
+            };
+        }
+        serialize_present!(
+            search_concurrency_limit,
+            scrape_concurrency_limit,
+            max_search_results,
+            max_scrape_chars,
+            scrape_timeout_secs,
+            default_context_window,
+            summarization_chunk_size,
+            llm_temperature,
+            llm_top_p,
+            vector_dimensions,
+            sd_threads,
+            knowledge_bits,
+            custom_personas,
+            image_prompt_enhance_enabled,
+            selected_persona,
+            selected_chat_provider,
+            memory_reservation_gb,
+            enable_memory_reservation,
+            mlock,
+            quantize_kv,
+            spotlight_shortcut,
+            ptt_shortcut,
+            disabled_providers,
+            mcp_base_url,
+            mcp_auth_token,
+            mcp_sandbox_enabled,
+            mcp_cache_ttl_secs,
+            mcp_tool_result_max_chars,
+            chat_backend,
+            embedding_backend,
+            tts_backend,
+            stt_backend,
+            diffusion_backend,
+            inference_models,
+            selected_model_context_size,
+        );
+        map.end()
+    }
+}
+
 impl std::fmt::Debug for UserConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -492,6 +689,7 @@ fn normalize_user_config(mut config: UserConfig) -> UserConfig {
 pub struct ConfigManager {
     config: Mutex<UserConfig>,
     config_path: PathBuf,
+    mutation_lock: Mutex<()>,
 }
 
 impl ConfigManager {
@@ -608,6 +806,7 @@ impl ConfigManager {
         Self {
             config: Mutex::new(config),
             config_path,
+            mutation_lock: Mutex::new(()),
         }
     }
 
@@ -651,7 +850,7 @@ impl ConfigManager {
 
 #[tauri::command]
 #[specta::specta]
-pub fn open_config_file(app: AppHandle) -> Result<(), String> {
+pub fn open_config_file(app: AppHandle) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let config_path = app
         .path()
         .app_config_dir()
@@ -676,7 +875,9 @@ pub fn open_config_file(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_hf_token(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn get_hf_token(
+    app: AppHandle,
+) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
     if let Some(ironclaw) = app.try_state::<crate::thinclaw::runtime_bridge::ThinClawRuntimeState>()
     {
         if ironclaw.remote_proxy().await.is_some() {
@@ -716,41 +917,57 @@ pub fn get_user_config(
 pub fn update_user_config(
     state: tauri::State<ConfigManager>,
     secret_store: tauri::State<crate::secret_store::SecretStore>,
-    config: UserConfig,
-) -> Result<(), String> {
-    let submitted_mcp_token = config
-        .mcp_auth_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned);
+    config: UserConfigPatch,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let _mutation = state
+        .mutation_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let patch = config.into_json()?;
+    let patch = patch
+        .as_object()
+        .ok_or_else(|| "User configuration patch must be an object".to_string())?;
+    let token_change = patch.get("mcp_auth_token").map(|value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned)
+    });
 
-    // Merge against the latest backend snapshot before the durable write. The
-    // command currently receives a full `UserConfig`, so incoming values have
-    // last-write-wins semantics while newly added backend-only fields remain
-    // represented by their serde defaults.
-    let current = state.get_config();
-    let mut base = serde_json::to_value(&current).map_err(|e| e.to_string())?;
-    let incoming = serde_json::to_value(&config).map_err(|e| e.to_string())?;
-
-    if let (Some(base_obj), Some(inc_obj)) = (base.as_object_mut(), incoming.as_object()) {
-        for (key, value) in inc_obj {
-            base_obj.insert(key.clone(), value.clone());
+    let mut merged = serde_json::to_value(state.get_config())
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+    let target = merged
+        .as_object_mut()
+        .ok_or_else(|| "User configuration must serialize as an object".to_string())?;
+    for (key, value) in patch {
+        if !target.contains_key(key) {
+            return Err(format!("Unknown user configuration field: {key}").into());
         }
+        target.insert(key.clone(), value.clone());
     }
 
-    let mut merged: UserConfig = serde_json::from_value(base).map_err(|e| e.to_string())?;
-    merged.mcp_auth_token = submitted_mcp_token.clone().or_else(default_mcp_auth_token);
+    let mut merged: UserConfig = serde_json::from_value(merged)
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+    if let Some(value) = &token_change {
+        merged.mcp_auth_token = value.clone().or_else(default_mcp_auth_token);
+    }
     validate_user_config(&normalize_user_config(merged.clone()))?;
 
     let previous_mcp_token = secret_store.get(MCP_AUTH_TOKEN_SECRET_KEY);
-    secret_store.set(MCP_AUTH_TOKEN_SECRET_KEY, submitted_mcp_token.as_deref())?;
+    if let Some(value) = &token_change {
+        secret_store.set(MCP_AUTH_TOKEN_SECRET_KEY, value.as_deref())?;
+    }
     if let Err(save_error) = state.save_config(&merged) {
+        if token_change.is_none() {
+            return Err(save_error.into());
+        }
         return match secret_store.set(MCP_AUTH_TOKEN_SECRET_KEY, previous_mcp_token.as_deref()) {
-            Ok(()) => Err(save_error),
+            Ok(()) => Err(save_error.into()),
             Err(rollback_error) => Err(format!(
                 "{save_error}; additionally failed to restore the previous MCP credential: {rollback_error}"
-            )),
+            )
+            .into()),
         };
     }
     Ok(())
@@ -1000,6 +1217,7 @@ mod tests {
         ConfigManager {
             config: Mutex::new(cfg),
             config_path: std::path::PathBuf::from("/tmp/thinclaw_desktop_test_config.json"),
+            mutation_lock: Mutex::new(()),
         }
     }
 
@@ -1019,6 +1237,7 @@ mod tests {
         let mgr = ConfigManager {
             config: Mutex::new(UserConfig::default()),
             config_path: directory.path().join("user_config.json"),
+            mutation_lock: Mutex::new(()),
         };
 
         let mut updated = mgr.get_config();

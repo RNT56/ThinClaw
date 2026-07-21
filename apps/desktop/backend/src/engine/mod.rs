@@ -11,6 +11,30 @@ use serde::Serialize;
 use specta::Type;
 use tauri::Emitter;
 
+/// Engine dependency pins validated together on 2026-07-13.
+///
+/// Keep these in sync with `scripts/setup_uv.sh` and the engine compatibility
+/// matrix. Exact top-level Python pins make first-launch bootstraps repeatable;
+/// changing a fingerprint below intentionally invalidates the matching venv
+/// marker and upgrades it on the next setup run.
+#[cfg(any(feature = "mlx", test))]
+pub(crate) const UV_VERSION: &str = "0.11.28";
+#[cfg(any(feature = "mlx", test))]
+pub(crate) const MLX_OPENAI_SERVER_SPEC: &str = "mlx-openai-server==1.8.1";
+#[cfg(any(feature = "mlx", test))]
+pub(crate) const MLX_EMBEDDINGS_SPEC: &str = "mlx-embeddings==0.1.0";
+#[cfg(any(feature = "mlx", test))]
+pub(crate) const MFLUX_SPEC: &str = "mflux==0.18.0";
+#[cfg(any(feature = "mlx", test))]
+pub(crate) const MLX_WHISPER_SPEC: &str = "mlx-whisper==0.4.3";
+#[cfg(any(feature = "vllm", test))]
+pub(crate) const VLLM_SPEC: &str = "vllm==0.25.0";
+#[cfg(any(feature = "mlx", test))]
+pub(crate) const MLX_BOOTSTRAP_FINGERPRINT: &str =
+    "mlx-openai-server=1.8.1;mlx-embeddings=0.1.0;mflux=0.18.0;mlx-whisper=0.4.3";
+#[cfg(any(feature = "vllm", test))]
+pub(crate) const VLLM_BOOTSTRAP_FINGERPRINT: &str = "vllm=0.25.0;python=3.12";
+
 // Conditionally compile engine implementations
 #[cfg(feature = "llamacpp")]
 pub mod engine_llamacpp;
@@ -61,7 +85,7 @@ pub trait InferenceEngine: Send + Sync {
 
     /// The model identifier that the engine's server expects in request bodies.
     ///
-    /// For `mlx_lm.server` this must match the `--model` argument (a local path
+    /// For `mlx-openai-server` this must match the model argument (a local path
     /// or HF repo ID); for llama-server it's typically ignored.  If `None`,
     /// the caller should fall back to `"default"`.
     fn model_id(&self) -> Option<String> {
@@ -228,7 +252,7 @@ pub fn direct_runtime_get_active_engine_info() -> EngineInfo {
             display_name: "Ollama".into(),
             available: true,
             requires_setup: false,
-            description: "Community model runner — install from ollama.ai".into(),
+            description: "Community model runner — install from ollama.com".into(),
             hf_tag: "gguf".into(), // Ollama uses GGUF internally
             single_file_model: true,
         };
@@ -252,7 +276,7 @@ pub fn direct_runtime_get_active_engine_info() -> EngineInfo {
 pub async fn direct_runtime_snapshot(
     sidecar: tauri::State<'_, crate::sidecar::SidecarManager>,
     engine_manager: tauri::State<'_, EngineManager>,
-) -> Result<LocalRuntimeSnapshot, String> {
+) -> Result<LocalRuntimeSnapshot, crate::thinclaw::bridge::BridgeError> {
     Ok(local_runtime_snapshot(&sidecar, &engine_manager)
         .await
         .redacted_for_public_clients())
@@ -665,7 +689,7 @@ pub fn direct_runtime_get_engine_setup_status(
 pub async fn direct_runtime_setup_engine(
     app: tauri::AppHandle,
     _engine_manager: tauri::State<'_, EngineManager>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let info = direct_runtime_get_active_engine_info();
 
     // Serialize setup against start/stop and refuse to replace an environment
@@ -677,7 +701,7 @@ pub async fn direct_runtime_setup_engine(
         .and_then(|engine| engine.base_url())
         .is_some()
     {
-        return Err("Stop the local inference engine before running setup".to_string());
+        return Err("Stop the local inference engine before running setup".into());
     }
 
     #[derive(Clone, serde::Serialize)]
@@ -754,7 +778,7 @@ pub async fn direct_runtime_start_engine(
     engine_manager: tauri::State<'_, EngineManager>,
     model_path: String,
     context_size: u32,
-) -> Result<EngineStartResult, String> {
+) -> Result<EngineStartResult, crate::thinclaw::bridge::BridgeError> {
     let mut guard = engine_manager.engine.lock().await;
     let engine = guard.as_mut().ok_or("No engine configured")?;
 
@@ -791,7 +815,7 @@ impl std::fmt::Debug for EngineStartResult {
 #[specta::specta]
 pub async fn direct_runtime_stop_engine(
     engine_manager: tauri::State<'_, EngineManager>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut guard = engine_manager.engine.lock().await;
     if let Some(engine) = guard.as_mut() {
         engine.stop().await?;
@@ -805,7 +829,7 @@ pub async fn direct_runtime_stop_engine(
 pub async fn direct_runtime_is_engine_ready(
     sidecar: tauri::State<'_, crate::sidecar::SidecarManager>,
     engine_manager: tauri::State<'_, EngineManager>,
-) -> Result<bool, String> {
+) -> Result<bool, crate::thinclaw::bridge::BridgeError> {
     Ok(local_runtime_snapshot(&sidecar, &engine_manager)
         .await
         .endpoint
@@ -852,6 +876,29 @@ mod tests {
         let info = direct_runtime_get_active_engine_info();
         let json = serde_json::to_string(&info).expect("EngineInfo should serialize");
         assert!(json.contains(&info.id));
+    }
+
+    #[test]
+    fn engine_dependency_pins_and_provisioning_scripts_stay_aligned() {
+        let uv_script = include_str!("../../../scripts/setup_uv.sh");
+        let llama_script = include_str!("../../../scripts/setup_llama.sh");
+        assert!(uv_script.contains(&format!("UV_VERSION:-{}", UV_VERSION)));
+        assert!(llama_script.contains("DEFAULT_TAG=\"b9988\""));
+
+        for spec in [
+            MLX_OPENAI_SERVER_SPEC,
+            MLX_EMBEDDINGS_SPEC,
+            MFLUX_SPEC,
+            MLX_WHISPER_SPEC,
+            VLLM_SPEC,
+        ] {
+            assert!(
+                spec.contains("=="),
+                "engine dependency must be exact: {spec}"
+            );
+        }
+        assert!(MLX_BOOTSTRAP_FINGERPRINT.contains("mlx-openai-server=1.8.1"));
+        assert!(VLLM_BOOTSTRAP_FINGERPRINT.contains("vllm=0.25.0"));
     }
 
     #[test]

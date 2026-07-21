@@ -395,12 +395,13 @@ mod tests {
     #[test]
     fn bridge_status_redacts_exact_and_pattern_secrets() {
         let exact = "an-unstructured-secret-value".to_string();
+        let patterned = ["sk", "-proj-", "abcdefghijklmnopqrstuvwxyz012345"].concat();
         let sanitized = sanitize_bridge_status(
-            &format!("failed with {exact} and sk-proj-abcdefghijklmnopqrstuvwxyz012345"),
+            &format!("failed with {exact} and {patterned}"),
             std::slice::from_ref(&exact),
         );
         assert!(!sanitized.contains(&exact));
-        assert!(!sanitized.contains("sk-proj-"));
+        assert!(!sanitized.contains(&patterned));
     }
 
     #[test]

@@ -11,6 +11,7 @@ import { createContext, useContext, useState, useEffect, useCallback, useRef, ty
 // @ts-ignore
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
+import { useThinClawEvents } from '../../../hooks/use-thinclaw-stream';
 import type {
     CanvasAction, CanvasActionShow, UiComponent,
     PanelPosition, NotifyLevel
@@ -202,34 +203,6 @@ export function CanvasProviderWrapper({ children }: { children: ReactNode }) {
             });
             unlisteners.push(() => u2());
 
-            // Listen for thinclaw-event — handle both CanvasUpdate (legacy) and canvas_action (A2UI)
-            const u3 = await listen('thinclaw-event', (event: any) => {
-                const payload = event.payload;
-                if (!payload) return;
-
-                if (payload.kind === 'CanvasUpdate') {
-                    if (payload.content_type === 'canvas_action') {
-                        // New A2UI CanvasAction — parse and dispatch
-                        try {
-                            const action: CanvasAction = JSON.parse(payload.content);
-                            handleCanvasAction(action, payload.session_key, payload.run_id);
-                        } catch (e) {
-                            console.error('[Canvas] Failed to parse CanvasAction:', e);
-                        }
-                    } else {
-                        // Legacy HTML/JSON content
-                        setLegacyContent({
-                            type: (payload.content_type as any) || 'html',
-                            data: payload.content || '',
-                            url: payload.url,
-                            sessionKey: payload.session_key,
-                            runId: payload.run_id,
-                        });
-                        setLegacyVisible(true);
-                    }
-                }
-            });
-            unlisteners.push(() => u3());
         };
 
         setup();
@@ -239,6 +212,28 @@ export function CanvasProviderWrapper({ children }: { children: ReactNode }) {
             toastTimers.current.forEach(t => clearTimeout(t));
         };
     }, [handleCanvasAction, refreshPanels]);
+
+    useThinClawEvents((payload) => {
+        if (payload.kind !== 'CanvasUpdate') return;
+        if (payload.content_type === 'canvas_action') {
+            try {
+                const action: CanvasAction = JSON.parse(payload.content);
+                handleCanvasAction(action, payload.session_key, payload.run_id ?? undefined);
+            } catch (error) {
+                console.error('[Canvas] Failed to parse CanvasAction:', error);
+            }
+            return;
+        }
+
+        setLegacyContent({
+            type: (payload.content_type as 'html' | 'json') || 'html',
+            data: payload.content || '',
+            url: payload.url ?? undefined,
+            sessionKey: payload.session_key,
+            runId: payload.run_id ?? undefined,
+        });
+        setLegacyVisible(true);
+    });
 
     const focusPanel = useCallback((id: string) => setFocusedPanelId(id), []);
     const dismissPanel = useCallback((id: string) => {

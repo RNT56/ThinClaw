@@ -18,8 +18,8 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use super::shell_security::{
-    check_safe_bins, classify_hard_block, detect_command_injection, detect_library_injection,
-    requires_explicit_approval,
+    check_allowed_executables, classify_hard_block, detect_command_injection,
+    detect_library_injection, requires_explicit_approval,
 };
 use crate::execution::{
     LocalExecutionBackend, LocalHostExecutionBackend, OwnedChild, ProcessStartRequest,
@@ -349,9 +349,9 @@ impl Tool for ProcessTool {
                         reason, command
                     )));
                 }
-                if let Some(reason) = check_safe_bins(command) {
+                if let Some(reason) = check_allowed_executables(command) {
                     return Err(ToolError::NotAuthorized(format!(
-                        "Blocked by safe bins policy ({}): {}",
+                        "Blocked by allowed-executables policy ({}): {}",
                         reason, command
                     )));
                 }

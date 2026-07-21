@@ -1,4 +1,5 @@
 use super::RemoteGatewayProxy;
+use crate::thinclaw::bridge::{BridgeError, RouteMode};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -231,11 +232,25 @@ fn fixture_response(method: &str, path: &str, body: &str) -> String {
 }
 
 #[test]
-fn unavailable_errors_are_explicitly_typed_by_prefix() {
-    let message = RemoteGatewayProxy::unavailable("chat abort", "no endpoint");
-    assert!(message.starts_with("unavailable:"));
-    assert!(message.contains("chat abort"));
-    assert!(message.contains("no endpoint"));
+fn unavailable_errors_preserve_typed_remediation() {
+    let error = RemoteGatewayProxy::unavailable("chat abort", "no endpoint");
+    let BridgeError::Unavailable {
+        capability,
+        reason,
+        remediation,
+        satisfied_by,
+    } = error
+    else {
+        panic!("expected a typed unavailable error");
+    };
+
+    assert_eq!(capability, "chat abort");
+    assert!(reason.contains("no endpoint"));
+    assert_eq!(
+        remediation.as_deref(),
+        Some("switch to embedded mode or upgrade the remote gateway")
+    );
+    assert_eq!(satisfied_by, RouteMode::LocalOnly);
 }
 
 #[test]
@@ -299,9 +314,22 @@ async fn raw_secret_injection_is_unavailable_in_remote_mode() {
         .await
         .expect_err("remote raw secret injection should stay disabled");
 
-    assert!(error.starts_with("unavailable:"));
-    assert!(error.contains("raw secret injection is disabled"));
-    assert!(error.contains("provider vault save/delete"));
+    let BridgeError::Unavailable {
+        capability,
+        reason,
+        remediation,
+        satisfied_by,
+    } = error
+    else {
+        panic!("expected a typed unavailable error");
+    };
+    assert_eq!(capability, "remote raw secret injection");
+    assert_eq!(reason, "raw secret injection is disabled");
+    assert_eq!(
+        remediation.as_deref(),
+        Some("use provider vault save/delete")
+    );
+    assert_eq!(satisfied_by, RouteMode::LocalOnly);
 }
 
 #[tokio::test]

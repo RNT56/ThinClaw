@@ -142,13 +142,15 @@ async fn start_isolated_server() -> (SocketAddr, HomeOverride, Arc<GatewayState>
         response_cache: None,
         startup_time: std::time::Instant::now(),
         restart_requested: std::sync::atomic::AtomicBool::new(false),
-        routine_engine: None,
+        routine_engine: Arc::new(std::sync::RwLock::new(None)),
         repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         secrets_store: None,
         channel_manager: None,
         hooks: None,
         device_registry,
-        pending_approvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        pending_approvals: Arc::new(
+            thinclaw::channels::web::server::PendingApprovalsStore::in_memory(),
+        ),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -842,8 +844,9 @@ async fn test_watch_companion_high_risk_approve_is_forbidden_but_low_risk_ok() {
 
     // Low-risk approve from the same watch companion passes the watch gate.
     // With no agent loop wired in this harness the submission fails 503, but
-    // crucially NOT 403 — the low-risk decision was allowed through the gate,
-    // and the pending entry is dropped (decision submitted).
+    // crucially NOT 403 — the low-risk decision was allowed through the gate.
+    // Because the agent loop did not accept it, the durable entry must remain
+    // available for a retry from this or another surface.
     let low_id = uuid::Uuid::new_v4().to_string();
     seed(&low_id, ApprovalRisk::Low);
     let resp = client()
@@ -853,17 +856,17 @@ async fn test_watch_companion_high_risk_approve_is_forbidden_but_low_risk_ok() {
         .send()
         .await
         .unwrap();
-    assert_ne!(
+    assert_eq!(
         resp.status(),
-        reqwest::StatusCode::FORBIDDEN,
-        "watch companion must be allowed a low-risk approval"
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "a low-risk approval must pass the watch gate and reach submission"
     );
     assert!(
-        !state
+        state
             .pending_approvals
             .lock()
             .unwrap()
             .contains_key(&low_id),
-        "an allowed low-risk approval drops the pending entry"
+        "an unaccepted low-risk decision must remain pending for retry"
     );
 }

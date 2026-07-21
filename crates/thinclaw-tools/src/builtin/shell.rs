@@ -43,7 +43,7 @@
 //! - Only safe env vars (PATH, HOME, LANG, etc.) forwarded to child processes
 //! - API keys, session tokens, and credentials are NOT inherited
 //! - LD_PRELOAD/DYLD_INSERT_LIBRARIES injection blocked
-//! - Optional safe-bins-only mode (THINCLAW_SAFE_BINS_ONLY=true)
+//! - Optional allowed-executables-only mode (`THINCLAW_ALLOWED_EXECUTABLES_ONLY=true`)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -67,8 +67,9 @@ use thinclaw_types::JobContext;
 use super::file::{effective_base_dir as effective_file_base_dir, validate_path};
 // Security validation — constants, blocked patterns, injection detection
 use super::shell_security::{
-    DANGEROUS_PATTERNS, ExternalCommandScanner, ExternalScanVerdict, check_safe_bins,
-    check_safe_bins_forced, classify_hard_block, detect_path_escape, normalize_command,
+    DANGEROUS_PATTERNS, ExternalCommandScanner, ExternalScanVerdict, check_allowed_executables,
+    check_allowed_executables_forced, classify_hard_block, detect_path_escape,
+    executable_approval_reason, normalize_command,
 };
 #[cfg(test)]
 use super::shell_security::{contains_shell_pipe, extract_binary_name, has_command_token};
@@ -90,6 +91,7 @@ pub struct ShellSafetyOptions {
     pub external_scanner_mode: Option<ExternalScannerMode>,
     pub external_scanner_path: Option<PathBuf>,
     pub external_scanner_require_verified: Option<bool>,
+    pub allow_temp_paths: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +153,8 @@ pub struct ShellTool {
     acp_terminal: Option<Arc<dyn AcpTerminalExecutor>>,
     /// First-party external shell scanner used for defense in depth.
     external_scanner: Option<ExternalCommandScanner>,
+    /// Whether workspace-confined commands may reference host temp paths.
+    allow_temp_paths: bool,
 }
 
 impl std::fmt::Debug for ShellTool {
@@ -184,6 +188,7 @@ impl ShellTool {
             smart_approver: None,
             acp_terminal: None,
             external_scanner: None,
+            allow_temp_paths: false,
         }
     }
 
@@ -198,7 +203,7 @@ impl ShellTool {
     /// When set, the shell tool will:
     /// - Reject `workdir` parameters pointing outside this directory
     /// - Scan commands for absolute paths outside this directory and block them
-    /// - Auto-enable the safe-bins allowlist (restricts to curated commands)
+    /// - Auto-enable the executable allowlist (restricts to curated commands)
     pub fn with_base_dir(mut self, dir: PathBuf) -> Self {
         self.base_dir = Some(dir);
         self
@@ -235,7 +240,8 @@ impl ShellTool {
         self.smart_approval_mode_override = options.smart_approval_mode;
         let scanner_mode = options
             .external_scanner_mode
-            .unwrap_or(ExternalScannerMode::FailOpen);
+            .unwrap_or(ExternalScannerMode::FailClosed);
+        self.allow_temp_paths = options.allow_temp_paths.unwrap_or(false);
         let require_verified = options.external_scanner_require_verified.unwrap_or(false);
         if scanner_mode != ExternalScannerMode::Off || options.external_scanner_path.is_some() {
             self.external_scanner = Some(ExternalCommandScanner::new_with_provenance_requirement(
@@ -327,6 +333,7 @@ impl ShellTool {
             .iter()
             .copied()
             .find(|pattern| normalized.contains(pattern))
+            .or_else(|| executable_approval_reason(&normalized))
     }
 
     fn smart_approval_mode(&self) -> SmartApprovalMode {
@@ -459,17 +466,17 @@ impl ShellTool {
             )));
         }
 
-        // Check safe bins allowlist (when THINCLAW_SAFE_BINS_ONLY=true)
-        if let Some(reason) = check_safe_bins(cmd) {
+        // Check the executable allowlist when explicitly enabled.
+        if let Some(reason) = check_allowed_executables(cmd) {
             return Err(ToolError::NotAuthorized(format!(
-                "Blocked by safe bins policy ({}): {}",
+                "Blocked by allowed-executables policy ({}): {}",
                 reason,
                 truncate_for_error(cmd)
             )));
         }
 
         // When base_dir is set, enforce sandbox restrictions:
-        // 1. Safe bins allowlist (auto-enabled)
+        // 1. Executable allowlist (auto-enabled)
         // 2. Workdir validation
         // 3. Command path scanning
         let effective_base_dir = self.effective_base_dir(ctx)?;
@@ -500,16 +507,18 @@ impl ShellTool {
         if let Some(ref base) = effective_base_dir {
             let base_canonical = base.canonicalize().unwrap_or_else(|_| base.clone());
 
-            // Auto-enable safe bins when sandboxed
-            if check_safe_bins_forced(cmd) {
+            // Auto-enable the executable allowlist when workspace-confined.
+            if check_allowed_executables_forced(cmd) {
                 return Err(ToolError::NotAuthorized(format!(
-                    "Sandboxed shell: command not in safe bins allowlist: {}",
+                    "Sandboxed shell: command not in allowed-executables policy: {}",
                     truncate_for_error(cmd)
                 )));
             }
 
             // Scan for obvious absolute path escapes in command
-            if let Some(escaped_path) = detect_path_escape(cmd, &base_canonical) {
+            if let Some(escaped_path) =
+                detect_path_escape(cmd, &base_canonical, self.allow_temp_paths)
+            {
                 return Err(ToolError::NotAuthorized(format!(
                     "Sandboxed shell: command references path outside workspace: {}",
                     escaped_path
@@ -1090,6 +1099,7 @@ mod tests {
                 external_scanner_mode: Some(ExternalScannerMode::FailClosed),
                 external_scanner_path: Some(scanner_path),
                 external_scanner_require_verified: Some(false),
+                allow_temp_paths: None,
             });
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let command = "sudo echo scanner-block";
@@ -1198,6 +1208,7 @@ mod tests {
             external_scanner_mode: Some(ExternalScannerMode::FailClosed),
             external_scanner_path: Some(scanner_path),
             external_scanner_require_verified: Some(true),
+            allow_temp_paths: None,
         });
         let ctx = JobContext::default();
 
@@ -1226,6 +1237,7 @@ mod tests {
             external_scanner_mode: Some(ExternalScannerMode::FailOpen),
             external_scanner_path: Some(scanner_path),
             external_scanner_require_verified: Some(true),
+            allow_temp_paths: None,
         });
         let ctx = JobContext::default();
 
@@ -1685,75 +1697,79 @@ mod tests {
         assert_eq!(extract_binary_name(""), None);
     }
 
-    // ── Safe bins allowlist tests ─────────────────────────────────────
+    // ── Executable allowlist tests ────────────────────────────────────
 
     #[test]
-    fn test_safe_bins_disabled_by_default() {
-        // When THINCLAW_SAFE_BINS_ONLY is not set, everything passes
-        assert!(check_safe_bins("rm -rf /tmp").is_none());
-        assert!(check_safe_bins("ruby script.rb").is_none());
+    fn test_allowed_executables_disabled_by_default() {
+        assert!(check_allowed_executables("rm -rf /tmp").is_none());
+        assert!(check_allowed_executables("ruby script.rb").is_none());
     }
     // ── Sandbox base_dir enforcement tests ──────────────────────────────
 
     #[test]
     fn test_detect_path_escape_blocks_outside_paths() {
         let base = Path::new("/home/user/projects");
-        assert!(detect_path_escape("cat /etc/passwd", base).is_some());
-        assert!(detect_path_escape("ls /var/log/syslog", base).is_some());
-        assert!(detect_path_escape("cp file.txt /home/other/", base).is_some());
+        assert!(detect_path_escape("cat /etc/passwd", base, false).is_some());
+        assert!(detect_path_escape("ls /var/log/syslog", base, false).is_some());
+        assert!(detect_path_escape("cp file.txt /home/other/", base, false).is_some());
     }
 
     #[test]
     fn test_detect_path_escape_allows_workspace_paths() {
         let base = Path::new("/home/user/projects");
-        assert!(detect_path_escape("cat /home/user/projects/src/main.rs", base).is_none());
-        assert!(detect_path_escape("ls /home/user/projects/", base).is_none());
+        assert!(detect_path_escape("cat /home/user/projects/src/main.rs", base, false).is_none());
+        assert!(detect_path_escape("ls /home/user/projects/", base, false).is_none());
+        assert!(detect_path_escape("cat /home/user/projects-evil/secret", base, false).is_some());
     }
 
     #[test]
-    fn test_detect_path_escape_allows_safe_locations() {
+    fn test_detect_path_escape_allows_only_explicit_safe_locations() {
         let base = Path::new("/home/user/projects");
-        // /dev/, /tmp, /usr/bin/, /bin/ are allowed
-        assert!(detect_path_escape("echo hello > /dev/null", base).is_none());
-        assert!(detect_path_escape("cat /tmp/build_output.log", base).is_none());
-        assert!(detect_path_escape("/usr/bin/env python3 script.py", base).is_none());
-        assert!(detect_path_escape("/bin/sh -c 'echo hi'", base).is_none());
+        assert!(detect_path_escape("echo hello > /dev/null", base, false).is_none());
+        assert!(detect_path_escape("cat /tmp/build_output.log", base, false).is_some());
+        assert!(detect_path_escape("cat /tmp/build_output.log", base, true).is_none());
+        assert!(detect_path_escape("cat /tmp/../etc/passwd", base, true).is_some());
+        assert!(detect_path_escape("cat /tmp-not-really/file", base, true).is_some());
+        assert!(detect_path_escape("/usr/bin/env python3 script.py", base, false).is_none());
+        assert!(detect_path_escape("/bin/sh -c 'echo hi'", base, false).is_none());
     }
 
     #[test]
     fn test_detect_path_escape_catches_traversal() {
         let base = Path::new("/home/user/projects");
-        assert!(detect_path_escape("cat ../../etc/passwd", base).is_some());
-        assert!(detect_path_escape("cat ../../../secrets", base).is_some());
-        assert!(detect_path_escape("ls ./../../../", base).is_some());
+        assert!(detect_path_escape("cat ../../etc/passwd", base, false).is_some());
+        assert!(detect_path_escape("cat ../../../secrets", base, false).is_some());
+        assert!(detect_path_escape("ls ./../../../", base, false).is_some());
     }
 
     #[test]
     fn test_detect_path_escape_allows_relative_in_workspace() {
         let base = Path::new("/home/user/projects");
         // Normal relative paths without `..` are fine
-        assert!(detect_path_escape("cat ./src/main.rs", base).is_none());
-        assert!(detect_path_escape("ls src/lib.rs", base).is_none());
+        assert!(detect_path_escape("cat ./src/main.rs", base, false).is_none());
+        assert!(detect_path_escape("ls src/lib.rs", base, false).is_none());
     }
 
     #[test]
-    fn test_safe_bins_forced_blocks_unknown() {
+    fn test_allowed_executables_forced_blocks_unknown() {
         // Unknown binaries are blocked
-        assert!(check_safe_bins_forced("ruby evil.rb"));
-        assert!(check_safe_bins_forced("perl -e 'system(\"rm -rf /\")'"));
-        assert!(check_safe_bins_forced("custom_binary --flag"));
+        assert!(check_allowed_executables_forced("ruby evil.rb"));
+        assert!(check_allowed_executables_forced(
+            "perl -e 'system(\"rm -rf /\")'"
+        ));
+        assert!(check_allowed_executables_forced("custom_binary --flag"));
     }
 
     #[test]
-    fn test_safe_bins_forced_allows_known() {
+    fn test_allowed_executables_forced_allows_known() {
         // Known safe binaries pass
-        assert!(!check_safe_bins_forced("ls -la"));
-        assert!(!check_safe_bins_forced("cat README.md"));
-        assert!(!check_safe_bins_forced("python3 script.py"));
-        assert!(!check_safe_bins_forced("cargo build --release"));
-        assert!(!check_safe_bins_forced("git status"));
-        assert!(!check_safe_bins_forced("open file.html")); // macOS desktop
-        assert!(!check_safe_bins_forced("npm install"));
+        assert!(!check_allowed_executables_forced("ls -la"));
+        assert!(!check_allowed_executables_forced("cat README.md"));
+        assert!(!check_allowed_executables_forced("python3 script.py"));
+        assert!(!check_allowed_executables_forced("cargo build --release"));
+        assert!(!check_allowed_executables_forced("git status"));
+        assert!(!check_allowed_executables_forced("open file.html")); // macOS desktop
+        assert!(!check_allowed_executables_forced("npm install"));
     }
 
     #[tokio::test]
@@ -1845,8 +1861,8 @@ mod tests {
             .await;
 
         assert!(
-            matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("safe bins")),
-            "Expected safe bins block, got: {result:?}"
+            matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("allowed-executables")),
+            "Expected executable allowlist block, got: {result:?}"
         );
     }
 
@@ -1859,7 +1875,7 @@ mod tests {
         let tool = ShellTool::new().with_base_dir(sandbox_dir.clone());
         let ctx = JobContext::default();
 
-        // echo is in safe bins and doesn't reference paths outside
+        // echo is allowlisted and doesn't reference paths outside
         let result = tool
             .execute(
                 serde_json::json!({

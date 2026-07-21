@@ -21,10 +21,15 @@ public enum SnapshotStoreError: Error, Equatable {
 public struct SnapshotStore: Sendable {
     /// Directory that holds all snapshot files.
     public let baseURL: URL
+    private let protectionPolicy: DataProtectionPolicy
 
     /// Store rooted at an explicit directory (used by tests and previews).
-    public init(baseURL: URL) {
+    public init(
+        baseURL: URL,
+        protectionPolicy: DataProtectionPolicy = .init()
+    ) {
         self.baseURL = baseURL
+        self.protectionPolicy = protectionPolicy
     }
 
     /// Store rooted at `<app group container>/Snapshots`.
@@ -37,6 +42,9 @@ public struct SnapshotStore: Sendable {
                 forSecurityApplicationGroupIdentifier: appGroupID)
         else { return nil }
         self.baseURL = container.appendingPathComponent("Snapshots", isDirectory: true)
+        self.protectionPolicy = DataProtectionPolicy(
+            enhanced: UserDefaults(suiteName: appGroupID)?.bool(
+                forKey: DataProtectionPolicy.enhancedPreferenceKey) ?? false)
     }
 
     /// Atomically persist a snapshot to its well-known file.
@@ -57,6 +65,8 @@ public struct SnapshotStore: Sendable {
             throw SnapshotStoreError.coordinationFailed(coordinationError.localizedDescription)
         }
         try writeResult.get()
+        _ = protectionPolicy.apply(to: baseURL)
+        _ = protectionPolicy.apply(to: url)
     }
 
     /// Load a snapshot; `nil` when the file does not exist yet.
@@ -111,6 +121,23 @@ public struct SnapshotStore: Sendable {
         let url = fileURL(for: type)
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         try FileManager.default.removeItem(at: url)
+    }
+
+    /// Reapply the selected protection to the snapshot directory and every
+    /// existing artifact. Atomic replacement can create a new inode, so save
+    /// also applies this policy after every write.
+    @discardableResult
+    public func applyFileProtection() -> Bool {
+        var applied = protectionPolicy.apply(to: baseURL)
+        guard
+            let files = try? FileManager.default.contentsOfDirectory(
+                at: baseURL,
+                includingPropertiesForKeys: nil)
+        else { return applied }
+        for file in files {
+            applied = protectionPolicy.apply(to: file) && applied
+        }
+        return applied
     }
 
     /// The on-disk location for a snapshot type.

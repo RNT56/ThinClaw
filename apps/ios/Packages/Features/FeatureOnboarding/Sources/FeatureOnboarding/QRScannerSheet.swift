@@ -1,4 +1,5 @@
 import SwiftUI
+import ThinClawDesign
 
 #if canImport(VisionKit) && canImport(AVFoundation) && os(iOS)
     import AVFoundation
@@ -59,7 +60,7 @@ import SwiftUI
                         UIApplication.shared.open(url)
                     }
                 }
-                .buttonStyle(.glassProminent)
+                .thinClawButtonStyle(prominent: true)
             }
         }
 

@@ -99,9 +99,9 @@ ThinClaw's CLAUDE.md explicitly makes accurate, ownership-scoped docs an archite
     - `thinclaw-soul` — "canonical/local soul parsing and rendering, seeded-soul composition, pack name canonicalization, and pack asset markdown."
     - `thinclaw-repo-projects` — "repo-project supervisor domain types and state machines: project/task/run states and transitions, coding backend, merge method, GitHub auth mode, project policy, and merge-gate decision DTOs."
     - `thinclaw-runtime-contracts` — "implementation-free shared runtime DTOs for ThinClaw clients and the Desktop host: asset, direct-runtime, model, provider (incl. `ApiStyle`/`ProviderEndpoint`), runtime, and secret contracts."
-  - **Acceptance:** Table has 26 rows; `rg "thinclaw-identity|thinclaw-soul|thinclaw-repo-projects|thinclaw-runtime-contracts" docs/CRATE_OWNERSHIP.md` returns all four; row count matches `ls crates | wc -l`.
+  - **Acceptance:** Table has 28 rows; `rg "thinclaw-identity|thinclaw-soul|thinclaw-repo-projects|thinclaw-runtime-contracts" docs/CRATE_OWNERSHIP.md` returns all four; row count matches `ls crates | wc -l`.
   - **Effort:** S
-  - **Verification:** `ls /Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop/crates | wc -l` (=26) and `grep -c '^| `thinclaw' docs/CRATE_OWNERSHIP.md` (=26).
+  - **Verification:** `ls /Users/mt/Programming/Schtack/ThinClaw/thinclaw-desktop/crates | wc -l` and `grep -c '^| `thinclaw' docs/CRATE_OWNERSHIP.md` both equal 28.
 
 - [x] **T2: Document the repo-project supervisor in CLAUDE.md repo-shape + a new CRATE_OWNERSHIP architecture note.**
   - **Files:** `CLAUDE.md` ("Current Architecture Notes" bullets near lines 107–110; "Repo Shape" list near `src/cli/`), `docs/CRATE_OWNERSHIP.md` (the T1 row covers the crate; add a one-line mention in the root-owned-runtime prose if a concrete supervisor/pipeline lives in root).
@@ -197,7 +197,7 @@ ThinClaw's CLAUDE.md explicitly makes accurate, ownership-scoped docs an archite
   - No Postgres/libSQL/Docker needed.
 
 ## Definition of Done
-- [x] `docs/CRATE_OWNERSHIP.md` crate table has 26 rows including `thinclaw-identity`, `thinclaw-soul`, `thinclaw-repo-projects`, `thinclaw-runtime-contracts` (T1).
+- [x] `docs/CRATE_OWNERSHIP.md` crate table has 28 rows including `thinclaw-identity`, `thinclaw-soul`, `thinclaw-repo-projects`, `thinclaw-runtime-contracts` (T1).
 - [x] Repo-project supervisor is documented in CLAUDE.md repo-shape/architecture notes (T2), `docs/CLI_REFERENCE.md` with all `RepoProjectCommand` subcommands/flags (T3), and `FEATURE_PARITY.md` (T4).
 - [x] FEATURE_PARITY.md §20 no longer carries "80 max" or a hardcoded "Updated: <date>"; registry named as authoritative (T5).
 - [x] `crates/thinclaw-config/src/provider_catalog.rs:4` no longer says "20+ providers"; the 16-entry `registry/providers.json` (plus env backends) is named accurately (T6).

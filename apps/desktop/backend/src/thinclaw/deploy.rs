@@ -49,9 +49,23 @@ struct CommandOutput {
     stdout: String,
 }
 
-/// Deploy ThinClaw to a Linux host and return connection details through the
-/// existing `deploy-status` event. Only one deployment may run at a time,
-/// because progress events are process-global rather than request-scoped.
+/// Connection details returned only to the renderer that initiated deployment.
+///
+/// The bearer token must never be broadcast through a process-global event:
+/// another renderer listener could otherwise observe a credential that it did
+/// not request.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct RemoteDeployResult {
+    pub status: String,
+    pub url: String,
+    pub token: String,
+    pub message: Option<String>,
+    pub reachable: bool,
+}
+
+/// Deploy ThinClaw to a Linux host and return its connection details directly
+/// to the caller. Only one deployment may run at a time because progress logs
+/// are process-global rather than request-scoped.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_deploy_remote(
@@ -61,7 +75,7 @@ pub async fn thinclaw_deploy_remote(
     user: String,
     tailscale_key: Option<String>,
     enable_systemd: Option<bool>,
-) -> Result<(), String> {
+) -> Result<RemoteDeployResult, crate::thinclaw::bridge::BridgeError> {
     let _deployment_lease = state
         .deploy_lock
         .try_lock()
@@ -117,8 +131,8 @@ pub async fn thinclaw_deploy_remote(
     .await
     {
         let message = format!("remote setup failed: {error}");
-        emit_failure(&app, &message)?;
-        return Err(message);
+        emit_log(&app, &format!("[error] {message}"));
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime { message });
     }
 
     emit_log(
@@ -149,22 +163,16 @@ pub async fn thinclaw_deploy_remote(
         );
     }
 
-    let message = (!desktop_can_reach).then_some(
-        "The server is healthy, but this desktop could not reach its Tailscale address yet.",
-    );
-    app.emit(
-        "deploy-status",
-        serde_json::json!({
-            "status": "success",
-            "url": gateway_url,
-            "token": &*token,
-            "message": message,
-            "reachable": desktop_can_reach,
-        })
-        .to_string(),
-    )
-    .map_err(|error| format!("deployment succeeded but status delivery failed: {error}"))?;
-    Ok(())
+    Ok(RemoteDeployResult {
+        status: "success".to_string(),
+        url: gateway_url,
+        token: token.to_string(),
+        message: (!desktop_can_reach).then(|| {
+            "The server is healthy, but this desktop could not reach its Tailscale address yet."
+                .to_string()
+        }),
+        reachable: desktop_can_reach,
+    })
 }
 
 fn validate_target(
@@ -390,20 +398,6 @@ fn generate_secure_token() -> String {
 
 fn emit_log(app: &AppHandle, message: &str) {
     let _ = app.emit("deploy-log", message);
-}
-
-fn emit_failure(app: &AppHandle, message: &str) -> Result<(), String> {
-    app.emit(
-        "deploy-status",
-        serde_json::json!({
-            "status": "failed",
-            "url": "",
-            "token": "",
-            "message": message,
-        })
-        .to_string(),
-    )
-    .map_err(|error| format!("failed to deliver deployment failure: {error}"))
 }
 
 async fn stream_process_output<R: AsyncRead + Unpin>(

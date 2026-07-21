@@ -23,11 +23,16 @@ import ThinClawWidgetKitShared
 @MainActor
 final class SnapshotService {
     private let publisher: SnapshotPublisher?
+    private var gatewayInstanceID: String?
 
     /// Build the service over the shared App Group container. `publisher` is
     /// `nil` when the container is unavailable, so callers need not special-case
     /// the unpaired/entitlement-missing path.
-    init(privacy: SnapshotPrivacyPolicy = .default) {
+    init(
+        gatewayInstanceID: String? = nil,
+        privacy: SnapshotPrivacyPolicy = .default
+    ) {
+        self.gatewayInstanceID = gatewayInstanceID
         if let sink = SnapshotStoreSink(appGroupID: WidgetSnapshotAccess.appGroupID) {
             self.publisher = SnapshotPublisher(sink: sink, privacy: privacy)
         } else {
@@ -35,16 +40,22 @@ final class SnapshotService {
         }
     }
 
+    func useGateway(_ gatewayInstanceID: String?) {
+        self.gatewayInstanceID = gatewayInstanceID
+    }
+
     /// Fold the approvals store's pending set into the publisher whenever it
     /// changes. Runs until the returned task is cancelled (on unpair/teardown).
     /// The status phase is nudged to `waitingForApproval` by the publisher when
     /// the set is non-empty, so the status widget and approvals widget agree.
     func mirror(approvals: [ApprovalRequest]) async {
+        await publisher?.setGatewayInstanceID(gatewayInstanceID)
         await publisher?.setApprovals(approvals)
     }
 
     /// Fold a single live event into the running agent-status projection.
     func ingest(event: AgentEvent, threadTitle: String? = nil) async {
+        await publisher?.setGatewayInstanceID(gatewayInstanceID)
         await publisher?.ingest(event: event, threadTitle: threadTitle)
     }
 
@@ -54,35 +65,81 @@ final class SnapshotService {
     /// updates the sections that answered. Returns whether anything was written
     /// (always `true` when a publisher exists — a background wake that produced
     /// a fresh snapshot counts as `.newData`).
-    @discardableResult
-    func refresh(client: Client) async -> Bool {
-        guard let publisher else { return false }
-        let inputs = await Self.fetchInputs(client: client)
-        try? await publisher.publishNow(inputs)
-        return true
+    func refresh(client: Client) async -> SnapshotRefreshResult {
+        guard let publisher else {
+            return .init(
+                status: .unavailable,
+                approvals: .unavailable,
+                jobs: .unavailable,
+                didWrite: false)
+        }
+        let previous = Self.previousInputs(gatewayInstanceID: gatewayInstanceID)
+        let refresh = await Self.fetchInputs(
+            client: client,
+            gatewayInstanceID: gatewayInstanceID,
+            previous: previous)
+        guard let inputs = refresh.inputs else { return refresh.result }
+        do {
+            try await publisher.publishNow(inputs)
+            var result = refresh.result
+            result.didWrite = true
+            return result
+        } catch {
+            var result = refresh.result
+            result.didWrite = false
+            return result
+        }
     }
 
     /// Assemble ``SnapshotInputs`` from the three read endpoints. Each fetch is
     /// independent and failure-tolerant.
-    private static func fetchInputs(client: Client) async -> SnapshotInputs {
+    private static func fetchInputs(
+        client: Client,
+        gatewayInstanceID: String?,
+        previous: PreviousState
+    ) async -> (inputs: SnapshotInputs?, result: SnapshotRefreshResult) {
         async let statusPhase = fetchStatusPhase(client: client)
         async let approvals = fetchApprovals(client: client)
         async let jobs = fetchJobs(client: client)
 
-        let pending = await approvals
+        let fetchedStatus = await statusPhase
+        let fetchedApprovals = await approvals
+        let fetchedJobs = await jobs
+        let statusState: SnapshotRefreshResult.SectionState =
+            fetchedStatus != nil
+            ? .refreshed : (previous.hasStatus ? .preserved : .unavailable)
+        let approvalsState: SnapshotRefreshResult.SectionState =
+            fetchedApprovals != nil
+            ? .refreshed : (previous.hasApprovals ? .preserved : .unavailable)
+        let jobsState: SnapshotRefreshResult.SectionState =
+            fetchedJobs != nil
+            ? .refreshed : (previous.hasJobs ? .preserved : .unavailable)
+        let result = SnapshotRefreshResult(
+            status: statusState,
+            approvals: approvalsState,
+            jobs: jobsState,
+            didWrite: false)
+        guard fetchedStatus != nil || fetchedApprovals != nil || fetchedJobs != nil else {
+            return (nil, result)
+        }
+        let pending = fetchedApprovals ?? previous.inputs.pendingApprovals
         var inputs = SnapshotInputs(
-            phase: await statusPhase,
+            gatewayInstanceID: gatewayInstanceID,
+            statusIsStale: fetchedStatus == nil,
+            approvalsAreStale: fetchedApprovals == nil,
+            jobsAreStale: fetchedJobs == nil,
+            phase: fetchedStatus ?? previous.inputs.phase,
             pendingApprovals: pending,
-            jobs: await jobs)
+            jobs: fetchedJobs ?? previous.inputs.jobs)
         // A pending approval outranks an "idle" status phase so the surfaces
         // stay consistent even if the status endpoint reports idle.
         if !pending.isEmpty, inputs.phase == .idle {
             inputs.phase = .waitingForApproval
         }
-        return inputs
+        return (inputs, result)
     }
 
-    private static func fetchStatusPhase(client: Client) async -> AgentStatusSnapshot.Phase {
+    private static func fetchStatusPhase(client: Client) async -> AgentStatusSnapshot.Phase? {
         // The gateway status endpoint reports gateway-wide health, not a single
         // run's phase; there is no per-run "thinking/streaming" signal on the
         // cold path. Treat a reachable gateway as `idle` (no active run implied)
@@ -91,17 +148,17 @@ final class SnapshotService {
             let output = try? await client.gatewayStatusHandler(),
             case .ok = output
         else {
-            return .error
+            return nil
         }
         return .idle
     }
 
-    private static func fetchApprovals(client: Client) async -> [ApprovalRequest] {
+    private static func fetchApprovals(client: Client) async -> [ApprovalRequest]? {
         guard
             let output = try? await client.chatApprovalsHandler(),
             let body = try? output.ok.body.json
         else {
-            return []
+            return nil
         }
         return body.approvals.map { entry in
             ApprovalRequest(
@@ -114,12 +171,12 @@ final class SnapshotService {
         }
     }
 
-    private static func fetchJobs(client: Client) async -> [SnapshotInputs.Job] {
+    private static func fetchJobs(client: Client) async -> [SnapshotInputs.Job]? {
         guard
             let output = try? await client.jobsListHandler(),
             let body = try? output.ok.body.json
         else {
-            return []
+            return nil
         }
         return body.jobs.map { job in
             SnapshotInputs.Job(
@@ -128,6 +185,60 @@ final class SnapshotService {
                 phase: Self.jobPhase(from: job.state),
                 startedAt: Self.parseTimestamp(job.startedAt ?? job.createdAt))
         }
+    }
+
+    private struct PreviousState {
+        var inputs: SnapshotInputs
+        var hasStatus: Bool
+        var hasApprovals: Bool
+        var hasJobs: Bool
+    }
+
+    private static func previousInputs(gatewayInstanceID: String?) -> PreviousState {
+        guard let store = WidgetSnapshotAccess.store() else {
+            return PreviousState(
+                inputs: SnapshotInputs(gatewayInstanceID: gatewayInstanceID),
+                hasStatus: false,
+                hasApprovals: false,
+                hasJobs: false)
+        }
+        let status = (try? store.load(AgentStatusSnapshot.self)) ?? nil
+        let approvals = (try? store.load(PendingApprovalsSnapshot.self)) ?? nil
+        let jobs = (try? store.load(JobsSnapshot.self)) ?? nil
+        let matchingStatus = status?.gatewayInstanceID == gatewayInstanceID ? status : nil
+        let matchingApprovals = approvals?.gatewayInstanceID == gatewayInstanceID ? approvals : nil
+        let matchingJobs = jobs?.gatewayInstanceID == gatewayInstanceID ? jobs : nil
+
+        return PreviousState(
+            inputs: SnapshotInputs(
+                gatewayInstanceID: gatewayInstanceID,
+                statusIsStale: matchingStatus?.isKnownStale ?? false,
+                approvalsAreStale: matchingApprovals?.isKnownStale ?? false,
+                jobsAreStale: matchingJobs?.isKnownStale ?? false,
+                phase: matchingStatus?.phase ?? .idle,
+                activeToolName: matchingStatus?.activeToolName,
+                activeThreadID: matchingStatus?.activeThreadID.map(ThreadID.init),
+                activeThreadTitle: matchingStatus?.activeThreadTitle,
+                unreadCount: matchingStatus?.unreadCount ?? 0,
+                pendingApprovals: matchingApprovals?.approvals.map { item in
+                    ApprovalRequest(
+                        requestID: item.id,
+                        toolName: item.toolName,
+                        description: item.description,
+                        parameters: "{}",
+                        risk: RiskTier(wire: item.effectiveRisk.rawValue),
+                        threadID: item.threadID.map(ThreadID.init))
+                } ?? [],
+                jobs: matchingJobs?.jobs.map { item in
+                    SnapshotInputs.Job(
+                        id: item.id,
+                        title: item.title,
+                        phase: item.phase,
+                        startedAt: item.startedAt)
+                } ?? []),
+            hasStatus: matchingStatus != nil,
+            hasApprovals: matchingApprovals != nil,
+            hasJobs: matchingJobs != nil)
     }
 
     /// Map a gateway job `state` string onto the snapshot's coarse phase,

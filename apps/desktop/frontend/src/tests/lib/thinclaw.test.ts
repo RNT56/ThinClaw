@@ -45,8 +45,8 @@ describe('getThinClawStatus()', () => {
         const result = await getThinClawStatus();
 
         expect(mockInvoke).toHaveBeenCalledOnce();
-        // safeInvoke forwards (cmd, args?) — args is undefined here
-        expect(mockInvoke).toHaveBeenCalledWith('thinclaw_get_status', undefined);
+        // Generated zero-argument bindings omit the IPC payload entirely.
+        expect(mockInvoke).toHaveBeenCalledWith('thinclaw_get_status');
         expect(result).toEqual(fakeStatus);
     });
 });

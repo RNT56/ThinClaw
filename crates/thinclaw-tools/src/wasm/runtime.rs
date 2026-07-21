@@ -274,8 +274,8 @@ fn extract_tool_description(
     let component_type = component.component_type();
     let exports: Vec<(String, String)> = component_type
         .exports(engine)
-        .map(|(name, ty)| {
-            let kind = match ty {
+        .map(|(name, export)| {
+            let kind = match export.ty {
                 wasmtime::component::types::ComponentItem::ComponentFunc(_) => "func",
                 wasmtime::component::types::ComponentItem::CoreFunc(_) => "core-func",
                 wasmtime::component::types::ComponentItem::Module(_) => "module",

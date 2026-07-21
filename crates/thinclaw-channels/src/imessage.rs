@@ -641,6 +641,43 @@ impl Channel for IMessageChannel {
         NAME
     }
 
+    fn config_schema(&self) -> Option<thinclaw_channels_core::ConfigSchema> {
+        use thinclaw_channels_core::{ConfigField, ConfigSchema};
+        Some(ConfigSchema {
+            channel_id: NAME.to_string(),
+            channel_name: "iMessage".to_string(),
+            fields: vec![
+                ConfigField {
+                    id: "allow_from".to_string(),
+                    label: "Allowed contacts".to_string(),
+                    field_type: "textarea".to_string(),
+                    required: false,
+                    help_text: Some(
+                        "One phone number or email per line. Empty allows every contact."
+                            .to_string(),
+                    ),
+                    default_value: Some(serde_json::Value::String(
+                        self.config.allow_from.join("\n"),
+                    )),
+                    options: None,
+                },
+                ConfigField {
+                    id: "poll_interval".to_string(),
+                    label: "Polling interval (seconds)".to_string(),
+                    field_type: "number".to_string(),
+                    required: true,
+                    help_text: Some("How often ThinClaw checks chat.db for messages.".to_string()),
+                    default_value: Some(serde_json::json!(self.config.poll_interval_secs)),
+                    options: None,
+                },
+            ],
+            help: Some(
+                "Configure iMessage polling and contact access. Changes apply after a channel restart."
+                    .to_string(),
+            ),
+        })
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(64);
         if let Some(handle) = self.poll_task.lock().await.take() {
@@ -1295,6 +1332,29 @@ mod tests {
         };
         assert_eq!(config.allow_from.len(), 2);
         assert!(config.allow_from.contains(&"+1234567890".to_string()));
+    }
+
+    #[test]
+    fn config_schema_exposes_current_non_secret_values() {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let channel = IMessageChannel::new(IMessageConfig {
+            db_path: db.path().to_path_buf(),
+            allow_from: vec!["+1234567890".into(), "user@icloud.com".into()],
+            poll_interval_secs: 7,
+            max_message_age_secs: 300,
+        })
+        .unwrap();
+        let schema = channel.config_schema().unwrap();
+        assert_eq!(schema.channel_id, "imessage");
+        assert_eq!(schema.fields.len(), 2);
+        assert_eq!(
+            schema.fields[0]
+                .default_value
+                .as_ref()
+                .and_then(|v| v.as_str()),
+            Some("+1234567890\nuser@icloud.com")
+        );
+        assert_eq!(schema.fields[1].default_value, Some(serde_json::json!(7)));
     }
 
     // ── channel creation tests ─────────────────────────────────────

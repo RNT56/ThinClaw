@@ -17,7 +17,7 @@ pub(super) fn default_model_for_runtime_slug(slug: &str) -> Option<&'static str>
         .or(match slug {
             "ollama" => Some("llama3"),
             "openai_compatible" => Some("default"),
-            "bedrock" => Some("anthropic.claude-3-sonnet-20240229-v1:0"),
+            "bedrock" => Some("anthropic.claude-opus-4-8"),
             "llama_cpp" => Some("llama-local"),
             _ => None,
         })
@@ -43,7 +43,7 @@ pub(super) fn suggest_provider_cheap_model(
 ) -> Option<String> {
     let mapped = match slug {
         "openai" => Some("gpt-4o-mini"),
-        "anthropic" => Some("claude-sonnet-4-6"),
+        "anthropic" => Some("claude-sonnet-5"),
         "gemini" => Some("gemini-2.5-flash-lite"),
         "openrouter" => Some("openai/gpt-4o-mini"),
         "tinfoil" => Some("kimi-k2-5"),

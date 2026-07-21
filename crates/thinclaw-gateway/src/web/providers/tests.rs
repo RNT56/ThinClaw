@@ -374,10 +374,7 @@ fn fallback_provider_credential_specs_cover_synthetic_providers() {
     let bedrock = fallback_provider_credential_spec("bedrock").unwrap();
     assert_eq!(bedrock.display_name(), "AWS Bedrock");
     assert_eq!(bedrock.secret_name, "llm_bedrock_api_key");
-    assert_eq!(
-        bedrock.default_model(),
-        "anthropic.claude-3-sonnet-20240229-v1:0"
-    );
+    assert_eq!(bedrock.default_model(), "anthropic.claude-opus-4-8");
 
     assert!(fallback_provider_credential_spec("unknown").is_none());
 }
@@ -928,7 +925,7 @@ fn provider_auto_enable_setting_updates_default_malformed_lists() {
         Some(serde_json::json!("not-a-list")),
         Some(serde_json::json!(null)),
         "anthropic",
-        "claude-sonnet-4-6",
+        "claude-sonnet-5",
     );
 
     assert_eq!(
@@ -940,7 +937,7 @@ fn provider_auto_enable_setting_updates_default_malformed_lists() {
             },
             ProviderSettingListMutation {
                 key: PROVIDERS_FALLBACK_CHAIN_SETTING_KEY,
-                value: vec!["anthropic/claude-sonnet-4-6".to_string()],
+                value: vec!["anthropic/claude-sonnet-5".to_string()],
             },
         ]
     );

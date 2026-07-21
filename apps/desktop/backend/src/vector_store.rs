@@ -198,6 +198,10 @@ impl VectorStore {
         Ok(index.size())
     }
 
+    pub fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
     pub fn reset(&self) -> Result<(), String> {
         let mut index = self.index.lock().unwrap_or_else(|e| e.into_inner());
 

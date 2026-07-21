@@ -50,6 +50,22 @@ public actor InMemoryTranscriptStore: TranscriptStoring {
         outboxMessages.append(message)
     }
 
+    public func enqueueOutbox(
+        _ message: OutboxMessage,
+        timelineItem: TimelineItem,
+        in thread: ThreadID
+    ) async throws {
+        var items = timelines[thread] ?? []
+        if let index = items.firstIndex(where: { $0.id == timelineItem.id }) {
+            items[index] = timelineItem
+        } else {
+            items.append(timelineItem)
+        }
+        timelines[thread] = items
+        outboxMessages.removeAll { $0.id == message.id }
+        outboxMessages.append(message)
+    }
+
     public func outbox() async throws -> [OutboxMessage] {
         // Match the GRDB store: order by queued_at, then id as a stable
         // tie-breaker for same-instant enqueues (parity contract).
@@ -60,5 +76,11 @@ public actor InMemoryTranscriptStore: TranscriptStoring {
 
     public func removeFromOutbox(_ id: UUID) async throws {
         outboxMessages.removeAll { $0.id == id }
+    }
+
+    public func clearAll() async throws {
+        threadsByID.removeAll()
+        timelines.removeAll()
+        outboxMessages.removeAll()
     }
 }

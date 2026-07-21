@@ -80,16 +80,18 @@ pub async fn direct_runtime_start_chat_server(
     expose_network: Option<bool>,
     mlock: Option<bool>,
     quantize_kv: Option<bool>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let _start_guard = CHAT_START_LOCK.lock().await;
     if expose_network.unwrap_or(false) {
         return Err(
-            "Direct model-server network exposure is disabled; use the authenticated ThinClaw gateway for remote access"
-                .to_string(),
+            crate::thinclaw::bridge::BridgeError::Runtime { message: "Direct model-server network exposure is disabled; use the authenticated ThinClaw gateway for remote access"
+                .to_string() },
         );
     }
     if context_size == 0 || context_size > 1_048_576 {
-        return Err("Context size must be between 1 and 1,048,576 tokens".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Context size must be between 1 and 1,048,576 tokens".to_string(),
+        });
     }
 
     // Guard: this command starts the llama.cpp sidecar and is only meaningful
@@ -205,7 +207,9 @@ pub async fn direct_runtime_start_chat_server(
     loop {
         if start.elapsed().as_secs() > 120 {
             let _ = state.direct_runtime_stop_chat_server();
-            return Err("Chat server startup exceeded its 2-minute deadline".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Chat server startup exceeded its 2-minute deadline".to_string(),
+            });
         }
 
         // Check if process died
@@ -365,10 +369,10 @@ pub async fn direct_runtime_start_embedding_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let vec_manager = app.state::<crate::vector_store::VectorStoreManager>();
     let res = start_embedding_server_core(&app, &state, &vec_manager, model_path).await;
-    res
+    Ok(res?)
 }
 
 #[tauri::command]
@@ -378,7 +382,7 @@ pub async fn direct_runtime_start_summarizer_server(
     state: State<'_, SidecarManager>,
     model_path: String,
     context_size: u32,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let _start_guard = SUMMARIZER_START_LOCK.lock().await;
     let (port, token) = state
         .direct_runtime_start_summarizer_server(app.clone(), model_path, context_size, -1)
@@ -397,10 +401,14 @@ pub async fn direct_runtime_start_summarizer_server(
     loop {
         if tokio::time::Instant::now() >= deadline {
             stop_summarizer_process(&app, state.inner());
-            return Err("Summarizer server startup exceeded its 3-minute deadline".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Summarizer server startup exceeded its 3-minute deadline".to_string(),
+            });
         }
         if state.get_summarizer_config().is_none() {
-            return Err("Summarizer server exited during startup".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Summarizer server exited during startup".to_string(),
+            });
         }
         if client
             .get(format!("http://127.0.0.1:{port}/health"))
@@ -443,7 +451,7 @@ pub async fn direct_runtime_start_stt_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     clear_managed_stt_endpoint();
     // Route to MLX STT server when compiled with MLX feature
     #[cfg(feature = "mlx")]
@@ -471,7 +479,7 @@ pub async fn direct_runtime_start_stt_server(
         .ok();
     }
 
-    res
+    Ok(res?)
 }
 
 #[tauri::command]
@@ -480,10 +488,10 @@ pub async fn direct_runtime_start_image_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
-) -> Result<(), String> {
-    state
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    Ok(state
         .direct_runtime_start_image_server(app, model_path)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?)
 }
 
 #[tauri::command]
@@ -492,11 +500,11 @@ pub async fn direct_runtime_start_tts_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     model_path: String,
-) -> Result<(), String> {
-    state
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    Ok(state
         .direct_runtime_start_tts_server(app, model_path)
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?)
 }
 
 #[tauri::command]
@@ -535,7 +543,7 @@ pub async fn direct_runtime_stop_chat_server(
     app: AppHandle,
     state: State<'_, SidecarManager>,
     _model_path: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state
         .direct_runtime_stop_chat_server()
         .map_err(|e| e.to_string())?;
@@ -553,7 +561,7 @@ pub async fn direct_runtime_stop_chat_server(
 #[specta::specta]
 pub async fn direct_runtime_cancel_generation(
     state: State<'_, SidecarManager>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state.cancellation_token.store(true, Ordering::SeqCst);
     Ok(())
 }

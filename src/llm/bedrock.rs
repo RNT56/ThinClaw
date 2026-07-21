@@ -7,7 +7,7 @@
 //! - `AWS_REGION` — AWS region (default: "us-east-1")
 //! - `AWS_ACCESS_KEY_ID` — AWS access key
 //! - `AWS_SECRET_ACCESS_KEY` — AWS secret key
-//! - `BEDROCK_MODEL_ID` — Model ID (default: "anthropic.claude-3-sonnet-20240229-v1:0")
+//! - `BEDROCK_MODEL_ID` — Model ID (default: "anthropic.claude-opus-4-8")
 
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +30,7 @@ impl Default for BedrockConfig {
         Self {
             endpoint_url: format!("https://bedrock-runtime.{}.amazonaws.com", region),
             region,
-            model_id: "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
+            model_id: "anthropic.claude-opus-4-8".to_string(),
             max_tokens: 4096,
         }
     }

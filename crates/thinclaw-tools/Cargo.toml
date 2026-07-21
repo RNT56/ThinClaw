@@ -54,9 +54,9 @@ unicode-normalization = "0.1"
 url = "2"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
-wasmtime = { version = "36.0.12", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
-wasmtime-wasi = { version = "36.0.12", optional = true }
-wasmparser = { version = "0.220", optional = true }
+wasmtime = { version = "46.0.1", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
+wasmtime-wasi = { version = "46.0.1", optional = true }
+wasmparser = { version = "0.244", optional = true }
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 

@@ -79,7 +79,10 @@ struct ComplicationProvider: TimelineProvider {
         let status = store.flatMap { try? $0.load(AgentStatusSnapshot.self) } ?? nil
         let approvals = store.flatMap { try? $0.load(PendingApprovalsSnapshot.self) } ?? nil
         let isStale =
-            status.map { Date.now.timeIntervalSince($0.generatedAt) > staleThreshold } ?? false
+            status.map {
+                $0.isKnownStale
+                    || Date.now.timeIntervalSince($0.generatedAt) > staleThreshold
+            } ?? false
         return ComplicationEntry(
             date: .now,
             phase: status?.phase,

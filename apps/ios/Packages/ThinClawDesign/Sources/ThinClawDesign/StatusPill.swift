@@ -62,7 +62,7 @@ public struct StatusPill: View {
         }
         .padding(.horizontal, ThinClawSpacing.md)
         .padding(.vertical, ThinClawSpacing.xs)
-        .glassEffect(.regular, in: .capsule)
+        .thinClawCapsuleSurface()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(status.accessibilityLabel))
         .accessibilityValue(detail.map(Text.init) ?? Text(""))

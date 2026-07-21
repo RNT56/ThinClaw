@@ -6,11 +6,18 @@ fn get_platform_exec_path() -> &'static str {
     "chrome-mac/Chromium.app/Contents/MacOS/Chromium"
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn get_platform_exec_path() -> &'static str {
-    // Fallback/TODO for other OS if needed, though script only supported mac for now
     "chrome-linux/chrome"
 }
+
+#[cfg(target_os = "windows")]
+fn get_platform_exec_path() -> &'static str {
+    "chrome-win/chrome.exe"
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+compile_error!("ThinClaw Desktop bundled Chromium supports macOS, Linux, and Windows");
 
 pub async fn ensure_chromium(app: Option<&tauri::AppHandle>) -> Result<PathBuf, String> {
     let exec_path = get_platform_exec_path();
@@ -45,7 +52,7 @@ pub async fn ensure_chromium(app: Option<&tauri::AppHandle>) -> Result<PathBuf, 
     // In dev run, CWD might be project root.
 
     // Check relative to backend/resources
-    let dev_paths = vec!["backend/resources/chromium", "resources/chromium"];
+    let dev_paths = ["backend/resources/chromium", "resources/chromium"];
 
     for base in dev_paths {
         let path = std::path::Path::new(base).join(exec_path);
@@ -57,8 +64,26 @@ pub async fn ensure_chromium(app: Option<&tauri::AppHandle>) -> Result<PathBuf, 
         }
     }
 
-    Err(
-        "Could not find Chromium binary. Please run 'backend/scripts/setup_chromium.sh'."
-            .to_string(),
-    )
+    Err(format!(
+        "Could not find Chromium binary for {}. Run 'npm run setup:chromium' from apps/desktop.",
+        std::env::consts::OS
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_platform_exec_path;
+
+    #[test]
+    fn platform_exec_path_matches_snapshot_layout() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            get_platform_exec_path(),
+            "chrome-mac/Chromium.app/Contents/MacOS/Chromium"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(get_platform_exec_path(), "chrome-linux/chrome");
+        #[cfg(target_os = "windows")]
+        assert_eq!(get_platform_exec_path(), "chrome-win/chrome.exe");
+    }
 }

@@ -142,12 +142,24 @@ set in the report.
   list, and file read.
 - Expected events: subagent and job lifecycle events on `thinclaw-event`.
 
+### Fleet Command
+
+- Add two credentialed remote agent profiles and open Fleet Command.
+- Verify each remote node reports authenticated gateway latency, active model,
+  connection count, and any runtime error without exposing its bearer token.
+- Assign a task to one remote node and verify the resulting thread is created on
+  that gateway, not in the local runtime.
+- Broadcast a harmless instruction and verify the receipt attempts each local or
+  remote node exactly once, including a named failure when one node is offline.
+
 ### Routines And Channels
 
 - Open Routines and verify list, create, toggle, run, history, audit, and clear
   controls.
-- Open Channels and verify Gmail OAuth/status, Apple Mail settings, Slack,
-  Telegram, and pairing screens.
+- Open Channels and verify Gmail OAuth/status, Apple Mail settings, and Slack/
+  Telegram setup. In DM Pairing, check Telegram, Slack, Discord, WhatsApp, and
+  Signal; verify each tab lists the real credential path and a generated code
+  can be approved for a configured adapter.
 - Expected events: routine lifecycle events forward to `thinclaw-event`.
 
 ### Extensions, Skills, And MCP
@@ -171,8 +183,19 @@ set in the report.
 
 - Open Experiments and verify projects, campaigns, runners, trials, targets,
   model usage, opportunities, GPU cloud validation, and test launch controls.
+- In the Benchmarks panel, run one `agent_loop` episode with a four-step cap;
+  verify a scored summary appears, terminal/skill case suites remain visibly
+  CLI-only, and no normal chat thread is created or modified.
 - Open Learning and verify status, history, candidates, outcomes, proposals,
   reviews, and rollbacks.
+- In External Memory, select a provider, enter only an environment-variable name
+  for its credential, save + activate, and verify the selected provider health
+  updates. Deactivate it and verify no provider remains active. Repeat with a
+  remote gateway connected and verify setup is visibly local-only while health
+  remains readable. Never paste a raw API key into this panel.
+- In Agent Chat, use the personality menu to inspect the current overlay, select
+  a preset, and restore the base identity; verify each command response appears
+  without discarding any draft already present in the composer.
 - Mutations must be enabled only when the root ThinClaw APIs and config allow
   them; otherwise record the visible gated reason.
 

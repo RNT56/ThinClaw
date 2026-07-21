@@ -78,14 +78,15 @@ pub async fn run_trajectory_command(cmd: TrajectoryCommand) -> anyhow::Result<()
             max_records,
             with_manifest,
         } => {
-            let records = load_archive_records(&logger, &artifact_logger)?;
-            let records = hydrate_records(records, db.as_ref()).await;
-            let records = sort_records(records)?;
-            let options = ExportOptions {
-                min_score,
-                max_records,
-            };
-            let rendered = render_export_with_options(&records, &format, options)?;
+            let rendered = export_trajectory_archive(
+                &format,
+                TrajectoryExportOptions {
+                    min_score,
+                    max_records,
+                },
+                db.as_ref(),
+            )
+            .await?;
             if with_manifest && output.is_none() {
                 anyhow::bail!("--with-manifest requires --output");
             }
@@ -323,12 +324,12 @@ fn summarize_records(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ExportOptions {
-    min_score: f64,
-    max_records: Option<usize>,
+pub struct TrajectoryExportOptions {
+    pub min_score: f64,
+    pub max_records: Option<usize>,
 }
 
-impl Default for ExportOptions {
+impl Default for TrajectoryExportOptions {
     fn default() -> Self {
         Self {
             min_score: 0.7,
@@ -338,12 +339,12 @@ impl Default for ExportOptions {
 }
 
 #[derive(Debug, Clone)]
-struct RenderedExport {
-    payload: String,
-    format: String,
-    source_record_count: usize,
-    exported_record_count: usize,
-    skipped_counts: BTreeMap<String, usize>,
+pub struct TrajectoryExportArtifact {
+    pub payload: String,
+    pub format: String,
+    pub source_record_count: usize,
+    pub exported_record_count: usize,
+    pub skipped_counts: BTreeMap<String, usize>,
     thresholds: ExportThresholds,
 }
 
@@ -369,7 +370,7 @@ struct ExportSourceCounts {
     exported_records: usize,
 }
 
-impl RenderedExport {
+impl TrajectoryExportArtifact {
     fn manifest(&self) -> ExportManifest {
         ExportManifest {
             schema_version: 1,
@@ -388,14 +389,31 @@ impl RenderedExport {
 
 #[cfg(test)]
 fn render_export(records: &[TrajectoryTurnRecord], format: &str) -> anyhow::Result<String> {
-    Ok(render_export_with_options(records, format, ExportOptions::default())?.payload)
+    Ok(render_export_with_options(records, format, TrajectoryExportOptions::default())?.payload)
+}
+
+/// Render the canonical trajectory archive export used by both the CLI and
+/// Desktop. Records from the legacy logger and durable run-artifact archive are
+/// combined, hydrated with available feedback, and sorted deterministically.
+pub async fn export_trajectory_archive(
+    format: &str,
+    options: TrajectoryExportOptions,
+    db: Option<&Arc<dyn crate::db::Database>>,
+) -> anyhow::Result<TrajectoryExportArtifact> {
+    let records = tokio::task::spawn_blocking(|| {
+        load_archive_records(&TrajectoryLogger::new(), &AgentRunArtifactLogger::new())
+    })
+    .await??;
+    let records = hydrate_records(records, db).await;
+    let records = sort_records(records)?;
+    render_export_with_options(&records, format, options)
 }
 
 fn render_export_with_options(
     records: &[TrajectoryTurnRecord],
     format: &str,
-    options: ExportOptions,
-) -> anyhow::Result<RenderedExport> {
+    options: TrajectoryExportOptions,
+) -> anyhow::Result<TrajectoryExportArtifact> {
     let normalized_format = format.to_ascii_lowercase();
     let thresholds = ExportThresholds {
         sft_min_score: options.min_score,
@@ -439,7 +457,7 @@ fn render_export_with_options(
         _ => 0,
     };
 
-    Ok(RenderedExport {
+    Ok(TrajectoryExportArtifact {
         payload,
         format: normalized_format,
         source_record_count: records.len(),
@@ -1030,7 +1048,7 @@ mod tests {
         let rendered = render_export_with_options(
             &records,
             "sft",
-            ExportOptions {
+            TrajectoryExportOptions {
                 min_score: 0.7,
                 max_records: None,
             },
@@ -1147,8 +1165,9 @@ mod tests {
             ),
         ];
 
-        let rendered = render_export_with_options(&records, "dpo", ExportOptions::default())
-            .expect("render dpo");
+        let rendered =
+            render_export_with_options(&records, "dpo", TrajectoryExportOptions::default())
+                .expect("render dpo");
 
         assert_eq!(rendered.exported_record_count, 0);
         assert_eq!(rendered.skipped_counts["scores_not_distinct"], 1);
@@ -1176,7 +1195,7 @@ mod tests {
         let rendered = render_export_with_options(
             &records,
             "sft",
-            ExportOptions {
+            TrajectoryExportOptions {
                 min_score: 0.7,
                 max_records: Some(1),
             },

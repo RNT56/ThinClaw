@@ -1178,7 +1178,7 @@ fn publish_staged_skill_directory(
     stage_dir: &Path,
     target_dir: &Path,
 ) -> std::io::Result<()> {
-    use fs4::FileExt as _;
+    use fs4::FileExt;
 
     let root_metadata = std::fs::symlink_metadata(install_root)?;
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
@@ -1213,7 +1213,7 @@ fn publish_staged_skill_directory(
             "skill install lock is not a regular file",
         ));
     }
-    lock_file.lock_exclusive()?;
+    FileExt::lock(&lock_file)?;
 
     match std::fs::symlink_metadata(target_dir) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

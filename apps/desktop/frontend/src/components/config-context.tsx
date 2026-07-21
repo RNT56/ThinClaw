@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { commands, UserConfig } from '../lib/bindings';
+import { commands, UserConfig, UserConfigPatch } from '../lib/bindings';
 import { toast } from 'sonner';
 
 interface ConfigContextType {
@@ -28,9 +28,18 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
     const updateConfig = async (newConfig: UserConfig) => {
         try {
-            // Optimistic update
-            setConfig(newConfig);
-            await commands.updateUserConfig(newConfig);
+            // Callers historically pass a full config snapshot. Send only the
+            // fields they actually changed so a stale React snapshot cannot
+            // overwrite a concurrent backend update.
+            const patch = Object.fromEntries(
+                Object.entries(newConfig).filter(([key, value]) =>
+                    JSON.stringify(config?.[key as keyof UserConfig]) !== JSON.stringify(value)
+                )
+            ) as UserConfigPatch;
+            if (Object.keys(patch).length === 0) return;
+
+            setConfig((current) => current ? { ...current, ...patch } : newConfig);
+            await commands.updateUserConfig(patch);
         } catch (e) {
             console.error("Failed to save config", e);
             toast.error("Failed to save settings");

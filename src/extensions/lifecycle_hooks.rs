@@ -159,7 +159,7 @@ impl AuditLogHook {
 
     /// Return events as serializable flat structs for Tauri command response.
     ///
-    /// Matches the `openclaw_plugin_lifecycle_list` contract: a flat list
+    /// Matches the `thinclaw_plugin_lifecycle_list` contract: a flat list
     /// of `{ timestamp, plugin, event_type, details }` objects.
     pub fn events_serialized(&self) -> Vec<SerializedLifecycleEvent> {
         self.events
@@ -250,7 +250,7 @@ impl LifecycleHook for MetricsHook {
 
 /// Flattened, serializable lifecycle event for Tauri command responses.
 ///
-/// Matches the `openclaw_plugin_lifecycle_list` response shape.
+/// Matches the `thinclaw_plugin_lifecycle_list` response shape.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SerializedLifecycleEvent {
     pub timestamp: String,

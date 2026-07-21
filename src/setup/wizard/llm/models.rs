@@ -484,7 +484,7 @@ impl SetupWizard {
                     public_only,
                     vec![
                         (
-                            "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
+                            "anthropic.claude-opus-4-8".to_string(),
                             "Claude Sonnet (Bedrock)".to_string(),
                         ),
                         (

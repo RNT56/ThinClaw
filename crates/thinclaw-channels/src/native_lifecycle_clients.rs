@@ -1181,14 +1181,30 @@ pub(crate) fn ensure_success(
 /// [`crate::apns_push`] pusher tests, which reuse the same ES256 signing key.
 #[cfg(test)]
 pub(crate) mod test_support {
-    /// A throwaway ES256 private key used only to exercise provider-token
-    /// signing paths in tests; never a real credential.
-    pub(crate) const EC_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgJucIoF39xIAoPvuA\nkM4ZnoH7Epi+1r1Navl4D+QjrHahRANCAAQDw2h+idVQiHyp4aRqib1xUtSm0Xry\ndVN+sF496LBtVCQQ/vf0xtLTAxgXy3ViSOFKgac0apHRwNA8boZDN7Yy\n-----END PRIVATE KEY-----\n";
+    use base64::Engine as _;
+    use ring::rand::SystemRandom;
+    use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+
+    /// Generate a throwaway ES256 private key in memory so signing-path tests
+    /// never require a credential-like private key fixture in the repository.
+    pub(crate) fn ec_private_key() -> String {
+        let pkcs8 =
+            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new())
+                .expect("generate test-only ES256 key");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(pkcs8.as_ref());
+        let mut pem = String::from("-----BEGIN PRIVATE KEY-----\n");
+        for line in encoded.as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+            pem.push('\n');
+        }
+        pem.push_str("-----END PRIVATE KEY-----\n");
+        pem
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::EC_PRIVATE_KEY;
+    use super::test_support::ec_private_key;
     use super::*;
     use tokio::sync::Mutex;
 
@@ -1336,7 +1352,7 @@ mod tests {
                 team_id: "TEAMID1234".to_string(),
                 key_id: "KEYID1234".to_string(),
                 bundle_id: "com.example.thinclaw".to_string(),
-                private_key_pem: EC_PRIVATE_KEY.to_string(),
+                private_key_pem: ec_private_key(),
                 sandbox: true,
             },
             http.clone(),
@@ -1380,7 +1396,7 @@ mod tests {
                 team_id: "TEAMID1234".to_string(),
                 key_id: "KEYID1234".to_string(),
                 bundle_id: "com.example.thinclaw".to_string(),
-                private_key_pem: EC_PRIVATE_KEY.to_string(),
+                private_key_pem: ec_private_key(),
                 sandbox: true,
             },
             http.clone(),
@@ -1415,7 +1431,7 @@ mod tests {
         let client = BrowserPushNativeClient::new(
             BrowserPushNativeConfig {
                 vapid_public_key: "public-key".to_string(),
-                vapid_private_key_pem: EC_PRIVATE_KEY.to_string(),
+                vapid_private_key_pem: ec_private_key(),
                 subject: "mailto:ops@example.test".to_string(),
                 ttl_seconds: 60,
             },
@@ -1459,7 +1475,7 @@ mod tests {
         let client = BrowserPushNativeClient::with_registry(
             BrowserPushNativeConfig {
                 vapid_public_key: "public-key".to_string(),
-                vapid_private_key_pem: EC_PRIVATE_KEY.to_string(),
+                vapid_private_key_pem: ec_private_key(),
                 subject: "mailto:ops@example.test".to_string(),
                 ttl_seconds: 60,
             },

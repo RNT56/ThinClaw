@@ -485,7 +485,7 @@ impl DevicePairingStore {
         let file = options.open(lock_path)?;
         #[cfg(unix)]
         file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-        file.lock_exclusive()?;
+        FileExt::lock(&file)?;
         Ok(file)
     }
 

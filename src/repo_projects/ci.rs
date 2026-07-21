@@ -757,16 +757,17 @@ mod tests {
 
     #[test]
     fn redacts_secrets_from_logs() {
-        let raw = concat!(
-            "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456\n",
-            "Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456\n",
-            "remote=https://user:password@example.com/repo.git\n",
-            "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"
+        let synthetic_openai_key = format!("{}{}", "sk-proj-", "a".repeat(48));
+        let raw = format!(
+            "OPENAI_API_KEY={synthetic_openai_key}\n\
+             Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456\n\
+             remote=https://user:password@example.com/repo.git\n\
+             -----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"
         );
 
-        let redacted = redact_sensitive_text(raw);
+        let redacted = redact_sensitive_text(&raw);
 
-        assert!(!redacted.contains("sk-proj-abcdefghijklmnopqrstuvwxyz123456"));
+        assert!(!redacted.contains(&synthetic_openai_key));
         assert!(!redacted.contains("ghp_abcdefghijklmnopqrstuvwxyz123456"));
         assert!(!redacted.contains("user:password"));
         assert!(!redacted.contains("BEGIN PRIVATE KEY"));

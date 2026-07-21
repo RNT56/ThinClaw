@@ -1,0 +1,1341 @@
+//! Domain service API consumed by ThinClaw Desktop command modules.
+//!
+//! Keeps reusable service logic independent from Tauri command registration.
+//! Desktop commands live under `apps/desktop/backend/src/thinclaw/commands` and
+//! call these helpers without preserving the retired pre-rename command facade.
+//!
+//! # Usage from ThinClaw Desktop `rpc.rs`
+//!
+//! ```rust,ignore
+//! use thinclaw::desktop_api;
+//!
+//! #[tauri::command]
+//! fn thinclaw_cost_summary(state: State<ThinClawState>) -> Result<CostSummary, String> {
+//!     desktop_api::cost_summary(&state.cost_tracker)
+//! }
+//! ```
+
+use crate::agent::routine::RoutineRun;
+use crate::channels::gmail_wiring::GmailConfig;
+use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
+use crate::db::Database;
+use crate::extensions::clawhub::{CatalogCache, CatalogEntry};
+use crate::extensions::lifecycle_hooks::{AuditLogHook, SerializedLifecycleEvent};
+use crate::extensions::manifest_validator::{ManifestValidator, PluginInfoRef, ValidationResponse};
+use crate::llm::LlmRuntimeManager;
+use crate::llm::cost_tracker::{CostSummary, CostTracker};
+use crate::llm::response_cache_ext::{CacheStats, CachedResponseStore};
+use crate::llm::routing_policy::{RoutingPolicy, RoutingRule, RoutingRuleSummary};
+use crate::secrets::SecretsStore;
+use crate::tools::wasm::{AuthCapabilitySchema, CapabilitiesFile, WasmToolOAuthFlow};
+use std::io::Read as _;
+use std::sync::{Arc, OnceLock};
+
+struct RoutingPersistenceContext {
+    store: Arc<dyn Database>,
+    user_id: String,
+    runtime: Arc<LlmRuntimeManager>,
+}
+
+static ROUTING_PERSISTENCE: OnceLock<RoutingPersistenceContext> = OnceLock::new();
+
+pub fn configure_routing_persistence(
+    store: Arc<dyn Database>,
+    user_id: impl Into<String>,
+    runtime: Arc<LlmRuntimeManager>,
+) {
+    let _ = ROUTING_PERSISTENCE.set(RoutingPersistenceContext {
+        store,
+        user_id: user_id.into(),
+        runtime,
+    });
+}
+
+fn persist_routing_policy(policy: &RoutingPolicy) -> Result<(), String> {
+    let Some(ctx) = ROUTING_PERSISTENCE.get() else {
+        return Ok(());
+    };
+
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|e| format!("No async runtime available to persist routing rules: {}", e))?;
+    let store = Arc::clone(&ctx.store);
+    let runtime = Arc::clone(&ctx.runtime);
+    let user_id = ctx.user_id.clone();
+    let policy = policy.clone();
+
+    tokio::task::block_in_place(|| {
+        handle.block_on(async move {
+            let map = store
+                .get_all_settings(&user_id)
+                .await
+                .map_err(|e| format!("Failed to load settings before routing save: {}", e))?;
+            let mut settings = crate::settings::Settings::from_db_map(&map);
+            settings.providers.policy_rules = policy.rules().to_vec();
+            settings.providers.smart_routing_enabled = policy.is_enabled();
+            if !settings.providers.policy_rules.is_empty()
+                && settings.providers.routing_mode == crate::settings::RoutingMode::PrimaryOnly
+            {
+                settings.providers.routing_mode = crate::settings::RoutingMode::Policy;
+            }
+
+            store
+                .set_all_settings(&user_id, &settings.to_db_map())
+                .await
+                .map_err(|e| format!("Failed to persist routing rules: {}", e))?;
+            runtime
+                .reload()
+                .await
+                .map_err(|e| format!("Failed to reload routing runtime: {}", e))?;
+            Ok(())
+        })
+    })
+}
+
+// ── 1. thinclaw_cost_summary ──────────────────────────────────────────
+
+/// Build a cost summary.
+///
+/// Maps to: `thinclaw_cost_summary`
+/// Response: `CostSummary`
+pub fn cost_summary(tracker: &CostTracker) -> Result<CostSummary, String> {
+    let now = chrono::Utc::now();
+    let today = now.format("%Y-%m-%d").to_string();
+    let month = now.format("%Y-%m").to_string();
+    Ok(tracker.summary(&today, &month))
+}
+
+// ── 2. thinclaw_cost_export_csv ───────────────────────────────────────
+
+/// Export cost entries as CSV.
+///
+/// Maps to: `thinclaw_cost_export_csv`
+/// Response: `String` (CSV text)
+pub fn cost_export_csv(tracker: &CostTracker) -> Result<String, String> {
+    Ok(tracker.export_csv())
+}
+
+// ── 2b. thinclaw_cost_reset ──────────────────────────────────────────
+
+/// Clear all cost tracking data.
+///
+/// Maps to: `thinclaw_cost_reset`
+/// Response: `()`
+///
+/// The caller is responsible for persisting the empty state to the DB
+/// via `SettingsStore::set_setting("default", "cost_entries", &tracker.to_json())`.
+pub fn cost_reset(tracker: &mut CostTracker) -> Result<(), String> {
+    let count = tracker.len();
+    tracker.clear();
+    tracing::info!("[cost] Reset: cleared {} entries", count);
+    Ok(())
+}
+
+// ── 3. thinclaw_clawhub_search ────────────────────────────────────────
+
+/// Search the ClawHub catalog cache.
+///
+/// Maps to: `thinclaw_clawhub_search`
+/// Params: `query: String`
+/// Response: `Vec<CatalogEntry>`
+pub fn clawhub_search(cache: &CatalogCache, query: &str) -> Result<Vec<CatalogEntry>, String> {
+    Ok(cache.search(query).into_iter().cloned().collect())
+}
+
+// ── 4. thinclaw_clawhub_install ───────────────────────────────────────
+
+/// Install result from ClawHub.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct InstallResult {
+    pub plugin_name: String,
+    pub version: String,
+    pub install_path: String,
+    pub success: bool,
+    pub message: String,
+}
+
+/// Install a plugin from ClawHub.
+///
+/// Maps to: `thinclaw_clawhub_install`
+/// Params: `plugin_id: String`
+/// Response: `InstallResult`
+///
+/// This performs local validation and path resolution. The actual HTTP
+/// fetch is done by the caller (ThinClaw Desktop) since it has the reqwest client.
+pub fn clawhub_prepare_install(
+    cache: &CatalogCache,
+    plugin_id: &str,
+) -> Result<InstallResult, String> {
+    if !crate::extensions::clawhub::is_safe_catalog_entry_name(plugin_id) {
+        return Err("Plugin identifier is invalid".to_string());
+    }
+    // Look up in cache
+    let entry = cache
+        .entries()
+        .iter()
+        .find(|e| e.name == plugin_id)
+        .cloned();
+
+    match entry {
+        Some(entry) => {
+            let install_dir = crate::platform::state_paths().tools_dir.join(&entry.name);
+
+            Ok(InstallResult {
+                plugin_name: entry.name.clone(),
+                version: entry.version.unwrap_or_else(|| "latest".to_string()),
+                install_path: install_dir.to_string_lossy().to_string(),
+                success: true,
+                message: format!("Ready to install {}", entry.display_name),
+            })
+        }
+        None => Err(format!("Plugin '{}' not found in catalog cache", plugin_id)),
+    }
+}
+
+// ── 5. thinclaw_routine_audit_list ────────────────────────────────────
+
+/// Query routine run history from the database.
+///
+/// `RoutineEngine` persists every run via `store.create_routine_run()` /
+/// `store.complete_routine_run()`. This command reads that data back.
+///
+/// Maps to: `thinclaw_routine_audit_list`
+/// Params: `routine_name: String, user_id: String, limit: Option<i64>`
+/// Response: `Vec<RoutineRun>`
+pub async fn routine_audit_list(
+    store: &dyn crate::db::Database,
+    routine_name: &str,
+    user_id: &str,
+    limit: Option<i64>,
+) -> Result<Vec<RoutineRun>, String> {
+    let routines = store
+        .list_routines(user_id)
+        .await
+        .map_err(|e| format!("DB error listing routines for '{}': {}", user_id, e))?;
+    let mut matches = routines
+        .into_iter()
+        .filter(|routine| routine.name == routine_name);
+    let routine = matches.next().ok_or_else(|| {
+        format!(
+            "Routine '{}' not found for user '{}'",
+            routine_name, user_id
+        )
+    })?;
+    if matches.next().is_some() {
+        return Err(format!(
+            "Routine '{}' is ambiguous across actors for user '{}'; use routine_audit_list_for_actor",
+            routine_name, user_id
+        ));
+    }
+
+    let runs = store
+        .list_routine_runs(routine.id, limit.unwrap_or(20))
+        .await
+        .map_err(|e| format!("DB error listing runs: {}", e))?;
+
+    Ok(runs)
+}
+
+pub async fn routine_audit_list_for_actor(
+    store: &dyn crate::db::Database,
+    routine_name: &str,
+    user_id: &str,
+    actor_id: &str,
+    limit: Option<i64>,
+) -> Result<Vec<RoutineRun>, String> {
+    let routine = store
+        .get_routine_by_name_for_actor(user_id, actor_id, routine_name)
+        .await
+        .map_err(|e| format!("DB error looking up routine '{}': {}", routine_name, e))?
+        .ok_or_else(|| {
+            format!(
+                "Routine '{}' not found for actor '{}' / user '{}'",
+                routine_name, actor_id, user_id
+            )
+        })?;
+
+    store
+        .list_routine_runs(routine.id, limit.unwrap_or(20))
+        .await
+        .map_err(|e| format!("DB error listing runs: {}", e))
+}
+
+// ── 6. thinclaw_cache_stats ───────────────────────────────────────────
+
+/// Get response cache statistics.
+///
+/// Maps to: `thinclaw_cache_stats`
+/// Response: `CacheStats { hits, misses, evictions, size, hit_rate }`
+pub fn cache_stats(store: &CachedResponseStore) -> Result<CacheStats, String> {
+    Ok(store.stats())
+}
+
+// ── 7. thinclaw_plugin_lifecycle_list ──────────────────────────────────
+
+/// List plugin lifecycle events.
+///
+/// Maps to: `thinclaw_plugin_lifecycle_list`
+/// Response: `Vec<SerializedLifecycleEvent>`
+pub fn plugin_lifecycle_list(hook: &AuditLogHook) -> Result<Vec<SerializedLifecycleEvent>, String> {
+    Ok(hook.events_serialized())
+}
+
+// ── 8. thinclaw_manifest_validate ─────────────────────────────────────
+
+/// Validate a plugin manifest.
+///
+/// Maps to: `thinclaw_manifest_validate`
+/// Params: `plugin_id: String` (used to look up the plugin info)
+/// Response: `ValidationResponse { errors: Vec<String>, warnings: Vec<String> }`
+pub fn manifest_validate(
+    validator: &ManifestValidator,
+    info: &PluginInfoRef,
+) -> Result<ValidationResponse, String> {
+    let result = validator.validate(info);
+    Ok(result.to_response())
+}
+
+// ── 9. thinclaw_routing_rules_list ────────────────────────────────────
+
+/// List all routing rules with human-readable descriptions.
+///
+/// Maps to: `thinclaw_routing_rules_list`
+/// Response: `Vec<RoutingRuleSummary>`
+pub fn routing_rules_list(policy: &RoutingPolicy) -> Result<Vec<RoutingRuleSummary>, String> {
+    Ok(RoutingRuleSummary::from_policy(policy))
+}
+
+// ── 10. thinclaw_routing_rules_add ────────────────────────────────────
+
+/// Add a routing rule at the end (or at a specific position).
+///
+/// Maps to: `thinclaw_routing_rules_add`
+/// Params: `rule: RoutingRule, position: Option<usize>`
+/// Response: `Vec<RoutingRuleSummary>` (full updated list)
+pub fn routing_rules_add(
+    policy: &mut RoutingPolicy,
+    rule: RoutingRule,
+    position: Option<usize>,
+) -> Result<Vec<RoutingRuleSummary>, String> {
+    let previous = policy.clone();
+
+    // Validate the rule before adding
+    match &rule {
+        RoutingRule::RoundRobin { providers } if providers.is_empty() => {
+            return Err("Round-robin rule requires at least one provider".into());
+        }
+        RoutingRule::Fallback { fallbacks, .. } if fallbacks.is_empty() => {
+            return Err("Fallback rule requires at least one fallback provider".into());
+        }
+        RoutingRule::LargeContext { threshold, .. } if *threshold == 0 => {
+            return Err("Large context threshold must be greater than 0".into());
+        }
+        _ => {}
+    }
+
+    if let Some(pos) = position {
+        if pos > policy.rule_count() {
+            return Err(format!(
+                "Position {} out of bounds (have {} rules)",
+                pos,
+                policy.rule_count()
+            ));
+        }
+        // Insert at position: add at end then reorder
+        policy.add_rule(rule);
+        let last = policy.rule_count() - 1;
+        if pos < last {
+            policy.reorder_rules(last, pos).map_err(|e| e.to_string())?;
+        }
+    } else {
+        policy.add_rule(rule);
+    }
+
+    if let Err(err) = persist_routing_policy(policy) {
+        *policy = previous;
+        let _ = persist_routing_policy(policy);
+        return Err(err);
+    }
+
+    Ok(RoutingRuleSummary::from_policy(policy))
+}
+
+// ── 11. thinclaw_routing_rules_remove ─────────────────────────────────
+
+/// Remove a routing rule by index.
+///
+/// Maps to: `thinclaw_routing_rules_remove`
+/// Params: `index: usize`
+/// Response: `Vec<RoutingRuleSummary>` (full updated list)
+pub fn routing_rules_remove(
+    policy: &mut RoutingPolicy,
+    index: usize,
+) -> Result<Vec<RoutingRuleSummary>, String> {
+    let previous = policy.clone();
+    policy.remove_rule(index)?;
+    if let Err(err) = persist_routing_policy(policy) {
+        *policy = previous;
+        let _ = persist_routing_policy(policy);
+        return Err(err);
+    }
+    Ok(RoutingRuleSummary::from_policy(policy))
+}
+
+// ── 12. thinclaw_routing_rules_reorder ────────────────────────────────
+
+/// Reorder a routing rule (move from one position to another).
+///
+/// Maps to: `thinclaw_routing_rules_reorder`
+/// Params: `from: usize, to: usize`
+/// Response: `Vec<RoutingRuleSummary>` (full updated list)
+pub fn routing_rules_reorder(
+    policy: &mut RoutingPolicy,
+    from: usize,
+    to: usize,
+) -> Result<Vec<RoutingRuleSummary>, String> {
+    let previous = policy.clone();
+    policy.reorder_rules(from, to)?;
+    if let Err(err) = persist_routing_policy(policy) {
+        *policy = previous;
+        let _ = persist_routing_policy(policy);
+        return Err(err);
+    }
+    Ok(RoutingRuleSummary::from_policy(policy))
+}
+
+// ── 13. thinclaw_routing_status ───────────────────────────────────────
+
+/// Get full routing policy status for UI display.
+///
+/// Maps to: `thinclaw_routing_status`
+/// Response: `RoutingStatusResponse`
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RoutingStatusResponse {
+    pub enabled: bool,
+    pub default_provider: String,
+    pub rule_count: usize,
+    pub rules: Vec<RoutingRuleSummary>,
+    pub latency_data: Vec<LatencyEntry>,
+}
+
+/// Per-provider latency data for UI display.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LatencyEntry {
+    pub provider: String,
+    pub avg_latency_ms: f64,
+}
+
+pub fn routing_status(policy: &RoutingPolicy) -> Result<RoutingStatusResponse, String> {
+    let tracker = policy.latency_tracker();
+    let mut latency_data = Vec::new();
+
+    // Collect all providers with latency data.
+    // We check known providers by iterating rules for provider names.
+    let mut providers: Vec<String> = Vec::new();
+    for rule in policy.rules() {
+        match rule {
+            RoutingRule::LargeContext { provider, .. }
+            | RoutingRule::VisionContent { provider }
+                if !providers.contains(provider) =>
+            {
+                providers.push(provider.clone());
+            }
+            RoutingRule::Fallback {
+                primary, fallbacks, ..
+            } => {
+                if !providers.contains(primary) {
+                    providers.push(primary.clone());
+                }
+                for p in fallbacks {
+                    if !providers.contains(p) {
+                        providers.push(p.clone());
+                    }
+                }
+            }
+            RoutingRule::RoundRobin {
+                providers: rr_providers,
+            } => {
+                for p in rr_providers {
+                    if !providers.contains(p) {
+                        providers.push(p.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // Also add default provider.
+    if !providers.contains(&policy.default_provider().to_string()) {
+        providers.push(policy.default_provider().to_string());
+    }
+
+    for provider in &providers {
+        if let Some(latency) = tracker.get_latency(provider) {
+            latency_data.push(LatencyEntry {
+                provider: provider.clone(),
+                avg_latency_ms: latency,
+            });
+        }
+    }
+
+    Ok(RoutingStatusResponse {
+        enabled: policy.is_enabled(),
+        default_provider: policy.default_provider().to_string(),
+        rule_count: policy.rule_count(),
+        rules: RoutingRuleSummary::from_policy(policy),
+        latency_data,
+    })
+}
+
+// ── 14. thinclaw_gmail_status ─────────────────────────────────────────
+
+/// Get Gmail channel configuration status.
+///
+/// Maps to: `thinclaw_gmail_status`
+/// Response: `GmailStatusResponse`
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GmailStatusResponse {
+    pub enabled: bool,
+    pub configured: bool,
+    pub status: String,
+    pub project_id: String,
+    pub subscription_id: String,
+    pub label_filters: Vec<String>,
+    pub allowed_senders: Vec<String>,
+    pub missing_fields: Vec<String>,
+    pub oauth_configured: bool,
+    pub needs_oauth: bool,
+}
+
+pub fn gmail_status(config: &GmailConfig) -> Result<GmailStatusResponse, String> {
+    use crate::channels::gmail_wiring::GmailStatus;
+
+    let missing_fields = config.validate();
+    // A refresh-token-only configuration (GMAIL_REFRESH_TOKEN/CLIENT_ID/SECRET)
+    // is fully functional via unattended refresh, so it does not "need oauth".
+    let needs_oauth = config.enabled
+        && missing_fields.is_empty()
+        && config.oauth_token.is_none()
+        && !config.can_refresh_token();
+    let status = config.status();
+    let status_str = if needs_oauth {
+        "needs oauth".to_string()
+    } else {
+        match &status {
+            GmailStatus::Disabled => "disabled".to_string(),
+            GmailStatus::Ready { subscription } => format!("ready ({})", subscription),
+            GmailStatus::MissingCredentials { fields } => {
+                format!("missing credentials: {}", fields.join(", "))
+            }
+            GmailStatus::Error(e) => format!("error: {}", e),
+        }
+    };
+
+    Ok(GmailStatusResponse {
+        enabled: config.enabled,
+        configured: config.enabled && missing_fields.is_empty() && !needs_oauth,
+        status: status_str,
+        project_id: config.project_id.clone(),
+        subscription_id: config.subscription_id.clone(),
+        label_filters: config.label_filters.clone(),
+        allowed_senders: config.allowed_senders.clone(),
+        missing_fields,
+        oauth_configured: config.oauth_token.is_some(),
+        needs_oauth,
+    })
+}
+
+// ── 15. thinclaw_gmail_oauth_start ────────────────────────────────────
+
+/// Response from the Gmail OAuth PKCE flow.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GmailOAuthResult {
+    pub success: bool,
+    pub expires_in: Option<u64>,
+    pub scope: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Start the Gmail OAuth PKCE flow.
+///
+/// This opens the user's browser for Google consent, waits for the
+/// callback, exchanges the auth code for tokens, and returns them.
+///
+/// Maps to: `thinclaw_gmail_oauth_start`
+/// Response: `GmailOAuthResult`
+pub async fn gmail_oauth_start(
+    secrets: &(dyn SecretsStore + Send + Sync),
+    user_id: &str,
+) -> Result<GmailOAuthResult, String> {
+    wasm_tool_oauth_start("gmail".to_string(), secrets, user_id).await
+}
+
+/// Start the OAuth flow for an installed or bundled WASM tool.
+///
+/// This is the generic desktop helper used by Google Workspace tools.
+pub async fn wasm_tool_oauth_start(
+    tool_name: String,
+    secrets: &(dyn SecretsStore + Send + Sync),
+    user_id: &str,
+) -> Result<GmailOAuthResult, String> {
+    if tool_name.is_empty()
+        || tool_name.len() > 64
+        || !tool_name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+        || user_id.is_empty()
+        || user_id.len() > 256
+        || user_id.chars().any(char::is_control)
+    {
+        return Err("OAuth request contains an invalid tool or user namespace".to_string());
+    }
+    static OAUTH_FLOW_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let _flow_guard = OAUTH_FLOW_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let auth = load_wasm_tool_auth(&tool_name)?;
+    let redirect_uri = format!("http://localhost:{}/callback", OAUTH_CALLBACK_PORT);
+    let tools_dir = crate::platform::state_paths().tools_dir;
+    let flow = WasmToolOAuthFlow::new(secrets, user_id, &tools_dir);
+    // CSRF defense: generate a state nonce, send it on the authorization request,
+    // and require the loopback callback to echo it back unchanged.
+    let oauth_state = oauth_defaults::generate_oauth_state();
+    let auth_request = flow
+        .prepare_authorization(&auth, &redirect_uri, "local", Some(&oauth_state))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Bind before opening the browser. Fast provider redirects must not race a
+    // listener that does not exist yet.
+    let listener = oauth_defaults::bind_callback_listener()
+        .await
+        .map_err(|e| format!("Failed to bind OAuth callback listener: {}", e))?;
+
+    if let Err(error) = open::that(&auth_request.auth_url) {
+        tracing::warn!(error = %error, tool = %tool_name, "Could not open browser for WASM tool OAuth");
+        return Err("Could not open the system browser for OAuth authorization".to_string());
+    }
+
+    let code = oauth_defaults::wait_for_callback_with_state(
+        listener,
+        "/callback",
+        "code",
+        auth.display_name.as_deref().unwrap_or(&tool_name),
+        Some(&oauth_state),
+    )
+    .await
+    .map_err(|e| format!("OAuth callback failed: {}", e))?;
+
+    let token = flow
+        .exchange_code(
+            &auth,
+            &redirect_uri,
+            &code,
+            auth_request.code_verifier.as_deref(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    flow.store_token_exchange(&auth, &token)
+        .await
+        .map_err(|error| format!("Failed to store OAuth credentials securely: {error}"))?;
+
+    let scope = if token.granted_scopes.is_empty() {
+        None
+    } else {
+        Some(token.granted_scopes.join(" "))
+    };
+    let expires_in = token
+        .expires_at
+        .map(|expires_at| (expires_at - chrono::Utc::now()).num_seconds().max(0) as u64);
+
+    Ok(GmailOAuthResult {
+        success: true,
+        expires_in,
+        scope,
+        error: None,
+    })
+}
+
+fn load_wasm_tool_auth(tool_name: &str) -> Result<AuthCapabilitySchema, String> {
+    let mut candidates = vec![
+        crate::platform::state_paths()
+            .tools_dir
+            .join(format!("{}.capabilities.json", tool_name)),
+    ];
+
+    let bundled = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tools-src")
+        .join(tool_name)
+        .join(format!("{}-tool.capabilities.json", tool_name));
+    candidates.push(bundled);
+
+    for path in candidates {
+        let Ok(path_metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !path_metadata.file_type().is_file()
+            || path_metadata.file_type().is_symlink()
+            || path_metadata.len() > 2 * 1024 * 1024
+        {
+            return Err("OAuth capabilities file is not a bounded regular file".to_string());
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options
+            .open(&path)
+            .map_err(|_| "Failed to open OAuth capabilities file safely".to_string())?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| "Failed to inspect OAuth capabilities file".to_string())?;
+        if !metadata.is_file() || metadata.len() > 2 * 1024 * 1024 {
+            return Err("OAuth capabilities file changed or exceeds the size limit".to_string());
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(2 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Failed to read OAuth capabilities file".to_string())?;
+        if bytes.len() > 2 * 1024 * 1024 {
+            return Err("OAuth capabilities file exceeds the size limit".to_string());
+        }
+        let content = String::from_utf8(bytes)
+            .map_err(|_| "OAuth capabilities file is not valid UTF-8".to_string())?;
+        let caps = CapabilitiesFile::from_json(&content)
+            .map_err(|error| format!("Invalid OAuth capabilities file: {error}"))?;
+        if let Some(auth) = caps.auth {
+            return Ok(auth);
+        }
+    }
+
+    Err(format!(
+        "No OAuth-capable WASM tool auth configuration found for '{}'",
+        tool_name
+    ))
+}
+
+// ── Canvas panel commands ─────────────────────────────────────────────
+
+/// Summary of a canvas panel for listing.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CanvasPanelSummary {
+    pub panel_id: String,
+    pub title: String,
+}
+
+/// Full panel data returned by the get command.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CanvasPanelData {
+    pub panel_id: String,
+    pub title: String,
+    pub components: serde_json::Value,
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// List all active canvas panels.
+///
+/// Maps to: `thinclaw_canvas_panels_list`
+/// Response: `Vec<CanvasPanelSummary>`
+pub async fn canvas_panels_list(
+    store: &crate::channels::canvas_gateway::CanvasStore,
+) -> Result<Vec<CanvasPanelSummary>, String> {
+    let panels = store.list().await;
+    Ok(panels
+        .into_iter()
+        .map(|p| CanvasPanelSummary {
+            panel_id: p.panel_id,
+            title: p.title,
+        })
+        .collect())
+}
+
+/// Get full data for a specific canvas panel.
+///
+/// Maps to: `thinclaw_canvas_panel_get`
+/// Response: `Option<CanvasPanelData>`
+pub async fn canvas_panel_get(
+    store: &crate::channels::canvas_gateway::CanvasStore,
+    panel_id: &str,
+) -> Result<Option<CanvasPanelData>, String> {
+    Ok(store.get(panel_id).await.map(|p| CanvasPanelData {
+        panel_id: p.panel_id,
+        title: p.title,
+        components: p.components,
+        metadata: p.metadata,
+    }))
+}
+
+/// Dismiss (remove) a canvas panel.
+///
+/// Maps to: `thinclaw_canvas_panel_dismiss`
+/// Response: `bool` (true if panel existed)
+pub async fn canvas_panel_dismiss(
+    store: &crate::channels::canvas_gateway::CanvasStore,
+    panel_id: &str,
+) -> Result<bool, String> {
+    Ok(store.dismiss(panel_id).await)
+}
+
+// ── 19. thinclaw_channel_status_list ──────────────────────────────────
+
+use crate::channels::ChannelManager;
+use crate::channels::status_view::ChannelStatusEntry;
+
+/// Get live channel status entries (message counters, uptime, state).
+///
+/// Maps to: `thinclaw_channel_status_list`
+/// Response: `Vec<ChannelStatusEntry>`
+pub async fn channel_status_list(
+    manager: &ChannelManager,
+) -> Result<Vec<ChannelStatusEntry>, String> {
+    Ok(manager.status_entries().await)
+}
+
+// ── 20. thinclaw_routine_create ────────────────────────────────────────
+
+use crate::agent::routine::{NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger};
+
+/// Parameters for creating a new routine (ThinClaw Desktop sends this from the UI).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RoutineCreateParams {
+    pub name: String,
+    pub description: String,
+    pub user_id: String,
+    #[serde(default)]
+    pub actor_id: Option<String>,
+    pub trigger: Trigger,
+    pub action: RoutineAction,
+    #[serde(default)]
+    pub notify: Option<NotifyConfig>,
+    /// Optional directory to write the routine file.
+    /// Defaults to `~/.thinclaw/routines/`.
+    pub routines_dir: Option<std::path::PathBuf>,
+}
+
+/// Create and persist a new routine as a JSON file.
+///
+/// Routines in ThinClaw are file-backed (not database-backed).
+/// Each routine is saved as `{id}.json` under the routines directory.
+///
+/// Maps to: `thinclaw_routine_create`
+/// Params: `RoutineCreateParams`
+/// Response: `Routine` (the saved object with a generated ID)
+pub fn routine_create(params: RoutineCreateParams) -> Result<Routine, String> {
+    let now = chrono::Utc::now();
+    let routine = Routine {
+        id: uuid::Uuid::new_v4(),
+        name: params.name,
+        description: params.description,
+        user_id: params.user_id.clone(),
+        actor_id: params.actor_id.unwrap_or(params.user_id),
+        enabled: true,
+        trigger: params.trigger,
+        action: params.action,
+        guardrails: RoutineGuardrails::default(),
+        notify: params.notify.unwrap_or_default(),
+        policy: Default::default(),
+        last_run_at: None,
+        next_fire_at: None,
+        run_count: 0,
+        consecutive_failures: 0,
+        state: serde_json::Value::Null,
+        config_version: 1,
+        created_at: now,
+        updated_at: now,
+    };
+
+    // Determine the routines directory.
+    let dir = params
+        .routines_dir
+        .unwrap_or_else(|| crate::platform::resolve_data_dir("routines"));
+
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create routines directory: {}", e))?;
+
+    let path = dir.join(format!("{}.json", routine.id));
+    let json = serde_json::to_string_pretty(&routine)
+        .map_err(|e| format!("Failed to serialize routine: {}", e))?;
+    thinclaw_platform::write_private_file_atomic(&path, json.as_bytes(), false)
+        .map_err(|e| format!("Failed to write routine file {:?}: {}", path, e))?;
+
+    tracing::info!(
+        routine_id = %routine.id,
+        routine_name = %routine.name,
+        path = ?path,
+        "Routine created"
+    );
+
+    Ok(routine)
+}
+
+// ── 21. thinclaw_autonomy_* ───────────────────────────────────────────
+
+pub async fn autonomy_status() -> Result<crate::desktop_autonomy::AutonomyStatus, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    Ok(manager.status().await)
+}
+
+pub async fn autonomy_pause(reason: Option<String>) -> Result<serde_json::Value, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.pause(reason).await;
+    Ok(serde_json::json!({"paused": true}))
+}
+
+pub async fn autonomy_resume() -> Result<serde_json::Value, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.resume().await?;
+    Ok(serde_json::json!({"paused": false}))
+}
+
+pub async fn desktop_permission_status() -> Result<serde_json::Value, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.desktop_permission_status().await
+}
+
+pub async fn autonomy_bootstrap() -> Result<crate::desktop_autonomy::AutonomyBootstrapReport, String>
+{
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.bootstrap().await
+}
+
+pub async fn autonomy_rollback() -> Result<serde_json::Value, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.rollback().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // RoutineRun tests removed — routine_audit_list now queries the DB (integration test needed)
+    use crate::extensions::lifecycle_hooks::{LifecycleEvent, LifecycleHook};
+    use crate::llm::cost_tracker::{BudgetConfig, CostEntry, CostSource, TokenCountSource};
+    use crate::llm::response_cache_ext::CacheConfig;
+    use crate::llm::routing_policy::RoutingRule;
+
+    #[test]
+    fn retired_tauri_command_facade_stays_a_compatibility_alias() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            !manifest.join("src/tauri_commands.rs").exists(),
+            "service logic must not drift back into a root Tauri facade"
+        );
+        let lib = include_str!("lib.rs");
+        assert!(lib.contains("pub mod desktop_api;"));
+        assert!(lib.contains("pub use desktop_api as tauri_commands;"));
+    }
+
+    #[test]
+    fn test_cost_summary() {
+        let mut tracker = CostTracker::new(BudgetConfig::default());
+        tracker.record(CostEntry {
+            cost_usd: 0.05,
+            model: "gpt-4o".into(),
+            agent_id: Some("default".into()),
+            provider: "openai".into(),
+            timestamp: "2026-03-04T12:00:00Z".into(),
+            input_tokens: 100,
+            output_tokens: 50,
+            request_id: None,
+            token_count_source: TokenCountSource::ProviderUsage,
+            cost_source: CostSource::ProviderCost,
+            token_capture: None,
+        });
+        let summary = cost_summary(&tracker).unwrap();
+        assert!((summary.total_cost_usd - 0.05).abs() < 0.001);
+        assert!(!summary.by_model.is_empty());
+    }
+
+    #[test]
+    fn test_cost_export_csv() {
+        let mut tracker = CostTracker::new(BudgetConfig::default());
+        tracker.record(CostEntry {
+            cost_usd: 0.10,
+            model: "claude".into(),
+            agent_id: Some("main".into()),
+            provider: "anthropic".into(),
+            timestamp: "2026-03-04T10:00:00Z".into(),
+            input_tokens: 200,
+            output_tokens: 100,
+            request_id: None,
+            token_count_source: TokenCountSource::ProviderUsage,
+            cost_source: CostSource::ProviderCost,
+            token_capture: None,
+        });
+        let csv = cost_export_csv(&tracker).unwrap();
+        assert!(csv.contains("claude"));
+        assert!(csv.contains("0.1"));
+    }
+
+    #[test]
+    fn test_clawhub_search() {
+        let mut cache = CatalogCache::new(3600);
+        cache.update(vec![
+            CatalogEntry {
+                name: "slack-bot".into(),
+                display_name: "Slack Bot".into(),
+                kind: "channel".into(),
+                description: "Slack integration".into(),
+                keywords: vec!["chat".into()],
+                version: Some("1.0.0".into()),
+            },
+            CatalogEntry {
+                name: "weather".into(),
+                display_name: "Weather Tool".into(),
+                kind: "tool".into(),
+                description: "Get weather data".into(),
+                keywords: vec!["api".into()],
+                version: None,
+            },
+        ]);
+
+        let results = clawhub_search(&cache, "slack").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "slack-bot");
+
+        let results = clawhub_search(&cache, "weather").unwrap();
+        assert_eq!(results.len(), 1);
+
+        let results = clawhub_search(&cache, "nonexistent").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_clawhub_prepare_install_found() {
+        let mut cache = CatalogCache::new(3600);
+        cache.update(vec![CatalogEntry {
+            name: "my-plugin".into(),
+            display_name: "My Plugin".into(),
+            kind: "tool".into(),
+            description: "Test".into(),
+            keywords: vec![],
+            version: Some("2.0.0".into()),
+        }]);
+        let result = clawhub_prepare_install(&cache, "my-plugin").unwrap();
+        assert!(result.success);
+        assert_eq!(result.plugin_name, "my-plugin");
+        assert_eq!(result.version, "2.0.0");
+        assert!(result.install_path.contains("my-plugin"));
+    }
+
+    #[test]
+    fn test_clawhub_prepare_install_not_found() {
+        let cache = CatalogCache::new(3600);
+        let result = clawhub_prepare_install(&cache, "unknown");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_clawhub_prepare_install_rejects_path_traversal() {
+        let cache = CatalogCache::new(3600);
+        let result = clawhub_prepare_install(&cache, "../../outside");
+        assert_eq!(result.unwrap_err(), "Plugin identifier is invalid");
+    }
+
+    // NOTE: test_routine_audit_list removed — the function now queries
+    // the Database (async + requires a real or mock DB). The DB-backed
+    // routine_run persistence is tested via routine_engine integration tests.
+
+    #[test]
+    fn test_cache_stats_service_api() {
+        let mut store = CachedResponseStore::new(CacheConfig::default());
+        store.set("k1", "r1".into(), "gpt-4o");
+        store.get("k1"); // hit
+        store.get("miss"); // miss
+
+        let stats = cache_stats(&store).unwrap();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.size, 1);
+    }
+
+    #[test]
+    fn test_plugin_lifecycle_list() {
+        let hook = AuditLogHook::new();
+        hook.on_event(&LifecycleEvent::Installed {
+            name: "test-plugin".into(),
+        });
+        let events = plugin_lifecycle_list(&hook).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].plugin, "test-plugin");
+        assert_eq!(events[0].event_type, "installed");
+    }
+
+    #[test]
+    fn test_manifest_validate_valid() {
+        let validator = ManifestValidator::new();
+        let info = PluginInfoRef {
+            name: "my-plugin".into(),
+            version: Some("1.0.0".into()),
+            description: Some("A test plugin".into()),
+            permissions: vec!["network".into()],
+            keywords: vec![],
+            homepage_url: None,
+        };
+        let response = manifest_validate(&validator, &info).unwrap();
+        assert!(response.errors.is_empty());
+    }
+
+    #[test]
+    fn test_manifest_validate_invalid() {
+        let validator = ManifestValidator::new();
+        let info = PluginInfoRef {
+            name: "".into(), // Empty name = error
+            version: Some("not-semver".into()),
+            description: None,
+            permissions: vec!["unknown_perm".into()],
+            keywords: vec![],
+            homepage_url: None,
+        };
+        let response = manifest_validate(&validator, &info).unwrap();
+        assert!(!response.errors.is_empty());
+    }
+
+    #[test]
+    fn test_install_result_serializable() {
+        let result = InstallResult {
+            plugin_name: "test".into(),
+            version: "1.0.0".into(),
+            install_path: "/path/to/plugin".into(),
+            success: true,
+            message: "OK".into(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"success\":true"));
+        let deser: InstallResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.plugin_name, "test");
+    }
+
+    // ── Routing rule CRUD tests ───────────────────────────────────────
+
+    #[test]
+    fn test_routing_rules_list_empty() {
+        let policy = RoutingPolicy::new("openai");
+        let rules = routing_rules_list(&policy).unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn test_routing_rules_list_with_rules() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+        policy.add_rule(RoutingRule::LargeContext {
+            threshold: 100_000,
+            provider: "claude".into(),
+        });
+        let rules = routing_rules_list(&policy).unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].rule_type, "vision");
+        assert_eq!(rules[1].rule_type, "large_context");
+        assert!(rules[1].description.contains("100000"));
+    }
+
+    #[test]
+    fn test_routing_rules_add_at_end() {
+        let mut policy = RoutingPolicy::new("openai");
+        let rules = routing_rules_add(&mut policy, RoutingRule::LowestLatency, None).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule_type, "lowest_latency");
+    }
+
+    #[test]
+    fn test_routing_rules_add_at_position() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::LowestLatency);
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+
+        // Insert at position 0
+        let rules = routing_rules_add(
+            &mut policy,
+            RoutingRule::LargeContext {
+                threshold: 50000,
+                provider: "claude".into(),
+            },
+            Some(0),
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].rule_type, "large_context");
+        assert_eq!(rules[1].rule_type, "lowest_latency");
+    }
+
+    #[test]
+    fn test_routing_rules_add_validation_empty_round_robin() {
+        let mut policy = RoutingPolicy::new("openai");
+        let result = routing_rules_add(
+            &mut policy,
+            RoutingRule::RoundRobin { providers: vec![] },
+            None,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("at least one provider"));
+    }
+
+    #[test]
+    fn test_routing_rules_add_validation_zero_threshold() {
+        let mut policy = RoutingPolicy::new("openai");
+        let result = routing_rules_add(
+            &mut policy,
+            RoutingRule::LargeContext {
+                threshold: 0,
+                provider: "claude".into(),
+            },
+            None,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("greater than 0"));
+    }
+
+    #[test]
+    fn test_routing_rules_remove() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::LowestLatency);
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+        let rules = routing_rules_remove(&mut policy, 0).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule_type, "vision");
+    }
+
+    #[test]
+    fn test_routing_rules_remove_out_of_bounds() {
+        let mut policy = RoutingPolicy::new("openai");
+        let result = routing_rules_remove(&mut policy, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_routing_rules_reorder() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::LowestLatency);
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+        policy.add_rule(RoutingRule::LargeContext {
+            threshold: 100_000,
+            provider: "claude".into(),
+        });
+
+        // Move last to first
+        let rules = routing_rules_reorder(&mut policy, 2, 0).unwrap();
+        assert_eq!(rules[0].rule_type, "large_context");
+        assert_eq!(rules[1].rule_type, "lowest_latency");
+        assert_eq!(rules[2].rule_type, "vision");
+    }
+
+    #[test]
+    fn test_routing_status() {
+        let mut policy = RoutingPolicy::new("openai");
+        policy.add_rule(RoutingRule::VisionContent {
+            provider: "gemini".into(),
+        });
+        policy.record_latency("openai", 200.0);
+        policy.record_latency("gemini", 100.0);
+
+        let status = routing_status(&policy).unwrap();
+        assert!(status.enabled);
+        assert_eq!(status.default_provider, "openai");
+        assert_eq!(status.rule_count, 1);
+        assert_eq!(status.rules.len(), 1);
+        assert!(!status.latency_data.is_empty());
+    }
+
+    #[test]
+    fn test_routing_status_serializable() {
+        let policy = RoutingPolicy::new("openai");
+        let status = routing_status(&policy).unwrap();
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"enabled\":true"));
+        assert!(json.contains("\"default_provider\":\"openai\""));
+    }
+
+    // ── Gmail status tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_gmail_status_disabled() {
+        let config = GmailConfig::default();
+        let status = gmail_status(&config).unwrap();
+        assert!(!status.enabled);
+        assert!(!status.configured);
+        assert!(!status.needs_oauth);
+        assert_eq!(status.status, "disabled");
+    }
+
+    #[test]
+    fn test_gmail_status_missing_creds() {
+        let config = GmailConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let status = gmail_status(&config).unwrap();
+        assert!(status.enabled);
+        assert!(!status.configured);
+        assert!(!status.needs_oauth);
+        assert!(status.status.contains("missing credentials"));
+        assert!(!status.missing_fields.is_empty());
+    }
+
+    #[test]
+    fn test_gmail_status_needs_oauth() {
+        let config = GmailConfig {
+            enabled: true,
+            project_id: "my-project".into(),
+            subscription_id: "my-sub".into(),
+            topic_id: "my-topic".into(),
+            ..Default::default()
+        };
+        let status = gmail_status(&config).unwrap();
+        assert!(status.enabled);
+        assert!(!status.configured);
+        assert!(status.needs_oauth);
+        assert_eq!(status.status, "needs oauth");
+        assert!(status.missing_fields.is_empty());
+    }
+
+    #[test]
+    fn test_gmail_status_ready() {
+        let config = GmailConfig {
+            enabled: true,
+            project_id: "my-project".into(),
+            subscription_id: "my-sub".into(),
+            topic_id: "my-topic".into(),
+            oauth_token: Some("ya29.test-token".into()),
+            ..Default::default()
+        };
+        let status = gmail_status(&config).unwrap();
+        assert!(status.enabled);
+        assert!(status.configured);
+        assert!(!status.needs_oauth);
+        assert!(status.status.contains("ready"));
+        assert!(status.missing_fields.is_empty());
+    }
+
+    #[test]
+    fn test_gmail_status_serializable() {
+        let config = GmailConfig::default();
+        let status = gmail_status(&config).unwrap();
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"enabled\":false"));
+        assert!(json.contains("\"configured\":false"));
+        assert!(json.contains("\"needs_oauth\":false"));
+    }
+}

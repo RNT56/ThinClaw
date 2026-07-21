@@ -178,7 +178,7 @@ pub(crate) async fn providers_list_handler(
         slug: "bedrock".to_string(),
         display_name: "AWS Bedrock".to_string(),
         api_style: "bedrock".to_string(),
-        default_model: "anthropic.claude-3-sonnet-20240229-v1:0".to_string(),
+        default_model: "anthropic.claude-opus-4-8".to_string(),
         default_context_size: 200_000,
         has_key: bedrock_has_key,
         credential_ready: bedrock_has_key,

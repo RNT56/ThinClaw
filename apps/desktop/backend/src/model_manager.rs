@@ -633,7 +633,9 @@ fn display_size(path: &std::path::Path) -> u64 {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn list_models(app: AppHandle) -> Result<Vec<ModelFile>, String> {
+pub async fn list_models(
+    app: AppHandle,
+) -> Result<Vec<ModelFile>, crate::thinclaw::bridge::BridgeError> {
     let models_dir = managed_models_dir(&app)?;
 
     // Ensure category folders exist
@@ -726,7 +728,7 @@ pub async fn download_model(
     state: State<'_, DownloadManager>,
     url: String,
     filename: String,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let relative = validate_model_relative_path(&filename)?;
     let url = validate_model_download_url(&url)?;
     let models = managed_models_dir(&app)?;
@@ -741,19 +743,23 @@ pub async fn download_model(
 pub async fn cancel_download(
     state: State<'_, DownloadManager>,
     filename: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if filename.is_empty()
         || filename.len() > MAX_MODEL_PATH_BYTES
         || filename.chars().any(char::is_control)
     {
-        return Err("Download identifier is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Download identifier is invalid".to_string(),
+        });
     }
     let downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(notify) = downloads.get(&filename) {
         notify.notify_one();
         Ok(())
     } else {
-        Err("Download not found".to_string())
+        Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Download not found".to_string(),
+        })
     }
 }
 
@@ -779,7 +785,9 @@ pub async fn check_model_path(app: AppHandle, path: String) -> bool {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn open_models_folder(app: AppHandle) -> Result<(), String> {
+pub async fn open_models_folder(
+    app: AppHandle,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let models_dir = managed_models_dir(&app)?;
 
     // Also ensure category folders exist
@@ -820,7 +828,9 @@ pub async fn open_models_folder(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn open_standard_models_folder(app: AppHandle) -> Result<(), String> {
+pub async fn open_standard_models_folder(
+    app: AppHandle,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let models_dir = managed_models_dir(&app)?;
     ensure_real_directory(&models_dir.join("Diffusion"))?;
     let standard_dir = models_dir.join("Diffusion").join("standard"); // Updated path
@@ -854,20 +864,27 @@ pub async fn open_standard_models_folder(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn delete_local_model(app: AppHandle, filename: String) -> Result<(), String> {
+pub async fn delete_local_model(
+    app: AppHandle,
+    filename: String,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let relative = validate_model_relative(&filename, false)?;
     let models_dir = managed_models_dir(&app)?;
     let file_path = models_dir.join(&relative);
     let metadata =
         fs::symlink_metadata(&file_path).map_err(|_| "Managed model was not found".to_string())?;
     if metadata.file_type().is_symlink() || !(metadata.is_file() || metadata.is_dir()) {
-        return Err("Managed model path is not a regular file or directory".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Managed model path is not a regular file or directory".to_string(),
+        });
     }
     let canonical_target = file_path
         .canonicalize()
         .map_err(|error| format!("Could not resolve managed model: {error}"))?;
     if !canonical_target.starts_with(&models_dir) || canonical_target == models_dir {
-        return Err("Managed model path escaped model storage".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Managed model path escaped model storage".to_string(),
+        });
     }
 
     // Determine if we should delete the whole folder
@@ -890,7 +907,9 @@ pub async fn delete_local_model(app: AppHandle, filename: String) -> Result<(), 
                     .iter()
                     .any(|category| resolved_parent == models_dir.join(category))
             {
-                return Err("Refusing to delete an unsafe model directory".to_string());
+                return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                    message: "Refusing to delete an unsafe model directory".to_string(),
+                });
             }
             fs::remove_dir_all(parent).map_err(|e| format!("Failed to delete folder: {}", e))?;
             return Ok(());
@@ -908,9 +927,11 @@ pub async fn delete_local_model(app: AppHandle, filename: String) -> Result<(), 
 
 #[tauri::command]
 #[specta::specta]
-pub async fn open_url(url: String) -> Result<(), String> {
+pub async fn open_url(url: String) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if url.is_empty() || url.len() > 4_096 || url.chars().any(char::is_control) {
-        return Err("URL is missing or invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "URL is missing or invalid".to_string(),
+        });
     }
     let parsed = reqwest::Url::parse(&url).map_err(|_| "URL is not valid".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https")
@@ -918,9 +939,11 @@ pub async fn open_url(url: String) -> Result<(), String> {
         || parsed.password().is_some()
         || parsed.host_str().is_none()
     {
-        return Err("Only public HTTP(S) URLs can be opened".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Only public HTTP(S) URLs can be opened".to_string(),
+        });
     }
-    open::that(parsed.as_str()).map_err(|_| "Could not open URL".to_string())
+    Ok(open::that(parsed.as_str()).map_err(|_| "Could not open URL".to_string())?)
 }
 
 // Standard Assets Logic
@@ -977,7 +1000,9 @@ pub fn get_standard_assets() -> Vec<StandardAsset> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn check_missing_standard_assets(app: AppHandle) -> Result<Vec<StandardAsset>, String> {
+pub async fn check_missing_standard_assets(
+    app: AppHandle,
+) -> Result<Vec<StandardAsset>, crate::thinclaw::bridge::BridgeError> {
     let models = managed_models_dir(&app)?;
     let diffusion = models.join("Diffusion");
     ensure_real_directory(&diffusion)?;
@@ -1007,7 +1032,7 @@ pub async fn download_standard_asset(
     app: AppHandle,
     state: State<'_, DownloadManager>,
     filename: String,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     // Find asset
     let assets = get_standard_assets();
     let asset = assets
@@ -1029,9 +1054,13 @@ pub async fn download_standard_asset(
         Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
             return Ok(target_path.to_string_lossy().to_string());
         }
-        Ok(_) => return Err("Standard model asset path is unsafe".to_string()),
+        Ok(_) => {
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Standard model asset path is unsafe".to_string(),
+            })
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("Could not inspect standard model asset: {error}")),
+        Err(error) => return Err(format!("Could not inspect standard model asset: {error}").into()),
     }
     let url = validate_model_download_url(&asset.url)?;
     let (notify, _download_guard) = state.register(&filename)?;
@@ -1043,9 +1072,11 @@ pub async fn download_standard_asset(
 pub async fn get_model_metadata(
     app: AppHandle,
     path: String,
-) -> Result<crate::gguf::GGUFMetadata, String> {
+) -> Result<crate::gguf::GGUFMetadata, crate::thinclaw::bridge::BridgeError> {
     if path.is_empty() || path.len() > 8_192 || path.chars().any(char::is_control) {
-        return Err("Model metadata path is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Model metadata path is invalid".to_string(),
+        });
     }
     let models = managed_models_dir(&app)?;
     let path = PathBuf::from(path);
@@ -1058,26 +1089,32 @@ pub async fn get_model_metadata(
             .and_then(|value| value.to_str())
             .is_none_or(|extension| !extension.eq_ignore_ascii_case("gguf"))
     {
-        return Err("Model metadata path is not a regular GGUF file".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Model metadata path is not a regular GGUF file".to_string(),
+        });
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
         if metadata.nlink() != 1 {
-            return Err("Model metadata file must not have multiple hard links".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Model metadata file must not have multiple hard links".to_string(),
+            });
         }
     }
     let resolved = path
         .canonicalize()
         .map_err(|error| format!("Could not resolve managed model file: {error}"))?;
     if !resolved.starts_with(models) {
-        return Err("Model metadata path escaped managed model storage".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Model metadata path escaped managed model storage".to_string(),
+        });
     }
-    crate::gguf::read_gguf_metadata(
+    Ok(crate::gguf::read_gguf_metadata(
         resolved
             .to_str()
             .ok_or_else(|| "Model metadata path is not valid Unicode".to_string())?,
-    )
+    )?)
 }
 
 #[derive(Serialize, Deserialize, Clone, Type)]
@@ -1097,7 +1134,7 @@ pub struct RemoteModelEntry {
 pub async fn update_remote_model_catalog(
     pool: State<'_, sqlx::SqlitePool>,
     entries: Vec<RemoteModelEntry>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     for entry in entries {
         let metadata_json = entry.metadata.to_string();
         sqlx::query(
@@ -1128,7 +1165,7 @@ pub async fn update_remote_model_catalog(
 #[specta::specta]
 pub async fn get_remote_model_catalog(
     pool: State<'_, sqlx::SqlitePool>,
-) -> Result<Vec<RemoteModelEntry>, String> {
+) -> Result<Vec<RemoteModelEntry>, crate::thinclaw::bridge::BridgeError> {
     let rows = sqlx::query("SELECT id, name, metadata, local_version, remote_version, last_checked_at, status FROM models_catalog")
         .fetch_all(&*pool)
         .await

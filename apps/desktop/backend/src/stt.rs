@@ -30,7 +30,7 @@ pub async fn direct_media_transcribe_audio(
     router: State<'_, InferenceRouter>,
     pool: State<'_, sqlx::SqlitePool>,
     audio_bytes: Vec<u8>,
-) -> Result<DirectSttResponse, String> {
+) -> Result<DirectSttResponse, crate::thinclaw::bridge::BridgeError> {
     let format = detect_audio_format(&audio_bytes).ok_or_else(|| {
         "Unsupported or malformed audio. Recordings must be WAV, WebM, Ogg Opus, or MP3."
             .to_string()
@@ -125,8 +125,8 @@ pub async fn direct_media_transcribe_audio(
 
         if format != AudioFormat::Wav {
             return Err(
-                "The local Whisper CLI fallback accepts WAV audio only. Start the STT server or select a cloud STT backend for this recording format."
-                    .to_string(),
+                crate::thinclaw::bridge::BridgeError::Runtime { message: "The local Whisper CLI fallback accepts WAV audio only. Start the STT server or select a cloud STT backend for this recording format."
+                    .to_string() },
             );
         }
 
@@ -201,7 +201,8 @@ pub async fn direct_media_transcribe_audio(
             return Err(format!(
                 "Whisper exited unsuccessfully: {}",
                 safe_process_message(&output.stderr)
-            ));
+            )
+            .into());
         }
 
         let output_path = whisper_output_path(&input_path);

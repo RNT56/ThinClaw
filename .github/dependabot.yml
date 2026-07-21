@@ -32,6 +32,17 @@ updates:
         update-types:
           - minor
           - patch
+    # The backend lockfile traverses the root workspace and the vendored
+    # libSQL 0.6 patch. Root dependencies are updated by the entry above; the
+    # patch internals must move only with an intentional libSQL migration.
+    ignore:
+      - dependency-name: bincode
+      - dependency-name: fs4
+      - dependency-name: http
+      - dependency-name: libloading
+      - dependency-name: libsql-sys
+      - dependency-name: libsql_replication
+      - dependency-name: tonic
 
   - package-ecosystem: npm
     directory: "/apps/desktop"

@@ -56,4 +56,5 @@ wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
 nostr = ["dep:nostr-sdk"]
 
 [dev-dependencies]
+ring = "0.17"
 tempfile = "3"

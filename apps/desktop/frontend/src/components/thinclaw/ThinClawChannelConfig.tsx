@@ -25,7 +25,7 @@ interface ConfigSchema {
     help?: string | null;
 }
 
-type FieldValue = string | boolean;
+type FieldValue = string | boolean | number | null;
 
 export function ThinClawChannelConfig() {
     const [schemas, setSchemas] = useState<ConfigSchema[]>([]);
@@ -46,6 +46,7 @@ export function ThinClawChannelConfig() {
                     setSchemas([]);
                 } else {
                     setSchemas(Array.isArray(data?.schemas) ? data.schemas : []);
+                    setValues({});
                 }
             } else {
                 setNotice(String(r.error));
@@ -66,6 +67,9 @@ export function ThinClawChannelConfig() {
         const current = values[schema.channel_id]?.[field.id];
         if (current !== undefined) return current;
         if (field.field_type === 'checkbox') return field.default_value === true;
+        if (field.field_type === 'number') {
+            return typeof field.default_value === 'number' ? field.default_value : null;
+        }
         return typeof field.default_value === 'string' ? field.default_value : '';
     };
 
@@ -114,7 +118,9 @@ export function ThinClawChannelConfig() {
                     </div>
                 </div>
                 <button
+                    type="button"
                     onClick={load}
+                    aria-label="Refresh channel configuration"
                     className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
                 >
                     <RefreshCw className="w-3.5 h-3.5" />
@@ -139,18 +145,20 @@ export function ThinClawChannelConfig() {
                         {schema.help && <p className="text-[11px] text-muted-foreground mt-0.5">{schema.help}</p>}
                     </div>
 
-                    <div className="space-y-3">
+                    {schema.fields.length > 0 && <div className="space-y-3">
                         {schema.fields.map((field) => {
                             const val = fieldValue(schema, field);
+                            const inputId = `channel-config-${schema.channel_id}-${field.id}`;
                             return (
                                 <div key={field.id} className="space-y-1">
-                                    <label className="text-xs font-medium text-foreground/90 flex items-center gap-1">
+                                    <label htmlFor={inputId} className="text-xs font-medium text-foreground/90 flex items-center gap-1">
                                         {field.label}
                                         {field.required && <span className="text-red-400">*</span>}
                                     </label>
                                     {field.field_type === 'checkbox' ? (
                                         <label className="flex items-center gap-2 cursor-pointer">
                                             <input
+                                                id={inputId}
                                                 type="checkbox"
                                                 checked={val === true}
                                                 onChange={(e) => setField(schema.channel_id, field.id, e.target.checked)}
@@ -160,6 +168,7 @@ export function ThinClawChannelConfig() {
                                         </label>
                                     ) : field.field_type === 'textarea' ? (
                                         <textarea
+                                            id={inputId}
                                             value={String(val)}
                                             onChange={(e) => setField(schema.channel_id, field.id, e.target.value)}
                                             rows={3}
@@ -168,6 +177,7 @@ export function ThinClawChannelConfig() {
                                         />
                                     ) : field.field_type === 'select' ? (
                                         <select
+                                            id={inputId}
                                             value={String(val)}
                                             onChange={(e) => setField(schema.channel_id, field.id, e.target.value)}
                                             className="w-full rounded-lg border border-border/40 bg-black/20 px-3 py-2 text-xs outline-hidden focus:border-primary/40"
@@ -178,9 +188,16 @@ export function ThinClawChannelConfig() {
                                         </select>
                                     ) : (
                                         <input
+                                            id={inputId}
                                             type={field.field_type === 'password' ? 'password' : field.field_type === 'number' ? 'number' : 'text'}
-                                            value={String(val)}
-                                            onChange={(e) => setField(schema.channel_id, field.id, e.target.value)}
+                                            value={val === null ? '' : String(val)}
+                                            onChange={(e) => setField(
+                                                schema.channel_id,
+                                                field.id,
+                                                field.field_type === 'number'
+                                                    ? e.target.value === '' ? null : e.target.valueAsNumber
+                                                    : e.target.value,
+                                            )}
                                             placeholder={field.help_text ?? ''}
                                             className="w-full rounded-lg border border-border/40 bg-black/20 px-3 py-2 text-xs outline-hidden focus:border-primary/40"
                                         />
@@ -191,9 +208,10 @@ export function ThinClawChannelConfig() {
                                 </div>
                             );
                         })}
-                    </div>
+                    </div>}
 
-                    <button
+                    {schema.fields.length > 0 && <button
+                        type="button"
                         onClick={() => submit(schema)}
                         disabled={saving === schema.channel_id}
                         className={cn(
@@ -203,7 +221,7 @@ export function ThinClawChannelConfig() {
                     >
                         {saving === schema.channel_id ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                         Save
-                    </button>
+                    </button>}
                 </div>
             ))}
         </motion.div>

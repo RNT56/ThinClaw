@@ -110,13 +110,13 @@ pub struct FrontendMessage {
 #[specta::specta]
 pub async fn direct_history_get_conversations(
     state: State<'_, SqlitePool>,
-) -> Result<Vec<Conversation>, String> {
-    sqlx::query_as::<_, Conversation>(
+) -> Result<Vec<Conversation>, crate::thinclaw::bridge::BridgeError> {
+    Ok(sqlx::query_as::<_, Conversation>(
         "SELECT * FROM conversations ORDER BY sort_order ASC, updated_at DESC",
     )
     .fetch_all(&*state)
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?)
 }
 
 #[tauri::command]
@@ -125,7 +125,7 @@ pub async fn direct_history_create_conversation(
     state: State<'_, SqlitePool>,
     title: String,
     project_id: Option<String>,
-) -> Result<Conversation, String> {
+) -> Result<Conversation, crate::thinclaw::bridge::BridgeError> {
     validate_title(&title)?;
     if let Some(project_id) = &project_id {
         validate_identifier("Project", project_id)?;
@@ -135,7 +135,9 @@ pub async fn direct_history_create_conversation(
             .await
             .map_err(|error| format!("Failed to validate project: {error}"))?;
         if !exists {
-            return Err("Selected project does not exist".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Selected project does not exist".to_string(),
+            });
         }
     }
     let id = generate_id();
@@ -173,7 +175,7 @@ pub async fn direct_history_delete_conversation(
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
     file_store: State<'_, FileStore>,
     id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     validate_identifier("Conversation", &id)?;
     let update_guard = vector_manager.lock_updates().await;
     let paths: Vec<String> =
@@ -253,7 +255,7 @@ pub async fn direct_history_delete_conversation(
     if cleanup_failures > 0 {
         return Err(format!(
             "Conversation data was deleted, but {cleanup_failures} backing file(s) could not be removed"
-        ));
+        ).into());
     }
     Ok(())
 }
@@ -264,7 +266,7 @@ pub async fn direct_history_update_conversation_title(
     state: State<'_, SqlitePool>,
     id: String,
     title: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     validate_identifier("Conversation", &id)?;
     validate_title(&title)?;
     let result = sqlx::query("UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?")
@@ -275,7 +277,9 @@ pub async fn direct_history_update_conversation_title(
         .await
         .map_err(|e| e.to_string())?;
     if result.rows_affected() != 1 {
-        return Err("Conversation does not exist".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Conversation does not exist".to_string(),
+        });
     }
     Ok(())
 }
@@ -287,7 +291,7 @@ pub async fn direct_history_update_conversation_project(
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
     id: String,
     project_id: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     validate_identifier("Conversation", &id)?;
     if let Some(project_id) = &project_id {
         validate_identifier("Project", project_id)?;
@@ -297,7 +301,9 @@ pub async fn direct_history_update_conversation_project(
             .await
             .map_err(|error| format!("Failed to validate project: {error}"))?;
         if !exists {
-            return Err("Selected project does not exist".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Selected project does not exist".to_string(),
+            });
         }
     }
 
@@ -310,7 +316,9 @@ pub async fn direct_history_update_conversation_project(
             .await
             .map_err(|error| error.to_string())?;
     let Some(previous_project) = previous_project else {
-        return Err("Conversation does not exist".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Conversation does not exist".to_string(),
+        });
     };
     if previous_project == project_id {
         return Ok(());
@@ -358,7 +366,8 @@ pub async fn direct_history_update_conversation_project(
             let _ = vector_manager.delete_scope(&new_scope);
             return Err(format!(
                 "Conversation moved, but the destination vector index could not be rebuilt: {error}"
-            ));
+            )
+            .into());
         }
     }
     Ok(())
@@ -369,15 +378,19 @@ pub async fn direct_history_update_conversation_project(
 pub async fn direct_history_update_conversations_order(
     state: State<'_, SqlitePool>,
     orders: Vec<(String, i32)>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if orders.len() > 10_000 {
-        return Err("Conversation order update exceeds the supported limit".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Conversation order update exceeds the supported limit".to_string(),
+        });
     }
     let mut seen = std::collections::HashSet::with_capacity(orders.len());
     for (id, order) in &orders {
         validate_identifier("Conversation", id)?;
         if *order < 0 || !seen.insert(id) {
-            return Err("Conversation order entries are invalid or duplicated".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Conversation order entries are invalid or duplicated".to_string(),
+            });
         }
     }
     let mut tx = state.begin().await.map_err(|e| e.to_string())?;
@@ -389,7 +402,7 @@ pub async fn direct_history_update_conversations_order(
             .await
             .map_err(|e| e.to_string())?;
         if result.rows_affected() != 1 {
-            return Err(format!("Conversation {id} does not exist"));
+            return Err(format!("Conversation {id} does not exist").into());
         }
     }
     tx.commit().await.map_err(|e| e.to_string())?;
@@ -403,13 +416,13 @@ pub async fn direct_history_get_messages(
     conversation_id: String,
     limit: Option<i32>,
     before_created_at: Option<f64>,
-) -> Result<Vec<FrontendMessage>, String> {
+) -> Result<Vec<FrontendMessage>, crate::thinclaw::bridge::BridgeError> {
     validate_identifier("Conversation", &conversation_id)?;
     let limit = limit.unwrap_or(50);
     if !(1..=MAX_HISTORY_PAGE_SIZE).contains(&limit) {
-        return Err(format!(
-            "History page size must be between 1 and {MAX_HISTORY_PAGE_SIZE}"
-        ));
+        return Err(
+            format!("History page size must be between 1 and {MAX_HISTORY_PAGE_SIZE}").into(),
+        );
     }
     let before = match before_created_at {
         Some(timestamp)
@@ -417,7 +430,11 @@ pub async fn direct_history_get_messages(
         {
             timestamp as i64
         }
-        Some(_) => return Err("History pagination timestamp is invalid".to_string()),
+        Some(_) => {
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "History pagination timestamp is invalid".to_string(),
+            })
+        }
         None => i64::MAX,
     };
 
@@ -514,13 +531,17 @@ pub async fn direct_history_save_message(
     assets: Option<Vec<AssetRef>>,
     attached_docs: Option<Vec<AttachedDoc>>,
     web_search_results: Option<Vec<crate::web_search::WebSearchResult>>,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     validate_identifier("Conversation", &conversation_id)?;
     if !matches!(role.as_str(), "user" | "assistant" | "system" | "tool") {
-        return Err("Message role is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Message role is invalid".to_string(),
+        });
     }
     if content.len() > MAX_MESSAGE_CONTENT_BYTES || content.contains('\0') {
-        return Err("Message content exceeds the supported limit or contains NUL".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Message content exceeds the supported limit or contains NUL".to_string(),
+        });
     }
     for (label, count) in [
         ("images", images.as_ref().map_or(0, Vec::len)),
@@ -535,9 +556,9 @@ pub async fn direct_history_save_message(
         ),
     ] {
         if count > MAX_MESSAGE_ATTACHMENTS {
-            return Err(format!(
-                "Message {label} exceed the {MAX_MESSAGE_ATTACHMENTS}-item limit"
-            ));
+            return Err(
+                format!("Message {label} exceed the {MAX_MESSAGE_ATTACHMENTS}-item limit").into(),
+            );
         }
     }
     if images.as_ref().is_some_and(|images| {
@@ -545,14 +566,18 @@ pub async fn direct_history_save_message(
             .iter()
             .any(|path| path.len() > 16 * 1024 || path.contains('\0'))
     }) {
-        return Err("Message image reference is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Message image reference is invalid".to_string(),
+        });
     }
     if assets.as_ref().is_some_and(|assets| {
         assets.iter().any(|asset| {
             asset.id.is_empty() || asset.id.len() > 128 || asset.id.chars().any(char::is_control)
         })
     }) {
-        return Err("Message asset reference is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Message asset reference is invalid".to_string(),
+        });
     }
     if attached_docs.as_ref().is_some_and(|documents| {
         documents.iter().any(|document| {
@@ -564,7 +589,9 @@ pub async fn direct_history_save_message(
                 || document.name.contains('\0')
         })
     }) {
-        return Err("Attached document metadata is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Attached document metadata is invalid".to_string(),
+        });
     }
 
     let id = generate_id();
@@ -576,14 +603,18 @@ pub async fn direct_history_save_message(
         .as_ref()
         .is_some_and(|assets| assets.len() > MAX_MESSAGE_ATTACHMENTS * 3)
     {
-        return Err("Merged message assets exceed the supported limit".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Merged message assets exceed the supported limit".to_string(),
+        });
     }
     if merged_assets.as_ref().is_some_and(|assets| {
         assets.iter().any(|asset| {
             asset.id.is_empty() || asset.id.len() > 128 || asset.id.chars().any(char::is_control)
         })
     }) {
-        return Err("Merged message asset reference is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Merged message asset reference is invalid".to_string(),
+        });
     }
     let images_json = serialize_optional_metadata(images, "message images")?;
     let assets_json = serialize_optional_metadata(merged_assets, "message assets")?;
@@ -598,7 +629,9 @@ pub async fn direct_history_save_message(
             .await
             .map_err(|error| error.to_string())?;
     if !conversation_exists {
-        return Err("Conversation does not exist".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Conversation does not exist".to_string(),
+        });
     }
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, role, content, images, assets, attached_docs, web_search_results, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -624,7 +657,9 @@ pub async fn direct_history_save_message(
         .await
         .map_err(|e| e.to_string())?;
     if update.rows_affected() != 1 {
-        return Err("Conversation disappeared while saving the message".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Conversation disappeared while saving the message".to_string(),
+        });
     }
     transaction
         .commit()
@@ -640,10 +675,12 @@ pub async fn direct_history_edit_message(
     state: State<'_, SqlitePool>,
     message_id: String,
     new_content: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     validate_identifier("Message", &message_id)?;
     if new_content.len() > MAX_MESSAGE_CONTENT_BYTES || new_content.contains('\0') {
-        return Err("Edited message exceeds the supported limit or contains NUL".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Edited message exceeds the supported limit or contains NUL".to_string(),
+        });
     }
     let mut tx = state.begin().await.map_err(|e| e.to_string())?;
 
@@ -705,7 +742,7 @@ pub async fn direct_history_delete_all_history(
     pool: State<'_, SqlitePool>,
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
     file_store: State<'_, FileStore>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     println!("[history] direct_history_delete_all_history: clearing database...");
     let update_guard = vector_manager.lock_updates().await;
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
@@ -773,7 +810,8 @@ pub async fn direct_history_delete_all_history(
         return Err(format!(
             "History metadata was deleted, but backing-file cleanup failed: {}",
             cleanup_failures.join("; ")
-        ));
+        )
+        .into());
     }
 
     println!("[history] All history deleted and vector stores reset.");

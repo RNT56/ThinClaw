@@ -1958,23 +1958,31 @@ function renderMarkdown(text) {
 // Strip dangerous HTML elements and attributes from rendered markdown.
 // This prevents XSS from tool output or prompt injection in LLM responses.
 function sanitizeRenderedHtml(html) {
-  html = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
-  html = html.replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '');
-  html = html.replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, '');
-  html = html.replace(/<embed\b[^>]*\/?>/gi, '');
-  html = html.replace(/<form\b[^>]*>[\s\S]*?<\/form>/gi, '');
-  html = html.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
-  html = html.replace(/<link\b[^>]*\/?>/gi, '');
-  html = html.replace(/<base\b[^>]*\/?>/gi, '');
-  html = html.replace(/<meta\b[^>]*\/?>/gi, '');
-  // Remove event handler attributes (onclick, onerror, onload, etc.)
-  html = html.replace(/\s+on\w+\s*=\s*"[^"]*"/gi, '');
-  html = html.replace(/\s+on\w+\s*=\s*'[^']*'/gi, '');
-  html = html.replace(/\s+on\w+\s*=\s*[^\s>]+/gi, '');
-  // Remove javascript: and data: URLs in href/src attributes
-  html = html.replace(/(href|src|action)\s*=\s*["']?\s*javascript\s*:/gi, '$1="');
-  html = html.replace(/(href|src|action)\s*=\s*["']?\s*data\s*:/gi, '$1="');
-  return html;
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  template.content
+    .querySelectorAll('script, iframe, object, embed, form, style, link, base, meta, svg, math, template')
+    .forEach((node) => node.remove());
+
+  const urlAttributes = new Set(['href', 'src', 'action', 'formaction', 'xlink:href']);
+  template.content.querySelectorAll('*').forEach((element) => {
+    [...element.attributes].forEach((attribute) => {
+      const name = attribute.name.toLowerCase();
+      if (name.startsWith('on') || name === 'style' || name === 'srcdoc') {
+        element.removeAttribute(attribute.name);
+        return;
+      }
+      if (urlAttributes.has(name)) {
+        const normalized = attribute.value
+          .replace(/[\u0000-\u0020\u007f-\u009f]/g, '')
+          .toLowerCase();
+        if (/^(?:javascript|data|vbscript):/.test(normalized)) {
+          element.removeAttribute(attribute.name);
+        }
+      }
+    });
+  });
+  return template.innerHTML;
 }
 
 function copyCodeBlock(btn) {
@@ -10774,7 +10782,7 @@ const SETTINGS_SCHEMA = {
       { key: 'routines_enabled', label: 'Routines enabled', type: 'bool', desc: 'Enable the cron-based routine system' },
       { key: 'skills_enabled', label: 'Skills enabled', type: 'bool', desc: 'Enable the skills system' },
       { key: 'claude_code_enabled', label: 'Claude Code sandbox', type: 'bool', desc: 'Enable Claude Code as a tool' },
-      { key: 'claude_code_model', label: 'Claude Code model', type: 'text', desc: 'Model for Claude Code containers (e.g. "claude-sonnet-4-6", "claude-opus-4-5")', nullable: true },
+      { key: 'claude_code_model', label: 'Claude Code model', type: 'text', desc: 'Model for Claude Code containers (e.g. "claude-sonnet-5", "claude-opus-4-5")', nullable: true },
       { key: 'claude_code_max_turns', label: 'Claude Code max turns', type: 'number', desc: 'Maximum agentic turns per Claude Code job', min: 1, nullable: true },
       { key: 'codex_code_enabled', label: 'Codex sandbox', type: 'bool', desc: 'Enable Codex CLI as a container coding agent' },
       { key: 'codex_code_model', label: 'Codex model', type: 'text', desc: 'Model for Codex containers (e.g. "gpt-5.3-codex")', nullable: true },
@@ -14027,12 +14035,9 @@ function renderPairingSession(data) {
   const card = document.createElement('div');
   card.className = 'ui-panel ui-panel--subtle';
 
-  // TODO(milestone M1): render the qr_uri as an actual scannable QR code on
-  // a <canvas> once a self-contained QR encoder lands in the codebase. For
-  // now we show the payload string, the human-typable fallback code, and a
-  // live expiry countdown so a no-camera operator can still pair.
   card.innerHTML =
-    '<p class="ui-panel-desc">Scan this on the ThinClaw iOS app, or enter the code manually. Not a QR image yet — see the TODO in app.js (milestone M1).</p>'
+    '<p class="ui-panel-desc">Scan this with the ThinClaw app, or use the manual code below.</p>'
+    + '<div id="device-pair-qr" role="img" aria-label="ThinClaw device pairing QR code" style="display:flex;justify-content:center;margin:1rem auto;padding:0.75rem;max-width:304px;background:#fff;border-radius:16px;"></div>'
     + '<div class="setting-row">'
     + '<div class="setting-label-wrap"><label class="setting-label">Pairing payload</label><span class="setting-desc">Full <code>thinclaw://pair</code> URI</span></div>'
     + '<div class="setting-control"><pre id="device-pair-uri" style="white-space:pre-wrap;word-break:break-all;max-width:100%;">' + escapeHtml(data.qr_uri || '') + '</pre></div>'
@@ -14052,6 +14057,21 @@ function renderPairingSession(data) {
 
   host.innerHTML = '';
   host.appendChild(card);
+
+  const qrHost = card.querySelector('#device-pair-qr');
+  if (typeof data.qr_svg === 'string' && data.qr_svg.indexOf('<svg') !== -1) {
+    const parsed = new DOMParser().parseFromString(data.qr_svg, 'image/svg+xml');
+    const svg = parsed.documentElement;
+    if (svg && svg.localName === 'svg') {
+      svg.setAttribute('width', '280');
+      svg.setAttribute('height', '280');
+      svg.setAttribute('aria-hidden', 'true');
+      qrHost.replaceChildren(document.importNode(svg, true));
+    }
+  }
+  if (!qrHost.firstChild) {
+    qrHost.textContent = 'QR rendering unavailable — copy the payload or use the manual code.';
+  }
 
   const copyBtn = card.querySelector('#device-pair-copy');
   copyBtn.addEventListener('click', function() {

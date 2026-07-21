@@ -7,7 +7,7 @@
 //! and serves the result.
 //!
 //! The committed snapshot at `clients/openapi/thinclaw-gateway.openapi.json`
-//! is regenerated with `cargo run --bin export-openapi -- generate` and
+//! is regenerated with `cargo run --example export-openapi -- generate` and
 //! drift-checked in CI (`-- check`). See `docs/MOBILE_APP.md`.
 
 use axum::Json;

@@ -56,6 +56,15 @@ impl ContextPressure {
             Self::None
         }
     }
+
+    /// Stable wire label used by channel and UI event contracts.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
 }
 
 /// Strategy for context compaction.
@@ -301,6 +310,14 @@ pub fn pressure_transition(
     } else {
         None
     }
+}
+
+/// Whether a structured pressure state event should be emitted.
+///
+/// The initial healthy state is implicit, but every later level change is
+/// explicit, including recovery to `None`, so persistent UI indicators clear.
+pub fn pressure_state_changed(previous: Option<ContextPressure>, current: ContextPressure) -> bool {
+    previous != Some(current) && (previous.is_some() || current != ContextPressure::None)
 }
 
 impl Default for ContextMonitor {
@@ -637,5 +654,21 @@ mod tests {
             pressure_transition(Some(ContextPressure::Critical), ContextPressure::None),
             None
         );
+
+        assert!(!pressure_state_changed(None, ContextPressure::None));
+        assert!(pressure_state_changed(None, ContextPressure::Warning));
+        assert!(!pressure_state_changed(
+            Some(ContextPressure::Warning),
+            ContextPressure::Warning
+        ));
+        assert!(pressure_state_changed(
+            Some(ContextPressure::Warning),
+            ContextPressure::Critical
+        ));
+        assert!(pressure_state_changed(
+            Some(ContextPressure::Critical),
+            ContextPressure::None
+        ));
+        assert_eq!(ContextPressure::Critical.as_str(), "critical");
     }
 }

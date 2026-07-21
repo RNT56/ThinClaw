@@ -30,28 +30,26 @@ public struct AuthPromptCard: View {
     }
 
     public var body: some View {
-        GlassEffectContainer {
-            VStack(alignment: .leading, spacing: ThinClawSpacing.md) {
-                Label("Authorize \(extensionName)", systemImage: "person.badge.key")
-                    .font(ThinClawTypography.cardTitle)
-                Text(instructions ?? "This extension needs to be authorized before the agent can continue.")
-                    .font(ThinClawTypography.body)
-                    .foregroundStyle(.secondary)
-                if hasAuthURL {
-                    Button(action: onOpenAuth) {
-                        Label("Continue in browser", systemImage: "safari")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.glassProminent)
-                } else {
-                    Text("Finish setup on the desktop app.")
-                        .font(ThinClawTypography.caption)
-                        .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: ThinClawSpacing.md) {
+            Label("Authorize \(extensionName)", systemImage: "person.badge.key")
+                .font(ThinClawTypography.cardTitle)
+            Text(instructions ?? "This extension needs to be authorized before the agent can continue.")
+                .font(ThinClawTypography.body)
+                .foregroundStyle(.secondary)
+            if hasAuthURL {
+                Button(action: onOpenAuth) {
+                    Label("Continue in browser", systemImage: "safari")
+                        .frame(maxWidth: .infinity)
                 }
+                .thinClawButtonStyle(prominent: true)
+            } else {
+                Text("Finish setup on the desktop app.")
+                    .font(ThinClawTypography.caption)
+                    .foregroundStyle(.secondary)
             }
-            .padding(ThinClawSpacing.lg)
-            .glassEffect(.regular, in: .rect(cornerRadius: ThinClawRadius.card))
         }
+        .padding(ThinClawSpacing.lg)
+        .thinClawSurface()
         .accessibilityElement(children: .contain)
     }
 }
@@ -74,20 +72,18 @@ public struct CredentialPromptCard: View {
     }
 
     public var body: some View {
-        GlassEffectContainer {
-            VStack(alignment: .leading, spacing: ThinClawSpacing.md) {
-                Label("\(provider) credential needed", systemImage: "key.horizontal")
-                    .font(ThinClawTypography.cardTitle)
-                Text(reason)
-                    .font(ThinClawTypography.body)
-                    .foregroundStyle(.secondary)
-                Label("Enter “\(secretName)” on the desktop app", systemImage: "desktopcomputer")
-                    .font(ThinClawTypography.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(ThinClawSpacing.lg)
-            .glassEffect(.regular, in: .rect(cornerRadius: ThinClawRadius.card))
+        VStack(alignment: .leading, spacing: ThinClawSpacing.md) {
+            Label("\(provider) credential needed", systemImage: "key.horizontal")
+                .font(ThinClawTypography.cardTitle)
+            Text(reason)
+                .font(ThinClawTypography.body)
+                .foregroundStyle(.secondary)
+            Label("Enter “\(secretName)” on the desktop app", systemImage: "desktopcomputer")
+                .font(ThinClawTypography.caption)
+                .foregroundStyle(.secondary)
         }
+        .padding(ThinClawSpacing.lg)
+        .thinClawSurface()
         .accessibilityElement(children: .contain)
     }
 }

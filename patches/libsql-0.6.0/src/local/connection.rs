@@ -83,8 +83,13 @@ impl Connection {
 
     /// Disconnect from the database.
     pub fn disconnect(&mut self) {
-        if Arc::get_mut(&mut self.drop_ref).is_some() {
-            unsafe { libsql_sys::ffi::sqlite3_close_v2(self.raw) };
+        if self.raw.is_null() || Arc::get_mut(&mut self.drop_ref).is_none() {
+            return;
+        }
+
+        let rc = unsafe { libsql_sys::ffi::sqlite3_close_v2(self.raw) };
+        if rc == ffi::SQLITE_OK {
+            self.raw = std::ptr::null_mut();
         }
     }
 
@@ -434,6 +439,36 @@ impl Connection {
                 Err(errors::Error::SqliteFailure(err, err_msg))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::OpenFlags;
+
+    #[test]
+    fn disconnect_is_idempotent() {
+        let db = Database::open(":memory:", OpenFlags::default()).expect("open database");
+        let mut connection = Connection::connect(&db).expect("connect database");
+
+        connection.disconnect();
+        assert!(connection.raw.is_null());
+        connection.disconnect();
+        assert!(connection.raw.is_null());
+    }
+
+    #[test]
+    fn disconnect_waits_for_the_last_connection_clone() {
+        let db = Database::open(":memory:", OpenFlags::default()).expect("open database");
+        let mut connection = Connection::connect(&db).expect("connect database");
+        let clone = connection.clone();
+
+        connection.disconnect();
+        assert!(!connection.raw.is_null());
+        drop(clone);
+        connection.disconnect();
+        assert!(connection.raw.is_null());
     }
 }
 

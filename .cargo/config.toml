@@ -1,0 +1,5 @@
+# aws-lc-sys requires NASM for Windows assembly builds. When NASM is not
+# installed, use the upstream crate's checked-in and CI-verified Windows
+# objects instead. A NASM installation on PATH still takes precedence.
+[env]
+AWS_LC_SYS_PREBUILT_NASM = { value = "1", force = false }

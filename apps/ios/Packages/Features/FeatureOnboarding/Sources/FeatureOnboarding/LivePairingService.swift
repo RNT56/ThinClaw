@@ -108,8 +108,11 @@ import ThinClawAuth
                 guard DeviceToken.isWellFormed(response.token) else {
                     throw PairingError.unexpected(status: 200)
                 }
+                try Self.validateGatewayIdentity(
+                    payloadInstallationID: payload.installationID,
+                    responseInstallationID: response.gatewayInstance)
                 let credential = DeviceCredential(
-                    installationID: payload.installationID,
+                    installationID: response.gatewayInstance,
                     deviceID: response.deviceId,
                     deviceToken: response.token,
                     // Persist only the policy-allowed endpoints (D-X2), never
@@ -172,6 +175,19 @@ import ThinClawAuth
             case 500...599: return .server(status: status)
             default: return .unexpected(status: status)
             }
+        }
+
+        /// QR pairing binds the locator identity to the authenticated response.
+        /// Manual-code pairing intentionally supplies an empty locator identity
+        /// and therefore always adopts the server-returned value.
+        static func validateGatewayIdentity(
+            payloadInstallationID: String,
+            responseInstallationID: String
+        ) throws(PairingError) {
+            guard
+                payloadInstallationID.isEmpty
+                    || payloadInstallationID == responseInstallationID
+            else { throw .gatewayIdentityMismatch }
         }
     }
 #endif

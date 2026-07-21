@@ -89,7 +89,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
                 capabilities: Default::default(),
                 deprecated: false,
                 pricing: None, // Gemini API doesn't expose pricing
-                embedding_dimensions: None,
+                embedding_dimensions: matches!(category, ModelCategory::Embedding).then_some(768),
                 metadata: m
                     .description
                     .map(|d| {

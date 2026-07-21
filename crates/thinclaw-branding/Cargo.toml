@@ -8,7 +8,7 @@ publish = false
 [dependencies]
 ratatui = "0.30.0"
 serde = { workspace = true }
-termimad = "0.34"
+termimad = "0.35"
 thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
 toml = "1.1"
 tracing = { workspace = true }

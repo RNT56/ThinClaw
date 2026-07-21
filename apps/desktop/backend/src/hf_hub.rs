@@ -416,9 +416,11 @@ pub async fn direct_runtime_discover_hf_models(
     // Optional list of HF pipeline tags to filter by task type.
     // When provided, one request per tag is made and results are merged.
     pipeline_tags: Option<Vec<String>>,
-) -> Result<Vec<HfModelCard>, String> {
+) -> Result<Vec<HfModelCard>, crate::thinclaw::bridge::BridgeError> {
     if query.len() > 1_024 || query.chars().any(char::is_control) {
-        return Err("HuggingFace search query is invalid or too large".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "HuggingFace search query is invalid or too large".to_string(),
+        });
     }
     let tag = engine_to_hf_tag(&engine)
         .ok_or_else(|| format!("Unknown engine '{}' — cannot map to HF tag", engine))?;
@@ -437,7 +439,9 @@ pub async fn direct_runtime_discover_hf_models(
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         })
     {
-        return Err("HuggingFace pipeline tag list is invalid or too large".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "HuggingFace pipeline tag list is invalid or too large".to_string(),
+        });
     }
 
     let search_url = |pipeline_tag: Option<&str>| -> Result<reqwest::Url, String> {
@@ -481,7 +485,8 @@ pub async fn direct_runtime_discover_hf_models(
             return Err(format!(
                 "HuggingFace search failed for all requested filters: {}",
                 failures.join("; ")
-            ));
+            )
+            .into());
         }
 
         // Deduplicate by model ID
@@ -515,10 +520,12 @@ pub async fn direct_runtime_get_model_files(
     app: AppHandle,
     repo_id: String,
     engine: String,
-) -> Result<ModelDownloadInfo, String> {
+) -> Result<ModelDownloadInfo, crate::thinclaw::bridge::BridgeError> {
     validate_repo_id(&repo_id)?;
     if engine_to_hf_tag(&engine).is_none() {
-        return Err("Unknown inference engine".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Unknown inference engine".to_string(),
+        });
     }
     let client = build_hf_client(&app).await?;
     let url = hf_model_api_url(&repo_id, &["tree", "main"])?;
@@ -532,9 +539,9 @@ pub async fn direct_runtime_get_model_files(
             .await
             .map_err(|error| format!("Invalid bounded HuggingFace tree response: {error}"))?;
     if tree.len() > MAX_HF_TREE_ENTRIES {
-        return Err(format!(
-            "HuggingFace tree exceeds the {MAX_HF_TREE_ENTRIES}-entry limit"
-        ));
+        return Err(
+            format!("HuggingFace tree exceeds the {MAX_HF_TREE_ENTRIES}-entry limit").into(),
+        );
     }
 
     let is_single_file = engine == "llamacpp" || engine == "ollama";
@@ -565,7 +572,9 @@ pub async fn direct_runtime_get_model_files(
 
                 let size_bytes = file["size"].as_u64().unwrap_or(0);
                 if size_bytes > MAX_HF_FILE_BYTES {
-                    return Err("HuggingFace tree contains an oversized file".to_string());
+                    return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                        message: "HuggingFace tree contains an oversized file".to_string(),
+                    });
                 }
                 let size = size_bytes as f64;
                 let is_mmproj = path.to_lowercase().contains("mmproj");
@@ -623,7 +632,9 @@ pub async fn direct_runtime_get_model_files(
 
                 let size_bytes = file["size"].as_u64().unwrap_or(0);
                 if size_bytes > MAX_HF_FILE_BYTES {
-                    return Err("HuggingFace tree contains an oversized file".to_string());
+                    return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                        message: "HuggingFace tree contains an oversized file".to_string(),
+                    });
                 }
                 let size = size_bytes as f64;
                 info.files.push(HfFileInfo {
@@ -641,7 +652,8 @@ pub async fn direct_runtime_get_model_files(
     if info.files.len() > MAX_HF_DOWNLOAD_FILES {
         return Err(format!(
             "HuggingFace tree contains more than {MAX_HF_DOWNLOAD_FILES} downloadable files"
-        ));
+        )
+        .into());
     }
     let total_size = info
         .files
@@ -650,7 +662,9 @@ pub async fn direct_runtime_get_model_files(
         .try_fold(0_u64, |total, file| total.checked_add(file.size as u64))
         .ok_or_else(|| "HuggingFace model size overflow".to_string())?;
     if total_size > MAX_HF_DOWNLOAD_BYTES {
-        return Err("HuggingFace model exceeds the total download size limit".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "HuggingFace model exceeds the total download size limit".to_string(),
+        });
     }
     info.total_size = total_size as f64;
     info.total_size_display = format_bytes(total_size);
@@ -674,7 +688,7 @@ pub async fn direct_runtime_download_hf_model_files(
     files_to_download: Vec<String>,
     dest_subdir: Option<String>,
     category: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     use futures::StreamExt;
     use std::io::Write;
     use tauri::Emitter;
@@ -683,13 +697,16 @@ pub async fn direct_runtime_download_hf_model_files(
     if files_to_download.is_empty() || files_to_download.len() > MAX_HF_DOWNLOAD_FILES {
         return Err(format!(
             "HuggingFace download must contain between 1 and {MAX_HF_DOWNLOAD_FILES} files"
-        ));
+        )
+        .into());
     }
     let mut seen = std::collections::HashSet::new();
     for filename in &files_to_download {
         validate_hf_file_path(filename)?;
         if !seen.insert(filename) {
-            return Err("HuggingFace download contains duplicate file paths".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "HuggingFace download contains duplicate file paths".to_string(),
+            });
         }
     }
     let model_category = category.unwrap_or_else(|| "LLM".to_string());
@@ -697,7 +714,9 @@ pub async fn direct_runtime_download_hf_model_files(
         model_category.as_str(),
         "LLM" | "Embedding" | "Diffusion" | "STT" | "TTS"
     ) {
-        return Err("HuggingFace model category is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "HuggingFace model category is invalid".to_string(),
+        });
     }
     let destination_name = dest_subdir.unwrap_or_else(|| repo_id.replace('/', "_"));
     validate_relative_subdir(&destination_name)?;
@@ -710,9 +729,13 @@ pub async fn direct_runtime_download_hf_model_files(
     ensure_real_directory(&category_dir)?;
     let dest_dir = category_dir.join(&destination_name);
     match std::fs::symlink_metadata(&dest_dir) {
-        Ok(_) => return Err("The destination model directory already exists".to_string()),
+        Ok(_) => {
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "The destination model directory already exists".to_string(),
+            })
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("Could not inspect model destination: {error}")),
+        Err(error) => return Err(format!("Could not inspect model destination: {error}").into()),
     }
 
     let staging_dir = category_dir.join(format!(
@@ -771,13 +794,14 @@ pub async fn direct_runtime_download_hf_model_files(
             return Err(format!(
                 "HuggingFace size request failed with HTTP {}",
                 response.status()
-            ));
+            )
+            .into());
         }
         let size = response.content_length().unwrap_or(0);
         if size > MAX_HF_FILE_BYTES {
-            return Err(format!(
-                "HuggingFace file exceeds the {MAX_HF_FILE_BYTES}-byte limit"
-            ));
+            return Err(
+                format!("HuggingFace file exceeds the {MAX_HF_FILE_BYTES}-byte limit").into(),
+            );
         }
         grand_total = grand_total
             .checked_add(size)
@@ -785,7 +809,8 @@ pub async fn direct_runtime_download_hf_model_files(
         if grand_total > MAX_HF_DOWNLOAD_BYTES {
             return Err(format!(
                 "HuggingFace download exceeds the {MAX_HF_DOWNLOAD_BYTES}-byte limit"
-            ));
+            )
+            .into());
         }
         file_sizes.push(size);
     }
@@ -805,13 +830,14 @@ pub async fn direct_runtime_download_hf_model_files(
             return Err(format!(
                 "HuggingFace download failed with HTTP {}",
                 response.status()
-            ));
+            )
+            .into());
         }
         let file_total = response.content_length().unwrap_or(file_sizes[file_idx]);
         if file_total > MAX_HF_FILE_BYTES {
-            return Err(format!(
-                "HuggingFace file exceeds the {MAX_HF_FILE_BYTES}-byte limit"
-            ));
+            return Err(
+                format!("HuggingFace file exceeds the {MAX_HF_FILE_BYTES}-byte limit").into(),
+            );
         }
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -840,7 +866,9 @@ pub async fn direct_runtime_download_hf_model_files(
                 .checked_add(chunk_len)
                 .ok_or_else(|| "HuggingFace download size overflow".to_string())?;
             if file_downloaded > MAX_HF_FILE_BYTES || grand_downloaded > MAX_HF_DOWNLOAD_BYTES {
-                return Err("HuggingFace download exceeded its size limit".to_string());
+                return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                    message: "HuggingFace download exceeded its size limit".to_string(),
+                });
             }
             file.write_all(&chunk)
                 .map_err(|error| format!("Failed to write staged model file: {error}"))?;
@@ -877,7 +905,9 @@ pub async fn direct_runtime_download_hf_model_files(
             }
         }
         if file_total > 0 && file_downloaded != file_total {
-            return Err("HuggingFace download length did not match the response".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "HuggingFace download length did not match the response".to_string(),
+            });
         }
         file.sync_all()
             .map_err(|error| format!("Failed to sync staged model file: {error}"))?;
@@ -919,7 +949,7 @@ pub async fn direct_runtime_download_hf_model_files(
 pub async fn direct_runtime_discover_embedding_dimension(
     app: AppHandle,
     repo_id: String,
-) -> Result<Option<u32>, String> {
+) -> Result<Option<u32>, crate::thinclaw::bridge::BridgeError> {
     validate_repo_id(&repo_id)?;
     let client = build_hf_client(&app).await?;
 
@@ -929,10 +959,12 @@ pub async fn direct_runtime_discover_embedding_dimension(
     let response = match client.get(url).send().await {
         Ok(resp) => resp,
         Err(error) => {
-            return Err(crate::rig_lib::http::transport_error(
-                "HuggingFace embedding config request failed",
-                error,
-            ));
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: crate::rig_lib::http::transport_error(
+                    "HuggingFace embedding config request failed",
+                    error,
+                ),
+            });
         }
     };
 

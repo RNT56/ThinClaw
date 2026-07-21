@@ -15,7 +15,7 @@ cap-fs-ext = "3.4.5"
 cap-std = "3.4.5"
 flate2 = "1"
 rand = "0.10"
-scrypt = "0.11"
+scrypt = "0.12"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.11"

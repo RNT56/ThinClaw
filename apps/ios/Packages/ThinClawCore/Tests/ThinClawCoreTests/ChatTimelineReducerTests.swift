@@ -140,16 +140,22 @@ struct ChatTimelineReducerTests {
         let id = reducer.appendOptimisticUserMessage("hi")
         #expect(reducer.items.map(\.kind) == [.userMessage(text: "hi")])
         reducer.markFailure(rowID: id, message: "send failed")
-        #expect(reducer.items.map(\.kind) == [.failure(message: "send failed")])
+        #expect(reducer.items.map(\.kind) == [.userMessage(text: "hi")])
+        #expect(reducer.items.map(\.deliveryState) == [.failed])
     }
 
-    @Test("queued note can be appended then removed when the send lands")
-    func queuedNoteLifecycle() {
+    @Test("a failed row retries in place through sending, queued, and sent")
+    func deliveryTransitionsKeepStableRow() {
         var reducer = makeReducer()
-        let id = reducer.appendQueuedNote("later")
-        #expect(reducer.items.count == 1)
-        reducer.removeRow(id)
-        #expect(reducer.items.isEmpty)
+        let id = reducer.appendOptimisticUserMessage("retry me")
+        reducer.markFailure(rowID: id, message: "offline")
+        reducer.markSending(rowID: id)
+        #expect(reducer.items.first?.id == id)
+        #expect(reducer.items.first?.deliveryState == .sending)
+        reducer.markQueued(rowID: id)
+        #expect(reducer.items.first?.deliveryState == .queued)
+        reducer.markSent(rowID: id)
+        #expect(reducer.items.first?.deliveryState == nil)
     }
 
     @Test("a full turn: user → thinking → tool → stream → response")

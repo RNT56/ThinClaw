@@ -17,6 +17,9 @@ on:
       - "clients/openapi/**"
       - ".github/workflows/ios.yml"
 
+permissions:
+  contents: read
+
 concurrency:
   group: ios-${{ github.ref }}
   cancel-in-progress: true
@@ -27,7 +30,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       # The packages declare swift-tools-version 6.2, which needs the Swift 6.2
       # toolchain (Xcode 26). The runner's *default* Xcode is older (Swift 6.1),
       # so select the newest installed Xcode before any swift/xcodebuild call.
@@ -40,12 +43,9 @@ jobs:
       - name: Lint Swift sources
         working-directory: apps/ios
         run: |
-          if xcrun --find swift-format >/dev/null 2>&1; then
-            xcrun swift-format lint --strict --recursive --configuration .swift-format \
-              Packages App Widgets Watch WatchWidgets
-          else
-            echo "::warning::swift-format not available in this Xcode toolchain; skipping"
-          fi
+          xcrun --find swift-format
+          xcrun swift-format lint --strict --recursive --configuration .swift-format \
+            Packages App Widgets Watch WatchWidgets NotificationService
 
   test-packages:
     name: swift test (${{ matrix.package }})
@@ -61,8 +61,10 @@ jobs:
           - ThinClawAuth
           - ThinClawAPI
           - ThinClawPersistence
+          - ThinClawLiveActivity
+          - ThinClawWatchBridge
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
@@ -77,7 +79,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
@@ -85,7 +87,7 @@ jobs:
           [ -n "$latest" ] && sudo xcode-select -s "$latest"
           swift --version
       # The drift check runs swift-openapi-generator, installed via mise.
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
         with:
           working_directory: apps/ios
       - name: Check generated client freshness
@@ -105,14 +107,14 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           echo "Selecting ${latest:-<none found>}"
           [ -n "$latest" ] && sudo xcode-select -s "$latest"
           swift --version
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
         with:
           working_directory: apps/ios
       - name: Generate workspace (resolves SPM via xcodebuild)
@@ -128,7 +130,29 @@ jobs:
             -workspace ThinClaw.xcworkspace \
             -scheme ThinClaw \
             -destination 'generic/platform=iOS Simulator' \
+            -resultBundlePath build/app-simulator.xcresult \
             CODE_SIGNING_ALLOWED=NO
+      - name: Build app for a generic iOS device
+        working-directory: apps/ios
+        run: |
+          xcodebuild build \
+            -workspace ThinClaw.xcworkspace \
+            -scheme ThinClaw \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Run app unit and UI tests
+        working-directory: apps/ios
+        run: ./scripts/app-tests.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: app-build-xcresult
+          path: apps/ios/build/app-simulator.xcresult
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: app-tests-xcresult
+          path: apps/ios/build/app-tests.xcresult
 
   # watchOS whole-target build. The watch app (ThinClawWatch) and its embedded
   # WidgetKit complication (ThinClawWatchWidgets) are a *separate* watchOS
@@ -146,14 +170,14 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           echo "Selecting ${latest:-<none found>}"
           [ -n "$latest" ] && sudo xcode-select -s "$latest"
           swift --version
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
         with:
           working_directory: apps/ios
       - name: Generate workspace (resolves SPM via xcodebuild)
@@ -170,28 +194,37 @@ jobs:
             -workspace ThinClaw.xcworkspace \
             -scheme ThinClawWatch \
             -destination 'generic/platform=watchOS Simulator' \
+            -resultBundlePath build/watch-simulator.xcresult \
             CODE_SIGNING_ALLOWED=NO
+      - name: Build the watch app for a generic device
+        working-directory: apps/ios
+        run: |
+          xcodebuild build \
+            -workspace ThinClaw.xcworkspace \
+            -scheme ThinClawWatch \
+            -destination 'generic/platform=watchOS' \
+            CODE_SIGNING_ALLOWED=NO
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: watch-build-xcresult
+          path: apps/ios/build/watch-simulator.xcresult
 
-  # iOS-only Feature package tests on a concrete iOS 26 simulator. The
+  # iOS-only package tests on the newest concrete supported simulator. The
   # swift-test matrix above cannot cover these: Packages/Features/* declare
-  # `.iOS(.v26)` only, so `swift test` (host-Mac build) skips them. This job
-  # runs their XCTest targets (e.g. FeatureOnboarding's DiscoveryStoreTests +
-  # OnboardingStoreTests) via `xcodebuild test -scheme <Package>` on a booted
-  # iOS 26 simulator. scripts/feature-tests.sh auto-discovers every feature
-  # package that has tests and soft-skips (exit 0 with a ::warning::) if the
-  # runner ships no iOS 26 runtime, so runner-image drift never blocks
-  # contributors. Set FEATURE_TESTS_REQUIRE_SIM=1 to harden it once the image
-  # is known to always carry an iOS 26 runtime.
+  # iOS 18+ only, so `swift test` (host-Mac build) skips them. This job runs all
+  # six feature XCTest targets plus WidgetKitShared via `xcodebuild test
+  # -scheme <Package>` on a booted supported simulator. The required-simulator
+  # flag below turns a missing runtime into a hard CI failure.
   feature-tests:
-    name: feature package tests (iOS 26 sim)
+    name: iOS package tests (latest simulator)
     runs-on: macos-15
     # Bounded so a hung simulator boot / test process can never hold the run
     # open (a stuck xcodebuild test otherwise inherits GitHub's 6h default).
-    # feature-tests.sh soft-skips a missing runtime in seconds, so a healthy
-    # run is well under this; the cap only fires on a genuine hang.
+    # Missing runtimes fail quickly; the cap only fires on a genuine hang.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
@@ -202,27 +235,83 @@ jobs:
         run: xcrun simctl list devices available | grep -i ios || true
       - name: Run Feature package tests
         working-directory: apps/ios
+        env:
+          FEATURE_TESTS_REQUIRE_SIM: "1"
         run: ./scripts/feature-tests.sh
+
+  minimum-os-tests:
+    name: iOS package tests (minimum iOS 18)
+    if: startsWith(github.ref, 'refs/tags/ios-v')
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Select newest Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$latest" ] && sudo xcode-select -s "$latest"
+          swift --version
+      - name: Run minimum-OS package tests
+        working-directory: apps/ios
+        env:
+          FEATURE_TESTS_REQUIRE_SIM: "1"
+          IOS_RUNTIME_MAJOR: "18"
+        run: ./scripts/feature-tests.sh
+
+  archive-validation:
+    name: unsigned release archive validation
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Select newest Xcode
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$latest" ] && sudo xcode-select -s "$latest"
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        with:
+          working_directory: apps/ios
+      - name: Generate workspace
+        working-directory: apps/ios
+        run: mise x -- ./scripts/tuist-generate.sh
+      - name: Validate release archive graph
+        working-directory: apps/ios
+        run: |
+          xcodebuild archive \
+            -workspace ThinClaw.xcworkspace \
+            -scheme ThinClaw \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/ThinClaw-unsigned.xcarchive \
+            -resultBundlePath build/archive-validation.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: archive-validation
+          path: |
+            apps/ios/build/archive-validation.xcresult
+            apps/ios/build/ThinClaw-unsigned.xcarchive
 
   # TestFlight archive + export + upload. Runs only on an `ios-v*` tag push.
   # Credential-gated: without the App Store Connect API key secrets (which the
   # public repo does not carry), the signing steps are skipped with a clear
   # message rather than failing — the archive requires an operator's own Apple
   # team. No fastlane, no match, no committed provisioning profiles.
-  archive:
-    name: TestFlight archive (tag ios-v*)
+  testflight-upload:
+    name: TestFlight credentialed upload (tag ios-v*)
     if: startsWith(github.ref, 'refs/tags/ios-v')
     runs-on: macos-15
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Select newest Xcode
         run: |
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
           echo "Selecting ${latest:-<none found>}"
           [ -n "$latest" ] && sudo xcode-select -s "$latest"
           swift --version
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
         with:
           working_directory: apps/ios
       # Surface whether distribution credentials are configured. Secrets cannot

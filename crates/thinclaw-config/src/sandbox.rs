@@ -19,7 +19,7 @@ pub struct ClaudeCodeConfig {
     /// Host directory containing Claude auth config (not mounted into containers;
     /// auth is handled via ANTHROPIC_API_KEY env var instead).
     pub config_dir: PathBuf,
-    /// Claude model to use (e.g. "claude-sonnet-4-6", "claude-opus-4-5").
+    /// Claude model to use (e.g. "claude-sonnet-5", "claude-opus-4-5").
     pub model: String,
     /// Maximum agentic turns before stopping.
     pub max_turns: u32,
@@ -106,7 +106,7 @@ impl Default for ClaudeCodeConfig {
             config_dir: dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".claude"),
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5".to_string(),
             max_turns: 50,
             memory_limit_mb: 4096,
             allowed_tools: default_claude_code_allowed_tools(),
@@ -410,7 +410,7 @@ mod tests {
     fn claude_code_default_keeps_permission_allowlist() {
         let cfg = ClaudeCodeConfig::default();
         assert!(!cfg.enabled);
-        assert_eq!(cfg.model, "claude-sonnet-4-6");
+        assert_eq!(cfg.model, "claude-sonnet-5");
         assert!(cfg.allowed_tools.contains(&"Read(*)".to_string()));
         assert!(cfg.allowed_tools.contains(&"Bash(*)".to_string()));
     }

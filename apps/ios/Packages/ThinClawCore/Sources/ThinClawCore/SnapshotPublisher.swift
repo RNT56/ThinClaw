@@ -100,6 +100,10 @@ public actor SnapshotPublisher {
         self.privacy = privacy
     }
 
+    public func setGatewayInstanceID(_ gatewayInstanceID: String?) {
+        state.gatewayInstanceID = gatewayInstanceID
+    }
+
     // MARK: - Live folding (foreground path)
 
     /// Fold one live SSE event into the agent-status projection and schedule a

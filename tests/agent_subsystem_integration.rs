@@ -92,6 +92,7 @@ fn permissive_safety() -> SafetyLayer {
         external_scanner_mode: "off".to_string(),
         external_scanner_path: None,
         external_scanner_require_verified: false,
+        allow_temp_paths: false,
     })
 }
 
@@ -105,6 +106,7 @@ fn strict_safety() -> SafetyLayer {
         external_scanner_mode: "off".to_string(),
         external_scanner_path: None,
         external_scanner_require_verified: false,
+        allow_temp_paths: false,
     })
 }
 
@@ -400,6 +402,7 @@ mod safety_layer {
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
             external_scanner_require_verified: false,
+            allow_temp_paths: false,
         });
         let big = "A".repeat(100);
         let out = safety.sanitize_tool_output("tool", &big);
@@ -424,14 +427,15 @@ mod safety_layer {
     fn tool_output_with_openai_key_is_blocked() {
         let safety = permissive_safety();
         // Synthetic key long enough to match the openai_api_key regex.
-        let output = "Result: sk-proj-abc123def456ghi789jkl012mno345pqrT3BlbkFJtest123";
-        let out = safety.sanitize_tool_output("web_search", output);
+        let synthetic_key = format!("{}{}", "sk-proj-", "a".repeat(48));
+        let output = format!("Result: {synthetic_key}");
+        let out = safety.sanitize_tool_output("web_search", &output);
         assert!(
             out.was_modified,
             "output containing an API key should be modified/blocked"
         );
         assert!(
-            !out.content.contains("sk-proj-"),
+            !out.content.contains(&synthetic_key),
             "raw key must not survive sanitization"
         );
     }

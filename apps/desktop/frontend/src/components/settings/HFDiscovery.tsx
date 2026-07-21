@@ -35,7 +35,7 @@ import {
     Video,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
-import { invoke } from "@tauri-apps/api/core";
+import { commandClient } from "../../lib/command-client";
 import { useModelContext } from "../model-context";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -441,7 +441,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
 
     // Open external URL
     const openExternal = useCallback((url: string) => {
-        invoke("open_url", { url }).catch((err) =>
+        commandClient.openUrl(url).catch((err) =>
             console.warn("open_url failed:", err)
         );
     }, []);

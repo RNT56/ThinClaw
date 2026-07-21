@@ -1556,4 +1556,102 @@ mod tests {
         assert!(scores.contains(&1.0));
         assert!(scores.iter().any(|&s| s < 1.0));
     }
+
+    #[derive(Default)]
+    struct FixtureAgent {
+        messages: std::sync::Mutex<Vec<IncomingMessage>>,
+    }
+
+    #[async_trait]
+    impl AgentEnvAgent for FixtureAgent {
+        async fn handle_env_message(
+            &self,
+            message: &IncomingMessage,
+        ) -> anyhow::Result<Option<String>> {
+            self.messages
+                .lock()
+                .expect("fixture messages lock")
+                .push(message.clone());
+            Ok(Some(
+                "The embedded evaluation agent completed the requested runtime smoke successfully."
+                    .to_string(),
+            ))
+        }
+
+        async fn latest_token_capture_for_env_message(
+            &self,
+            _message: &IncomingMessage,
+        ) -> Option<ProviderTokenCapture> {
+            Some(ProviderTokenCapture {
+                exact_tokens_supported: true,
+                logprobs_supported: true,
+                token_ids: vec![101, 102],
+                tokens: vec!["runtime".to_string(), " smoke".to_string()],
+                logprobs: vec![-0.1, -0.2],
+                provider: Some("fixture-provider".to_string()),
+                model: Some("fixture-model".to_string()),
+            })
+        }
+
+        fn env_llm_token_capture_support(&self) -> TokenCaptureSupport {
+            TokenCaptureSupport {
+                exact_tokens_supported: true,
+                logprobs_supported: true,
+            }
+        }
+
+        fn env_llm_provider_name(&self) -> String {
+            "fixture-provider".to_string()
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_loop_runner_smoke_uses_restricted_isolated_sessions_and_real_capture_path() {
+        let agent = Arc::new(FixtureAgent::default());
+        let artifact_root = tempfile::tempdir().expect("agent-loop artifact tempdir");
+        let env = AgentLoopEnv::new(agent.clone()).with_max_steps(1);
+        let mut runner = EnvRunner::new(env)
+            .with_artifact_root(artifact_root.path())
+            .with_concurrency(2);
+
+        let trajectories = runner
+            .evaluate(2, |_| {
+                vec![AgentAction::UserMessage {
+                    content: "Run the embedded agent evaluation smoke.".to_string(),
+                }]
+            })
+            .await
+            .expect("agent-loop evaluation");
+
+        assert_eq!(trajectories.len(), 2);
+        assert_ne!(trajectories[0].episode_id, trajectories[1].episode_id);
+        for trajectory in &trajectories {
+            assert_eq!(trajectory.env_name, "agent_loop");
+            assert_eq!(trajectory.steps.len(), 1);
+            assert_eq!(trajectory.score, 0.55);
+            let capture = trajectory.steps[0]
+                .token_capture
+                .as_ref()
+                .expect("provider token capture");
+            assert!(capture.exact_tokens_supported);
+            assert!(capture.logprobs_supported);
+            assert_eq!(capture.token_ids, vec![101, 102]);
+            assert_eq!(capture.provider.as_deref(), Some("fixture-provider"));
+        }
+
+        let messages = agent.messages.lock().expect("fixture messages lock");
+        assert_eq!(messages.len(), 2);
+        for message in messages.iter() {
+            assert_eq!(message.channel, "agent_env");
+            assert_eq!(message.user_id, "agent-env");
+            assert!(
+                message
+                    .thread_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("agent-env:"))
+            );
+            assert_eq!(message.metadata["tool_profile"], "restricted");
+            assert_eq!(message.metadata["agent_env"], true);
+        }
+    }
 }

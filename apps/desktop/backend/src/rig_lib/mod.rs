@@ -22,9 +22,9 @@ pub async fn agent_chat(
     state: tauri::State<'_, crate::sidecar::SidecarManager>,
     engine_manager: tauri::State<'_, crate::engine::EngineManager>,
     request: String,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     if request.trim().is_empty() || request.len() > 2 * 1024 * 1024 || request.contains('\0') {
-        return Err("Chat request is missing, malformed, or oversized".to_string());
+        return Err("Chat request is missing, malformed, or oversized".into());
     }
     let snapshot = crate::engine::local_runtime_snapshot(&state, &engine_manager).await;
     let endpoint = snapshot.endpoint.as_ref().ok_or_else(|| {
@@ -80,5 +80,5 @@ pub async fn agent_chat(
         model_family,
     );
 
-    manager.chat(&request).await
+    Ok(manager.chat(&request).await?)
 }

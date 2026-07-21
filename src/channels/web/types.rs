@@ -318,6 +318,7 @@ mod tests {
         assert_eq!(req.content, "hello");
         assert_eq!(req.user_id.as_deref(), Some("family-1"));
         assert!(req.thread_id.is_none());
+        assert!(req.client_message_id.is_none());
     }
 
     #[test]

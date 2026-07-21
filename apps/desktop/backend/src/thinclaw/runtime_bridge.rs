@@ -23,6 +23,32 @@ use thinclaw_core::llm::LlmRuntimeManager;
 use super::tool_bridge::TauriToolBridge;
 use super::ui_types::UiEvent;
 
+#[derive(Debug, Clone)]
+pub(crate) struct LocalToolSecurityEvidence {
+    pub name: String,
+    pub side_effect: String,
+    pub approval_class: String,
+    pub empty_params_requirement: String,
+    pub sanitizes_output: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LocalSandboxSecurityEvidence {
+    pub enabled: bool,
+    pub policy: String,
+    pub network_allowlist: Vec<String>,
+    pub timeout_secs: u64,
+    pub memory_limit_mb: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LocalSecurityRuntimeEvidence {
+    pub telemetry: thinclaw_core::safety::SafetyTelemetrySnapshot,
+    pub sandbox: LocalSandboxSecurityEvidence,
+    pub tools: Vec<LocalToolSecurityEvidence>,
+}
+
 struct BootInjectCompletion {
     signal: tokio::sync::watch::Sender<bool>,
 }
@@ -175,6 +201,8 @@ pub(crate) struct ThinClawRuntimeInner {
     pub oauth_credential_sync: Option<thinclaw_core::llm::OAuthCredentialSyncHandle>,
     /// LLM runtime manager used for provider routing, advisor state, and route simulation.
     pub llm_runtime: Arc<LlmRuntimeManager>,
+    /// Effective sandbox configuration captured at runtime assembly.
+    pub sandbox_config: thinclaw_core::config::SandboxModeConfig,
     /// Desktop-local auxiliary tasks tied to the embedded engine lifecycle.
     pub auxiliary_tasks: RuntimeAuxiliaryTasks,
 }
@@ -286,6 +314,81 @@ impl ThinClawRuntimeState {
         } else {
             "stopped"
         }
+    }
+
+    /// Read the active local runtime's effective safety controls without
+    /// exposing prompts, parameters, outputs, or secret material.
+    pub(crate) async fn local_security_evidence(&self) -> Option<LocalSecurityRuntimeEvidence> {
+        use thinclaw_core::tools::{ApprovalRequirement, ToolApprovalClass, ToolSideEffectLevel};
+
+        let (agent, sandbox_config) = {
+            let guard = self.inner.read().await;
+            let inner = guard.as_ref()?;
+            (Arc::clone(&inner.agent), inner.sandbox_config.clone())
+        };
+        let sandbox = sandbox_config.to_sandbox_config();
+        let mut tools = Vec::new();
+        for tool in agent.tools().all().await {
+            let descriptor = tool.descriptor();
+            let approval_class = match descriptor.metadata.approval_class {
+                ToolApprovalClass::Never => "never",
+                ToolApprovalClass::Conditional => "conditional",
+                ToolApprovalClass::Always => "always",
+            };
+            let side_effect = match descriptor.metadata.side_effect_level {
+                ToolSideEffectLevel::Read => "read",
+                ToolSideEffectLevel::Write => "write",
+            };
+            let empty_params_requirement = match tool.requires_approval(&serde_json::json!({})) {
+                ApprovalRequirement::Never => "never",
+                ApprovalRequirement::UnlessAutoApproved => "unless_auto_approved",
+                ApprovalRequirement::Always => "always",
+            };
+            let reason = match (
+                descriptor.metadata.side_effect_level,
+                descriptor.metadata.approval_class,
+            ) {
+                (_, ToolApprovalClass::Always) => {
+                    "Every invocation requires explicit human approval.".to_string()
+                }
+                (ToolSideEffectLevel::Write, ToolApprovalClass::Conditional) => {
+                    "Write-capable tool; approval is decided from the concrete operation and parameters."
+                        .to_string()
+                }
+                (ToolSideEffectLevel::Write, ToolApprovalClass::Never) => {
+                    "Write-capable tool with no coarse approval requirement; sandbox and runtime validators remain authoritative."
+                        .to_string()
+                }
+                (ToolSideEffectLevel::Read, ToolApprovalClass::Conditional) => {
+                    "Read-oriented tool that may require approval for sensitive targets or credentials."
+                        .to_string()
+                }
+                (ToolSideEffectLevel::Read, ToolApprovalClass::Never) => {
+                    "Read-only metadata class with no approval requirement.".to_string()
+                }
+            };
+            tools.push(LocalToolSecurityEvidence {
+                name: descriptor.name,
+                side_effect: side_effect.to_string(),
+                approval_class: approval_class.to_string(),
+                empty_params_requirement: empty_params_requirement.to_string(),
+                sanitizes_output: tool.requires_sanitization(),
+                reason,
+            });
+        }
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+
+        Some(LocalSecurityRuntimeEvidence {
+            telemetry: agent.safety_telemetry_snapshot(),
+            sandbox: LocalSandboxSecurityEvidence {
+                enabled: sandbox.enabled,
+                policy: sandbox_config.policy,
+                network_allowlist: sandbox.network_allowlist,
+                timeout_secs: sandbox_config.timeout_secs,
+                memory_limit_mb: sandbox_config.memory_limit_mb,
+            },
+            tools,
+        })
     }
 
     /// Get a reference to the Tauri AppHandle.

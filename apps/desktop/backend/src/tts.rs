@@ -62,7 +62,7 @@ pub async fn direct_media_tts_synthesize(
     pool: State<'_, SqlitePool>,
     text: String,
     model_path: Option<String>,
-) -> Result<DirectTtsResponse, String> {
+) -> Result<DirectTtsResponse, crate::thinclaw::bridge::BridgeError> {
     // Read user's preferred voice from config (set via InferenceModeTab voice selector)
     let user_voice = config_mgr
         .get_config()
@@ -237,21 +237,26 @@ pub async fn direct_media_tts_synthesize(
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             let _ = child.kill();
-            return Err(error);
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime { message: error });
         }
         Err(_) => {
             let _ = child.kill();
-            return Err("Piper synthesis timed out".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Piper synthesis timed out".to_string(),
+            });
         }
     }
 
     if pcm_bytes.is_empty() {
-        return Err(
-            "piper produced no audio output. Check that the model path is valid.".to_string(),
-        );
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "piper produced no audio output. Check that the model path is valid."
+                .to_string(),
+        });
     }
     if !pcm_bytes.len().is_multiple_of(2) {
-        return Err("Piper returned malformed 16-bit PCM audio".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Piper returned malformed 16-bit PCM audio".to_string(),
+        });
     }
 
     tracing::info!("[tts] Synthesis complete — {} PCM bytes", pcm_bytes.len());
@@ -350,7 +355,7 @@ async fn persist_voice_output(
 #[specta::specta]
 pub async fn direct_media_tts_list_voices(
     router: State<'_, InferenceRouter>,
-) -> Result<Vec<crate::inference::VoiceInfo>, String> {
+) -> Result<Vec<crate::inference::VoiceInfo>, crate::thinclaw::bridge::BridgeError> {
     if let Some(backend) = router.tts_backend().await {
         let voices = backend
             .available_voices()

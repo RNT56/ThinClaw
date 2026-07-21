@@ -263,21 +263,26 @@ pub async fn direct_rag_upload_document(
     pool: State<'_, SqlitePool>,
     file_bytes: Vec<u8>,
     filename: String,
-) -> Result<DirectDocumentUploadResponse, String> {
+) -> Result<DirectDocumentUploadResponse, crate::thinclaw::bridge::BridgeError> {
     if file_bytes.is_empty() || file_bytes.len() > MAX_DOCUMENT_UPLOAD_BYTES {
         return Err(format!(
             "Document must be between 1 byte and {MAX_DOCUMENT_UPLOAD_BYTES} bytes"
-        ));
+        )
+        .into());
     }
     if filename.is_empty()
         || filename.len() > MAX_DOCUMENT_FILENAME_BYTES
         || filename.chars().any(char::is_control)
     {
-        return Err("Document filename is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Document filename is invalid".to_string(),
+        });
     }
     let filename_path = std::path::Path::new(&filename);
     if filename_path.components().count() != 1 {
-        return Err("Document filename must not contain a path".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Document filename must not contain a path".to_string(),
+        });
     }
     let safe_filename = filename_path
         .file_name()
@@ -289,18 +294,24 @@ pub async fn direct_rag_upload_document(
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| "Document filename must include a file extension".to_string())?;
     if extension.len() > 16 || !extension.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-        return Err("Document file extension is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Document file extension is invalid".to_string(),
+        });
     }
     let mime_type = if extension == "pdf" {
         if !file_bytes.starts_with(b"%PDF-") {
-            return Err("The uploaded file is not a valid PDF".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "The uploaded file is not a valid PDF".to_string(),
+            });
         }
         "application/pdf"
     } else {
         let text = std::str::from_utf8(&file_bytes)
             .map_err(|_| "Only PDF and UTF-8 text documents are supported".to_string())?;
         if text.contains('\0') {
-            return Err("Text documents cannot contain NUL bytes".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Text documents cannot contain NUL bytes".to_string(),
+            });
         }
         "text/plain"
     };
@@ -355,7 +366,7 @@ pub async fn direct_rag_upload_document(
         Ok(asset) => asset,
         Err(error) => {
             let _ = file_store.delete(&relative_path).await;
-            return Err(error);
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime { message: error });
         }
     };
 
@@ -1235,8 +1246,8 @@ pub async fn direct_rag_ingest_document(
     chat_id: Option<String>,
     project_id: Option<String>,
     embedding_model_path: Option<String>,
-) -> Result<DirectDocumentIngestResponse, String> {
-    ingest_document_impl(
+) -> Result<DirectDocumentIngestResponse, crate::thinclaw::bridge::BridgeError> {
+    Ok(ingest_document_impl(
         &app,
         sidecar.inner(),
         file_store.inner(),
@@ -1248,7 +1259,7 @@ pub async fn direct_rag_ingest_document(
         project_id,
         embedding_model_path,
     )
-    .await
+    .await?)
 }
 
 #[tauri::command]
@@ -1266,9 +1277,9 @@ pub async fn direct_rag_retrieve_context(
     chat_id: Option<String>,
     doc_ids: Option<Vec<String>>,
     project_id: Option<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, crate::thinclaw::bridge::BridgeError> {
     let embedding_backend = inference_router.embedding_backend().await;
-    retrieve_context_internal(
+    Ok(retrieve_context_internal(
         Some(app),
         sidecar.inner(),
         pool.inner().clone(),
@@ -1280,7 +1291,7 @@ pub async fn direct_rag_retrieve_context(
         doc_ids,
         project_id,
     )
-    .await
+    .await?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2051,8 +2062,8 @@ pub async fn perform_integrity_check(
 pub async fn direct_rag_check_vector_index_integrity(
     pool: State<'_, SqlitePool>,
     vector_manager: State<'_, crate::vector_store::VectorStoreManager>,
-) -> Result<String, String> {
-    perform_integrity_check(&pool, &vector_manager).await
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
+    Ok(perform_integrity_check(&pool, &vector_manager).await?)
 }
 
 #[cfg(test)]

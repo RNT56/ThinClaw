@@ -234,9 +234,9 @@ async fn start_test_server_with_provider(
             .await
             .expect("load device store for test"),
         ),
-        pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
+        pending_approvals: std::sync::Arc::new(
+            thinclaw::channels::web::server::PendingApprovalsStore::in_memory(),
+        ),
         registry_entries: Vec::new(),
         cost_guard: None,
         cost_tracker: None,
@@ -244,7 +244,7 @@ async fn start_test_server_with_provider(
         response_cache: None,
         startup_time: std::time::Instant::now(),
         restart_requested: std::sync::atomic::AtomicBool::new(false),
-        routine_engine: None,
+        routine_engine: Arc::new(std::sync::RwLock::new(None)),
         repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         secrets_store: None,
         channel_manager: None,
@@ -750,9 +750,9 @@ async fn test_no_llm_provider_returns_503() {
             .await
             .expect("load device store for test"),
         ),
-        pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
+        pending_approvals: std::sync::Arc::new(
+            thinclaw::channels::web::server::PendingApprovalsStore::in_memory(),
+        ),
         registry_entries: Vec::new(),
         cost_guard: None,
         cost_tracker: None,
@@ -760,7 +760,7 @@ async fn test_no_llm_provider_returns_503() {
         response_cache: None,
         startup_time: std::time::Instant::now(),
         restart_requested: std::sync::atomic::AtomicBool::new(false),
-        routine_engine: None,
+        routine_engine: Arc::new(std::sync::RwLock::new(None)),
         repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         secrets_store: None,
         channel_manager: None,

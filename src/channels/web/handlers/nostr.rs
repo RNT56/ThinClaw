@@ -137,7 +137,10 @@ pub(crate) async fn nostr_save_key_handler(
 
     if let Err(err) = reconcile_nostr_runtime(state.as_ref(), &request_identity.principal_id).await
     {
-        tracing::warn!("Nostr runtime reconcile failed after secret save: {}", err);
+        // A provider error can include request context; do not attach it to a
+        // log emitted from a secret-handling path.
+        let _ = err;
+        tracing::warn!("Nostr runtime reconcile failed after secret save");
         return Ok((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(nostr_save_key_partial_failure_response(

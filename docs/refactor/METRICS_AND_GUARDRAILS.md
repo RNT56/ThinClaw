@@ -49,7 +49,7 @@ Each architectural invariant must be machine-enforced. Status: ✅ live · 🟡 
 | bundle-reference resolution test | broken registry bundles | 🟡 with P5/T11 |
 | coverage threshold (`--fail-under`, no `--lib`) | silent coverage erosion | 🟡 partial: CI enforces the measured 38% project floor and 70% changed-line coverage; expanding beyond `--lib` remains |
 | `export_bindings` no-hand-edit + variant-coverage test | binding drift | ✅ exists; extend per B-tasks |
-| MSRV/toolchain synchronization | accidental MSRV bump | ✅ `check-msrv-sync.py` runs in CI; the pinned toolchain equals package MSRV 1.92 |
+| MSRV/toolchain synchronization | accidental MSRV bump | ✅ `check-msrv-sync.py` runs in CI; the pinned toolchain equals package MSRV 1.94 |
 
 ## Re-audit procedure
 

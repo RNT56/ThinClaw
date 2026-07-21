@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -233,10 +234,10 @@ async fn wait_for_terminal_run(
     }
 }
 
-async fn wait_for_new_terminal_run(
+async fn wait_for_unseen_terminal_run(
     db: &Arc<dyn Database>,
     routine_id: Uuid,
-    previous_run_id: Option<Uuid>,
+    seen_run_ids: &HashSet<Uuid>,
 ) -> thinclaw::agent::routine::RoutineRun {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -246,7 +247,7 @@ async fn wait_for_new_terminal_run(
             .expect("list_routine_runs should succeed");
 
         for run in runs {
-            if Some(run.id) == previous_run_id || run.status == RunStatus::Running {
+            if seen_run_ids.contains(&run.id) || run.status == RunStatus::Running {
                 continue;
             }
             return run;
@@ -315,9 +316,9 @@ async fn start_routine_gateway_server(
             .await
             .expect("load device store for test"),
         ),
-        pending_approvals: std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
+        pending_approvals: std::sync::Arc::new(
+            thinclaw::channels::web::server::PendingApprovalsStore::in_memory(),
+        ),
         registry_entries: Vec::new(),
         cost_guard: None,
         cost_tracker: None,
@@ -325,7 +326,7 @@ async fn start_routine_gateway_server(
         response_cache: None,
         startup_time: std::time::Instant::now(),
         restart_requested: std::sync::atomic::AtomicBool::new(false),
-        routine_engine: Some(engine),
+        routine_engine: Arc::new(std::sync::RwLock::new(Some(engine))),
         repo_project_supervisor: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         secrets_store: None,
         channel_manager: None,

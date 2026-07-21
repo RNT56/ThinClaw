@@ -5,6 +5,7 @@ import { useVoiceWake } from '../../hooks/use-voice-wake';
 import { useAudioRecorder } from '../../hooks/use-audio-recorder';
 import { directCommands } from '../../lib/generated/direct-commands';
 import { toast } from 'sonner';
+import { bridgeErrorMessage } from '../../lib/command-errors';
 
 type VoiceState = 'idle' | 'listening' | 'recording' | 'transcribing';
 
@@ -42,7 +43,7 @@ export function VoiceWakeOverlay() {
             const res = await directCommands.directMediaTranscribeAudio(audioBytes);
 
             if (res.status === 'error') {
-                toast.error('Transcription failed', { description: res.error });
+                toast.error('Transcription failed', { description: bridgeErrorMessage(res.error) });
             } else if (res.status === 'ok' && res.data.text.trim()) {
                 const text = res.data.text.trim();
                 // Dispatch custom event for ChatProvider to pick up

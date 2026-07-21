@@ -35,11 +35,11 @@ pub async fn direct_assets_upload_image(
     file_store: State<'_, FileStore>,
     pool: State<'_, SqlitePool>,
     image_bytes: Vec<u8>,
-) -> Result<ImageResponse, String> {
+) -> Result<ImageResponse, crate::thinclaw::bridge::BridgeError> {
     if image_bytes.is_empty() || image_bytes.len() > MAX_IMAGE_UPLOAD_BYTES {
-        return Err(format!(
-            "Image must be between 1 byte and {MAX_IMAGE_UPLOAD_BYTES} bytes"
-        ));
+        return Err(
+            format!("Image must be between 1 byte and {MAX_IMAGE_UPLOAD_BYTES} bytes").into(),
+        );
     }
     // Ensure images directory exists
     file_store
@@ -121,7 +121,7 @@ pub async fn direct_assets_upload_image(
     .await;
     if let Err(error) = asset_result {
         let _ = file_store.delete(&relative_path).await;
-        return Err(format!("Failed to save asset metadata: {error}"));
+        return Err(format!("Failed to save asset metadata: {error}").into());
     }
 
     println!(
@@ -146,7 +146,7 @@ pub async fn direct_assets_get_image_path(
     file_store: State<'_, FileStore>,
     pool: State<'_, SqlitePool>,
     id: String,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     validate_image_id(&id)?;
     let reference = DirectAssetStore::direct_ref(&id);
     if let Ok(path) = DirectAssetStore::path_for(pool.inner(), &reference).await {
@@ -187,15 +187,18 @@ pub async fn direct_assets_get_image_path(
         return Ok(full.to_string_lossy().to_string());
     }
 
-    Err(format!("Image not found: {}", id))
+    Err(format!("Image not found: {}", id).into())
 }
 
 // Helper to load and base64 encode an image by ID (Available as command)
 #[tauri::command]
 #[specta::specta]
-pub async fn direct_assets_load_image(app: AppHandle, id: String) -> Result<String, String> {
+pub async fn direct_assets_load_image(
+    app: AppHandle,
+    id: String,
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     validate_image_id(&id)?;
-    load_image_as_base64(&app, &id).await
+    Ok(load_image_as_base64(&app, &id).await?)
 }
 
 /// Detect MIME type from the file extension.
@@ -255,7 +258,9 @@ pub async fn load_image_as_base64(app: &AppHandle, image_id: &str) -> Result<Str
 
 #[tauri::command]
 #[specta::specta]
-pub async fn direct_assets_open_images_folder(app: AppHandle) -> Result<(), String> {
+pub async fn direct_assets_open_images_folder(
+    app: AppHandle,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let file_store = app.state::<FileStore>();
     file_store
         .create_dir_all("images")

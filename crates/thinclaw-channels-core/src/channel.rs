@@ -271,6 +271,14 @@ pub enum StatusUpdate {
     StreamChunk(String),
     /// General status message.
     Status(String),
+    /// Structured context-window pressure transition for clients that render
+    /// persistent capacity indicators without parsing human status text.
+    ContextPressure {
+        /// `none` | `warning` | `critical`.
+        level: String,
+        /// Approximate percentage of the model context window currently used.
+        usage_percent: f64,
+    },
     /// Structured plan update for clients that can render agent plans.
     Plan { entries: Vec<serde_json::Value> },
     /// LLM token/cost usage for the most recent model turn.

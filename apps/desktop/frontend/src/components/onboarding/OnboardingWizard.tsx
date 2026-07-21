@@ -12,13 +12,13 @@ import { APP_THEMES } from '../../lib/app-themes';
 import { toast } from 'sonner';
 // model-library no longer used directly — all models discovered via HF Hub
 import { useModelContext } from '../model-context';
-import { openPath } from '../../lib/thinclaw';
 import { commands } from '../../lib/bindings';
 import { listen } from '@tauri-apps/api/event';
 import { useEngineSetup } from '../../hooks/use-engine-setup';
 import { clearOnboardingProgress, startOnboardingProgress } from '../../lib/local-storage-migration';
 import { directCommands } from '../../lib/generated/direct-commands';
 import { unwrapResult } from '../../lib/guards';
+import { Progress } from '../ui';
 
 // ---------------------------------------------------------------------------
 // HF Hub types (match backend via specta)
@@ -32,16 +32,6 @@ interface HfModelCard {
     tags: string[];
     last_modified: string;
     gated: boolean;
-}
-
-const MAX_REMOTE_DEPLOY_LOG_LINES = 2000;
-const MAX_REMOTE_DEPLOY_LOG_CHARS = 16_384;
-
-function appendRemoteDeployLog(previous: string[], line: string): string[] {
-    const next = [...previous, line.slice(0, MAX_REMOTE_DEPLOY_LOG_CHARS)];
-    return next.length > MAX_REMOTE_DEPLOY_LOG_LINES
-        ? next.slice(-MAX_REMOTE_DEPLOY_LOG_LINES)
-        : next;
 }
 
 interface HfFileInfo {
@@ -71,9 +61,33 @@ interface OnboardingWizardProps {
     onComplete: () => void;
 }
 
-type Step = 'welcome' | 'style' | 'mode' | 'remote_setup' | 'engine_setup' | 'inference' | 'models' | 'api_keys' | 'permissions' | 'complete';
+export type Step = 'welcome' | 'style' | 'mode' | 'remote_setup' | 'agent' | 'engine_setup' | 'inference' | 'models' | 'api_keys' | 'permissions' | 'complete';
 type InferenceChoice = 'local' | 'cloud';
 type ModelCategory = 'llm' | 'embedding' | 'stt' | 'diffusion';
+
+export function buildOnboardingSteps({
+    mode,
+    inference,
+    showEngineSetup,
+}: {
+    mode: 'local' | 'remote';
+    inference: InferenceChoice;
+    showEngineSetup: boolean;
+}): Step[] {
+    const steps: Step[] = ['welcome', 'style', 'mode'];
+    if (mode === 'remote') steps.push('remote_setup');
+    steps.push('agent');
+    if (showEngineSetup) steps.push('engine_setup');
+    steps.push('inference', inference === 'local' ? 'models' : 'api_keys', 'permissions', 'complete');
+    return steps;
+}
+
+const PERSONALITY_PACKS = [
+    { id: 'balanced', label: 'Balanced', description: 'Clear, thoughtful, and adaptable' },
+    { id: 'professional', label: 'Professional', description: 'Precise, structured, and concise' },
+    { id: 'creative_partner', label: 'Creative partner', description: 'Exploratory, generative, and expressive' },
+    { id: 'research_assistant', label: 'Research assistant', description: 'Evidence-oriented and analytical' },
+] as const;
 
 // Pipeline filter definitions — matches HFDiscovery.tsx for consistency
 const ONBOARDING_PIPELINE_FILTERS: Record<ModelCategory, { label: string; tags: string[]; downloadCategory: string | null; placeholder: string }> = {
@@ -96,7 +110,7 @@ function normaliseHttpUrl(raw: string): string {
 
 // Cloud providers shown in API keys step
 const CLOUD_PROVIDERS = [
-    { id: 'anthropic', label: 'Anthropic', desc: 'Claude Sonnet, Opus & Haiku models', placeholder: 'sk-ant-api03-...', color: 'text-purple-500', keyUrl: 'https://console.anthropic.com/settings/keys', save: 'thinclawSaveAnthropicKey' as const },
+    { id: 'anthropic', label: 'Anthropic', desc: 'Claude Fable 5, Opus 4.8, Sonnet 5 & Haiku 4.5', placeholder: 'sk-ant-api03-...', color: 'text-purple-500', keyUrl: 'https://console.anthropic.com/settings/keys', save: 'thinclawSaveAnthropicKey' as const },
     { id: 'openai', label: 'OpenAI', desc: 'GPT-5, reasoning & coding models', placeholder: 'sk-...', color: 'text-emerald-500', keyUrl: 'https://platform.openai.com/api-keys', save: 'thinclawSaveOpenaiKey' as const },
     { id: 'gemini', label: 'Google Gemini', desc: 'Gemini Flash, Pro & frontier models', placeholder: 'AIza...', color: 'text-cyan-500', keyUrl: 'https://aistudio.google.com/app/apikey', save: 'thinclawSaveGeminiKey' as const },
     { id: 'groq', label: 'Groq', desc: 'Ultra-fast Llama, Mixtral inference', placeholder: 'gsk_...', color: 'text-orange-400', keyUrl: 'https://console.groq.com/keys', save: 'thinclawSaveGroqKey' as const },
@@ -112,6 +126,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     });
     const [isLoading, setIsLoading] = useState(false);
     const [inferenceChoice, setInferenceChoice] = useState<InferenceChoice>('local');
+    const [agentName, setAgentName] = useState('ThinClaw');
+    const [personalityPack, setPersonalityPack] = useState('balanced');
 
     // --- Remote setup state ---
     const [remoteDeployMode, setRemoteDeployMode] = useState<'new' | 'existing'>('existing');
@@ -192,19 +208,11 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     const showEngineSetupStep = engineInfo?.id === 'mlx' || engineInfo?.id === 'vllm';
 
     // Dynamic step list based on user choices
-    const stepList = useMemo(() => {
-        const s: Step[] = ['welcome', 'style', 'mode'];
-        if (mode === 'remote') s.push('remote_setup');
-        if (showEngineSetupStep) s.push('engine_setup');
-        s.push('inference');
-        if (inferenceChoice === 'local') {
-            s.push('models');
-        } else {
-            s.push('api_keys');
-        }
-        s.push('permissions', 'complete');
-        return s;
-    }, [showEngineSetupStep, mode, inferenceChoice]);
+    const stepList = useMemo(() => buildOnboardingSteps({
+        mode,
+        inference: inferenceChoice,
+        showEngineSetup: showEngineSetupStep,
+    }), [showEngineSetupStep, mode, inferenceChoice]);
 
     const progressPct = useMemo(() => {
         const idx = stepList.indexOf(step);
@@ -245,6 +253,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     };
 
     const handleNext = () => {
+        if (step === 'agent' && !agentName.trim()) return;
         if (step === 'complete') { handleFinish(); return; }
         const idx = stepList.indexOf(step);
         if (idx < stepList.length - 1) setStep(stepList[idx + 1]);
@@ -321,7 +330,10 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         setRemoteConnecting(true);
         setRemoteError('');
         try {
-            const ok = await commands.thinclawTestConnection(url, remoteExistingToken || null);
+            const ok = unwrapResult(
+                await commands.thinclawTestConnection(url, remoteExistingToken || null),
+                'Test remote gateway connection',
+            );
             if (!ok) {
                 setRemoteError('Cannot connect — server unreachable or auth failed');
                 setRemoteConnecting(false);
@@ -337,7 +349,10 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 auto_connect: true,
             };
             await thinclaw.addAgentProfile(newProfile);
-            await commands.thinclawSaveGatewaySettings('remote', url, remoteExistingToken || '');
+            unwrapResult(
+                await commands.thinclawSaveGatewaySettings('remote', url, remoteExistingToken || ''),
+                'Save remote gateway settings',
+            );
             setRemoteConnected(true);
             toast.success('Connected to remote agent!');
         } catch (e: any) {
@@ -349,53 +364,52 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
     // Remote deploy handler
     const handleRemoteDeploy = async () => {
-        if (!remoteIp || !remoteTailscaleKey.trim()) return;
+        if (!remoteIp) return;
         setRemoteDeploying(true);
         setRemoteDeployLogs(['=== ThinClaw Remote Deploy ===', `Target: ${remoteUser}@${remoteIp}`]);
         setRemoteError('');
-        let unlistenLog: (() => void) | undefined;
-        let unlistenStatus: (() => void) | undefined;
         try {
-            unlistenLog = await listen<string>('deploy-log', (event) => {
-                setRemoteDeployLogs((prev) => appendRemoteDeployLog(prev, event.payload));
+            const unlistenLog = await listen<string>('deploy-log', (event) => {
+                setRemoteDeployLogs((prev) => [...prev, event.payload]);
             });
-            unlistenStatus = await listen<string>('deploy-status', (event) => {
-                unlistenLog?.();
-                unlistenStatus?.();
-                try {
-                    const result = JSON.parse(event.payload);
-                    if (result.status === 'success') {
-                        setRemoteConnected(result.reachable !== false);
-                        // Auto-save the deployed agent
-                        const newProfile: thinclaw.AgentProfile = {
-                            id: crypto.randomUUID(),
-                            name: `Remote (${remoteIp})`,
-                            url: result.url,
-                            token: result.token || null,
-                            mode: 'remote',
-                            auto_connect: true,
-                        };
-                        thinclaw.addAgentProfile(newProfile).catch(console.error);
-                        commands.thinclawSaveGatewaySettings('remote', result.url, result.token || '').catch(console.error);
-                        if (result.reachable === false) {
-                            setRemoteError(result.message || 'Agent deployed, but this desktop is not connected to the same tailnet.');
-                            toast.warning('Agent deployed; connect this desktop to the same tailnet to continue.');
-                        } else {
-                            toast.success('Remote agent deployed and connected!');
-                        }
-                    } else {
-                        setRemoteError(result.message || 'Deployment failed');
-                    }
-                } catch {
-                    setRemoteError(event.payload);
+            try {
+                const result = unwrapResult(
+                    await commands.thinclawDeployRemote(
+                        remoteIp,
+                        remoteUser,
+                        remoteTailscaleKey || null,
+                        remoteEnableSystemd,
+                    ),
+                    'Deploy remote gateway',
+                );
+                const newProfile: thinclaw.AgentProfile = {
+                    id: crypto.randomUUID(),
+                    name: `Remote (${remoteIp})`,
+                    url: result.url,
+                    token: result.token || null,
+                    mode: 'remote',
+                    auto_connect: true,
+                };
+                // Save the returned credential even if the health check timed
+                // out: the deployment may still finish after this command, and
+                // the one-time token must not be lost with the response object.
+                await thinclaw.addAgentProfile(newProfile);
+                unwrapResult(
+                    await commands.thinclawSaveGatewaySettings('remote', result.url, result.token || ''),
+                    'Save deployed gateway settings',
+                );
+                if (result.status === 'success') {
+                    setRemoteConnected(true);
+                    toast.success('Remote agent deployed and connected!');
+                } else {
+                    setRemoteError(`${result.message || 'Deployment health check timed out'} The URL and credential were saved; retry the connection when the gateway is ready.`);
                 }
-                setRemoteDeploying(false);
-            });
-            await commands.thinclawDeployRemote(remoteIp, remoteUser, remoteTailscaleKey || null, remoteEnableSystemd);
+            } finally {
+                unlistenLog();
+            }
         } catch (e: any) {
-            unlistenLog?.();
-            unlistenStatus?.();
             setRemoteError(typeof e === 'string' ? e : e.message);
+        } finally {
             setRemoteDeploying(false);
         }
     };
@@ -431,6 +445,14 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     const handleFinish = async () => {
         setIsLoading(true);
         try {
+            unwrapResult(await commands.thinclawConfigPatch({
+                agent: {
+                    'agent.name': agentName.trim(),
+                    'agent.personality_pack': personalityPack,
+                    'agent.persona_seed': personalityPack,
+                },
+            }), 'agent setup');
+
             // Save HF Token if provided
             if (hfToken && hfToken.trim().length > 0) {
                 await thinclaw.setHfToken(hfToken.trim());
@@ -464,7 +486,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                         if (dim && dim > 0) {
                             const userConfig = await commands.getUserConfig();
                             if (userConfig.vector_dimensions !== dim) {
-                                await commands.updateUserConfig({ ...userConfig, vector_dimensions: dim });
+                                await commands.updateUserConfig({ vector_dimensions: dim });
                                 console.log(`[onboarding] Pre-set vector_dimensions to ${dim} for ${embeddingEntry.repoId}`);
                             }
                         }
@@ -527,21 +549,21 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     };
 
     return (
-        <div className="fixed inset-0 z-50 bg-background/95 backdrop-blur-xs flex items-center justify-center p-4">
+        <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="onboarding-dialog-title"
+            className="fixed inset-0 z-50 bg-background/95 backdrop-blur-xs flex items-center justify-center p-4"
+        >
             <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 className="w-full max-w-4xl bg-card border border-border rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
             >
-                <div className="h-1 bg-muted w-full">
-                    <motion.div
-                        className="h-full bg-primary"
-                        initial={{ width: "0%" }}
-                        animate={{ width: `${progressPct}%` }}
-                    />
-                </div>
+                <h1 id="onboarding-dialog-title" className="sr-only">ThinClaw Desktop setup</h1>
+                <Progress value={progressPct} label={`Setup step ${stepList.indexOf(step) + 1} of ${stepList.length}`} />
 
-                <div className="p-8 flex-1 overflow-y-auto">
+                <div className="p-8 flex-1 overflow-y-auto" aria-live="polite">
                     <AnimatePresence mode="wait">
                         {step === 'welcome' && (
                             <motion.div
@@ -582,12 +604,16 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                 <button
                                                     onClick={() => setUiTheme("light")}
                                                     className={cn("p-1.5 rounded-md transition-all", currentMode === 'light' ? 'bg-background shadow-xs text-primary' : 'text-muted-foreground hover:text-foreground')}
+                                                    aria-label="Use light appearance"
+                                                    aria-pressed={currentMode === 'light'}
                                                 >
                                                     <Sun className="w-3.5 h-3.5" />
                                                 </button>
                                                 <button
                                                     onClick={() => setUiTheme("dark")}
                                                     className={cn("p-1.5 rounded-md transition-all", currentMode === 'dark' ? 'bg-background shadow-xs text-primary' : 'text-muted-foreground hover:text-foreground')}
+                                                    aria-label="Use dark appearance"
+                                                    aria-pressed={currentMode === 'dark'}
                                                 >
                                                     <Moon className="w-3.5 h-3.5" />
                                                 </button>
@@ -602,6 +628,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                     <button
                                                         key={t.id}
                                                         onClick={() => setAppThemeId(t.id)}
+                                                        aria-label={`Use ${t.label} palette`}
+                                                        aria-pressed={isActive}
                                                         className={cn(
                                                             "group p-3 rounded-xl border-2 text-left transition-all space-y-3",
                                                             isActive
@@ -744,6 +772,83 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                             </motion.div>
                         )}
 
+                        {step === 'agent' && (
+                            <motion.div
+                                key="agent"
+                                initial={{ opacity: 0, x: 20 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                exit={{ opacity: 0, x: -20 }}
+                                className="space-y-7"
+                            >
+                                <div className="text-center">
+                                    <div className="mx-auto mb-4 grid size-12 place-items-center rounded-xl bg-primary/10 text-primary">
+                                        <Bot className="size-6" aria-hidden="true" />
+                                    </div>
+                                    <h2 className="text-2xl font-bold">Meet your agent</h2>
+                                    <p className="mt-1 text-muted-foreground">
+                                        This identity follows the agent in both Workbench and Agent Cockpit.
+                                    </p>
+                                </div>
+
+                                <div className="mx-auto max-w-2xl space-y-5">
+                                    <div className="space-y-2">
+                                        <label htmlFor="onboarding-agent-name" className="text-sm font-semibold">Agent name</label>
+                                        <input
+                                            id="onboarding-agent-name"
+                                            value={agentName}
+                                            maxLength={48}
+                                            onChange={(event) => setAgentName(event.currentTarget.value)}
+                                            placeholder="ThinClaw"
+                                            aria-invalid={!agentName.trim()}
+                                            className="h-11 w-full rounded-xl border border-border bg-background px-4 text-sm outline-none transition-shadow focus:ring-2 focus:ring-primary/30"
+                                        />
+                                        <p className="text-xs text-muted-foreground">Used in conversations, status, and connected channels.</p>
+                                    </div>
+
+                                    <fieldset className="space-y-3">
+                                        <legend className="text-sm font-semibold">Working style</legend>
+                                        <div className="grid gap-3 sm:grid-cols-2">
+                                            {PERSONALITY_PACKS.map((pack) => {
+                                                const selected = personalityPack === pack.id;
+                                                return (
+                                                    <button
+                                                        key={pack.id}
+                                                        type="button"
+                                                        role="radio"
+                                                        aria-checked={selected}
+                                                        onClick={() => setPersonalityPack(pack.id)}
+                                                        className={cn(
+                                                            "rounded-xl border p-4 text-left transition-colors",
+                                                            selected
+                                                                ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+                                                                : "border-border bg-card hover:bg-accent/50",
+                                                        )}
+                                                    >
+                                                        <span className="block text-sm font-semibold">{pack.label}</span>
+                                                        <span className="mt-1 block text-xs text-muted-foreground">{pack.description}</span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </fieldset>
+
+                                    <div className="grid gap-3 rounded-xl border border-border bg-muted/30 p-4 text-xs sm:grid-cols-2">
+                                        <div>
+                                            <p className="font-semibold text-foreground">Workbench</p>
+                                            <p className="mt-1 text-muted-foreground">Direct chat, projects, models, and private desktop workflows.</p>
+                                        </div>
+                                        <div>
+                                            <p className="font-semibold text-foreground">Agent Cockpit</p>
+                                            <p className="mt-1 text-muted-foreground">Sessions, tools, approvals, automations, and channels.</p>
+                                        </div>
+                                        <p className="text-muted-foreground sm:col-span-2">
+                                            Channel credentials remain optional and can be added safely after setup from Cockpit → Channels.
+                                        </p>
+                                    </div>
+                                </div>
+                            </motion.div>
+                        )}
+
                         {step === 'remote_setup' && (
                             <motion.div
                                 key="remote_setup"
@@ -785,7 +890,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             <div className="relative">
                                                 <input type="text"
                                                     className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono pl-10 placeholder:text-muted-foreground/50"
-                                                    placeholder="100.64.0.10 or https://your-server.example"
+                                                    placeholder="192.168.1.50 or https://your-server.com:3000"
                                                     value={remoteExistingUrl}
                                                     onChange={(e) => setRemoteExistingUrl(e.target.value)}
                                                 />
@@ -835,7 +940,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                 <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Server IP Address</label>
                                                 <input type="text"
                                                     className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
-                                                    placeholder="e.g. 203.0.113.10"
+                                                    placeholder="e.g. 192.168.1.50 or your-server.com"
                                                     value={remoteIp}
                                                     onChange={(e) => setRemoteIp(e.target.value)}
                                                 />
@@ -850,8 +955,9 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                 />
                                             </div>
                                             <div className="space-y-2">
-                                                <label className="text-xs font-semibold text-muted-foreground">Tailscale Auth Key <span className="text-rose-500">(required)</span></label>
+                                                <label className="text-xs font-semibold text-muted-foreground">Tailscale Auth Key <span className="text-muted-foreground/60">(optional)</span></label>
                                                 <input type="password"
+                                                    autoComplete="off"
                                                     className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                                     placeholder="tskey-auth-..."
                                                     value={remoteTailscaleKey}
@@ -871,7 +977,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
                                         <button
                                             onClick={handleRemoteDeploy}
-                                            disabled={!remoteIp || !remoteTailscaleKey.trim() || remoteDeploying}
+                                            disabled={!remoteIp || remoteDeploying}
                                             className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-bold shadow-lg shadow-blue-500/20 transition-all flex items-center justify-center gap-2"
                                         >
                                             {remoteDeploying ? <><Loader2 className="w-4 h-4 animate-spin" /> Deploying...</> : <><Server className="w-4 h-4" /> Start Deployment</>}
@@ -1273,7 +1379,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                             Setup will finish immediately. You can check progress in Settings &gt; Models.
                                             <br />
                                             <button
-                                                onClick={() => modelsDir && openPath(modelsDir)}
+                                                onClick={() => modelsDir && void commands.openModelsFolder()}
                                                 className="underline hover:text-blue-300 mt-1 inline-flex items-center gap-1"
                                             >
                                                 Open Models Folder <HardDrive className="w-3 h-3" />
@@ -1439,9 +1545,9 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                 <div className="w-20 h-20 bg-green-500/10 rounded-full flex items-center justify-center mx-auto mb-6">
                                     <CheckCircle className="w-10 h-10 text-green-500" />
                                 </div>
-                                <h2 className="text-3xl font-bold">You're All Set!</h2>
+                                <h2 className="text-3xl font-bold">{agentName.trim() || 'ThinClaw'} is ready</h2>
                                 <p className="text-lg text-muted-foreground max-w-md mx-auto">
-                                    ThinClaw Desktop is configured and ready to help. You can always change these settings later in the settings menu.
+                                    Your {mode} agent will use {inferenceChoice} inference. Workbench and Agent Cockpit are both ready, and every choice remains editable in Settings.
                                 </p>
                             </motion.div>
                         )}
@@ -1465,7 +1571,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
                     <button
                         onClick={handleNext}
-                        disabled={isLoading}
+                        disabled={isLoading || (step === 'agent' && !agentName.trim())}
                         className="flex items-center gap-2 bg-primary text-primary-foreground hover:bg-primary/90 px-6 py-2.5 rounded-lg font-medium transition-all shadow-xs hover:shadow-sm"
                     >
                         {step === 'complete' ? (

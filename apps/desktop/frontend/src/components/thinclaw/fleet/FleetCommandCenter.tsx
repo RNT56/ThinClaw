@@ -12,6 +12,7 @@ import { FleetGraph } from './FleetGraph';
 import { FleetTerminal } from './FleetTerminal';
 import { Node, Edge } from '@xyflow/react';
 import { toast } from 'sonner';
+import { useThinClawEvents } from '../../../hooks/use-thinclaw-stream';
 
 // Real-time state per agent derived from events
 interface AgentRealtimeState {
@@ -81,6 +82,7 @@ export function FleetCommandCenter() {
     const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
     const [showTerminal, setShowTerminal] = useState(true);
     const [isSpawning, setIsSpawning] = useState(false);
+    const [fleetError, setFleetError] = useState<string | null>(null);
     const [realtimeLogs, setRealtimeLogs] = useState<Record<string, string[]>>({}); // agentId -> logs
     const [agentStates, setAgentStates] = useState<Record<string, AgentRealtimeState>>({});
 
@@ -93,8 +95,10 @@ export function FleetCommandCenter() {
         try {
             const data = await thinclaw.getFleetStatus();
             setAgents(data);
+            setFleetError(null);
         } catch (e) {
             console.error("Fleet fetch error:", e);
+            setFleetError(String(e));
         }
     }, []);
 
@@ -109,155 +113,128 @@ export function FleetCommandCenter() {
         return () => clearInterval(interval);
     }, [refreshFleet]);
 
-    // Real-time Event Listener — updates both logs AND agent states
-    // Uses a ref to store the unlisten function so the useEffect cleanup can actually call it
-    const unlistenRef = useRef<(() => void) | null>(null);
+    // Real-time event fan-out updates both logs and agent states.
+    useThinClawEvents((payload) => {
 
-    useEffect(() => {
-        let cancelled = false;
+        let sessionKey: string | null = null;
+        let logLine: string | null = null;
 
-        import('@tauri-apps/api/event').then(({ listen }) => {
-            if (cancelled) return; // Component unmounted during dynamic import
+        if ('session_key' in payload && payload.session_key) {
+            sessionKey = payload.session_key;
+        }
 
-            listen<any>('thinclaw-event', (event) => {
-                const payload = event.payload;
-                if (!payload || !payload.kind) return;
-
-                let sessionKey: string | null = null;
-                let logLine: string | null = null;
-
-                if (payload.session_key) {
-                    sessionKey = payload.session_key;
+        // Format log line based on event type
+        if (payload.kind === 'ToolUpdate') {
+            const status = payload.status;
+            const toolName = payload.tool_name;
+            if (status === 'started') {
+                logLine = `[TOOL] ▶ ${toolName}`;
+            } else if (status === 'stream') {
+                // Skip noisy stream events from terminal
+                logLine = null;
+            } else if (status === 'ok') {
+                logLine = `[TOOL] ✓ ${toolName}`;
+                if (payload.output) {
+                    const outStr = typeof payload.output === 'string'
+                        ? payload.output
+                        : JSON.stringify(payload.output).substring(0, 100);
+                    logLine += ` → ${outStr}`;
                 }
-
-                // Format log line based on event type
-                if (payload.kind === 'ToolUpdate') {
-                    const status = payload.status;
-                    const toolName = payload.tool_name;
-                    if (status === 'started') {
-                        logLine = `[TOOL] ▶ ${toolName}`;
-                    } else if (status === 'stream') {
-                        // Skip noisy stream events from terminal
-                        logLine = null;
-                    } else if (status === 'ok') {
-                        logLine = `[TOOL] ✓ ${toolName}`;
-                        if (payload.output) {
-                            const outStr = typeof payload.output === 'string'
-                                ? payload.output
-                                : JSON.stringify(payload.output).substring(0, 100);
-                            logLine += ` → ${outStr}`;
-                        }
-                    } else if (status === 'error') {
-                        logLine = `[ERROR] ✗ ${toolName} failed`;
-                    }
-                } else if (payload.kind === 'AssistantFinal') {
-                    logLine = `[RESPONSE] ${payload.text?.substring(0, 80)}${payload.text?.length > 80 ? '…' : ''}`;
-                } else if (payload.kind === 'AssistantSnapshot') {
-                    if (payload.text && payload.text.length > 20) {
-                        logLine = `[THINKING] ${payload.text.substring(0, 60)}${payload.text.length > 60 ? '…' : ''}`;
-                    }
-                } else if (payload.kind === 'RunStatus') {
-                    const s = payload.status;
-                    const icon = s === 'ok' ? '✓' : s === 'error' ? '✗' : s === 'started' ? '▶' : '●';
-                    logLine = `[RUN] ${icon} ${s}`;
-                    if (payload.error) logLine += `: ${payload.error}`;
-                } else if (payload.kind === 'ApprovalRequested') {
-                    logLine = `[APPROVAL] ⏳ Awaiting: ${payload.tool_name}`;
-                } else if (payload.kind === 'ApprovalResolved') {
-                    logLine = `[APPROVAL] ${payload.approved ? '✓ Approved' : '✗ Denied'}`;
-                } else if (payload.kind === 'AssistantDelta') {
-                    // Skip deltas from terminal (too noisy)
-                    logLine = null;
-                }
-
-                // Find matching agent
-                const agent = sessionKey ? (
-                    agentsRef.current.find(a =>
-                        sessionKey!.startsWith(`agent:${a.id}:`) ||
-                        a.active_session_id === sessionKey
-                    ) || (
-                        sessionKey!.startsWith('agent:main') ? agentsRef.current[0] : null
-                    )
-                ) : null;
-
-                if (agent) {
-                    // Update logs
-                    if (logLine) {
-                        const timestamp = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-                        const taggedLine = `${timestamp} ${logLine}`;
-                        setRealtimeLogs(prev => {
-                            const existing = prev[agent.id] || [];
-                            const newLogs = [...existing, taggedLine].slice(-100);
-                            return { ...prev, [agent.id]: newLogs };
-                        });
-                    }
-
-                    // Update real-time state
-                    setAgentStates(prev => {
-                        const current = prev[agent.id] || {
-                            runStatus: 'idle' as const,
-                            currentRunId: null,
-                            currentTool: null,
-                            lastActivity: Date.now(),
-                            toolsCompleted: 0,
-                            toolsStarted: 0,
-                        };
-
-                        let updated = { ...current, lastActivity: Date.now() };
-
-                        if (payload.kind === 'RunStatus') {
-                            if (payload.status === 'started' || payload.status === 'in_flight') {
-                                updated.runStatus = 'processing';
-                                updated.currentRunId = payload.run_id || null;
-                                updated.toolsCompleted = 0;
-                                updated.toolsStarted = 0;
-                            } else if (payload.status === 'ok' || payload.status === 'aborted') {
-                                updated.runStatus = 'idle';
-                                updated.currentRunId = null;
-                                updated.currentTool = null;
-                            } else if (payload.status === 'error') {
-                                updated.runStatus = 'error';
-                                updated.currentRunId = null;
-                                updated.currentTool = null;
-                            }
-                        } else if (payload.kind === 'ToolUpdate') {
-                            if (payload.status === 'started') {
-                                updated.runStatus = 'processing';
-                                updated.currentTool = payload.tool_name;
-                                updated.toolsStarted = (updated.toolsStarted || 0) + 1;
-                            } else if (payload.status === 'ok' || payload.status === 'error') {
-                                updated.currentTool = null;
-                                updated.toolsCompleted = (updated.toolsCompleted || 0) + 1;
-                            }
-                        } else if (payload.kind === 'ApprovalRequested') {
-                            updated.runStatus = 'waiting_approval';
-                            updated.currentTool = payload.tool_name;
-                        } else if (payload.kind === 'ApprovalResolved') {
-                            updated.runStatus = 'processing';
-                        } else if (payload.kind === 'AssistantDelta' || payload.kind === 'AssistantSnapshot') {
-                            updated.runStatus = 'processing';
-                        }
-
-                        return { ...prev, [agent.id]: updated };
-                    });
-                }
-            }).then(fn => {
-                if (cancelled) {
-                    fn(); // Already unmounted, clean up immediately
-                } else {
-                    unlistenRef.current = fn;
-                }
-            });
-        });
-
-        return () => {
-            cancelled = true;
-            if (unlistenRef.current) {
-                unlistenRef.current();
-                unlistenRef.current = null;
+            } else if (status === 'error') {
+                logLine = `[ERROR] ✗ ${toolName} failed`;
             }
-        };
-    }, []);
+        } else if (payload.kind === 'AssistantFinal') {
+            logLine = `[RESPONSE] ${payload.text?.substring(0, 80)}${payload.text?.length > 80 ? '…' : ''}`;
+        } else if (payload.kind === 'AssistantSnapshot') {
+            if (payload.text && payload.text.length > 20) {
+                logLine = `[THINKING] ${payload.text.substring(0, 60)}${payload.text.length > 60 ? '…' : ''}`;
+            }
+        } else if (payload.kind === 'RunStatus') {
+            const s = payload.status;
+            const icon = s === 'ok' ? '✓' : s === 'error' ? '✗' : s === 'started' ? '▶' : '●';
+            logLine = `[RUN] ${icon} ${s}`;
+            if (payload.error) logLine += `: ${payload.error}`;
+        } else if (payload.kind === 'ApprovalRequested') {
+            logLine = `[APPROVAL] ⏳ Awaiting: ${payload.tool_name}`;
+        } else if (payload.kind === 'ApprovalResolved') {
+            logLine = `[APPROVAL] ${payload.approved ? '✓ Approved' : '✗ Denied'}`;
+        } else if (payload.kind === 'AssistantDelta') {
+            // Skip deltas from terminal (too noisy)
+            logLine = null;
+        }
+
+        // Find matching agent
+        const agent = sessionKey ? (
+            agentsRef.current.find(a =>
+                sessionKey!.startsWith(`agent:${a.id}:`) ||
+                a.active_session_id === sessionKey
+            ) || (
+                sessionKey!.startsWith('agent:main') ? agentsRef.current[0] : null
+            )
+        ) : null;
+
+        if (agent) {
+            // Update logs
+            if (logLine) {
+                const timestamp = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                const taggedLine = `${timestamp} ${logLine}`;
+                setRealtimeLogs(prev => {
+                    const existing = prev[agent.id] || [];
+                    const newLogs = [...existing, taggedLine].slice(-100);
+                    return { ...prev, [agent.id]: newLogs };
+                });
+            }
+
+            // Update real-time state
+            setAgentStates(prev => {
+                const current = prev[agent.id] || {
+                    runStatus: 'idle' as const,
+                    currentRunId: null,
+                    currentTool: null,
+                    lastActivity: Date.now(),
+                    toolsCompleted: 0,
+                    toolsStarted: 0,
+                };
+
+                let updated = { ...current, lastActivity: Date.now() };
+
+                if (payload.kind === 'RunStatus') {
+                    if (payload.status === 'started' || payload.status === 'in_flight') {
+                        updated.runStatus = 'processing';
+                        updated.currentRunId = payload.run_id || null;
+                        updated.toolsCompleted = 0;
+                        updated.toolsStarted = 0;
+                    } else if (payload.status === 'ok' || payload.status === 'aborted') {
+                        updated.runStatus = 'idle';
+                        updated.currentRunId = null;
+                        updated.currentTool = null;
+                    } else if (payload.status === 'error') {
+                        updated.runStatus = 'error';
+                        updated.currentRunId = null;
+                        updated.currentTool = null;
+                    }
+                } else if (payload.kind === 'ToolUpdate') {
+                    if (payload.status === 'started') {
+                        updated.runStatus = 'processing';
+                        updated.currentTool = payload.tool_name;
+                        updated.toolsStarted = (updated.toolsStarted || 0) + 1;
+                    } else if (payload.status === 'ok' || payload.status === 'error') {
+                        updated.currentTool = null;
+                        updated.toolsCompleted = (updated.toolsCompleted || 0) + 1;
+                    }
+                } else if (payload.kind === 'ApprovalRequested') {
+                    updated.runStatus = 'waiting_approval';
+                    updated.currentTool = payload.tool_name;
+                } else if (payload.kind === 'ApprovalResolved') {
+                    updated.runStatus = 'processing';
+                } else if (payload.kind === 'AssistantDelta' || payload.kind === 'AssistantSnapshot') {
+                    updated.runStatus = 'processing';
+                }
+
+                return { ...prev, [agent.id]: updated };
+            });
+        }
+    });
 
     // Merge backend run_status with frontend real-time states
     const getEffectiveStatus = useCallback((agent: thinclaw.AgentStatusSummary): string => {
@@ -396,10 +373,19 @@ export function FleetCommandCenter() {
 
     const handleBroadcast = async (command: string) => {
         try {
-            await thinclaw.broadcastCommand(command);
-            toast.success('Broadcast sent to all sessions');
+            const result = await thinclaw.broadcastCommand(command);
+            if (result.failed > 0) {
+                const failed = result.deliveries
+                    .filter(delivery => !delivery.delivered)
+                    .map(delivery => delivery.agent_name)
+                    .join(', ');
+                toast.warning(`Delivered to ${result.delivered}/${result.attempted} agents; failed: ${failed}`);
+            } else {
+                toast.success(`Broadcast delivered to ${result.delivered} agent${result.delivered === 1 ? '' : 's'}`);
+            }
+            await refreshFleet();
         } catch (e) {
-            toast.error('Broadcast failed');
+            toast.error(String(e));
             console.error("Broadcast error:", e);
         }
     };
@@ -410,7 +396,7 @@ export function FleetCommandCenter() {
     const approvalCount = agents.filter(a => getEffectiveStatus(a) === 'waiting_approval').length;
 
     return (
-        <div className="flex flex-col h-full bg-[#050505] text-zinc-100 overflow-hidden">
+        <div className="flex flex-col h-full bg-surface-canvas text-content-primary overflow-hidden">
             {/* Top Bar */}
             <div className="h-14 border-b border-white/10 bg-zinc-900/50 backdrop-blur-sm flex items-center justify-between px-6 z-10">
                 <div className="flex items-center gap-4">
@@ -461,6 +447,12 @@ export function FleetCommandCenter() {
                     </button>
                 </div>
             </div>
+
+            {fleetError && (
+                <div role="alert" className="border-b border-red-500/20 bg-red-500/10 px-6 py-2 text-xs text-red-200">
+                    Fleet status unavailable: {fleetError}
+                </div>
+            )}
 
             {/* Main Area */}
             <div className="flex-1 relative">
@@ -687,7 +679,7 @@ export function FleetCommandCenter() {
                     <input
                         name="cmd"
                         type="text"
-                        placeholder="Broadcast to all sessions..."
+                        placeholder="Broadcast once to each agent..."
                         className="flex-1 bg-transparent border-none outline-hidden font-mono text-sm text-zinc-300 placeholder:text-zinc-600"
                         autoComplete="off"
                     />

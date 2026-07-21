@@ -9,7 +9,7 @@ import PackageDescription
 let package = Package(
     name: "FeatureSettings",
     platforms: [
-        .iOS(.v26)
+        .iOS(.v18)
     ],
     products: [
         .library(name: "FeatureSettings", targets: ["FeatureSettings"])
@@ -31,6 +31,13 @@ let package = Package(
                 .product(name: "ThinClawAPI", package: "ThinClawAPI"),
                 .product(name: "ThinClawTransport", package: "ThinClawTransport"),
             ]
-        )
+        ),
+        .testTarget(
+            name: "FeatureSettingsTests",
+            dependencies: [
+                "FeatureSettings",
+                .product(name: "ThinClawCore", package: "ThinClawCore"),
+            ]
+        ),
     ]
 )

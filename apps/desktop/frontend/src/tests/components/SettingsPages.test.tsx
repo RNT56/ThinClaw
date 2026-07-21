@@ -2,7 +2,8 @@
  * Tests for the lazy-loading refactor in SettingsPages.tsx
  *
  * Verifies:
- *  1. The three heavy tab components (ModelBrowser, GatewayTab, SecretsTab)
+ *  1. The four heavy tab components (ModelBrowser, GatewayTab, SecretsTab,
+ *     SecurityPosturePanel)
  *     are code-split — i.e. they load asynchronously rather than being part
  *     of the synchronous module graph.
  *  2. TabSkeleton renders correctly while lazy chunks are loading.
@@ -64,7 +65,7 @@ vi.mock('../../lib/thinclaw', () => ({
     patchThinClawConfig: vi.fn().mockResolvedValue(undefined),
 }));
 
-// Mock all three heavy tabs so we can verify routing without their full DOM
+// Mock all four heavy tabs so we can verify routing without their full DOM
 vi.mock('../../components/settings/ModelBrowser', () => ({
     ModelBrowser: () => <div data-testid="model-browser">ModelBrowser</div>,
 }));
@@ -73,6 +74,9 @@ vi.mock('../../components/settings/GatewayTab', () => ({
 }));
 vi.mock('../../components/settings/SecretsTab', () => ({
     SecretsTab: () => <div data-testid="secrets-tab">SecretsTab</div>,
+}));
+vi.mock('../../components/settings/SecurityPosturePanel', () => ({
+    SecurityPosturePanel: () => <div data-testid="security-posture-panel">SecurityPosturePanel</div>,
 }));
 
 // Lightweight mocks for non-lazy tabs
@@ -149,6 +153,11 @@ describe('SettingsContent routing', () => {
         await waitFor(() => expect(screen.getByTestId('secrets-tab')).toBeInTheDocument());
     });
 
+    it('renders SecurityPosturePanel for the "security" page', async () => {
+        renderPage('security');
+        await waitFor(() => expect(screen.getByTestId('security-posture-panel')).toBeInTheDocument());
+    });
+
     it('renders PersonaTab for the "persona" page (not lazy)', async () => {
         renderPage('persona');
         await waitFor(() => expect(screen.getByTestId('persona-tab')).toBeInTheDocument());
@@ -179,7 +188,7 @@ describe('SettingsContent routing', () => {
 // Tests — heavy tabs are NOT included in the synchronous import
 // ---------------------------------------------------------------------------
 describe('Lazy tab code-splitting', () => {
-    it('ModelBrowser, GatewayTab, SecretsTab are loaded via React.lazy', async () => {
+    it('loads heavyweight settings panels via React.lazy', async () => {
         // When loaded, modules go through the lazy() dynamic-import path.
         // We verify by checking that the mock's default export is used (i.e.
         // the re-export via `.then(m => ({ default: m.X }))` worked correctly).
@@ -191,6 +200,9 @@ describe('Lazy tab code-splitting', () => {
 
         renderPage('secrets');
         await waitFor(() => expect(screen.getByTestId('secrets-tab')).toBeInTheDocument());
+
+        renderPage('security');
+        await waitFor(() => expect(screen.getByTestId('security-posture-panel')).toBeInTheDocument());
     });
 });
 
@@ -211,5 +223,10 @@ describe('PageHeader content', () => {
     it('shows "API Secrets" heading on the secrets page', async () => {
         renderPage('secrets');
         await waitFor(() => expect(screen.getByRole('heading', { name: /API Secrets/i })).toBeInTheDocument());
+    });
+
+    it('shows "Security Posture" heading on the security page', async () => {
+        renderPage('security');
+        await waitFor(() => expect(screen.getByRole('heading', { name: /Security Posture/i })).toBeInTheDocument());
     });
 });

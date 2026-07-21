@@ -348,7 +348,7 @@ impl WasmChannel {
     }
 
     /// Map WASM execution errors to our error types.
-    fn map_wasm_error(e: anyhow::Error, name: &str, fuel_limit: u64) -> WasmChannelError {
+    fn map_wasm_error(e: impl std::fmt::Display, name: &str, fuel_limit: u64) -> WasmChannelError {
         let error_str = e.to_string();
         if error_str.contains("out of fuel") {
             WasmChannelError::FuelExhausted {

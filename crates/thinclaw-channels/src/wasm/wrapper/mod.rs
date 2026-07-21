@@ -59,6 +59,7 @@ use crate::wasm::host::{ChannelEmitRateLimiter, ChannelWorkspaceStore};
 use crate::wasm::router::RegisteredEndpoint;
 use crate::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::wasm::schema::ChannelConfig;
+use crate::wasm::schema::SetupSchema;
 use thinclaw_channels_core::{
     Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
     StreamMode,
@@ -126,6 +127,10 @@ pub struct WasmChannel {
 
     /// Optional platform formatting guidance exposed to prompt assembly.
     formatting_hints: Option<String>,
+
+    /// Declarative setup fields from the signed capabilities sidecar.
+    /// Secret values are never stored here; this is metadata only.
+    setup_schema: SetupSchema,
 
     /// Message sender (for emitting messages to the stream).
     /// Wrapped in Arc for sharing with the polling task.
@@ -237,6 +242,7 @@ impl WasmChannel {
             config_json: RwLock::new(config_json),
             channel_config: RwLock::new(None),
             formatting_hints,
+            setup_schema: SetupSchema::default(),
             message_tx: Arc::new(RwLock::new(None)),
             pending_responses: RwLock::new(HashMap::new()),
             rate_limiter: Arc::new(RwLock::new(rate_limiter)),
@@ -254,6 +260,12 @@ impl WasmChannel {
             debug_mode: std::sync::RwLock::new(false),
             pending_tool_events: tokio::sync::RwLock::new(Vec::new()),
         }
+    }
+
+    /// Attach the setup declaration parsed from the channel capabilities file.
+    pub fn with_setup_schema(mut self, setup_schema: SetupSchema) -> Self {
+        self.setup_schema = setup_schema;
+        self
     }
 
     /// Update the channel config before starting.
@@ -498,6 +510,52 @@ impl Channel for WasmChannel {
 
     fn formatting_hints(&self) -> Option<String> {
         self.formatting_hints.clone()
+    }
+
+    fn config_schema(&self) -> Option<thinclaw_channels_core::ConfigSchema> {
+        if self.setup_schema.required_secrets.is_empty() {
+            return None;
+        }
+
+        let channel_name = self
+            .name
+            .split(['_', '-'])
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let fields = self
+            .setup_schema
+            .required_secrets
+            .iter()
+            .map(|secret| thinclaw_channels_core::ConfigField {
+                id: secret.name.clone(),
+                label: secret.prompt.clone(),
+                field_type: "password".to_string(),
+                required: !secret.optional,
+                help_text: Some(
+                    "Stored encrypted. Leave blank to preserve the current credential.".to_string(),
+                ),
+                default_value: None,
+                options: None,
+            })
+            .collect();
+
+        Some(thinclaw_channels_core::ConfigSchema {
+            channel_id: self.name.clone(),
+            channel_name,
+            fields,
+            help: Some(
+                "Credentials come from the channel's capabilities manifest and are written only to the encrypted secret store. Restart or reactivate the channel after replacing a credential."
+                    .to_string(),
+            ),
+        })
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {

@@ -15,7 +15,7 @@ use crate::thinclaw::runtime_builder::get_resolved_workspace_root;
 #[specta::specta]
 pub async fn thinclaw_get_workspace_path(
     manager: State<'_, ThinClawManager>,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     Ok(workspace_root_for_commands(&manager)
         .await
         .to_string_lossy()
@@ -29,14 +29,16 @@ pub async fn thinclaw_get_workspace_path(
 #[specta::specta]
 pub async fn thinclaw_reveal_workspace(
     manager: State<'_, ThinClawManager>,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     let path = workspace_root_for_commands(&manager).await;
     std::fs::create_dir_all(&path)
         .map_err(|error| format!("Failed to create workspace directory: {error}"))?;
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| format!("Failed to inspect workspace directory: {error}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err("Workspace root must be a real directory".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Workspace root must be a real directory".to_string(),
+        });
     }
     let path = path
         .canonicalize()
@@ -72,16 +74,18 @@ pub async fn thinclaw_reveal_workspace(
 #[specta::specta]
 pub async fn thinclaw_list_agent_workspace_files(
     manager: State<'_, ThinClawManager>,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<serde_json::Value>, crate::thinclaw::bridge::BridgeError> {
     let workspace_root = workspace_root_for_commands(&manager).await;
 
     let root_metadata = match std::fs::symlink_metadata(&workspace_root) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(error) => return Err(format!("Failed to inspect workspace: {error}")),
+        Err(error) => return Err(format!("Failed to inspect workspace: {error}").into()),
     };
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        return Err("Workspace root must be a real directory".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Workspace root must be a real directory".to_string(),
+        });
     }
     let workspace_root = workspace_root
         .canonicalize()
@@ -203,15 +207,19 @@ pub async fn thinclaw_list_agent_workspace_files(
 pub async fn thinclaw_reveal_file(
     manager: State<'_, ThinClawManager>,
     path: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if path.is_empty() || path.len() > 4_096 || path.chars().any(char::is_control) {
-        return Err("Invalid workspace path".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Invalid workspace path".to_string(),
+        });
     }
     let workspace_root = workspace_root_for_commands(&manager).await;
     let root_metadata = std::fs::symlink_metadata(&workspace_root)
         .map_err(|error| format!("Failed to inspect workspace: {error}"))?;
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        return Err("Workspace root must be a real directory".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Workspace root must be a real directory".to_string(),
+        });
     }
     let canonical_root = workspace_root
         .canonicalize()
@@ -222,13 +230,17 @@ pub async fn thinclaw_reveal_file(
     if requested_metadata.file_type().is_symlink()
         || (!requested_metadata.is_file() && !requested_metadata.is_dir())
     {
-        return Err("Workspace path must be a real file or directory".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Workspace path must be a real file or directory".to_string(),
+        });
     }
     let p = requested
         .canonicalize()
         .map_err(|error| format!("Failed to resolve workspace path: {error}"))?;
     if p == canonical_root || !p.starts_with(&canonical_root) {
-        return Err("Path is outside the agent workspace".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Path is outside the agent workspace".to_string(),
+        });
     }
 
     #[cfg(target_os = "macos")]
@@ -265,7 +277,7 @@ pub async fn thinclaw_write_agent_workspace_file(
     manager: State<'_, ThinClawManager>,
     relative_path: String,
     content: String,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     const MAX_WORKSPACE_WRITE_BYTES: usize = 8 * 1024 * 1024;
     let relative = std::path::Path::new(&relative_path);
     if relative_path.is_empty()
@@ -281,7 +293,9 @@ pub async fn thinclaw_write_agent_workspace_file(
         || content.len() > MAX_WORKSPACE_WRITE_BYTES
         || content.contains('\0')
     {
-        return Err("Workspace path or content is malformed or oversized".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Workspace path or content is malformed or oversized".to_string(),
+        });
     }
 
     let workspace_root = workspace_root_for_commands(&manager).await;
@@ -290,7 +304,9 @@ pub async fn thinclaw_write_agent_workspace_file(
     let root_metadata = std::fs::symlink_metadata(&workspace_root)
         .map_err(|error| format!("Failed to inspect workspace: {error}"))?;
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        return Err("Workspace root must be a real directory".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Workspace root must be a real directory".to_string(),
+        });
     }
     let canonical_root = workspace_root
         .canonicalize()
@@ -305,7 +321,9 @@ pub async fn thinclaw_write_agent_workspace_file(
         .and_then(|p| p.canonicalize().ok())
         .unwrap_or_default();
     if !canonical_parent.starts_with(&canonical_root) {
-        return Err("Path escapes workspace root".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Path escapes workspace root".to_string(),
+        });
     }
 
     thinclaw_platform::write_regular_file_atomic(&target, content.as_bytes(), true)

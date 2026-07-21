@@ -1,22 +1,16 @@
 import React, { useState, useRef, useEffect } from 'react';
+import type { RemoteDeployResult } from '../../lib/bindings';
 import { thinclawCommands } from '../../lib/generated/thinclaw-commands';
 import { listen } from '@tauri-apps/api/event';
 import { Server, CheckCircle, AlertCircle, Loader2, Zap, Copy } from 'lucide-react';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
+import { unwrapResult } from '../../lib/guards';
 
 interface RemoteDeployWizardProps {
     isOpen: boolean;
     onCheckStatus?: () => void;
     onClose: () => void;
-}
-
-interface DeployResult {
-    status: 'success' | 'timeout' | 'failed';
-    url: string;
-    token: string;
-    message?: string;
-    reachable?: boolean;
 }
 
 const MAX_DEPLOY_LOG_LINES = 2000;
@@ -58,7 +52,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
     const [deployMode, setDeployMode] = useState<'new' | 'existing'>('new');
     const [existingUrl, setExistingUrl] = useState('');
     const [existingToken, setExistingToken] = useState('');
-    const [deployResult, setDeployResult] = useState<DeployResult | null>(null);
+    const [deployResult, setDeployResult] = useState<RemoteDeployResult | null>(null);
     const [connecting, setConnecting] = useState(false);
     const [testLoading, setTestLoading] = useState(false);
     const [tailscaleKey, setTailscaleKey] = useState('');
@@ -81,45 +75,21 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
         setDeployResult(null);
         setShowDeployedToken(false);
 
-        let unlistenLog: (() => void) | undefined;
-        let unlistenStatus: (() => void) | undefined;
         try {
-            unlistenLog = await listen<string>('deploy-log', (event) => {
+            const unlistenLog = await listen<string>('deploy-log', (event) => {
                 setLogs((prev) => appendDeployLog(prev, event.payload));
             });
-
-            unlistenStatus = await listen<string>('deploy-status', (event) => {
-                unlistenLog?.();
-                unlistenStatus?.();
-
-                // New structured payload
-                try {
-                    const result: DeployResult = JSON.parse(event.payload);
-                    setDeployResult(result);
-                    if (result.status === 'success') {
-                        setStep('success');
-                    } else if (result.status === 'timeout') {
-                        setStep('timeout');
-                    } else {
-                        setErrorMsg(result.message || 'Deployment failed');
-                        setStep('error');
-                    }
-                } catch {
-                    // Legacy plain-text fallback
-                    if (event.payload === 'success') {
-                        setStep('success');
-                    } else {
-                        setErrorMsg(event.payload);
-                        setStep('error');
-                    }
-                }
-            });
-
-            await thinclawCommands.thinclawDeployRemote(ip, user, tailscaleKey || null, enableSystemd);
-
+            try {
+                const result = unwrapResult(
+                    await thinclawCommands.thinclawDeployRemote(ip, user, tailscaleKey || null, enableSystemd),
+                    'Deploy remote gateway',
+                );
+                setDeployResult(result);
+                setStep('success');
+            } finally {
+                unlistenLog();
+            }
         } catch (e: any) {
-            unlistenLog?.();
-            unlistenStatus?.();
             setErrorMsg(typeof e === 'string' ? e : e.message);
             setStep('error');
         }
@@ -141,7 +111,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
             };
 
             await thinclaw.addAgentProfile(newProfile);
-            await thinclawCommands.thinclawSaveGatewaySettings('remote', deployResult.url, deployResult.token || '');
+            await thinclaw.saveGatewaySettings('remote', deployResult.url, deployResult.token || '');
 
             if (deployResult.reachable === false) {
                 toast.warning('Remote agent saved. Connect this desktop to the same tailnet before using it.');
@@ -167,7 +137,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
         // Test connection first
         setTestLoading(true);
         try {
-            const ok = await thinclawCommands.thinclawTestConnection(url, existingToken || null);
+            const ok = await thinclaw.verifyConnection(url, existingToken || null);
             if (!ok) {
                 toast.error('Cannot connect — server unreachable or auth failed');
                 setTestLoading(false);
@@ -193,7 +163,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
             };
 
             await thinclaw.addAgentProfile(newProfile);
-            await thinclawCommands.thinclawSaveGatewaySettings('remote', url, existingToken || '');
+            await thinclaw.saveGatewaySettings('remote', url, existingToken || '');
 
             toast.success('Connected to remote agent');
             onCheckStatus?.();

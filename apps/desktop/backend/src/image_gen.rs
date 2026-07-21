@@ -977,7 +977,7 @@ pub async fn direct_media_generate_image(
     state: State<'_, SidecarManager>,
     config: State<'_, ConfigManager>,
     params: ImageGenParams,
-) -> Result<ImageResponse, String> {
+) -> Result<ImageResponse, crate::thinclaw::bridge::BridgeError> {
     validate_image_gen_params(&params)?;
     // 1. Try params first
     let mut model_path = params.model.clone().unwrap_or_default();
@@ -1074,7 +1074,7 @@ pub async fn direct_media_generate_image(
         // Also restart chat server here if needed? No, let user do it or auto-manager.
     }
 
-    result
+    Ok(result?)
 }
 
 #[cfg(test)]

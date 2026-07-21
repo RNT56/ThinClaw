@@ -362,9 +362,21 @@ The listener is **ephemeral** — it is started only when an OAuth flow is initi
 
 **Reference:** `src/cli/oauth_defaults.rs` — `html_escape()`
 
-### Built-in OAuth Credentials
+### OAuth Client Credentials
 
-Google OAuth client ID and secret are compiled into the binary (with compile-time override via `THINCLAW_GOOGLE_CLIENT_ID` / `THINCLAW_GOOGLE_CLIENT_SECRET`). As noted in the source, Google Desktop App client secrets are [not actually secret](https://developers.google.com/identity/protocols/oauth2/native-app) per Google's documentation.
+ThinClaw does not commit shared Google OAuth client credentials. Source and
+self-hosted builds use operator-provided `GOOGLE_OAUTH_CLIENT_ID` and
+`GOOGLE_OAUTH_CLIENT_SECRET` values by default. Official distributors may
+inject a dedicated client with `THINCLAW_GOOGLE_CLIENT_ID` and
+`THINCLAW_GOOGLE_CLIENT_SECRET` at compile time; a complete runtime pair always
+overrides it, and partial pairs are rejected rather than mixed. This follows
+Google's current [OAuth credential policy](https://developers.google.com/identity/protocols/oauth2/policies#handleclientcredentials),
+which prohibits publishing client credentials in public repositories.
+
+Compile-time injection is distribution configuration, not a confidentiality
+boundary: users can extract a Desktop OAuth client secret from a binary. Release
+secrets keep the pair out of source control and routine build logs, while the
+distributor remains responsible for the client after publication.
 
 **Reference:** `src/cli/oauth_defaults.rs` — `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` constants
 

@@ -45,6 +45,9 @@ public final class ApprovalsStore {
 
     /// Badge count for the app shell.
     public var badgeCount: Int { pending.count }
+    public private(set) var submittingRequestIDs: Set<String> = []
+    public private(set) var notice: String?
+    public private(set) var errorMessage: String?
 
     private let gateway: any ApprovalsGateway
     private let biometrics: any BiometricGating
@@ -61,6 +64,11 @@ public final class ApprovalsStore {
     /// Cold-load the pending set and begin folding live events. Idempotent.
     public func start() async {
         subscribeToEvents()
+        // Let the subscription task attach its stream continuation before an
+        // immediate producer can emit. This closes the cold-start race where a
+        // live approval arriving between launch and the first snapshot fetch
+        // could otherwise be lost.
+        await Task.yield()
         await refresh()
     }
 
@@ -70,13 +78,31 @@ public final class ApprovalsStore {
         eventTask = nil
     }
 
-    /// Re-pull the pending set (pull-to-refresh / reconnect). Merges rather than
-    /// replaces so a live event that arrived between the request and its
-    /// response is not dropped, and a decision already applied locally is not
-    /// resurrected by a stale server snapshot.
+    /// Re-pull the authoritative pending set. Requests with a local decision in
+    /// flight are retained until that decision completes; everything else
+    /// absent from the server snapshot is resolved or expired and is removed.
     public func refresh() async {
-        guard let fetched = try? await gateway.pendingApprovals() else { return }
-        merge(fetched)
+        let fetched: [ApprovalRequest]
+        do {
+            fetched = try await gateway.pendingApprovals()
+        } catch {
+            errorMessage = "Couldn’t refresh approvals. Check the connection and try again."
+            return
+        }
+        errorMessage = nil
+        let previousIDs = Set(pending.map(\.requestID))
+        let fetchedIDs = Set(fetched.map(\.requestID))
+        let inFlightOnly = pending.filter {
+            submittingRequestIDs.contains($0.requestID) && !fetchedIDs.contains($0.requestID)
+        }
+        pending = fetched + inFlightOnly
+        let resolvedElsewhere =
+            previousIDs
+            .subtracting(fetchedIDs)
+            .subtracting(submittingRequestIDs)
+        if !resolvedElsewhere.isEmpty {
+            notice = "The approval list changed because a request was resolved elsewhere or expired."
+        }
     }
 
     private func subscribeToEvents() {
@@ -101,26 +127,47 @@ public final class ApprovalsStore {
     @discardableResult
     public func respond(_ requestID: String, decision: ApprovalDecision) async -> Bool {
         guard let request = pending.first(where: { $0.requestID == requestID }) else {
+            notice = "That request is no longer pending."
             return false
         }
 
         if decision.requiresBiometricGate(for: request.risk) {
             let ok = await biometrics.authenticate(
                 reason: "Approve \(request.toolName)")
-            guard ok else { return false }
+            guard ok else {
+                notice = "Authentication wasn’t completed. The request is still pending."
+                return false
+            }
         }
 
+        errorMessage = nil
+        submittingRequestIDs.insert(requestID)
         do {
             try await gateway.respondToApproval(
                 requestID, decision: decision, thread: request.threadID)
         } catch {
-            // Leave the entry in place so the operator can retry; a failed POST
-            // must not silently drop a pending approval.
+            submittingRequestIDs.remove(requestID)
+            // Another surface may have resolved it first. Refresh before
+            // declaring failure; absence from the authoritative list means the
+            // desired terminal state has already been reached.
+            await refresh()
+            if !pending.contains(where: { $0.requestID == requestID }) {
+                notice = "This request was already resolved elsewhere."
+                return true
+            }
+            errorMessage = "Couldn’t submit the decision. The request is still pending."
             return false
         }
 
+        submittingRequestIDs.remove(requestID)
         remove(requestID)
+        notice = decision == .deny ? "Request denied." : "Request approved."
         return true
+    }
+
+    public func clearMessages() {
+        notice = nil
+        errorMessage = nil
     }
 
     // MARK: - Convenience
@@ -149,16 +196,5 @@ public final class ApprovalsStore {
 
     private func remove(_ requestID: String) {
         pending.removeAll { $0.requestID == requestID }
-    }
-
-    /// Fold a freshly-pulled set into the current one: update/insert every
-    /// fetched entry while keeping locally-known entries the pull missed. The
-    /// pull is deliberately additive rather than authoritative because the
-    /// gateway cache is best-effort/lossy per its contract — treating an empty
-    /// or partial pull as "these are the only pending approvals" would drop a
-    /// live one the cache forgot. Decided entries are already removed locally
-    /// on decision, so they do not reappear.
-    private func merge(_ fetched: [ApprovalRequest]) {
-        for request in fetched { upsert(request) }
     }
 }

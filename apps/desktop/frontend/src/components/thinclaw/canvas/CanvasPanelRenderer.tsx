@@ -239,7 +239,7 @@ function ButtonRenderer({ label, action, style, panelId }: {
     const handleClick = async () => {
         setLoading(true);
         try {
-            await canvasDispatchAction(panelId, action);
+            await canvasDispatchAction(panelId, action, {});
         } catch (e) {
             console.error('[Canvas] Button action failed:', e);
         } finally {

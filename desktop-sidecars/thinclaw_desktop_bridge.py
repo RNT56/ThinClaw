@@ -658,7 +658,7 @@ def invoke_apps(payload):
                 }
                 for window in by_pid.values()
             ]
-        result = run(["sh", "-lc", "ps -eo pid=,comm="])
+        result = run(["ps", "-eo", "pid=,comm="])
         apps = []
         for line in result.stdout.splitlines():
             parts = line.strip().split(None, 1)
@@ -704,7 +704,7 @@ def invoke_apps(payload):
         bundle_id = payload.get("bundle_id")
         if not bundle_id:
             raise RuntimeError("desktop_apps quit requires bundle_id")
-        run(["sh", "-lc", f"pkill -f '{bundle_id}'"], check=False)
+        run(["pkill", "-f", "--", str(bundle_id)], check=False)
         return {"quit": True, "bundle_id": bundle_id}
     if action == "windows":
         bundle_id = payload.get("bundle_id")
@@ -757,6 +757,8 @@ def send_text(text):
     elif backend == "ydotool":
         run(["ydotool", "type", text], capture=False)
     else:
+        if "\n" in text or "\r" in text:
+            raise RuntimeError("dotool cannot safely type multiline text")
         run_with_input(["dotool"], f"type {text}\n")
     return backend
 
@@ -773,6 +775,8 @@ def send_keys(keys):
     elif backend == "ydotool":
         run(["ydotool", "key", keys], capture=False)
     else:
+        if "\n" in keys or "\r" in keys:
+            raise RuntimeError("dotool key sequence contains a line break")
         run_with_input(["dotool"], f"key {keys}\n")
     return backend
 

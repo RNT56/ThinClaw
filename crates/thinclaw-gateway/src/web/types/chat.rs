@@ -15,6 +15,10 @@ pub struct SendMessageRequest {
     pub user_id: Option<String>,
     #[serde(default)]
     pub actor_id: Option<String>,
+    /// Optional client-generated UUID used to make offline/retry sends
+    /// idempotent across ambiguous transport failures.
+    #[serde(default)]
+    pub client_message_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,14 +121,10 @@ pub struct ApprovalRequest {
 ///
 /// Populated from the `StatusUpdate::ApprovalNeeded` -> `SseEvent::ApprovalNeeded`
 /// projection at broadcast time (see `src/channels/web/mod.rs::send_status`),
-/// and removed once `chat_approval_handler` submits a decision for the
-/// `request_id`. This cache is **best-effort**: it lives only in gateway
-/// process memory, is not persisted, and is cleared on restart — a client
-/// that misses the SSE broadcast *and* queries after a restart will not see
-/// an approval that was already resolved or that predates the restart. It
-/// exists to close the gap for a client that connects (or reconnects) after
-/// the SSE event already fired, not to be an authoritative durable queue.
-#[derive(Debug, Clone, Serialize)]
+/// and removed once the underlying decision is accepted. The gateway persists
+/// this registry so reconnecting mobile clients receive an authoritative
+/// snapshot across process restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PendingApprovalEntry {
     pub request_id: String,

@@ -130,7 +130,7 @@ Do not reveal hidden chain-of-thought or prefix answers with internal analysis.
         //
         // IMPORTANT: The `rig` crate resolves model context windows by querying
         // HuggingFace when the model name is unknown.  For Local providers
-        // (mlx_lm.server, llama-server) the model name is "default" — not a real
+        // (mlx-openai-server, llama-server) the model name is "default" — not a real
         // HF repo — which causes a spurious 404 error on first chat.
         //
         // Workaround: for Local providers, substitute a well-known model name that

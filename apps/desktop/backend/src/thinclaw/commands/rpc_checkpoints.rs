@@ -39,10 +39,10 @@ impl From<thinclaw_core::agent::checkpoint::CheckpointEntry> for CheckpointEntry
 #[specta::specta]
 pub async fn thinclaw_checkpoints_list(
     project_dir: String,
-) -> Result<Vec<CheckpointEntryItem>, String> {
+) -> Result<Vec<CheckpointEntryItem>, crate::thinclaw::bridge::BridgeError> {
     let entries = thinclaw_core::agent::checkpoint::list_checkpoints(&PathBuf::from(project_dir))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
     Ok(entries.into_iter().map(CheckpointEntryItem::from).collect())
 }
 
@@ -52,10 +52,10 @@ pub async fn thinclaw_checkpoints_list(
 pub async fn thinclaw_checkpoint_diff(
     project_dir: String,
     commit_hash: String,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     thinclaw_core::agent::checkpoint::diff(&PathBuf::from(project_dir), &commit_hash)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }
 
 /// Restore a project (or a single `file`) to a checkpoint commit. The core
@@ -66,12 +66,12 @@ pub async fn thinclaw_checkpoint_restore(
     project_dir: String,
     commit_hash: String,
     file: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     thinclaw_core::agent::checkpoint::restore(
         &PathBuf::from(project_dir),
         &commit_hash,
         file.as_deref(),
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))
 }

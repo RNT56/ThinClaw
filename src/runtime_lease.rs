@@ -3,7 +3,7 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use fs4::FileExt;
+use fs4::{FileExt, TryLockError};
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -115,12 +115,12 @@ impl RuntimeLease {
                 source: std::io::Error::other("runtime lock is not a regular file"),
             });
         }
-        match file.try_lock_exclusive() {
+        match FileExt::try_lock(&file) {
             Ok(()) => {}
-            Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(TryLockError::WouldBlock) => {
                 return Err(RuntimeLeaseError::AlreadyRunning { path: canonical });
             }
-            Err(source) => {
+            Err(TryLockError::Error(source)) => {
                 return Err(RuntimeLeaseError::Lock {
                     path: canonical,
                     source,

@@ -1,9 +1,9 @@
-//! Cloud model discovery — queries provider APIs for available models.
+//! Shared model/provider registry and cloud model discovery.
 //!
 //! ## Architecture
 //!
 //! ```text
-//!   CloudModelRegistry (Tauri managed state)
+//!   ModelProviderRegistry (Tauri managed state)
 //!   │
 //!   ├── discover(providers)  ── for each provider with key ──┐
 //!   │                                                         │
@@ -21,7 +21,10 @@
 //!
 //! ## Key Constraint
 //!
-//! All API keys come from `SecretStore`, same as `InferenceRouter`.
+//! Provider metadata, model discovery, local-model inventory, and provider-key
+//! readiness all flow through one cloneable registry. Clones share the same
+//! cache and app-wide `SecretStore`; `InferenceRouter` owns a clone of this
+//! service rather than a second key-vault path.
 
 pub mod types;
 
@@ -44,8 +47,10 @@ pub mod classifier;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tauri::AppHandle;
 use tokio::sync::RwLock;
 
+use super::{BackendInfo, Modality};
 use crate::secret_store::SecretStore;
 use types::*;
 
@@ -201,20 +206,193 @@ impl CachedDiscovery {
     }
 }
 
-/// Central registry for cloud-discovered models.
+/// Non-chat providers that are not part of the LLM endpoint catalog.
+#[derive(Clone, Copy)]
+struct SupplementalProvider {
+    slug: &'static str,
+    display_name: &'static str,
+    secret_name: &'static str,
+}
+
+const SUPPLEMENTAL_PROVIDERS: &[SupplementalProvider] = &[
+    SupplementalProvider {
+        slug: "voyage",
+        display_name: "Voyage AI",
+        secret_name: "voyage",
+    },
+    SupplementalProvider {
+        slug: "elevenlabs",
+        display_name: "ElevenLabs",
+        secret_name: "elevenlabs",
+    },
+    SupplementalProvider {
+        slug: "deepgram",
+        display_name: "Deepgram",
+        secret_name: "deepgram",
+    },
+    SupplementalProvider {
+        slug: "stability",
+        display_name: "Stability AI",
+        secret_name: "stability",
+    },
+    SupplementalProvider {
+        slug: "fal",
+        display_name: "fal.ai",
+        secret_name: "fal",
+    },
+];
+
+const EMBEDDING_PROVIDERS: &[&str] = &["openai", "gemini", "voyage", "cohere"];
+const TTS_PROVIDERS: &[&str] = &["openai", "elevenlabs", "gemini"];
+const STT_PROVIDERS: &[&str] = &["openai", "gemini", "deepgram"];
+const DIFFUSION_PROVIDERS: &[&str] = &["openai", "gemini", "stability", "fal", "together"];
+
+/// Providers with an implemented cloud-model discoverer. The boolean marks
+/// static registries that do not require a provider key.
+const DISCOVERY_PROVIDERS: &[(&str, bool)] = &[
+    ("openai", false),
+    ("anthropic", false),
+    ("gemini", false),
+    ("groq", false),
+    ("openrouter", false),
+    ("mistral", false),
+    ("xai", false),
+    ("together", false),
+    ("cohere", false),
+    ("elevenlabs", false),
+    ("stability", false),
+    ("deepgram", true),
+    ("voyage", true),
+    ("fal", true),
+];
+
+fn supplemental_provider(slug: &str) -> Option<SupplementalProvider> {
+    SUPPLEMENTAL_PROVIDERS
+        .iter()
+        .copied()
+        .find(|provider| provider.slug == slug)
+}
+
+fn provider_display_name(slug: &str) -> Option<&'static str> {
+    thinclaw_config::provider_catalog::endpoint_for(slug)
+        .map(|endpoint| endpoint.display_name.as_str())
+        .or_else(|| supplemental_provider(slug).map(|provider| provider.display_name))
+}
+
+fn provider_secret_name(slug: &str) -> Option<&'static str> {
+    thinclaw_config::provider_catalog::endpoint_for(slug)
+        .map(|endpoint| endpoint.secret_name.as_str())
+        .or_else(|| supplemental_provider(slug).map(|provider| provider.secret_name))
+}
+
+fn modality_provider_ids(modality: Modality) -> &'static [&'static str] {
+    match modality {
+        Modality::Chat => &[],
+        Modality::Embedding => EMBEDDING_PROVIDERS,
+        Modality::Tts => TTS_PROVIDERS,
+        Modality::Stt => STT_PROVIDERS,
+        Modality::Diffusion => DIFFUSION_PROVIDERS,
+    }
+}
+
+fn provider_ids_for_modality(modality: Modality) -> Vec<&'static str> {
+    let mut provider_ids = if modality == Modality::Chat {
+        thinclaw_config::provider_catalog::all_provider_ids()
+    } else {
+        modality_provider_ids(modality).to_vec()
+    };
+    provider_ids.sort_unstable();
+    provider_ids
+}
+
+/// App-wide registry for provider metadata, provider keys, and local/cloud models.
 ///
-/// Managed as Tauri state alongside `InferenceRouter`.
-pub struct CloudModelRegistry {
-    cache: RwLock<HashMap<String, CachedDiscovery>>,
+/// Managed as Tauri state and cloned into `InferenceRouter`. Every clone shares
+/// the same discovery cache and `SecretStore`.
+#[derive(Clone)]
+pub struct ModelProviderRegistry {
+    cache: Arc<RwLock<HashMap<String, CachedDiscovery>>>,
     secret_store: Arc<SecretStore>,
 }
 
-impl CloudModelRegistry {
+impl ModelProviderRegistry {
     pub fn new(secret_store: Arc<SecretStore>) -> Self {
         Self {
-            cache: RwLock::new(HashMap::new()),
+            cache: Arc::new(RwLock::new(HashMap::new())),
             secret_store,
         }
+    }
+
+    /// Read a provider key through the canonical descriptor/alias contract.
+    pub fn provider_secret(&self, provider: &str) -> Option<String> {
+        let secret_name = provider_secret_name(provider).unwrap_or(provider);
+        descriptor_secret(&self.secret_store, secret_name)
+            .or_else(|| {
+                (secret_name != provider)
+                    .then(|| descriptor_secret(&self.secret_store, provider))
+                    .flatten()
+            })
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    pub fn has_provider_secret(&self, provider: &str) -> bool {
+        self.provider_secret(provider).is_some()
+    }
+
+    pub fn secret_store(&self) -> &SecretStore {
+        &self.secret_store
+    }
+
+    /// List every configured backend for a modality from one metadata source.
+    pub fn available_backends_for(&self, modality: Modality) -> Vec<BackendInfo> {
+        let local_display_name = match modality {
+            Modality::Chat => "Local (llama.cpp / MLX)",
+            Modality::Embedding => "Local (llama-server / mlx-embed)",
+            Modality::Tts => "Local (Piper)",
+            Modality::Stt => "Local (Whisper)",
+            Modality::Diffusion => "Local (sd.cpp / mflux)",
+        };
+        let mut backends = vec![BackendInfo {
+            id: "local".to_string(),
+            display_name: local_display_name.to_string(),
+            is_local: true,
+            model_id: None,
+            available: true,
+        }];
+
+        backends.extend(
+            provider_ids_for_modality(modality)
+                .into_iter()
+                .filter_map(|provider| {
+                    Some(BackendInfo {
+                        id: provider.to_string(),
+                        display_name: provider_display_name(provider)?.to_string(),
+                        is_local: false,
+                        model_id: None,
+                        available: self.has_provider_secret(provider),
+                    })
+                }),
+        );
+        backends
+    }
+
+    /// Scan the local model inventory through the same shared registry seam.
+    pub async fn list_local_models(
+        &self,
+        app: &AppHandle,
+    ) -> Result<Vec<crate::model_manager::ModelFile>, String> {
+        crate::model_manager::list_models(app.clone())
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Snapshot the active local runtime for both Desktop product modes.
+    pub async fn local_runtime_snapshot(
+        &self,
+        sidecar: &crate::sidecar::SidecarManager,
+        engine_manager: &crate::engine::EngineManager,
+    ) -> thinclaw_runtime_contracts::LocalRuntimeSnapshot {
+        crate::engine::local_runtime_snapshot(sidecar, engine_manager).await
     }
 
     /// Discover models from all providers that have API keys configured.
@@ -236,7 +414,7 @@ impl CloudModelRegistry {
         let mut handles = Vec::new();
         for provider in &providers {
             let provider = provider.clone();
-            let secret_store = self.secret_store.clone();
+            let registry = self.clone();
 
             // Check if we have a fresh cache
             {
@@ -257,7 +435,7 @@ impl CloudModelRegistry {
 
             // Need fresh discovery
             handles.push(tokio::spawn(async move {
-                discover_for_provider(&provider, &secret_store).await
+                discover_for_provider(&provider, &registry).await
             }));
         }
 
@@ -300,7 +478,7 @@ impl CloudModelRegistry {
 
     /// Refresh models for a single provider (ignoring cache).
     pub async fn refresh(&self, provider: &str) -> ProviderDiscoveryResult {
-        let result = discover_for_provider(provider, &self.secret_store).await;
+        let result = discover_for_provider(provider, self).await;
 
         // Update cache
         let mut cache = self.cache.write().await;
@@ -324,33 +502,10 @@ impl CloudModelRegistry {
 
     /// All providers that have API keys configured in SecretStore.
     fn available_providers(&self) -> Vec<String> {
-        // Check each known provider for a key
-        let known = [
-            "openai",
-            "anthropic",
-            "gemini",
-            "groq",
-            "openrouter",
-            "mistral",
-            "xai",
-            "together",
-            "cohere",
-            "elevenlabs",
-            "stability",
-            // Static registries (no key needed, always included)
-            "deepgram",
-            "voyage",
-            "fal",
-        ];
-
-        known
+        DISCOVERY_PROVIDERS
             .iter()
-            .filter(|p| {
-                // Static providers are always available
-                matches!(*p, &"deepgram" | &"voyage" | &"fal")
-                    || descriptor_secret(&self.secret_store, p).is_some()
-            })
-            .map(|s| s.to_string())
+            .filter(|(provider, is_static)| *is_static || self.has_provider_secret(provider))
+            .map(|(provider, _)| (*provider).to_string())
             .collect()
     }
 }
@@ -358,9 +513,9 @@ impl CloudModelRegistry {
 /// Dispatch discovery to the appropriate provider module.
 async fn discover_for_provider(
     provider: &str,
-    secret_store: &SecretStore,
+    registry: &ModelProviderRegistry,
 ) -> ProviderDiscoveryResult {
-    let api_key = descriptor_secret(secret_store, provider);
+    let api_key = registry.provider_secret(provider);
 
     let result = match provider {
         "openai" => {
@@ -476,4 +631,80 @@ fn descriptor_secret(secret_store: &SecretStore, name: &str) -> Option<String> {
     thinclaw_runtime_contracts::descriptor_for_secret_name(name)
         .and_then(|descriptor| secret_store.get_descriptor_secret(&descriptor))
         .or_else(|| secret_store.get(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    fn registry() -> ModelProviderRegistry {
+        ModelProviderRegistry::new(Arc::new(SecretStore::new()))
+    }
+
+    #[test]
+    fn registry_clones_share_cache_and_key_vault() {
+        let registry = registry();
+        let clone = registry.clone();
+        assert!(Arc::ptr_eq(&registry.cache, &clone.cache));
+        assert!(Arc::ptr_eq(&registry.secret_store, &clone.secret_store));
+    }
+
+    #[test]
+    fn chat_provider_ids_come_from_provider_catalog() {
+        let provider_ids = provider_ids_for_modality(Modality::Chat);
+        let ids: HashSet<_> = provider_ids.iter().copied().collect();
+
+        assert_eq!(
+            provider_ids.len(),
+            thinclaw_config::provider_catalog::catalog().len()
+        );
+        for provider in thinclaw_config::provider_catalog::all_provider_ids() {
+            assert!(
+                ids.contains(provider),
+                "missing catalog provider {provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn modality_backend_lists_are_duplicate_free() {
+        for modality in [
+            Modality::Chat,
+            Modality::Embedding,
+            Modality::Tts,
+            Modality::Stt,
+            Modality::Diffusion,
+        ] {
+            let provider_ids = provider_ids_for_modality(modality);
+            let ids: HashSet<_> = provider_ids.iter().copied().collect();
+            assert_eq!(
+                ids.len(),
+                provider_ids.len(),
+                "duplicate {modality} backend"
+            );
+        }
+    }
+
+    #[test]
+    fn every_direct_backend_has_provider_metadata() {
+        for modality in [
+            Modality::Embedding,
+            Modality::Tts,
+            Modality::Stt,
+            Modality::Diffusion,
+        ] {
+            for provider in modality_provider_ids(modality) {
+                assert!(
+                    provider_display_name(provider).is_some(),
+                    "missing display name for {provider}"
+                );
+                assert!(
+                    provider_secret_name(provider).is_some(),
+                    "missing secret name for {provider}"
+                );
+            }
+        }
+    }
 }

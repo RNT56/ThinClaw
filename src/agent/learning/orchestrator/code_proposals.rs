@@ -670,7 +670,7 @@ fn publish_proposal_bundle_generation(
     diff: &str,
     summary: &str,
 ) -> Result<PathBuf, String> {
-    use fs4::FileExt as _;
+    use fs4::FileExt;
 
     const MAX_BUNDLE_GENERATIONS: usize = 5;
     let bundle_root = proposal_root
@@ -714,8 +714,7 @@ fn publish_proposal_bundle_generation(
     {
         return Err("proposal bundle lock is not a regular file".to_string());
     }
-    lock_file
-        .lock_exclusive()
+    FileExt::lock(&lock_file)
         .map_err(|error| format!("failed to lock proposal bundle: {error}"))?;
 
     let generation_name = format!("generation-{}", Uuid::new_v4().simple());

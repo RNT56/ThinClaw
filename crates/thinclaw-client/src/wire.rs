@@ -170,6 +170,19 @@ pub enum SseEvent {
         message: String,
         thread_id: Option<String>,
     },
+    /// A structured context-window capacity transition.
+    ContextPressure {
+        level: String,
+        usage_percent: Option<f64>,
+        thread_id: Option<String>,
+    },
+    /// A structured internal agent lifecycle transition.
+    AgentLifecycle {
+        phase: String,
+        label: String,
+        detail: Option<String>,
+        thread_id: Option<String>,
+    },
     /// A token/cost usage update.
     UsageUpdate {
         input_tokens: Option<u64>,
@@ -213,6 +226,8 @@ impl SseEvent {
             | Self::ToolResult { thread_id, .. }
             | Self::StreamChunk { thread_id, .. }
             | Self::Status { thread_id, .. }
+            | Self::ContextPressure { thread_id, .. }
+            | Self::AgentLifecycle { thread_id, .. }
             | Self::UsageUpdate { thread_id, .. }
             | Self::ApprovalNeeded { thread_id, .. }
             | Self::Error { thread_id, .. } => thread_id.as_deref(),
@@ -270,6 +285,17 @@ impl SseEvent {
                 message: s("message").unwrap_or_default(),
                 thread_id: opt("thread_id"),
             },
+            "context_pressure" => Self::ContextPressure {
+                level: s("level").unwrap_or_else(|| "none".to_string()),
+                usage_percent: value.get("usage_percent").and_then(|value| value.as_f64()),
+                thread_id: opt("thread_id"),
+            },
+            "agent_lifecycle" => Self::AgentLifecycle {
+                phase: s("phase").unwrap_or_default(),
+                label: s("label").unwrap_or_default(),
+                detail: opt("detail"),
+                thread_id: opt("thread_id"),
+            },
             "usage_update" => Self::UsageUpdate {
                 input_tokens: value.get("input_tokens").and_then(|v| v.as_u64()),
                 output_tokens: value.get("output_tokens").and_then(|v| v.as_u64()),
@@ -322,6 +348,48 @@ mod tests {
             }
             other => panic!("expected Unknown, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_structured_agent_lifecycle_event() {
+        let event = SseEvent::from_json(serde_json::json!({
+            "type": "agent_lifecycle",
+            "phase": "advisor_consultation",
+            "label": "Consulting the advisor lane",
+            "detail": "confidence below threshold",
+            "thread_id": "t-2"
+        }));
+
+        assert_eq!(
+            event,
+            SseEvent::AgentLifecycle {
+                phase: "advisor_consultation".into(),
+                label: "Consulting the advisor lane".into(),
+                detail: Some("confidence below threshold".into()),
+                thread_id: Some("t-2".into()),
+            }
+        );
+        assert_eq!(event.thread_id(), Some("t-2"));
+    }
+
+    #[test]
+    fn parses_structured_context_pressure_event() {
+        let event = SseEvent::from_json(serde_json::json!({
+            "type": "context_pressure",
+            "level": "warning",
+            "usage_percent": 88.5,
+            "thread_id": "t-3"
+        }));
+
+        assert_eq!(
+            event,
+            SseEvent::ContextPressure {
+                level: "warning".into(),
+                usage_percent: Some(88.5),
+                thread_id: Some("t-3".into()),
+            }
+        );
+        assert_eq!(event.thread_id(), Some("t-3"));
     }
 
     #[test]

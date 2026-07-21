@@ -12,6 +12,10 @@ import ThinClawSnapshotKit
 /// DTOs into the publisher — is what makes the mapping macOS-testable with
 /// scripted fixtures and keeps ThinClawCore free of any networking dependency.
 public struct SnapshotInputs: Sendable, Equatable {
+    public var gatewayInstanceID: String?
+    public var statusIsStale: Bool
+    public var approvalsAreStale: Bool
+    public var jobsAreStale: Bool
     /// A background job as surfaced to the Jobs widget. A small denormalized
     /// projection — never the full job record.
     public struct Job: Sendable, Equatable {
@@ -58,6 +62,10 @@ public struct SnapshotInputs: Sendable, Equatable {
     public var jobs: [Job]
 
     public init(
+        gatewayInstanceID: String? = nil,
+        statusIsStale: Bool = false,
+        approvalsAreStale: Bool = false,
+        jobsAreStale: Bool = false,
         phase: AgentStatusSnapshot.Phase = .idle,
         activeToolName: String? = nil,
         activeThreadID: ThreadID? = nil,
@@ -66,6 +74,10 @@ public struct SnapshotInputs: Sendable, Equatable {
         pendingApprovals: [ApprovalRequest] = [],
         jobs: [Job] = []
     ) {
+        self.gatewayInstanceID = gatewayInstanceID
+        self.statusIsStale = statusIsStale
+        self.approvalsAreStale = approvalsAreStale
+        self.jobsAreStale = jobsAreStale
         self.phase = phase
         self.activeToolName = activeToolName
         self.activeThreadID = activeThreadID
@@ -139,6 +151,8 @@ extension SnapshotInputs {
         privacy: SnapshotPrivacyPolicy
     ) -> ProjectedSnapshots {
         let status = AgentStatusSnapshot(
+            gatewayInstanceID: gatewayInstanceID,
+            stale: statusIsStale,
             generatedAt: generatedAt,
             phase: phase,
             activeToolName: activeToolName,
@@ -147,6 +161,8 @@ extension SnapshotInputs {
             unreadCount: max(0, unreadCount))
 
         let approvals = PendingApprovalsSnapshot(
+            gatewayInstanceID: gatewayInstanceID,
+            stale: approvalsAreStale,
             generatedAt: generatedAt,
             approvals: pendingApprovals.map { request in
                 PendingApprovalsSnapshot.PendingApproval(
@@ -166,6 +182,8 @@ extension SnapshotInputs {
             })
 
         let jobs = JobsSnapshot(
+            gatewayInstanceID: gatewayInstanceID,
+            stale: jobsAreStale,
             generatedAt: generatedAt,
             jobs: jobs.map { job in
                 JobsSnapshot.JobSummary(
@@ -176,6 +194,34 @@ extension SnapshotInputs {
             })
 
         return ProjectedSnapshots(status: status, approvals: approvals, jobs: jobs)
+    }
+}
+
+/// Per-section outcome from one snapshot refresh. Callers can distinguish a
+/// fresh section from preserved last-known-good data and a section with no
+/// usable data at all.
+public struct SnapshotRefreshResult: Sendable, Equatable {
+    public enum SectionState: Sendable, Equatable {
+        case refreshed
+        case preserved
+        case unavailable
+    }
+
+    public var status: SectionState
+    public var approvals: SectionState
+    public var jobs: SectionState
+    public var didWrite: Bool
+
+    public init(
+        status: SectionState,
+        approvals: SectionState,
+        jobs: SectionState,
+        didWrite: Bool
+    ) {
+        self.status = status
+        self.approvals = approvals
+        self.jobs = jobs
+        self.didWrite = didWrite
     }
 }
 

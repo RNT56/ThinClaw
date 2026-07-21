@@ -1547,7 +1547,7 @@ fn provider_primary_model_for_slug(ps: &ProvidersSettings, slug: &str) -> Option
         .or_else(|| match slug {
             "ollama" => Some("llama3".to_string()),
             "openai_compatible" => Some("default".to_string()),
-            "bedrock" => Some("anthropic.claude-3-sonnet-20240229-v1:0".to_string()),
+            "bedrock" => Some("anthropic.claude-opus-4-8".to_string()),
             "llama_cpp" => Some("llama-local".to_string()),
             _ => None,
         })

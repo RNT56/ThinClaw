@@ -26,7 +26,7 @@ use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 pub async fn thinclaw_get_status(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<ThinClawStatus, String> {
+) -> Result<ThinClawStatus, crate::thinclaw::bridge::BridgeError> {
     let config = state.get_config().await;
 
     let engine_running = ironclaw.is_initialized() || ironclaw.is_remote_mode().await;
@@ -270,6 +270,27 @@ pub async fn thinclaw_get_status(
     })
 }
 
+/// Reveal the local gateway bearer token for an explicit user copy action.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_reveal_gateway_token(
+    state: State<'_, ThinClawManager>,
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
+    let config = match state.get_config().await {
+        Some(config) => config,
+        None => state.init_config().await?,
+    };
+    if config.gateway_mode == "remote" {
+        return Err(crate::thinclaw::bridge::gated(
+            "local gateway credential",
+            "Desktop is connected to a remote gateway",
+            "Switch to Local Core before revealing its credential",
+            crate::thinclaw::bridge::RouteMode::LocalOnly,
+        ));
+    }
+    Ok(config.auth_token.clone())
+}
+
 /// Sync Local LLM config (llama-server) to ThinClaw config.
 ///
 /// Still needed: ThinClaw Desktop manages the local llama-server sidecar and needs to
@@ -280,7 +301,7 @@ pub async fn thinclaw_sync_local_llm(
     state: State<'_, ThinClawManager>,
     sidecar: State<'_, crate::sidecar::SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -296,7 +317,8 @@ pub async fn thinclaw_sync_local_llm(
                 .unavailable_reason
                 .as_deref()
                 .unwrap_or("runtime endpoint unavailable")
-        ));
+        )
+        .into());
     }
 
     info!(
@@ -340,11 +362,12 @@ pub async fn thinclaw_sync_local_llm(
 #[specta::specta]
 pub async fn thinclaw_start_gateway(
     state: State<'_, ThinClawManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     sidecar: State<'_, crate::sidecar::SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     app_handle: tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let oc_config = state.get_config().await;
 
     // ── Determine mode ──────────────────────────────────────────────────────
@@ -396,10 +419,11 @@ pub async fn thinclaw_start_gateway(
             .await
             .map_err(|e| format!("Cannot connect to remote gateway: {}", e))?;
         if !authenticated {
-            return Err(
-                "Remote gateway rejected the configured bearer token or failed its health check"
-                    .to_string(),
-            );
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message:
+                    "Remote gateway rejected the configured bearer token or failed its health check"
+                        .to_string(),
+            });
         }
 
         // Start SSE subscription (forwards remote events as Tauri events)
@@ -463,25 +487,26 @@ pub async fn thinclaw_start_gateway(
             }
 
             if !ready {
-                return Err("Local inference engine did not start within 30 seconds. \
+                return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                    message: "Local inference engine did not start within 30 seconds. \
                      Please ensure a model is loaded and try again."
-                    .to_string());
+                        .to_string(),
+                });
             }
         }
     }
 
     // ── Start ThinClaw runtime ────────────────────────────────────────
-    // Create secrets adapter (bridges macOS Keychain to ThinClaw and enforces grants)
+    // Refresh grants and share the existing app-wide credential service.
     let cfg_for_secrets = if let Some(cfg) = state.get_config().await {
         cfg
     } else {
         state.init_config().await?
     };
+    secret_store.apply_thinclaw_config(&cfg_for_secrets);
     let secrets_store: Option<
         std::sync::Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
-    > = Some(std::sync::Arc::new(
-        crate::thinclaw::secrets_adapter::KeychainSecretsAdapter::with_config(&cfg_for_secrets),
-    ));
+    > = Some(std::sync::Arc::new((*secret_store).clone()));
 
     match ironclaw.start(secrets_store).await {
         Ok(true) => {
@@ -495,7 +520,7 @@ pub async fn thinclaw_start_gateway(
         Err(e) => {
             let msg = format!("Failed to start ThinClaw runtime: {}", e);
             tracing::error!("{}", msg);
-            Err(msg)
+            Err(crate::thinclaw::bridge::BridgeError::Runtime { message: msg })
         }
     }
 }
@@ -509,7 +534,7 @@ pub async fn thinclaw_start_gateway(
 pub async fn thinclaw_stop_gateway(
     _state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     info!(
         "[thinclaw-runtime] Gateway stop requested (mode={})",
         ironclaw.mode_label().await
@@ -536,27 +561,27 @@ pub async fn thinclaw_stop_gateway(
 /// Called by the frontend after API key save/toggle operations so the ThinClaw
 /// agent picks up changes without requiring manual restart by the user.
 ///
-/// **Flow:** stop engine → create fresh KeychainSecretsAdapter → start engine
+/// **Flow:** refresh shared grants → hot reload or restart the runtime
 ///
 /// This is a no-op if the engine isn't running.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_reload_secrets(
     state: State<'_, ThinClawManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     info!("[thinclaw-runtime] Reload secrets requested");
 
-    // Create a fresh secrets adapter (reads live from Keychain, grants from config)
+    // Refresh the live grant view on the one shared credential service.
     let cfg = state
         .get_config()
         .await
         .ok_or_else(|| "ThinClaw config is not initialized".to_string())?;
+    secret_store.apply_thinclaw_config(&cfg);
     let secrets_store: Option<
         std::sync::Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
-    > = Some(std::sync::Arc::new(
-        crate::thinclaw::secrets_adapter::KeychainSecretsAdapter::with_config(&cfg),
-    ));
+    > = Some(std::sync::Arc::new((*secret_store).clone()));
 
     ironclaw.reload_secrets(secrets_store).await?;
 
@@ -570,7 +595,7 @@ pub async fn thinclaw_reload_secrets(
 pub async fn thinclaw_get_diagnostics(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<ThinClawDiagnostics, String> {
+) -> Result<ThinClawDiagnostics, crate::thinclaw::bridge::BridgeError> {
     let cfg = state.get_config().await;
     let engine_running = ironclaw.is_initialized() || ironclaw.is_remote_mode().await;
 
@@ -615,7 +640,10 @@ pub async fn thinclaw_get_diagnostics(
 /// Now fully implemented using RemoteGatewayProxy.
 #[tauri::command]
 #[specta::specta]
-pub async fn thinclaw_test_connection(url: String, token: Option<String>) -> Result<bool, String> {
+pub async fn thinclaw_test_connection(
+    url: String,
+    token: Option<String>,
+) -> Result<bool, crate::thinclaw::bridge::BridgeError> {
     let clean_url = url.trim_end_matches('/').to_string();
     let token_str = token.as_deref().unwrap_or("");
 
@@ -627,7 +655,9 @@ pub async fn thinclaw_test_connection(url: String, token: Option<String>) -> Res
 /// payloads or returning it through renderer IPC.
 #[tauri::command]
 #[specta::specta]
-pub async fn thinclaw_copy_gateway_token(state: State<'_, ThinClawManager>) -> Result<(), String> {
+pub async fn thinclaw_copy_gateway_token(
+    state: State<'_, ThinClawManager>,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let cfg = if let Some(config) = state.get_config().await {
         config
     } else {
@@ -666,11 +696,15 @@ pub async fn thinclaw_copy_gateway_token(state: State<'_, ThinClawManager>) -> R
             Ok(result) => result.map_err(|error| format!("clipboard helper failed: {error}"))?,
             Err(_) => {
                 let _ = child.kill().await;
-                return Err("clipboard helper timed out".to_string());
+                return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                    message: "clipboard helper timed out".to_string(),
+                });
             }
         };
         if !status.success() {
-            return Err("system clipboard helper exited unsuccessfully".to_string());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "system clipboard helper exited unsuccessfully".to_string(),
+            });
         }
         Ok(())
     }
@@ -691,12 +725,13 @@ pub async fn thinclaw_copy_gateway_token(state: State<'_, ThinClawManager>) -> R
 #[specta::specta]
 pub async fn thinclaw_switch_to_profile(
     state: State<'_, ThinClawManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     sidecar: State<'_, crate::sidecar::SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     app_handle: tauri::AppHandle,
     profile_id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     info!("[thinclaw-runtime] Switching to profile: {}", profile_id);
 
     let mut cfg = if let Some(c) = state.get_config().await {
@@ -739,5 +774,13 @@ pub async fn thinclaw_switch_to_profile(
     );
 
     // Restart with new settings
-    thinclaw_start_gateway(state, ironclaw, sidecar, engine_manager, app_handle).await
+    thinclaw_start_gateway(
+        state,
+        secret_store,
+        ironclaw,
+        sidecar,
+        engine_manager,
+        app_handle,
+    )
+    .await
 }

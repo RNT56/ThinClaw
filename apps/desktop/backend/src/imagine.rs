@@ -225,7 +225,7 @@ pub async fn direct_imagine_generate(
     config: State<'_, ConfigManager>,
     router: State<'_, InferenceRouter>,
     params: ImagineParams,
-) -> Result<GeneratedImage, String> {
+) -> Result<GeneratedImage, crate::thinclaw::bridge::BridgeError> {
     validate_imagine_params(&params)?;
     tracing::info!(
         "[imagine] Generating image with provider: {}",
@@ -290,14 +290,18 @@ pub async fn direct_imagine_generate(
         .await
         .map_err(|error| format!("Generated image identifier is invalid: {error}"))?;
     if result_path != expected_path {
-        return Err("Image backend returned a path outside its assigned output file".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Image backend returned a path outside its assigned output file".to_string(),
+        });
     }
     let result_exists = file_store
         .exists_absolute(result_path)
         .await
         .map_err(|error| format!("Generated image path is outside managed storage: {error}"))?;
     if !result_exists {
-        return Err("Image backend did not produce a managed output file".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Image backend did not produce a managed output file".to_string(),
+        });
     }
     let generated_bytes = match file_store
         .read_absolute_bounded(result_path, MAX_GENERATED_IMAGE_BYTES)
@@ -306,7 +310,7 @@ pub async fn direct_imagine_generate(
         Ok(bytes) => bytes,
         Err(error) => {
             let _ = file_store.discard_local_absolute(result_path).await;
-            return Err(format!("Generated image output is invalid: {error}"));
+            return Err(format!("Generated image output is invalid: {error}").into());
         }
     };
     let normalized = tokio::task::spawn_blocking(move || {
@@ -320,11 +324,11 @@ pub async fn direct_imagine_generate(
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
             let _ = file_store.discard_local_absolute(result_path).await;
-            return Err(error);
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime { message: error });
         }
         Err(error) => {
             let _ = file_store.discard_local_absolute(result_path).await;
-            return Err(format!("Generated image validation task failed: {error}"));
+            return Err(format!("Generated image validation task failed: {error}").into());
         }
     };
     let generated_size = u64::try_from(generated_bytes.len())
@@ -339,9 +343,9 @@ pub async fn direct_imagine_generate(
         .await
     {
         let _ = file_store.discard_local_absolute(result_path).await;
-        return Err(format!(
-            "Generated image could not be published to managed storage: {error}"
-        ));
+        return Err(
+            format!("Generated image could not be published to managed storage: {error}").into(),
+        );
     }
 
     // Save metadata to database
@@ -375,7 +379,7 @@ pub async fn direct_imagine_generate(
     .await;
     if let Err(error) = metadata_result {
         let _ = file_store.delete_absolute(result_path).await;
-        return Err(format!("Failed to save image metadata: {error}"));
+        return Err(format!("Failed to save image metadata: {error}").into());
     }
 
     Ok(GeneratedImage {
@@ -404,11 +408,13 @@ pub async fn direct_imagine_list_images(
     limit: Option<i32>,
     offset: Option<i32>,
     favorites_only: Option<bool>,
-) -> Result<Vec<GeneratedImage>, String> {
+) -> Result<Vec<GeneratedImage>, crate::thinclaw::bridge::BridgeError> {
     let limit = limit.unwrap_or(50);
     let offset = offset.unwrap_or(0);
     if !(1..=200).contains(&limit) || !(0..=1_000_000).contains(&offset) {
-        return Err("Image gallery pagination is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Image gallery pagination is invalid".to_string(),
+        });
     }
     let favorites_only = favorites_only.unwrap_or(false);
 
@@ -491,9 +497,11 @@ pub async fn direct_imagine_list_images(
 pub async fn direct_imagine_search_images(
     pool: State<'_, SqlitePool>,
     query: String,
-) -> Result<Vec<GeneratedImage>, String> {
+) -> Result<Vec<GeneratedImage>, crate::thinclaw::bridge::BridgeError> {
     if query.trim().is_empty() || query.len() > 4096 || query.contains('\0') {
-        return Err("Image search query is invalid".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Image search query is invalid".to_string(),
+        });
     }
     let escaped_query = query
         .replace('\\', "\\\\")
@@ -566,7 +574,7 @@ pub async fn direct_imagine_search_images(
 pub async fn direct_imagine_toggle_favorite(
     pool: State<'_, SqlitePool>,
     image_id: String,
-) -> Result<bool, String> {
+) -> Result<bool, crate::thinclaw::bridge::BridgeError> {
     validate_image_id(&image_id)?;
     // Get current status
     let current: Option<(i32,)> =
@@ -580,7 +588,11 @@ pub async fn direct_imagine_toggle_favorite(
         Some((0,)) => 1,
         Some((1,)) => 0,
         Some(_) => 0,
-        None => return Err("Image not found".to_string()),
+        None => {
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Image not found".to_string(),
+            })
+        }
     };
 
     let result = sqlx::query("UPDATE direct_assets SET is_favorite = ?, updated_at = ? WHERE id = ? AND namespace = 'direct_workbench' AND kind = 'generated_image' AND status != 'deleted'")
@@ -591,7 +603,9 @@ pub async fn direct_imagine_toggle_favorite(
         .await
         .map_err(|e| format!("Failed to update favorite: {}", e))?;
     if result.rows_affected() != 1 {
-        return Err("Image disappeared while updating favorite status".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Image disappeared while updating favorite status".to_string(),
+        });
     }
 
     Ok(new_status == 1)
@@ -604,7 +618,7 @@ pub async fn direct_imagine_delete_image(
     pool: State<'_, SqlitePool>,
     file_store: State<'_, crate::file_store::FileStore>,
     image_id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     validate_image_id(&image_id)?;
     let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
     let row: Option<(String,)> =
@@ -651,7 +665,7 @@ pub async fn direct_imagine_delete_image(
 #[specta::specta]
 pub async fn direct_imagine_get_stats(
     pool: State<'_, SqlitePool>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM direct_assets WHERE namespace = 'direct_workbench' AND kind = 'generated_image' AND status != 'deleted'")
         .fetch_one(pool.inner())
         .await

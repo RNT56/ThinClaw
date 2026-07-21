@@ -154,7 +154,7 @@ pub struct OAuthStartResult {
 #[specta::specta]
 pub async fn cloud_get_status(
     cloud: State<'_, CloudManager>,
-) -> Result<CloudStatusResponse, String> {
+) -> Result<CloudStatusResponse, crate::thinclaw::bridge::BridgeError> {
     Ok(cloud.get_status().await.into())
 }
 
@@ -165,7 +165,7 @@ pub async fn cloud_test_connection(
     cloud: State<'_, CloudManager>,
     db: State<'_, sqlx::SqlitePool>,
     config: S3ConfigInput,
-) -> Result<ConnectionTestResult, String> {
+) -> Result<ConnectionTestResult, crate::thinclaw::bridge::BridgeError> {
     let provider_config = CloudProviderConfig {
         provider_type: "s3".to_string(),
         endpoint: config.endpoint,
@@ -176,7 +176,7 @@ pub async fn cloud_test_connection(
         root: config.root,
     };
 
-    test_provider(cloud, db, provider_config).await
+    Ok(test_provider(cloud, db, provider_config).await?)
 }
 
 /// Configure and test iCloud Drive storage.
@@ -187,7 +187,7 @@ pub async fn cloud_test_connection(
 pub async fn cloud_test_icloud(
     cloud: State<'_, CloudManager>,
     db: State<'_, sqlx::SqlitePool>,
-) -> Result<ConnectionTestResult, String> {
+) -> Result<ConnectionTestResult, crate::thinclaw::bridge::BridgeError> {
     let provider_config = CloudProviderConfig {
         provider_type: "icloud".to_string(),
         endpoint: None,
@@ -198,7 +198,7 @@ pub async fn cloud_test_icloud(
         root: None,
     };
 
-    test_provider(cloud, db, provider_config).await
+    Ok(test_provider(cloud, db, provider_config).await?)
 }
 
 /// Configure and test a WebDAV provider.
@@ -208,7 +208,7 @@ pub async fn cloud_test_webdav(
     cloud: State<'_, CloudManager>,
     db: State<'_, sqlx::SqlitePool>,
     config: WebDavConfigInput,
-) -> Result<ConnectionTestResult, String> {
+) -> Result<ConnectionTestResult, crate::thinclaw::bridge::BridgeError> {
     let provider_config = CloudProviderConfig {
         provider_type: "webdav".to_string(),
         endpoint: Some(config.endpoint),
@@ -219,7 +219,7 @@ pub async fn cloud_test_webdav(
         root: config.root,
     };
 
-    test_provider(cloud, db, provider_config).await
+    Ok(test_provider(cloud, db, provider_config).await?)
 }
 
 /// Configure and test an SFTP provider.
@@ -229,7 +229,7 @@ pub async fn cloud_test_sftp(
     cloud: State<'_, CloudManager>,
     db: State<'_, sqlx::SqlitePool>,
     config: SftpConfigInput,
-) -> Result<ConnectionTestResult, String> {
+) -> Result<ConnectionTestResult, crate::thinclaw::bridge::BridgeError> {
     let provider_config = CloudProviderConfig {
         provider_type: "sftp".to_string(),
         endpoint: Some(config.endpoint),
@@ -240,7 +240,7 @@ pub async fn cloud_test_sftp(
         root: config.root,
     };
 
-    test_provider(cloud, db, provider_config).await
+    Ok(test_provider(cloud, db, provider_config).await?)
 }
 
 /// Start the OAuth 2.0 PKCE flow for a cloud provider.
@@ -255,7 +255,7 @@ pub async fn cloud_test_sftp(
 pub async fn cloud_oauth_start(
     cloud: State<'_, CloudManager>,
     provider: String,
-) -> Result<OAuthStartResult, String> {
+) -> Result<OAuthStartResult, crate::thinclaw::bridge::BridgeError> {
     use super::oauth::{config_for_provider, OAuthManager};
 
     let config = config_for_provider(&provider).map_err(|error| error.to_string())?;
@@ -286,12 +286,12 @@ pub async fn cloud_oauth_complete(
     db: State<'_, sqlx::SqlitePool>,
     provider: String,
     flow_id: String,
-) -> Result<ConnectionTestResult, String> {
+) -> Result<ConnectionTestResult, crate::thinclaw::bridge::BridgeError> {
     use super::oauth::OAuthManager;
     use super::provider::CloudProvider;
 
     if !matches!(provider.as_str(), "gdrive" | "dropbox" | "onedrive") {
-        return Err(format!("OAuth not supported for provider: {provider}"));
+        return Err(format!("OAuth not supported for provider: {provider}").into());
     }
 
     let callback = cloud
@@ -389,7 +389,7 @@ pub async fn cloud_migrate_to_cloud(
     cloud: State<'_, CloudManager>,
     app: tauri::AppHandle,
     db: State<'_, sqlx::SqlitePool>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     use tauri::Manager;
 
     info!("[cloud] Frontend requested: migrate to cloud");
@@ -411,7 +411,8 @@ pub async fn cloud_migrate_to_cloud(
             return Err(format!(
                 "Migrated to cloud, but live sync failed to start: {}. Restart the app to retry.",
                 e
-            ));
+            )
+            .into());
         }
     }
 
@@ -425,7 +426,7 @@ pub async fn cloud_migrate_to_local(
     cloud: State<'_, CloudManager>,
     app: tauri::AppHandle,
     db: State<'_, sqlx::SqlitePool>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     use tauri::Manager;
 
     info!("[cloud] Frontend requested: migrate to local");
@@ -440,10 +441,11 @@ pub async fn cloud_migrate_to_local(
             Err(restart_error) => {
                 return Err(format!(
                     "{error}; additionally failed to resume cloud sync: {restart_error}"
-                ));
+                )
+                .into());
             }
         }
-        return Err(error);
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime { message: error });
     }
 
     info!("[cloud] Restore is authenticated and staged; restarting for atomic activation");
@@ -453,15 +455,19 @@ pub async fn cloud_migrate_to_local(
 /// Cancel an in-progress migration.
 #[tauri::command]
 #[specta::specta]
-pub async fn cloud_cancel_migration(cloud: State<'_, CloudManager>) -> Result<(), String> {
-    cloud.cancel_migration().await
+pub async fn cloud_cancel_migration(
+    cloud: State<'_, CloudManager>,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    Ok(cloud.cancel_migration().await?)
 }
 
 /// Get the recovery key (base64-encoded master encryption key).
 #[tauri::command]
 #[specta::specta]
-pub async fn cloud_get_recovery_key(cloud: State<'_, CloudManager>) -> Result<String, String> {
-    cloud.get_recovery_key().await
+pub async fn cloud_get_recovery_key(
+    cloud: State<'_, CloudManager>,
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
+    Ok(cloud.get_recovery_key().await?)
 }
 
 /// Import a recovery key (for restoring on a new device).
@@ -470,8 +476,8 @@ pub async fn cloud_get_recovery_key(cloud: State<'_, CloudManager>) -> Result<St
 pub async fn cloud_import_recovery_key(
     cloud: State<'_, CloudManager>,
     recovery_key: String,
-) -> Result<(), String> {
-    cloud.import_recovery_key(&recovery_key).await
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    Ok(cloud.import_recovery_key(&recovery_key).await?)
 }
 
 /// Get storage breakdown by category (for the progress bar UI).
@@ -479,7 +485,7 @@ pub async fn cloud_import_recovery_key(
 #[specta::specta]
 pub async fn cloud_get_storage_breakdown(
     app: tauri::AppHandle,
-) -> Result<Vec<StorageCategory>, String> {
+) -> Result<Vec<StorageCategory>, crate::thinclaw::bridge::BridgeError> {
     use tauri::Manager;
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
 

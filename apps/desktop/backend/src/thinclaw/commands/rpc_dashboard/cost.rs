@@ -6,9 +6,11 @@ use super::helpers::{json_bool_field, json_f64_field, json_f64_map, json_number_
 use crate::thinclaw::commands::types::*;
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
-pub(super) fn map_remote_cost_summary(value: serde_json::Value) -> Result<CostSummary, String> {
+pub(super) fn map_remote_cost_summary(
+    value: serde_json::Value,
+) -> Result<CostSummary, crate::thinclaw::bridge::BridgeError> {
     if !value.is_object() {
-        return Err("Remote cost summary returned an invalid response".to_string());
+        return Err(("Remote cost summary returned an invalid response".to_string()).into());
     }
 
     Ok(CostSummary {
@@ -39,14 +41,14 @@ pub(super) fn map_remote_cost_summary(value: serde_json::Value) -> Result<CostSu
 #[specta::specta]
 pub async fn thinclaw_cost_summary(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<CostSummary, String> {
+) -> Result<CostSummary, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return map_remote_cost_summary(proxy.get_cost_summary().await?);
     }
 
     let tracker_lock = ironclaw.cost_tracker().await?;
     let tracker = tracker_lock.lock().await;
-    let ic_summary = thinclaw_core::tauri_commands::cost_summary(&tracker)?;
+    let ic_summary = thinclaw_core::desktop_api::cost_summary(&tracker)?;
 
     // Auto-persist to DB on each summary poll (cheap — 10s interval).
     if let Ok(agent) = ironclaw.agent().await {
@@ -78,14 +80,14 @@ pub async fn thinclaw_cost_summary(
 #[specta::specta]
 pub async fn thinclaw_cost_export_csv(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.export_cost_csv().await;
     }
 
     let tracker_lock = ironclaw.cost_tracker().await?;
     let tracker = tracker_lock.lock().await;
-    thinclaw_core::tauri_commands::cost_export_csv(&tracker)
+    Ok(thinclaw_core::desktop_api::cost_export_csv(&tracker)?)
 }
 
 /// Reset (clear) all cost tracking data.
@@ -93,14 +95,16 @@ pub async fn thinclaw_cost_export_csv(
 /// Clears in-memory entries and persists the empty state to the ThinClaw DB.
 #[tauri::command]
 #[specta::specta]
-pub async fn thinclaw_cost_reset(ironclaw: State<'_, ThinClawRuntimeState>) -> Result<(), String> {
+pub async fn thinclaw_cost_reset(
+    ironclaw: State<'_, ThinClawRuntimeState>,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         return proxy.reset_costs().await;
     }
 
     let tracker_lock = ironclaw.cost_tracker().await?;
     let mut tracker = tracker_lock.lock().await;
-    thinclaw_core::tauri_commands::cost_reset(&mut tracker)?;
+    thinclaw_core::desktop_api::cost_reset(&mut tracker)?;
 
     // Persist empty state to DB
     if let Ok(agent) = ironclaw.agent().await {

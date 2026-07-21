@@ -108,16 +108,16 @@ pub struct AgentDeps {
     /// Optional sub-agent executor for spawning parallel agentic loops.
     pub subagent_executor: Option<Arc<SubagentExecutor>>,
     /// Shared cost tracker — receives entries from every LLM call in the agent.
-    /// Read by `openclaw_cost_summary` Tauri command for the Cost Dashboard.
+    /// Read by `thinclaw_cost_summary` for the Cost Dashboard.
     pub cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
     /// Shared response cache — populated by Reasoning after each LLM call,
-    /// read by `openclaw_cache_stats` Tauri command for the Cache Dashboard.
+    /// read by `thinclaw_cache_stats` for the Cache Dashboard.
     pub response_cache:
         Option<Arc<tokio::sync::RwLock<crate::llm::response_cache_ext::CachedResponseStore>>>,
     /// Live runtime manager for reading effective routing state without restart.
     pub llm_runtime: Option<Arc<crate::llm::runtime_manager::LlmRuntimeManager>>,
     /// Smart routing policy — selects provider/model based on request context.
-    /// Read/written by `openclaw_routing_*` Tauri commands, consulted before each LLM call.
+    /// Read/written by `thinclaw_routing_*` Desktop commands, consulted before each LLM call.
     pub routing_policy: Option<Arc<std::sync::RwLock<crate::llm::routing_policy::RoutingPolicy>>>,
     /// Agent-driven model override state, written by the `llm_select` tool.
     /// When set, the dispatcher creates a new provider from the catalog and
@@ -491,6 +491,12 @@ impl Agent {
     /// Get the tool registry (public for Tauri/API integration).
     pub fn tools(&self) -> &Arc<ToolRegistry> {
         &self.deps.tools
+    }
+
+    /// Metadata-only safety counters for host diagnostics. Raw tool output is
+    /// never retained by the telemetry source.
+    pub fn safety_telemetry_snapshot(&self) -> crate::safety::SafetyTelemetrySnapshot {
+        self.deps.safety.telemetry_snapshot()
     }
 
     /// Get the workspace (public for Tauri/API integration).

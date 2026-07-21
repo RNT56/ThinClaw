@@ -25,6 +25,14 @@ public enum TransportBadge: Sendable, Equatable {
 @MainActor
 @Observable
 public final class OnboardingStore {
+    private static let pendingAttemptKey = "thinclaw.pending-pairing.v1"
+
+    private struct PendingPairingAttempt: Codable {
+        var payload: PairingPayload
+        var redemption: PairingRedemption
+        var pairingID: String
+        var deviceName: String
+    }
     public enum Step: Sendable, Equatable {
         /// Landing screen: offer scan / paste / manual code.
         case welcome
@@ -60,17 +68,22 @@ public final class OnboardingStore {
     private let keychain: any KeychainStoring
     /// Called after a credential is persisted, so the app can flip `isPaired`.
     private let onPaired: @MainActor (DeviceCredential) -> Void
+    private let now: @Sendable () -> Date
+    private var pollingTask: Task<Void, Never>?
 
     public init(
         pairingService: any PairingService,
         keychain: any KeychainStoring,
         deviceName: String,
+        now: @escaping @Sendable () -> Date = { Date() },
         onPaired: @escaping @MainActor (DeviceCredential) -> Void = { _ in }
     ) {
         self.pairingService = pairingService
         self.keychain = keychain
         self.deviceName = deviceName
+        self.now = now
         self.onPaired = onPaired
+        restorePendingAttempt()
     }
 
     // MARK: - Navigation
@@ -82,6 +95,9 @@ public final class OnboardingStore {
 
     /// Return to the landing screen and drop any pending payload.
     public func reset() {
+        pollingTask?.cancel()
+        pollingTask = nil
+        try? keychain.removeSecret(for: Self.pendingAttemptKey)
         pendingPayload = nil
         pendingRedemption = nil
         step = .welcome
@@ -146,7 +162,7 @@ public final class OnboardingStore {
             installationID: "",
             name: url.host ?? "gateway",
             secret: "",
-            expiresAt: .distantFuture)
+            expiresAt: now().addingTimeInterval(15 * 60))
         pendingPayload = payload
         pendingRedemption = .code(trimmedCode)
         await runPairing(payload: payload, redemption: .code(trimmedCode))
@@ -200,7 +216,11 @@ public final class OnboardingStore {
         await runPairing(payload: payload, redemption: redemption)
     }
 
-    private func runPairing(payload: PairingPayload, redemption: PairingRedemption) async {
+    private func runPairing(
+        payload: PairingPayload,
+        redemption: PairingRedemption,
+        schedulePolling: Bool = true
+    ) async {
         step = .pairing
         let name = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
         let effectiveName = name.isEmpty ? "iPhone" : name
@@ -216,18 +236,71 @@ public final class OnboardingStore {
                     return
                 }
                 onPaired(credential)
+                pollingTask?.cancel()
+                pollingTask = nil
+                try? keychain.removeSecret(for: Self.pendingAttemptKey)
                 step = .done
             case .pendingConfirmation(let pairingID):
                 step = .pendingApproval(pairingID: pairingID)
+                persistPendingAttempt(pairingID: pairingID)
+                if schedulePolling { startPolling() }
             }
-        } catch let error as PairingError {
+        } catch let error {
             fail(error)
-        } catch {
-            fail(.unexpected(status: 0))
         }
     }
 
     private func fail(_ error: PairingError) {
         step = .failed(message: error.userMessage)
+    }
+
+    private func persistPendingAttempt(pairingID: String) {
+        guard let pendingPayload, let pendingRedemption else { return }
+        let attempt = PendingPairingAttempt(
+            payload: pendingPayload,
+            redemption: pendingRedemption,
+            pairingID: pairingID,
+            deviceName: deviceName)
+        guard let data = try? JSONEncoder().encode(attempt) else { return }
+        try? keychain.setSecret(
+            data,
+            for: Self.pendingAttemptKey,
+            accessibility: .whenUnlockedDeviceOnly)
+    }
+
+    private func restorePendingAttempt() {
+        guard let data = try? keychain.secret(for: Self.pendingAttemptKey),
+            let attempt = try? JSONDecoder().decode(PendingPairingAttempt.self, from: data),
+            attempt.payload.expiresAt > now()
+        else {
+            try? keychain.removeSecret(for: Self.pendingAttemptKey)
+            return
+        }
+        pendingPayload = attempt.payload
+        pendingRedemption = attempt.redemption
+        deviceName = attempt.deviceName
+        step = .pendingApproval(pairingID: attempt.pairingID)
+        startPolling()
+    }
+
+    private func startPolling() {
+        pollingTask?.cancel()
+        pollingTask = Task { [weak self] in
+            let delays: [Duration] = [.seconds(2), .seconds(4), .seconds(8), .seconds(15), .seconds(30)]
+            for delay in delays {
+                do { try await Task.sleep(for: delay) } catch { return }
+                guard !Task.isCancelled, let self,
+                    let payload = self.pendingPayload,
+                    let redemption = self.pendingRedemption,
+                    payload.expiresAt > self.now()
+                else { return }
+                await self.runPairing(
+                    payload: payload,
+                    redemption: redemption,
+                    schedulePolling: false)
+                if self.step == .done { return }
+                guard case .pendingApproval = self.step else { return }
+            }
+        }
     }
 }

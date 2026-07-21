@@ -169,15 +169,16 @@ async fn remote_gmail_status(
 #[specta::specta]
 pub async fn thinclaw_channel_status_list(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Vec<ChannelStatusEntry>, String> {
+) -> Result<Vec<ChannelStatusEntry>, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_status().await?;
         let entries = remote_channel_status_entries(&status);
         if entries.is_empty() {
-            return Err(
-                "unavailable: remote ThinClaw gateway did not include channel setup status"
-                    .to_string(),
-            );
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message:
+                    "unavailable: remote ThinClaw gateway did not include channel setup status"
+                        .to_string(),
+            });
         }
         return Ok(entries);
     }
@@ -237,7 +238,7 @@ pub async fn thinclaw_channel_status_list(
 #[specta::specta]
 pub async fn thinclaw_gmail_oauth_start(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<GmailOAuthResult, String> {
+) -> Result<GmailOAuthResult, crate::thinclaw::bridge::BridgeError> {
     if ironclaw.remote_proxy().await.is_some() {
         return Ok(GmailOAuthResult {
             success: false,
@@ -301,10 +302,10 @@ pub async fn thinclaw_gmail_oauth_start(
 #[specta::specta]
 pub async fn thinclaw_gmail_status(
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<GmailStatusResponse, String> {
+) -> Result<GmailStatusResponse, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let status = proxy.get_status().await?;
-        return remote_gmail_status(&proxy, &status).await;
+        return Ok(remote_gmail_status(&proxy, &status).await?);
     }
 
     let mut enabled = false;

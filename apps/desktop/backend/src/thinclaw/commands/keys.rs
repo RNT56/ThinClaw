@@ -53,7 +53,7 @@ async fn save_remote_provider_key_if_needed(
 pub async fn thinclaw_get_openai_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
     }
@@ -68,7 +68,7 @@ pub async fn thinclaw_save_openai_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if save_remote_provider_key_if_needed(&ironclaw, "openai", key.as_deref()).await? {
         return Ok(());
     }
@@ -110,7 +110,7 @@ pub async fn thinclaw_save_openai_key(
 pub async fn thinclaw_get_openrouter_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
     }
@@ -125,7 +125,7 @@ pub async fn thinclaw_save_openrouter_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if save_remote_provider_key_if_needed(&ironclaw, "openrouter", key.as_deref()).await? {
         return Ok(());
     }
@@ -166,7 +166,7 @@ pub async fn thinclaw_save_openrouter_key(
 pub async fn thinclaw_get_gemini_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
     }
@@ -181,7 +181,7 @@ pub async fn thinclaw_save_gemini_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if save_remote_provider_key_if_needed(&ironclaw, "gemini", key.as_deref()).await? {
         return Ok(());
     }
@@ -223,7 +223,7 @@ pub async fn thinclaw_save_gemini_key(
 pub async fn thinclaw_get_groq_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
     }
@@ -238,7 +238,7 @@ pub async fn thinclaw_save_groq_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if save_remote_provider_key_if_needed(&ironclaw, "groq", key.as_deref()).await? {
         return Ok(());
     }
@@ -280,7 +280,7 @@ pub async fn thinclaw_save_groq_key(
 pub async fn thinclaw_get_anthropic_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
     }
@@ -294,7 +294,7 @@ pub async fn thinclaw_get_anthropic_key(
 pub async fn thinclaw_get_brave_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
     }
@@ -309,7 +309,7 @@ pub async fn thinclaw_save_anthropic_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     key: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if save_remote_provider_key_if_needed(&ironclaw, "anthropic", key.as_deref()).await? {
         return Ok(());
     }
@@ -418,7 +418,7 @@ pub async fn thinclaw_toggle_secret_access(
     state: State<'_, ThinClawManager>,
     secret: String,
     granted: bool,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -460,7 +460,7 @@ pub async fn select_thinclaw_brain(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     brain: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let mut remote_config = proxy
             .get_providers_config()
@@ -577,7 +577,7 @@ pub async fn thinclaw_save_implicit_provider_key(
     ironclaw: State<'_, ThinClawRuntimeState>,
     provider: String,
     key: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let valid_providers = [
         "xai",
         "venice",
@@ -595,7 +595,7 @@ pub async fn thinclaw_save_implicit_provider_key(
         "fal",
     ];
     if !valid_providers.contains(&provider.as_str()) {
-        return Err(format!("Unknown implicit provider: {}", provider));
+        return Err(format!("Unknown implicit provider: {}", provider).into());
     }
 
     if let Some(proxy) = ironclaw.remote_proxy().await {
@@ -670,7 +670,7 @@ pub async fn thinclaw_get_implicit_provider_key(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
     provider: String,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, crate::thinclaw::bridge::BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok(None);
     }
@@ -775,7 +775,7 @@ pub async fn thinclaw_save_bedrock_credentials(
 pub async fn thinclaw_get_bedrock_credentials(
     state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
-) -> Result<BedrockCredentials, String> {
+) -> Result<BedrockCredentials, crate::thinclaw::bridge::BridgeError> {
     if remote_secret_reads_are_opaque(&ironclaw).await {
         return Ok((None, None, None));
     }
@@ -793,7 +793,7 @@ pub async fn thinclaw_add_custom_secret(
     name: String,
     value: String,
     description: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let name = name.trim().to_string();
     if name.is_empty()
         || name.len() > 256
@@ -809,9 +809,10 @@ pub async fn thinclaw_add_custom_secret(
                 })
         })
     {
-        return Err(
-            "custom secret metadata or value is empty, malformed, or oversized".to_string(),
-        );
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "custom secret metadata or value is empty, malformed, or oversized"
+                .to_string(),
+        });
     }
     let mut cfg = if let Some(c) = state.get_config().await {
         c
@@ -819,7 +820,9 @@ pub async fn thinclaw_add_custom_secret(
         state.init_config().await?
     };
     if cfg.custom_secrets.len() >= 128 {
-        return Err("custom secret limit of 128 has been reached".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "custom secret limit of 128 has been reached".to_string(),
+        });
     }
 
     let id = format!("custom-{}", uuid::Uuid::new_v4());
@@ -839,10 +842,10 @@ pub async fn thinclaw_add_custom_secret(
     if let Err(error) = cfg.save_identity() {
         let rollback = crate::thinclaw::config::keychain::set_key(&id, None);
         return match rollback {
-            Ok(()) => Err(error.to_string()),
+            Ok(()) => Err(crate::thinclaw::bridge::BridgeError::Runtime { message: error.to_string() }),
             Err(rollback_error) => Err(format!(
                 "failed to persist custom secret ({error}); credential rollback also failed: {rollback_error}"
-            )),
+            ).into()),
         };
     }
 
@@ -861,13 +864,73 @@ pub async fn thinclaw_add_custom_secret(
     Ok(())
 }
 
+/// Update an existing custom secret value without changing its identity or grant.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_update_custom_secret(
+    state: State<'_, ThinClawManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
+    id: String,
+    value: String,
+) -> Result<(), BridgeError> {
+    if id.is_empty()
+        || id.len() > 256
+        || id.chars().any(char::is_control)
+        || value.is_empty()
+        || value.len() > 64 * 1024
+        || value.contains('\0')
+    {
+        return Err("custom secret identity or value is empty, malformed, or oversized".into());
+    }
+
+    let mut cfg = if let Some(config) = state.get_config().await {
+        config
+    } else {
+        state.init_config().await?
+    };
+    let secret = cfg
+        .custom_secrets
+        .iter_mut()
+        .find(|secret| secret.id == id)
+        .ok_or_else(|| "Secret not found".to_string())?;
+    let old_value = crate::thinclaw::config::keychain::get_key(&id)
+        .or_else(|| (!secret.value.is_empty()).then(|| secret.value.clone()));
+
+    crate::thinclaw::config::keychain::set_key(&id, Some(&value))
+        .map_err(|error| format!("Keychain error: {error}"))?;
+    secret.value = value;
+
+    if let Err(error) = cfg.save_identity() {
+        let rollback = crate::thinclaw::config::keychain::set_key(&id, old_value.as_deref());
+        return match rollback {
+            Ok(()) => Err(error.to_string().into()),
+            Err(rollback_error) => Err(format!(
+                "failed to persist custom secret update ({error}); credential rollback also failed: {rollback_error}"
+            )
+            .into()),
+        };
+    }
+
+    let existing_thinclaw_engine = cfg.load_config().ok();
+    let local_llm = existing_thinclaw_engine
+        .as_ref()
+        .and_then(|model| model.get_local_llm_config());
+    let thinclaw_engine = cfg.generate_config(None, None, local_llm.clone());
+    cfg.write_config(&thinclaw_engine, local_llm)
+        .map_err(|error| error.to_string())?;
+
+    secret_store.apply_thinclaw_config(&cfg);
+    *state.config.write().await = Some(cfg);
+    Ok(())
+}
+
 /// Remove a custom secret
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_remove_custom_secret(
     state: State<'_, ThinClawManager>,
     id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -889,10 +952,10 @@ pub async fn thinclaw_remove_custom_secret(
     if let Err(error) = cfg.save_identity() {
         let rollback = crate::thinclaw::config::keychain::set_key(&id, old_value.as_deref());
         return match rollback {
-            Ok(()) => Err(error.to_string()),
+            Ok(()) => Err(crate::thinclaw::bridge::BridgeError::Runtime { message: error.to_string() }),
             Err(rollback_error) => Err(format!(
                 "failed to persist custom secret removal ({error}); credential rollback also failed: {rollback_error}"
-            )),
+            ).into()),
         };
     }
 
@@ -918,7 +981,7 @@ pub async fn thinclaw_toggle_custom_secret(
     state: State<'_, ThinClawManager>,
     id: String,
     granted: bool,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -956,7 +1019,7 @@ pub async fn thinclaw_toggle_local_tools(
     sidecar: State<'_, SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     enabled: bool,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -1005,13 +1068,14 @@ pub async fn thinclaw_set_workspace_mode(
     engine_manager: State<'_, crate::engine::EngineManager>,
     mode: String,
     root: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, crate::thinclaw::bridge::BridgeError> {
     // Validate mode
     if !matches!(mode.as_str(), "unrestricted" | "sandboxed" | "project") {
         return Err(format!(
             "Invalid workspace mode '{}'. Must be 'unrestricted', 'sandboxed', or 'project'.",
             mode
-        ));
+        )
+        .into());
     }
 
     let mut cfg = if let Some(c) = state.get_config().await {
@@ -1029,10 +1093,12 @@ pub async fn thinclaw_set_workspace_mode(
         if !root_path.is_empty() {
             let path = std::path::Path::new(root_path);
             if !path.is_absolute() {
-                return Err("Workspace root must be an absolute path.".to_string());
+                return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                    message: "Workspace root must be an absolute path.".to_string(),
+                });
             }
             if let Err(e) = std::fs::create_dir_all(path) {
-                return Err(format!("Failed to create workspace directory: {}", e));
+                return Err(format!("Failed to create workspace directory: {}", e).into());
             }
             Some(root_path.clone())
         } else {
@@ -1099,7 +1165,7 @@ pub async fn thinclaw_toggle_local_inference(
     sidecar: State<'_, SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
     enabled: bool,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -1149,7 +1215,7 @@ pub async fn thinclaw_toggle_local_inference(
 pub async fn thinclaw_save_slack_config(
     state: State<'_, ThinClawManager>,
     config_input: SlackConfigInput,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let cfg = state.get_config().await.ok_or("Config not initialized")?;
 
     let existing_thinclaw_engine = cfg.load_config().ok();
@@ -1179,7 +1245,7 @@ pub async fn thinclaw_save_slack_config(
 pub async fn thinclaw_save_telegram_config(
     state: State<'_, ThinClawManager>,
     config_input: TelegramConfigInput,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let cfg = state.get_config().await.ok_or("Config not initialized")?;
 
     let existing_thinclaw_engine = cfg.load_config().ok();
@@ -1219,7 +1285,7 @@ pub async fn thinclaw_save_gateway_settings(
     mode: String,
     url: Option<String>,
     token: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -1243,7 +1309,7 @@ pub async fn thinclaw_save_gateway_settings(
 pub async fn thinclaw_add_agent_profile(
     state: State<'_, ThinClawManager>,
     mut profile: AgentProfile,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     profile.id = profile.id.trim().to_string();
     profile.name = profile.name.trim().to_string();
     profile.url = profile.url.trim().trim_end_matches('/').to_string();
@@ -1254,24 +1320,33 @@ pub async fn thinclaw_add_agent_profile(
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
-        return Err(
-            "agent profile ID must be 1-64 ASCII letters, digits, '.', '_' or '-'".to_string(),
-        );
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "agent profile ID must be 1-64 ASCII letters, digits, '.', '_' or '-'"
+                .to_string(),
+        });
     }
     if profile.name.is_empty()
         || profile.name.len() > 128
         || profile.name.chars().any(char::is_control)
     {
-        return Err("agent profile name must be 1-128 printable characters".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "agent profile name must be 1-128 printable characters".to_string(),
+        });
     }
     if !matches!(profile.mode.as_str(), "local" | "remote") {
-        return Err("agent profile mode must be 'local' or 'remote'".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "agent profile mode must be 'local' or 'remote'".to_string(),
+        });
     }
     if profile.url.len() > 2048 {
-        return Err("agent profile URL exceeds the 2048-byte limit".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "agent profile URL exceeds the 2048-byte limit".to_string(),
+        });
     }
     if profile.url.chars().any(char::is_control) {
-        return Err("agent profile URL contains control characters".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "agent profile URL contains control characters".to_string(),
+        });
     }
 
     let mut cfg = if let Some(c) = state.get_config().await {
@@ -1284,7 +1359,9 @@ pub async fn thinclaw_add_agent_profile(
         .iter()
         .any(|existing| existing.id == profile.id);
     if !replacing_existing && cfg.profiles.len() >= 64 {
-        return Err("agent profile limit of 64 has been reached".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "agent profile limit of 64 has been reached".to_string(),
+        });
     }
 
     let token_key = crate::thinclaw::config::keychain::profile_token_key(&profile.id);
@@ -1303,7 +1380,9 @@ pub async fn thinclaw_add_agent_profile(
     if resolved_token.as_deref().is_some_and(|token| {
         token.is_empty() || token.len() > 8 * 1024 || token.chars().any(char::is_control)
     }) {
-        return Err("agent profile token is malformed or exceeds 8192 bytes".to_string());
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "agent profile token is malformed or exceeds 8192 bytes".to_string(),
+        });
     }
 
     if profile.mode == "remote" {
@@ -1334,10 +1413,10 @@ pub async fn thinclaw_add_agent_profile(
         let rollback =
             crate::thinclaw::config::keychain::set_key(&token_key, old_stored_token.as_deref());
         return match rollback {
-            Ok(()) => Err(error.to_string()),
+            Ok(()) => Err(crate::thinclaw::bridge::BridgeError::Runtime { message: error.to_string() }),
             Err(rollback_error) => Err(format!(
                 "failed to persist agent profile ({error}); credential rollback also failed: {rollback_error}"
-            )),
+            ).into()),
         };
     }
     *state.config.write().await = Some(cfg);
@@ -1350,7 +1429,7 @@ pub async fn thinclaw_add_agent_profile(
 pub async fn thinclaw_remove_agent_profile(
     state: State<'_, ThinClawManager>,
     id: String,
-) -> Result<(), String> {
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -1373,10 +1452,10 @@ pub async fn thinclaw_remove_agent_profile(
     if let Err(error) = cfg.save_identity() {
         let rollback = crate::thinclaw::config::keychain::set_key(&token_key, old_token.as_deref());
         return match rollback {
-            Ok(()) => Err(error.to_string()),
+            Ok(()) => Err(crate::thinclaw::bridge::BridgeError::Runtime { message: error.to_string() }),
             Err(rollback_error) => Err(format!(
                 "failed to persist profile removal ({error}); credential rollback also failed: {rollback_error}"
-            )),
+            ).into()),
         };
     }
     *state.config.write().await = Some(cfg);

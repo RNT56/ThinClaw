@@ -435,11 +435,13 @@ mod tests {
             repo.id,
             vec!["urgent".to_string(), "ci".to_string()],
         );
+        let synthetic_openai_key = format!("{}{}", "sk-proj-", "a".repeat(48));
+        let failure_details = format!("test result: FAILED. secret={synthetic_openai_key}");
         let ci = classify_ci_check(&GitHubCiCheck::new(
             GitHubCiScope::Job,
             "test",
             Some("failure"),
-            Some("test result: FAILED. secret=sk-proj-abcdefghijklmnopqrstuvwxyz123456"),
+            Some(&failure_details),
         ));
         let gate = MergeGateDecision::denied(
             vec![MergeGateDenialReason::ChecksNotGreen],
@@ -473,11 +475,7 @@ mod tests {
                 .prompt
                 .contains("ghp_abcdefghijklmnopqrstuvwxyz123456")
         );
-        assert!(
-            !packet_a
-                .prompt
-                .contains("sk-proj-abcdefghijklmnopqrstuvwxyz123456")
-        );
+        assert!(!packet_a.prompt.contains(&synthetic_openai_key));
     }
 
     #[test]
