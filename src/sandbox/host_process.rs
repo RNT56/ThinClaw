@@ -3,8 +3,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::Command;
 
 use super::{Result, SandboxError};
 
@@ -40,89 +40,58 @@ pub(crate) async fn execute_host_command(
         .envs(env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    cmd.process_group(0);
+        .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|error| SandboxError::ExecutionFailed {
-        reason: error.to_string(),
-    })?;
-    let mut ownership =
-        DescendantOwnership::attach(&child).map_err(|error| SandboxError::ExecutionFailed {
+    let mut child = thinclaw_platform::process::OwnedChild::spawn(&mut cmd).map_err(|error| {
+        SandboxError::ExecutionFailed {
             reason: format!("failed to retain ownership of host command descendants: {error}"),
-        })?;
+        }
+    })?;
     let mut stdout = child
-        .stdout
-        .take()
+        .take_stdout()
         .ok_or_else(|| SandboxError::ExecutionFailed {
             reason: "host command stdout pipe was not created".to_string(),
         })?;
     let mut stderr = child
-        .stderr
-        .take()
+        .take_stderr()
         .ok_or_else(|| SandboxError::ExecutionFailed {
             reason: "host command stderr pipe was not created".to_string(),
         })?;
 
     let half_max = max_output_bytes / 2;
-    let mut stdout_bytes = Vec::with_capacity(half_max.min(8 * 1024));
-    let mut stderr_bytes = Vec::with_capacity(half_max.min(8 * 1024));
-    let mut stdout_buffer = [0_u8; 8 * 1024];
-    let mut stderr_buffer = [0_u8; 8 * 1024];
-    let mut stdout_eof = false;
-    let mut stderr_eof = false;
-    let mut status = None;
-    let mut truncated = false;
-    let deadline = tokio::time::sleep(timeout);
-    tokio::pin!(deadline);
-
-    loop {
-        if status.is_some() && stdout_eof && stderr_eof {
-            break;
+    let output = tokio::time::timeout(timeout, async {
+        let (stdout_result, stderr_result, status_result) = tokio::join!(
+            capture_bounded_pipe(&mut stdout, half_max),
+            capture_bounded_pipe(&mut stderr, half_max),
+            child.wait(),
+        );
+        let (stdout_bytes, stdout_truncated) =
+            stdout_result.map_err(|error| SandboxError::ExecutionFailed {
+                reason: format!("failed reading host command stdout: {error}"),
+            })?;
+        let (stderr_bytes, stderr_truncated) =
+            stderr_result.map_err(|error| SandboxError::ExecutionFailed {
+                reason: format!("failed reading host command stderr: {error}"),
+            })?;
+        let status = status_result.map_err(|error| SandboxError::ExecutionFailed {
+            reason: error.to_string(),
+        })?;
+        Ok::<_, SandboxError>((
+            stdout_bytes,
+            stderr_bytes,
+            status,
+            stdout_truncated || stderr_truncated,
+        ))
+    })
+    .await;
+    let (stdout_bytes, stderr_bytes, status, truncated) = match output {
+        Ok(result) => result?,
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err(SandboxError::Timeout(timeout));
         }
-        tokio::select! {
-            _ = &mut deadline => {
-                ownership.terminate();
-                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-                return Err(SandboxError::Timeout(timeout));
-            }
-            result = child.wait(), if status.is_none() => {
-                status = Some(result.map_err(|error| SandboxError::ExecutionFailed {
-                    reason: error.to_string(),
-                })?);
-                // A shell can exit after launching background children. Kill
-                // the owned group/job before waiting for inherited pipes to
-                // close so those descendants cannot outlive this call.
-                ownership.terminate();
-            }
-            result = stdout.read(&mut stdout_buffer), if !stdout_eof => {
-                let read = result.map_err(|error| SandboxError::ExecutionFailed {
-                    reason: format!("failed reading host command stdout: {error}"),
-                })?;
-                if read == 0 {
-                    stdout_eof = true;
-                } else {
-                    truncated |= append_bounded(&mut stdout_bytes, &stdout_buffer[..read], half_max);
-                }
-            }
-            result = stderr.read(&mut stderr_buffer), if !stderr_eof => {
-                let read = result.map_err(|error| SandboxError::ExecutionFailed {
-                    reason: format!("failed reading host command stderr: {error}"),
-                })?;
-                if read == 0 {
-                    stderr_eof = true;
-                } else {
-                    truncated |= append_bounded(&mut stderr_bytes, &stderr_buffer[..read], half_max);
-                }
-            }
-        }
-    }
+    };
 
-    ownership.terminate();
-    let status = status.ok_or_else(|| SandboxError::ExecutionFailed {
-        reason: "host command exited without a process status".to_string(),
-    })?;
     Ok(HostCommandOutput {
         exit_code: status.code().unwrap_or(-1) as i64,
         stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
@@ -132,126 +101,27 @@ pub(crate) async fn execute_host_command(
     })
 }
 
+async fn capture_bounded_pipe<R>(mut pipe: R, max_bytes: usize) -> std::io::Result<(Vec<u8>, bool)>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut retained = Vec::with_capacity(max_bytes.min(8 * 1024));
+    let mut chunk = [0_u8; 8 * 1024];
+    let mut truncated = false;
+    loop {
+        let read = pipe.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok((retained, truncated));
+        }
+        truncated |= append_bounded(&mut retained, &chunk[..read], max_bytes);
+    }
+}
+
 fn append_bounded(target: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> bool {
     let remaining = max_bytes.saturating_sub(target.len());
     let retained = remaining.min(chunk.len());
     target.extend_from_slice(&chunk[..retained]);
     retained < chunk.len()
-}
-
-#[cfg(unix)]
-struct DescendantOwnership {
-    process_group: libc::pid_t,
-    terminated: bool,
-}
-
-#[cfg(unix)]
-impl DescendantOwnership {
-    fn attach(child: &Child) -> std::io::Result<Self> {
-        let pid = child.id().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "child process has no PID")
-        })?;
-        let process_group = libc::pid_t::try_from(pid).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "child PID exceeds pid_t")
-        })?;
-        Ok(Self {
-            process_group,
-            terminated: false,
-        })
-    }
-
-    fn terminate(&mut self) {
-        if self.terminated || self.process_group <= 1 {
-            return;
-        }
-        self.terminated = true;
-        // SAFETY: `process_group` is the positive PID returned for a child
-        // spawned with process_group(0); negating it targets only that group.
-        unsafe {
-            libc::kill(-self.process_group, libc::SIGKILL);
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for DescendantOwnership {
-    fn drop(&mut self) {
-        self.terminate();
-    }
-}
-
-#[cfg(windows)]
-struct DescendantOwnership {
-    job: windows_sys::Win32::Foundation::HANDLE,
-}
-
-#[cfg(windows)]
-impl DescendantOwnership {
-    fn attach(child: &Child) -> std::io::Result<Self> {
-        use std::os::windows::io::RawHandle;
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-            SetInformationJobObject,
-        };
-
-        // SAFETY: every pointer passed below is either null as documented or
-        // points to an initialized value for the duration of the call.
-        unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                return Err(std::io::Error::last_os_error());
-            }
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                (&raw const info).cast(),
-                std::mem::size_of_val(&info) as u32,
-            ) == 0
-            {
-                let error = std::io::Error::last_os_error();
-                CloseHandle(job);
-                return Err(error);
-            }
-            let process = child.raw_handle().ok_or_else(|| {
-                CloseHandle(job);
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "child process has no Windows process handle",
-                )
-            })? as RawHandle as windows_sys::Win32::Foundation::HANDLE;
-            if AssignProcessToJobObject(job, process) == 0 {
-                let error = std::io::Error::last_os_error();
-                CloseHandle(job);
-                return Err(error);
-            }
-            Ok(Self { job })
-        }
-    }
-
-    fn terminate(&mut self) {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-        if self.job.is_null() {
-            return;
-        }
-        // SAFETY: `job` is an owned handle created by CreateJobObjectW.
-        unsafe {
-            TerminateJobObject(self.job, 1);
-            CloseHandle(self.job);
-        }
-        self.job = std::ptr::null_mut();
-    }
-}
-
-#[cfg(windows)]
-impl Drop for DescendantOwnership {
-    fn drop(&mut self) {
-        self.terminate();
-    }
 }
 
 #[cfg(test)]
