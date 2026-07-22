@@ -74,7 +74,7 @@
     "lucide-react": "^1.24.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "react-dropzone": "^17.0.0",
+    "react-dropzone": "^19.1.1",
     "react-markdown": "^10.1.0",
     "react-virtuoso": "^4.18.10",
     "rehype-highlight": "^7.0.2",
