@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Releases prior to v0.13.0 were published under the IronClaw name and are not listed here.
 > See the [IronClaw releases](https://github.com/nearai/ironclaw/releases) for earlier history.
 
+## [0.16.0](https://github.com/RNT56/ThinClaw/compare/v0.15.0...v0.16.0) (2026-07-22)
+
+
+### Features
+
+* **desktop:** complete signed release pipeline ([#252](https://github.com/RNT56/ThinClaw/issues/252)) ([105a18c](https://github.com/RNT56/ThinClaw/commit/105a18c1b50c7d8403dbe3e1a24d12ada005f25d))
+
+
+### Bug Fixes
+
+* **ci:** gate releases on credentials ([#255](https://github.com/RNT56/ThinClaw/issues/255)) ([2edea47](https://github.com/RNT56/ThinClaw/commit/2edea47a4e5cbca235a5f791c43d058a99b16be5))
+* **ci:** reduce profile build disk pressure ([c294dad](https://github.com/RNT56/ThinClaw/commit/c294dad1becc871466cd85a48b37b325bfc1bf57))
+* **ci:** reduce profile build disk pressure ([3f36954](https://github.com/RNT56/ThinClaw/commit/3f3695496998546d3b8f09b44d8d7986ce4165f9))
+* **ci:** stabilize Wasmtime profile linking ([2ce26fd](https://github.com/RNT56/ThinClaw/commit/2ce26fd4b98dba9d4193c7a90ddb88d0fefc17ea))
+* **ci:** synchronize Rust 1.94 workflow pins ([a447802](https://github.com/RNT56/ThinClaw/commit/a447802417fc1f49dcd3e302576eba07b6d34d4d))
+* **ci:** tolerate slow KWin startup ([5404025](https://github.com/RNT56/ThinClaw/commit/54040256330b37a31ef1bf5ce44240a3a11fd90e))
+* **ci:** use PR-associated release checks ([#254](https://github.com/RNT56/ThinClaw/issues/254)) ([d073f66](https://github.com/RNT56/ThinClaw/commit/d073f66dfba4c711be5c026954829acefd27eb58))
+* **desktop:** support cross-platform Chromium setup ([4776ff9](https://github.com/RNT56/ThinClaw/commit/4776ff90ecc2cc5bb639b188454e124a1dd533a5))
+* **security:** align channels on jsonwebtoken 10 ([#334](https://github.com/RNT56/ThinClaw/issues/334)) ([c82cef6](https://github.com/RNT56/ThinClaw/commit/c82cef6b66ba37da9036891183316b89ff97daa4))
+* **security:** move Wasmtime to patched toolchain ([e9d9fbb](https://github.com/RNT56/ThinClaw/commit/e9d9fbbcfbff5fb17036a2986f46ca8c5faf5fe3))
+* **security:** remove committed credentials and harden boundaries ([#256](https://github.com/RNT56/ThinClaw/issues/256)) ([67f3354](https://github.com/RNT56/ThinClaw/commit/67f3354b7fa6383c7255ba2eb814ee69539c4a62))
+
 ## [0.15.0](https://github.com/RNT56/ThinClaw/compare/v0.14.0...v0.15.0) (2026-07-13)
 
 

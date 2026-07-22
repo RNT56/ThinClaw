@@ -37,7 +37,7 @@ jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 
 [package]
 name = "thinclaw"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 rust-version = "1.94"
 autobins = false
