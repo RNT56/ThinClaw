@@ -27,7 +27,7 @@ use thinclaw::setup::{SetupConfig, UiMode};
 use main_helpers::*;
 
 fn main() -> anyhow::Result<()> {
-    run_async_entrypoint(async_main())
+    run_async_entrypoint(async_main)
 }
 
 fn runtime_command_intent(command: Option<&Command>) -> RuntimeCommandIntent {

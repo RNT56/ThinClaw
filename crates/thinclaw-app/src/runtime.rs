@@ -318,24 +318,26 @@ where
 }
 
 #[cfg(target_os = "windows")]
-pub fn run_async_entrypoint<F>(future: F) -> anyhow::Result<()>
+pub fn run_async_entrypoint<Factory, F>(future_factory: Factory) -> anyhow::Result<()>
 where
-    F: Future<Output = anyhow::Result<()>> + Send + 'static,
+    Factory: FnOnce() -> F + Send + 'static,
+    F: Future<Output = anyhow::Result<()>>,
 {
     std::thread::Builder::new()
         .name("thinclaw-main".to_string())
         .stack_size(8 * 1024 * 1024)
-        .spawn(|| block_on_async_main(future))?
+        .spawn(move || block_on_async_main(future_factory()))?
         .join()
         .map_err(|_| anyhow::anyhow!("ThinClaw main thread panicked"))?
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn run_async_entrypoint<F>(future: F) -> anyhow::Result<()>
+pub fn run_async_entrypoint<Factory, F>(future_factory: Factory) -> anyhow::Result<()>
 where
+    Factory: FnOnce() -> F,
     F: Future<Output = anyhow::Result<()>>,
 {
-    block_on_async_main(future)
+    block_on_async_main(future_factory())
 }
 
 const STARTUP_SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -408,6 +410,17 @@ pub fn should_show_quiet_startup_spinner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn async_entrypoint_constructs_its_future_on_the_runtime_thread() {
+        run_async_entrypoint(|| async {
+            let thread_bound = std::rc::Rc::new("runtime-owned");
+            tokio::task::yield_now().await;
+            assert_eq!(thread_bound.as_ref(), &"runtime-owned");
+            Ok(())
+        })
+        .expect("entrypoint should accept a thread-bound root future");
+    }
 
     #[test]
     fn restricted_modes_disable_background_processes() {
