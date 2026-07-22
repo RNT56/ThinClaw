@@ -3,11 +3,12 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::process::{ChildStderr, ChildStdout, Command};
 
 use crate::error::WorkerError;
 use crate::worker::api::{JobEventPayload, PromptResponse, WorkerHttpClient};
+
+pub use thinclaw_platform::read_bounded_line;
 
 pub const MAX_BRIDGE_STDOUT_LINE_BYTES: usize = 192 * 1024;
 pub const MAX_BRIDGE_STATUS_LINE_BYTES: usize = 3 * 1024;
@@ -15,11 +16,6 @@ pub const MAX_BRIDGE_SESSION_ID_BYTES: usize = 512;
 const MAX_AUTH_COPY_FILES: usize = 4096;
 const MAX_AUTH_COPY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_AUTH_COPY_DEPTH: usize = 32;
-
-pub struct BoundedLine {
-    pub text: String,
-    pub truncated: bool,
-}
 
 /// A CLI child whose entire Unix process group is owned by the bridge.
 ///
@@ -84,54 +80,6 @@ impl Drop for OwnedBridgeTask {
             handle.abort();
         }
     }
-}
-
-/// Read and drain one newline-delimited record while retaining at most
-/// `max_bytes`. This avoids `AsyncBufReadExt::lines()` allocating until an
-/// attacker- or CLI-controlled newline eventually arrives.
-pub async fn read_bounded_line<R>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> std::io::Result<Option<BoundedLine>>
-where
-    R: AsyncBufRead + Unpin,
-{
-    let mut retained = Vec::with_capacity(max_bytes.min(8 * 1024));
-    let mut saw_input = false;
-    let mut truncated = false;
-
-    loop {
-        let available = reader.fill_buf().await?;
-        if available.is_empty() {
-            if !saw_input {
-                return Ok(None);
-            }
-            break;
-        }
-        saw_input = true;
-
-        let newline = available.iter().position(|byte| *byte == b'\n');
-        let data_len = newline.unwrap_or(available.len());
-        let remaining = max_bytes.saturating_sub(retained.len());
-        let keep = data_len.min(remaining);
-        retained.extend_from_slice(&available[..keep]);
-        if keep < data_len {
-            truncated = true;
-        }
-        let consumed = newline.map_or(available.len(), |index| index + 1);
-        reader.consume(consumed);
-        if newline.is_some() {
-            break;
-        }
-    }
-
-    if retained.last() == Some(&b'\r') {
-        retained.pop();
-    }
-    Ok(Some(BoundedLine {
-        text: String::from_utf8_lossy(&retained).into_owned(),
-        truncated,
-    }))
 }
 
 pub async fn post_job_event(client: &WorkerHttpClient, event_type: &str, data: &Value) {
@@ -379,14 +327,14 @@ mod tests {
             .await
             .unwrap()
             .expect("first line");
-        assert_eq!(first.text, "abcd");
+        assert_eq!(first.bytes, b"abcd");
         assert!(first.truncated);
 
         let second = read_bounded_line(&mut reader, 4)
             .await
             .unwrap()
             .expect("second line");
-        assert_eq!(second.text, "ok");
+        assert_eq!(second.bytes, b"ok");
         assert!(!second.truncated);
         assert!(read_bounded_line(&mut reader, 4).await.unwrap().is_none());
         writer_task.await.unwrap();

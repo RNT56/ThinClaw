@@ -3,7 +3,7 @@
 use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
 /// A child process plus ownership of every descendant it creates.
@@ -166,6 +166,67 @@ pub struct BoundedProcessOutput {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+/// One newline-delimited record retained within a fixed memory bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedLine {
+    pub bytes: Vec<u8>,
+    pub truncated: bool,
+}
+
+impl BoundedLine {
+    /// Decode the retained bytes without allowing malformed subprocess output
+    /// to escape the bounded transport as an error.
+    pub fn into_lossy_text(self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+}
+
+/// Read and drain one newline-delimited record while retaining at most
+/// `max_bytes`. Draining the full record prevents a producer from blocking on
+/// a full pipe, while the retained allocation remains bounded.
+pub async fn read_bounded_line<R>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> std::io::Result<Option<BoundedLine>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut retained = Vec::with_capacity(max_bytes.min(8 * 1024));
+    let mut saw_input = false;
+    let mut truncated = false;
+
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if !saw_input {
+                return Ok(None);
+            }
+            break;
+        }
+        saw_input = true;
+
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let data_len = newline.unwrap_or(available.len());
+        let remaining = max_bytes.saturating_sub(retained.len());
+        let keep = data_len.min(remaining);
+        retained.extend_from_slice(&available[..keep]);
+        truncated |= keep < data_len;
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        reader.consume(consumed);
+        if newline.is_some() {
+            break;
+        }
+    }
+
+    if retained.last() == Some(&b'\r') {
+        retained.pop();
+    }
+    Ok(Some(BoundedLine {
+        bytes: retained,
+        truncated,
+    }))
 }
 
 /// Failure modes for bounded subprocess execution.
@@ -507,6 +568,36 @@ mod tests {
         let result =
             bounded_std_command_output(&mut command, Duration::from_millis(100), 1024, 1024);
         assert!(matches!(result, Err(BoundedProcessError::Timeout(_))));
+    }
+}
+
+#[cfg(test)]
+mod bounded_line_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_line_reader_drains_an_oversized_record() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(b"abcdef\r\nok\n").await.unwrap();
+        });
+        let mut reader = tokio::io::BufReader::new(reader);
+
+        let first = read_bounded_line(&mut reader, 4)
+            .await
+            .unwrap()
+            .expect("first line");
+        assert_eq!(first.bytes, b"abcd");
+        assert!(first.truncated);
+
+        let second = read_bounded_line(&mut reader, 4)
+            .await
+            .unwrap()
+            .expect("second line");
+        assert_eq!(second.bytes, b"ok");
+        assert!(!second.truncated);
+        assert!(read_bounded_line(&mut reader, 4).await.unwrap().is_none());
+        writer_task.await.unwrap();
     }
 }
 

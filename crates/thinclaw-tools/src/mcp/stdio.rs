@@ -11,13 +11,14 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use super::protocol::{McpError, McpNotification, McpRequest, McpResponse, McpTransportMessage};
 use crate::execution::OwnedChild;
+use thinclaw_platform::read_bounded_line;
 use thinclaw_tools_core::ToolError;
 
 const MAX_SERVER_NAME_BYTES: usize = 256;
@@ -54,11 +55,6 @@ pub trait McpInboundHandler: Send + Sync {
     /// expose pending user interactions should override this so transport
     /// shutdown cannot leave stale interactions behind.
     async fn cancel_request(&self, _request_id: u64, _reason: &str) {}
-}
-
-struct BoundedLine {
-    bytes: Vec<u8>,
-    truncated: bool,
 }
 
 struct ActiveInboundRequest {
@@ -716,51 +712,6 @@ async fn wait_for_shutdown(shutdown_rx: &mut watch::Receiver<bool>) {
             break;
         }
     }
-}
-
-async fn read_bounded_line<R>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> std::io::Result<Option<BoundedLine>>
-where
-    R: AsyncBufRead + Unpin,
-{
-    let mut retained = Vec::with_capacity(max_bytes.min(8 * 1024));
-    let mut saw_input = false;
-    let mut truncated = false;
-
-    loop {
-        let available = reader.fill_buf().await?;
-        if available.is_empty() {
-            if !saw_input {
-                return Ok(None);
-            }
-            break;
-        }
-        saw_input = true;
-
-        let newline = available.iter().position(|byte| *byte == b'\n');
-        let data_len = newline.unwrap_or(available.len());
-        let remaining = max_bytes.saturating_sub(retained.len());
-        let keep = data_len.min(remaining);
-        retained.extend_from_slice(&available[..keep]);
-        if keep < data_len {
-            truncated = true;
-        }
-        let consumed = newline.map_or(available.len(), |index| index + 1);
-        reader.consume(consumed);
-        if newline.is_some() {
-            break;
-        }
-    }
-
-    if retained.last() == Some(&b'\r') {
-        retained.pop();
-    }
-    Ok(Some(BoundedLine {
-        bytes: retained,
-        truncated,
-    }))
 }
 
 fn validate_spawn_inputs(

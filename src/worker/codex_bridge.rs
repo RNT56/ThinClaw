@@ -280,10 +280,12 @@ impl CodexBridgeRuntime {
                         break;
                     }
                 };
-                let message = if line.truncated {
-                    format!("{} [truncated]", line.text)
+                let truncated = line.truncated;
+                let text = line.into_lossy_text();
+                let message = if truncated {
+                    format!("{text} [truncated]")
                 } else {
-                    line.text
+                    text
                 };
                 let message = sanitize_bridge_status(&message, &stderr_secrets);
                 tracing::debug!(job_id = %job_id, message_bytes = message.len(), "Codex CLI wrote stderr");
@@ -318,7 +320,8 @@ impl CodexBridgeRuntime {
                     .await;
                     continue;
                 }
-                let line = line.text.trim();
+                let line_text = line.into_lossy_text();
+                let line = line_text.trim();
                 if line.is_empty() {
                     continue;
                 }

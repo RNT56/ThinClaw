@@ -7,7 +7,7 @@ use crate::tunnel::{
     SharedProcess, SharedUrl, Tunnel, TunnelProcess, drain_tunnel_output, kill_shared,
     new_shared_process, new_shared_url,
 };
-use crate::worker::bridge_common::read_bounded_line;
+use thinclaw_platform::read_bounded_line;
 
 /// Wraps `ngrok` with optional custom domain support (paid plan).
 pub struct NgrokTunnel {
@@ -71,7 +71,7 @@ impl Tunnel for NgrokTunnel {
 
             match line {
                 Ok(Ok(Some(line))) => {
-                    let l = line.text;
+                    let l = line.into_lossy_text();
                     tracing::debug!("ngrok: {l}");
                     // ngrok logfmt: url=https://xxxx.ngrok-free.app
                     if let Some(idx) = l.find("url=https://") {

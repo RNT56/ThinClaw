@@ -7,7 +7,7 @@ use crate::tunnel::{
     SharedProcess, SharedUrl, Tunnel, TunnelProcess, drain_tunnel_output, kill_shared,
     new_shared_process, new_shared_url,
 };
-use crate::worker::bridge_common::read_bounded_line;
+use thinclaw_platform::read_bounded_line;
 
 /// Bring-your-own tunnel binary.
 ///
@@ -91,7 +91,7 @@ impl Tunnel for CustomTunnel {
 
             match line {
                 Ok(Ok(Some(line))) => {
-                    let line = line.text;
+                    let line = line.into_lossy_text();
                     tracing::debug!(bytes = line.len(), "custom tunnel produced an output line");
                     if let Some(url) = extract_url(&line) {
                         let matches_pattern = self
