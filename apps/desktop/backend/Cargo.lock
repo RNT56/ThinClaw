@@ -5054,7 +5054,7 @@ dependencies = [
  "memchr",
  "phf 0.11.3",
  "phf_codegen 0.11.3",
- "phf_shared 0.11.3",
+ "phf_shared 0.13.1",
  "uncased",
 ]
 
@@ -6872,6 +6872,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
 dependencies = [
  "siphasher",
+ "uncased",
 ]
 
 [[package]]
