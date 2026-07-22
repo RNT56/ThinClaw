@@ -262,7 +262,16 @@ impl RemoteGatewayProxy {
             } else {
                 MAX_ERROR_BODY_BYTES
             };
-            let body = read_body_limited(response, max_bytes).await?;
+            let body = match read_body_limited(response, max_bytes).await {
+                Ok(body) => body,
+                Err(error) => {
+                    if attempt < MAX_IDEMPOTENT_ATTEMPTS && bridge_error_is_retryable(&error) {
+                        sleep_before_retry(path, attempt, retry_after).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
             if status.is_success() {
                 return String::from_utf8(body).map_err(|_| BridgeError::Runtime {
                     message: "remote gateway returned non-UTF-8 text".to_string(),
@@ -406,7 +415,17 @@ impl RemoteGatewayProxy {
 
             let status = response.status();
             let retry_after = retry_after_delay(response.headers());
-            let body = read_body_limited(response, MAX_ERROR_BODY_BYTES).await?;
+            let body = match read_body_limited(response, MAX_ERROR_BODY_BYTES).await {
+                Ok(body) => body,
+                Err(error) => {
+                    if attempt < MAX_IDEMPOTENT_ATTEMPTS && bridge_error_is_retryable(&error) {
+                        sleep_before_retry(path, attempt, retry_after).await;
+                        continue;
+                    }
+                    *self.inner.state.write().await = ConnectionState::Disconnected;
+                    return Err(error);
+                }
+            };
             let error = remote_http_error(status, &body, path);
             if attempt < MAX_IDEMPOTENT_ATTEMPTS && bridge_error_is_retryable(&error) {
                 sleep_before_retry(path, attempt, retry_after).await;
