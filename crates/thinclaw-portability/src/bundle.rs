@@ -598,13 +598,33 @@ fn write_capability_rooted_file(root: &Dir, relative: &Path, bytes: &[u8]) -> Re
         if installed.file_type().is_symlink() || !installed.is_file() {
             return Err(PortabilityError::UnsafePath(relative.display().to_string()));
         }
-        parent.try_clone()?.into_std_file().sync_all()?;
+        sync_capability_directory(&parent)?;
         Ok(())
     })();
     if result.is_err() {
         let _ = parent.remove_file(&stage_name);
     }
     result
+}
+
+#[cfg(unix)]
+fn sync_capability_directory(directory: &Dir) -> Result<()> {
+    // `cap_std::fs::Dir` may use an `O_PATH` descriptor on Linux. That is
+    // suitable for capability-rooted path resolution, but `fsync` on it fails
+    // with `EBADF`. Open `.` through the capability with read access to obtain
+    // an fsync-capable directory descriptor without reintroducing an ambient
+    // path or a symlink race.
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    directory.open_with(Path::new("."), &options)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_capability_directory(_directory: &Dir) -> Result<()> {
+    // Directory handles are not portably flushable outside Unix. The staged
+    // file itself was synced before the atomic rename above.
+    Ok(())
 }
 
 fn validate_new_section(
@@ -943,6 +963,15 @@ mod tests {
         assert!(validate_archive_path("a/./b").is_err());
         assert!(validate_archive_path("a\\..\\b").is_err());
         assert!(safe_relative("ok/nested/file.txt").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capability_directory_sync_uses_fsync_capable_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = Dir::open_ambient_dir(directory.path(), ambient_authority()).unwrap();
+
+        sync_capability_directory(&root).unwrap();
     }
 
     #[cfg(unix)]
