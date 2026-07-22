@@ -2983,6 +2983,71 @@
           },
           {
             "type": "object",
+            "description": "Structured context-window capacity transition.",
+            "required": [
+              "level",
+              "usage_percent",
+              "type"
+            ],
+            "properties": {
+              "level": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "context_pressure"
+                ]
+              },
+              "usage_percent": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A structured internal agent lifecycle transition. Keeping these events\ndistinct from generic status text lets clients render and inspect the\nunderlying phase without parsing a human-readable message.",
+            "required": [
+              "phase",
+              "label",
+              "type"
+            ],
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "label": {
+                "type": "string"
+              },
+              "phase": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent_lifecycle"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "required": [
               "entries",
               "type"

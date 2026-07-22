@@ -108,7 +108,7 @@ impl HttpChannel {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct WebhookRequest {
     /// User or client identifier (ignored, user is fixed by server config).
     #[serde(default)]
@@ -122,6 +122,19 @@ struct WebhookRequest {
     /// Whether to wait for a synchronous response.
     #[serde(default)]
     wait_for_response: bool,
+}
+
+impl std::fmt::Debug for WebhookRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WebhookRequest")
+            .field("user_id", &self.user_id)
+            .field("content_bytes", &self.content.len())
+            .field("thread_id", &self.thread_id)
+            .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
+            .field("wait_for_response", &self.wait_for_response)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]

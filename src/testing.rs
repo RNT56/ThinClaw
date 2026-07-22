@@ -20,6 +20,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+#[cfg(test)]
+use std::ffi::{OsStr, OsString};
+
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
@@ -31,6 +34,61 @@ use crate::llm::{
     ToolCompletionResponse,
 };
 use crate::tools::ToolRegistry;
+
+/// Panic-safe, process-wide serialization for tests that mutate an environment
+/// variable. Environment state is shared by every test thread, so a local
+/// module mutex or manual cleanup after assertions is insufficient.
+#[cfg(test)]
+pub struct ScopedEnvVar {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+#[cfg(test)]
+impl ScopedEnvVar {
+    pub fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+        let guard = crate::config::helpers::lock_env();
+        let previous = std::env::var_os(key);
+        // SAFETY: the shared configuration lock serializes test environment mutation.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self {
+            _guard: guard,
+            key,
+            previous,
+        }
+    }
+
+    pub fn remove(key: &'static str) -> Self {
+        let guard = crate::config::helpers::lock_env();
+        let previous = std::env::var_os(key);
+        // SAFETY: the shared configuration lock serializes test environment mutation.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self {
+            _guard: guard,
+            key,
+            previous,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        // SAFETY: the shared configuration lock remains held until this value drops.
+        unsafe {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
 
 /// Create a libSQL-backed test database in a temporary directory.
 ///

@@ -3,6 +3,46 @@
 
 use super::*;
 
+const ROUTINE_COMPLETION_TAIL_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn routine_workspace(ctx: &EngineContext, routine: &Routine) -> AuthorizedWorkspace {
+    AuthorizedWorkspace::conversation(&ctx.workspace, &routine_identity(routine), "routine")
+}
+
+fn routine_timezone<'a>(ctx: &'a EngineContext, routine: &'a Routine) -> Option<&'a str> {
+    routine_timezone_setting(routine, ctx.user_timezone.as_deref())
+}
+
+async fn build_routine_daily_context(workspace: &AuthorizedWorkspace) -> String {
+    let mut daily_context = String::new();
+    let today = workspace.local_today().await;
+
+    if let Ok(document) = workspace.daily_log(today).await
+        && !document.content.trim().is_empty()
+    {
+        let capped = thinclaw_agent::heartbeat::cap_daily_log(&document.content, 3_000);
+        daily_context.push_str(&format!(
+            "\n\n## Daily Log - {} (today)\n\n{}",
+            today.format("%Y-%m-%d"),
+            capped
+        ));
+    }
+
+    if let Some(yesterday) = today.pred_opt()
+        && let Ok(document) = workspace.daily_log(yesterday).await
+        && !document.content.trim().is_empty()
+    {
+        let capped = thinclaw_agent::heartbeat::cap_daily_log(&document.content, 2_000);
+        daily_context.push_str(&format!(
+            "\n\n## Daily Log - {} (yesterday)\n\n{}",
+            yesterday.format("%Y-%m-%d"),
+            capped
+        ));
+    }
+
+    daily_context
+}
+
 /// Execute a routine run. Handles both lightweight and full_job modes.
 pub(super) async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) {
     // Broadcast routine start event
@@ -103,7 +143,7 @@ pub(super) async fn execute_routine(ctx: EngineContext, routine: Routine, run: R
         } => Ok(
             match experiments_api::start_campaign(
                 &ctx.store,
-                "default",
+                &routine.user_id,
                 *project_id,
                 experiments_api::StartExperimentCampaignRequest {
                     runner_profile_id: *runner_profile_id,
@@ -139,102 +179,47 @@ pub(super) async fn execute_routine(ctx: EngineContext, routine: Routine, run: R
     // The worker/subagent handles its own DB completion + SSE lifecycle event,
     // so skip all post-processing here to avoid conflicts.
     if status == RunStatus::Running {
-        // Still update the routine schedule so next_fire_at advances
-        match routine_runtime_update_for_run(
-            &routine,
-            run.id,
-            status,
-            ctx.user_timezone.as_deref(),
-            Utc::now(),
-        ) {
-            Ok(plan) => {
-                if let Err(error) = persist_routine_runtime_update(
-                    &ctx.store,
-                    routine.id,
-                    plan.last_run_at,
-                    plan.next_fire_at,
-                    plan.run_count,
-                    plan.consecutive_failures,
-                    &plan.state,
-                )
-                .await
-                {
-                    tracing::error!(
-                        routine = %routine.name,
-                        run_id = %run.id,
-                        "Failed to persist dispatched routine runtime state: {}",
-                        error
-                    );
-                }
-            }
-            Err(error) => {
-                tracing::error!(
-                    routine = %routine.name,
-                    run_id = %run.id,
-                    "Failed to plan dispatched routine runtime state: {}",
-                    error
-                );
-            }
-        }
         return;
     }
 
-    match routine_runtime_update_for_run(
-        &routine,
-        run.id,
-        status,
-        ctx.user_timezone.as_deref(),
-        Utc::now(),
-    ) {
-        Ok(plan) => {
-            if let Err(e) = persist_routine_runtime_update(
-                &ctx.store,
-                routine.id,
-                plan.last_run_at,
-                plan.next_fire_at,
-                plan.run_count,
-                plan.consecutive_failures,
-                &plan.state,
-            )
-            .await
-            {
-                tracing::error!(routine = %routine.name, "Failed to update runtime state: {}", e);
-            }
-        }
-        Err(error) => {
-            tracing::error!(routine = %routine.name, "Failed to plan runtime state: {}", error);
-        }
-    }
-
-    // Complete the run record after advancing the parent routine state so a
-    // visible terminal run also has consistent runtime metadata.
-    if let Err(e) = ctx
-        .store
-        .complete_routine_run(run.id, status, summary.as_deref(), tokens)
-        .await
+    match finalize_routine_run_record(&ctx.store, run.id, status, summary.as_deref(), tokens).await
     {
-        tracing::error!(routine = %routine.name, "Failed to complete run record: {}", e);
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(
+                routine = %routine.name,
+                run_id = %run.id,
+                "Routine run was already terminal; skipping duplicate completion tails"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::error!(routine = %routine.name, "Failed to complete run record: {}", e);
+            return;
+        }
     }
 
     // IC-CRON-STAGGER: notify an optional external webhook that this run
-    // finished, if CRON_FINISHED_WEBHOOK is configured. Fire-and-forget —
-    // webhook delivery failures are logged but never affect run outcome.
-    if let Some(webhook_url) = StaggerConfig::from_env().finished_webhook_url {
-        let payload = crate::agent::cron_stagger::FinishedRunPayload {
-            routine_id: routine.id.to_string(),
-            routine_name: routine.name.clone(),
-            success: status != RunStatus::Failed,
-            duration_ms: Utc::now()
-                .signed_duration_since(run.started_at)
-                .num_milliseconds()
-                .max(0) as u64,
-            error: summary.clone().filter(|_| status == RunStatus::Failed),
-            completed_at: Utc::now().to_rfc3339(),
-        };
-        tokio::spawn(async move {
-            crate::agent::cron_stagger::notify_finished_run(&webhook_url, &payload).await;
-        });
-    }
+    // finished. Keep delivery in the tracked routine tail so runtime shutdown
+    // cannot silently detach it; the HTTP helper and this outer tail are both
+    // bounded and failures never change the run outcome.
+    let webhook_url = StaggerConfig::from_env().finished_webhook_url;
+    let webhook_payload = crate::agent::cron_stagger::FinishedRunPayload {
+        routine_id: routine.id.to_string(),
+        routine_name: routine.name.clone(),
+        success: status != RunStatus::Failed,
+        duration_ms: Utc::now()
+            .signed_duration_since(run.started_at)
+            .num_milliseconds()
+            .max(0) as u64,
+        error: summary.clone().filter(|_| status == RunStatus::Failed),
+        completed_at: Utc::now().to_rfc3339(),
+    };
+    let webhook_delivery = async move {
+        if let Some(webhook_url) = webhook_url {
+            crate::agent::cron_stagger::notify_finished_run(&webhook_url, &webhook_payload).await;
+        }
+    };
 
     let mut completed_run = run.clone();
     completed_run.status = status;
@@ -273,21 +258,51 @@ pub(super) async fn execute_routine(ctx: EngineContext, routine: Routine, run: R
         "result_summary": completed_run.result_summary.clone(),
         "tokens_used": completed_run.tokens_used,
     }));
-    let routine_user_id = routine.user_id.clone();
     let provider_store = Arc::clone(&ctx.store);
     let mut run_artifact = run_artifact;
     run_artifact.user_id = Some(routine.user_id.clone());
     run_artifact.actor_id = Some(routine.owner_actor_id().to_string());
-    tokio::spawn(async move {
+    run_artifact.conversation_scope_id = Some(thinclaw_identity::direct_scope_id(
+        &routine.user_id,
+        routine.owner_actor_id(),
+    ));
+    run_artifact.conversation_kind = Some("direct".to_string());
+    run_artifact.channel = Some("system".to_string());
+    let artifact_persistence = async move {
         let harness = crate::agent::AgentRunHarness::new(None);
         if let Err(err) = harness.append_artifact(&run_artifact).await {
             tracing::debug!(error = %err, "Failed to append routine run artifact");
         }
         let manager = crate::agent::learning::MemoryProviderManager::new(provider_store);
-        manager
-            .session_end_extract(&routine_user_id, &run_artifact)
-            .await;
-    });
+        if let Some(access) =
+            crate::agent::learning::provider_access_context_from_artifact(&run_artifact)
+        {
+            manager.session_end_extract(&access, &run_artifact).await;
+        }
+    };
+    let bounded_artifact_persistence = async move {
+        if tokio::time::timeout(ROUTINE_COMPLETION_TAIL_TIMEOUT, artifact_persistence)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                timeout_secs = ROUTINE_COMPLETION_TAIL_TIMEOUT.as_secs(),
+                "Routine run artifact/learning tail timed out"
+            );
+        }
+    };
+    let bounded_webhook_delivery = async move {
+        if tokio::time::timeout(ROUTINE_COMPLETION_TAIL_TIMEOUT, webhook_delivery)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                timeout_secs = ROUTINE_COMPLETION_TAIL_TIMEOUT.as_secs(),
+                "Routine completion webhook tail timed out"
+            );
+        }
+    };
+    tokio::join!(bounded_artifact_persistence, bounded_webhook_delivery);
 
     // Send notifications based on config
     send_notification(
@@ -303,7 +318,14 @@ pub(super) async fn execute_routine(ctx: EngineContext, routine: Routine, run: R
         RunStatus::Ok => "completed",
         RunStatus::Attention => "attention",
         RunStatus::Failed => "failed",
-        RunStatus::Running => unreachable!(), // handled above
+        RunStatus::Running => {
+            tracing::error!(
+                routine = %routine.name,
+                run_id = %run.id,
+                "Dispatched routine unexpectedly reached terminal notification handling"
+            );
+            return;
+        }
     };
     ctx.broadcast_sse(SseEvent::RoutineLifecycle {
         routine_name: routine.name.clone(),
@@ -366,6 +388,18 @@ async fn execute_as_subagent(
     // can finalize the routine_run on completion.
     let channel_metadata = serde_json::json!({
         "thread_id": "agent:main",
+        "principal_id": routine.user_id,
+        "actor_id": routine.owner_actor_id(),
+        "conversation_kind": "direct",
+        "conversation_scope_id": thinclaw_identity::direct_scope_id(
+            &routine.user_id,
+            routine.owner_actor_id(),
+        ).to_string(),
+        "stable_external_conversation_key": thinclaw_identity::direct_conversation_key(
+            &routine.user_id,
+            routine.owner_actor_id(),
+        ),
+        "user_timezone": routine_timezone(ctx, routine),
         "routine_id": routine.id.to_string(),
         "routine_name": routine.name,
         "routine_run_id": run.id.to_string(),
@@ -469,6 +503,7 @@ async fn execute_full_job(
             allowed_skills: allowed_skills.map(|skills| skills.to_vec()),
             tool_profile,
             desktop,
+            user_timezone: routine_timezone(ctx, routine).map(str::to_string),
         },
     );
 
@@ -563,7 +598,7 @@ async fn execute_heartbeat(
     if let (Some(s), Some(e)) = (active_start_hour, active_end_hour) {
         let tz = crate::timezone::resolve_effective_timezone(
             Some(&routine.user_id),
-            ctx.user_timezone.as_deref(),
+            routine_timezone(ctx, routine),
         );
         let now_hour = crate::timezone::now_in_tz(tz).hour() as u8;
         if !active_hour_allows(now_hour, s, e) {
@@ -582,7 +617,8 @@ async fn execute_heartbeat(
     }
 
     // 1. Read HEARTBEAT.md
-    let checklist = match ctx.workspace.heartbeat_checklist().await {
+    let workspace = routine_workspace(ctx, routine);
+    let checklist = match workspace.heartbeat_checklist().await {
         Ok(Some(content)) if !crate::agent::heartbeat::is_effectively_empty(&content) => content,
         Ok(_) => {
             tracing::debug!(routine = %routine.name, "HEARTBEAT.md is empty or missing — skipping");
@@ -600,16 +636,13 @@ async fn execute_heartbeat(
     };
 
     // IC-013: Use shared function to build daily log context
-    let daily_context = crate::agent::heartbeat::build_daily_context(&ctx.workspace).await;
+    let daily_context = build_routine_daily_context(&workspace).await;
 
     // ── Self-critique feedback: inject previous run's evaluation ─────
     // If the previous heartbeat was flagged by the post-completion
     // evaluator, inject that feedback so the agent can learn from it.
-    let critique_context = match ctx
-        .store
-        .get_setting("system", "heartbeat.last_critique")
-        .await
-    {
+    let critique_key = heartbeat_critique_setting_key(routine.owner_actor_id());
+    let critique_context = match ctx.store.get_setting(&routine.user_id, &critique_key).await {
         Ok(Some(critique)) if !critique.is_null() => {
             let reasoning = critique
                 .get("reasoning")
@@ -631,14 +664,16 @@ async fn execute_heartbeat(
     };
 
     // 3. Build the full prompt
-    let outcome_summary = match crate::agent::outcomes::heartbeat_review_summary(
-        &ctx.store,
-        &routine.user_id,
-    )
-    .await
-    {
-        Ok(Some(summary)) => Some(summary),
-        _ => None,
+    // The existing aggregate is principal-wide. Until the persistence port
+    // exposes actor-filtered stats, only the principal actor may receive it;
+    // household actors must not learn counts derived from sibling activity.
+    let outcome_summary = if routine.owner_actor_id() == routine.user_id {
+        match crate::agent::outcomes::heartbeat_review_summary(&ctx.store, &routine.user_id).await {
+            Ok(Some(summary)) => Some(summary),
+            _ => None,
+        }
+    } else {
+        None
     };
     let mut full_prompt = build_heartbeat_prompt(
         custom_prompt,
@@ -659,16 +694,21 @@ async fn execute_heartbeat(
         // and tool access. The response flows through normal SSE → chat.
         if let Some(ref tx) = ctx.system_event_tx {
             let heartbeat_target = HeartbeatTarget::parse(target);
-            let message = IncomingMessage::new("heartbeat", "system", &full_prompt).with_metadata(
-                serde_json::json!({
+            let identity = routine_identity(routine);
+            let message = IncomingMessage::new("heartbeat", "system", &full_prompt)
+                .with_metadata(serde_json::json!({
                     "source": "heartbeat",
+                    "conversation_kind": "direct",
+                    "conversation_scope_id": identity.conversation_scope_id.to_string(),
+                    "stable_external_conversation_key": identity.stable_external_conversation_key,
+                    "user_timezone": routine_timezone(ctx, routine),
                     "routine_name": routine.name,
                     "run_id": run.id.to_string(),
                     "include_reasoning": include_reasoning,
                     "suppress_output": heartbeat_target.suppresses_output(),
                     "notify_channel": heartbeat_target.channel_override(),
-                }),
-            );
+                }))
+                .with_identity(identity);
 
             if let Err(e) = tx.send(message).await {
                 return Err(RoutineError::ExecutionFailed {
@@ -716,7 +756,13 @@ async fn execute_heartbeat(
             reason: "scheduler not available".to_string(),
         })?;
 
-    let metadata = heartbeat_job_metadata(routine, max_iterations, target, include_reasoning);
+    let metadata = heartbeat_job_metadata(
+        routine,
+        max_iterations,
+        target,
+        include_reasoning,
+        routine_timezone(ctx, routine),
+    );
 
     let job_id = scheduler
         .dispatch_job_reserved_for_routine(
@@ -772,10 +818,11 @@ async fn execute_lightweight(
     max_tokens: u32,
     trigger_detail: Option<&str>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    let workspace = routine_workspace(ctx, routine);
     // Load context from workspace
     let mut context_parts = Vec::new();
     for path in context_paths {
-        match ctx.workspace.read(path).await {
+        match workspace.read(path).await {
             Ok(doc) => {
                 context_parts.push(format!("## {}\n\n{}", path, doc.content));
             }
@@ -791,17 +838,13 @@ async fn execute_lightweight(
     // Load routine state from workspace (name sanitized to prevent path traversal)
     let safe_name = sanitize_routine_name(&routine.name);
     let state_path = format!("routines/{safe_name}/state.md");
-    let state_content = match ctx.workspace.read(&state_path).await {
+    let state_content = match workspace.read(&state_path).await {
         Ok(doc) => Some(doc.content),
         Err(_) => None,
     };
 
-    let mut full_prompt =
-        build_lightweight_routine_prompt(prompt, &context_parts, state_content.as_deref());
-    full_prompt.push_str(&render_trigger_payload_block(trigger_detail));
-
     // Get system prompt
-    let system_prompt = match ctx.workspace.system_prompt().await {
+    let system_prompt = match workspace.trusted_system_prompt(false).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(routine = %routine.name, "Failed to get system prompt: {}", e);
@@ -809,17 +852,52 @@ async fn execute_lightweight(
         }
     };
 
-    let messages = lightweight_routine_messages(&system_prompt, &full_prompt);
+    let model_context_length = ctx
+        .llm
+        .model_metadata()
+        .await
+        .ok()
+        .and_then(|meta| meta.context_length)
+        .filter(|length| *length > 0);
+    // Honor the configured output cap while ensuring it cannot consume more
+    // than half of a smaller provider window.
+    let effective_max_tokens = effective_lightweight_max_tokens(max_tokens, model_context_length);
 
-    // Determine max_tokens from model metadata with fallback
-    let effective_max_tokens = effective_lightweight_max_tokens(
-        max_tokens,
-        ctx.llm
-            .model_metadata()
-            .await
-            .ok()
-            .and_then(|meta| meta.context_length),
+    let fixed_messages = lightweight_routine_fixed_messages(&system_prompt, prompt);
+    let evidence =
+        lightweight_routine_evidence(&context_parts, state_content.as_deref(), trigger_detail);
+    let monitor = crate::agent::context_monitor::ContextMonitor::new().with_limit(
+        model_context_length.map_or_else(
+            || crate::agent::context_monitor::ContextMonitor::new().limit(),
+            |length| length as usize,
+        ),
     );
+    let Some(bounded_evidence) = thinclaw_agent::context_monitor::bound_recent_untrusted_context(
+        &monitor,
+        &fixed_messages,
+        "lightweight_routine_evidence",
+        "workspace_state_and_trigger",
+        &evidence,
+        effective_max_tokens as usize,
+        thinclaw_agent::context_monitor::AUXILIARY_CONTEXT_SAFETY_MARGIN_PERCENT,
+    ) else {
+        return Err(RoutineError::LlmFailed {
+            reason: format!(
+                "routine policy and prompt exceed the active model context window ({} tokens)",
+                monitor.limit()
+            ),
+        });
+    };
+    if bounded_evidence.was_truncated {
+        tracing::warn!(
+            routine = %routine.name,
+            context_limit = monitor.limit(),
+            retained_chars = bounded_evidence.retained_chars,
+            "Lightweight routine evidence was truncated to the active model window"
+        );
+    }
+    let mut messages = fixed_messages;
+    messages.push(bounded_evidence.message);
 
     let request = CompletionRequest::new(messages)
         .with_max_tokens(effective_max_tokens)

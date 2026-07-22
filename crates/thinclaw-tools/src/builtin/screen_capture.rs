@@ -9,13 +9,36 @@
 //! This replaces `ScreenCommands.swift` from the companion app.
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::process::Command;
 
 use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};
 use thinclaw_types::JobContext;
+
+use super::capture_target::{CaptureFormat, CaptureTarget};
+use crate::execution::bounded_command_output;
+
+const CAPTURE_HELPER_TIMEOUT: Duration = Duration::from_secs(45);
+const CAPTURE_STDOUT_LIMIT: usize = 256 * 1024;
+const CAPTURE_STDERR_LIMIT: usize = 256 * 1024;
+
+#[cfg(target_os = "windows")]
+const WINDOWS_SCREENSHOT_SCRIPT: &str = r#"
+$OutputPath = $args[0]
+Add-Type -AssemblyName System.Windows.Forms
+$screen = [System.Windows.Forms.Screen]::PrimaryScreen
+$bitmap = New-Object System.Drawing.Bitmap($screen.Bounds.Width, $screen.Bounds.Height)
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+try {
+    $graphics.CopyFromScreen($screen.Bounds.Location, [System.Drawing.Point]::Empty, $screen.Bounds.Size)
+    $bitmap.Save($OutputPath)
+} finally {
+    $graphics.Dispose()
+    $bitmap.Dispose()
+}
+"#;
 
 /// Screen capture tool.
 pub struct ScreenCaptureTool;
@@ -46,7 +69,7 @@ fn screenshot_path(custom: Option<&str>) -> PathBuf {
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         thinclaw_platform::state_paths()
             .screenshots_dir
-            .join(format!("screen_{ts}.png"))
+            .join(format!("screen_{ts}_{}.png", uuid::Uuid::new_v4().simple()))
     }
 }
 
@@ -82,10 +105,14 @@ async fn capture_screen(
 
     cmd.arg(path.to_string_lossy().as_ref());
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("screencapture: {e}")))?;
+    let output = bounded_command_output(
+        &mut cmd,
+        CAPTURE_HELPER_TIMEOUT,
+        CAPTURE_STDOUT_LIMIT,
+        CAPTURE_STDERR_LIMIT,
+        "macOS screen capture",
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -182,12 +209,28 @@ async fn capture_screen(
     }
 
     let mut attempted = Vec::new();
+    let deadline = tokio::time::Instant::now() + CAPTURE_HELPER_TIMEOUT;
     for plan in linux_screen_capture_commands(path, interactive, window, delay_secs) {
         if !thinclaw_platform::executable_available(plan.program) {
             continue;
         }
 
-        match Command::new(plan.program).args(&plan.args).output().await {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            attempted.push("capture helper deadline elapsed".to_string());
+            break;
+        }
+        let mut command = Command::new(plan.program);
+        command.args(&plan.args);
+        match bounded_command_output(
+            &mut command,
+            remaining,
+            CAPTURE_STDOUT_LIMIT,
+            CAPTURE_STDERR_LIMIT,
+            plan.program,
+        )
+        .await
+        {
             Ok(output) if output.status.success() && path.exists() => {
                 return Ok(());
             }
@@ -234,25 +277,19 @@ async fn capture_screen(
             .map_err(|e| ToolError::ExecutionFailed(format!("Create screenshot dir: {e}")))?;
     }
 
-    let ps_script = format!(
-        r#"
-        Add-Type -AssemblyName System.Windows.Forms
-        $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-        $bitmap = New-Object System.Drawing.Bitmap($screen.Bounds.Width, $screen.Bounds.Height)
-        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-        $graphics.CopyFromScreen($screen.Bounds.Location, [System.Drawing.Point]::Empty, $screen.Bounds.Size)
-        $bitmap.Save("{}")
-        $graphics.Dispose()
-        $bitmap.Dispose()
-        "#,
-        path.to_string_lossy()
-    );
-
-    let output = Command::new("powershell")
-        .args(["-Command", &ps_script])
-        .output()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("PowerShell: {e}")))?;
+    let mut command = Command::new("powershell");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(WINDOWS_SCREENSHOT_SCRIPT)
+        .arg(path);
+    let output = bounded_command_output(
+        &mut command,
+        CAPTURE_HELPER_TIMEOUT,
+        CAPTURE_STDOUT_LIMIT,
+        CAPTURE_STDERR_LIMIT,
+        "Windows screen capture",
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -310,6 +347,11 @@ impl Tool for ScreenCaptureTool {
             .get("mode")
             .and_then(|v| v.as_str())
             .unwrap_or("fullscreen");
+        if !matches!(mode, "fullscreen" | "interactive" | "window") {
+            return Err(ToolError::InvalidParameters(
+                "mode must be fullscreen, interactive, or window".to_string(),
+            ));
+        }
 
         let custom_path = params.get("output_path").and_then(|v| v.as_str());
         let delay = params
@@ -317,22 +359,19 @@ impl Tool for ScreenCaptureTool {
             .and_then(|v| v.as_u64())
             .map(|d| d.min(30) as u32);
 
-        let path = screenshot_path(custom_path);
+        let requested_path = screenshot_path(custom_path);
+        let target = CaptureTarget::prepare(&requested_path, CaptureFormat::Png).await?;
 
         let interactive = mode == "interactive";
         let window = mode == "window";
 
-        capture_screen(&path, interactive, window, delay).await?;
-
-        // Get file size
-        let metadata = tokio::fs::metadata(&path)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Read screenshot metadata: {e}")))?;
+        capture_screen(target.staging_path(), interactive, window, delay).await?;
+        let (path, size_bytes) = target.publish().await?;
 
         Ok(ToolOutput::success(
             serde_json::json!({
                 "path": path.to_string_lossy(),
-                "size_bytes": metadata.len(),
+                "size_bytes": size_bytes,
                 "mode": mode,
             }),
             start.elapsed(),
@@ -349,6 +388,10 @@ impl Tool for ScreenCaptureTool {
 
     fn domain(&self) -> ToolDomain {
         ToolDomain::Orchestrator
+    }
+
+    fn execution_timeout(&self) -> Duration {
+        Duration::from_secs(60)
     }
 }
 

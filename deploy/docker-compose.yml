@@ -11,7 +11,7 @@
 #   cp target/release/thinclaw .
 #   docker compose up -d --build
 #
-# ThinClaw Desktop connects via: http://<server-ip>:3000
+# Scrappy connects via: http://<server-ip>:3000
 # Auth token: value of GATEWAY_AUTH_TOKEN in .env
 
 services:
@@ -25,7 +25,7 @@ services:
     container_name: thinclaw-remote
     restart: unless-stopped
     ports:
-      - "${GATEWAY_PORT:-3000}:${GATEWAY_PORT:-3000}"   # Gateway HTTP API (ThinClaw Desktop connects here)
+      - "${GATEWAY_BIND_IP:-127.0.0.1}:${GATEWAY_PORT:-3000}:${GATEWAY_PORT:-3000}"
     env_file:
       - .env
     environment:

@@ -36,6 +36,7 @@ mod types;
 pub mod video;
 
 pub use audio::AudioExtractor;
+pub(crate) use audio::guarded_whisper_http_client;
 pub use cache::{CacheConfig, CacheStats, MediaCache};
 #[cfg(feature = "document-extraction")]
 pub use document::DocumentExtractor;

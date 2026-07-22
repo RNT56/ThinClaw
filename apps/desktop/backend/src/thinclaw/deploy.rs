@@ -1,441 +1,473 @@
-//! Remote deployment command — SSH + Docker Compose approach.
+//! Remote deployment over SSH.
 //!
-//! Previous implementation relied on an Ansible/shell script that wasn't
-//! bundled. This version is fully self-contained: it uses `ssh` and `scp`
-//! (available on all major platforms) to deploy a Docker Compose stack
-//! to any Linux server.
-//!
-//! ## Deploy flow:
-//!   1. SCP the ThinClaw `deploy/` bundle to the target server
-//!   2. Generate a secure auth token locally and send it through SSH stdin
-//!   3. Run `docker compose up -d --build` via SSH
-//!   4. Emit `deploy-log` events to the frontend for live progress
-//!   5. Return the credential only to the initiating command caller
-//!
-//! ## Connect flow (new):
-//!   - Simply test connectivity and return the URL + token to the frontend.
-//!   - The frontend calls `thinclaw_switch_to_profile` to activate the connection.
+//! Deployment is intentionally fail-closed: the gateway is exposed only over
+//! a Tailscale overlay, host keys use OpenSSH's accept-new TOFU policy, secrets
+//! travel through stdin rather than process arguments, and the remote bundle is
+//! installed transactionally at a stable path suitable for systemd.
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
 use tauri::{AppHandle, Emitter, Manager, State};
+use thinclaw_tools::execution::OwnedChild;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
-const REMOTE_GATEWAY_PORT: u16 = 3000;
-const MAX_DEPLOY_LOG_LINE_BYTES: usize = 64 * 1024;
+const GATEWAY_PORT: u16 = 3000;
+const MAX_TAILSCALE_KEY_BYTES: usize = 512;
+const MAX_PROCESS_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CAPTURED_STDOUT_BYTES: usize = 64 * 1024;
+const MAX_LOG_LINE_BYTES: usize = 16 * 1024;
+const MAX_BUNDLE_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const SCP_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const SETUP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const SSH_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(serde::Serialize, specta::Type, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
-#[serde(rename_all = "camelCase")]
+struct DeployTarget {
+    ip: IpAddr,
+    user: String,
+    tailscale_key: Zeroizing<String>,
+}
+
+impl DeployTarget {
+    fn ssh_destination(&self) -> String {
+        format!("{}@{}", self.user, self.ip)
+    }
+
+    fn scp_destination(&self, path: &str) -> String {
+        match self.ip {
+            IpAddr::V4(ip) => format!("{}@{}:{path}", self.user, ip),
+            IpAddr::V6(ip) => format!("{}@[{}]:{path}", self.user, ip),
+        }
+    }
+}
+
+struct CommandOutput {
+    stdout: String,
+}
+
+/// Connection details returned only to the renderer that initiated deployment.
+///
+/// The bearer token must never be broadcast through a process-global event:
+/// another renderer listener could otherwise observe a credential that it did
+/// not request.
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct RemoteDeployResult {
     pub status: String,
     pub url: String,
     pub token: String,
     pub message: Option<String>,
+    pub reachable: bool,
 }
 
-/// Deploy the ThinClaw remote agent to a Linux server via SSH + Docker Compose.
-///
-/// Accepts the SSH host, user, and optional configuration for Tailscale VPN
-/// and systemd service. Emits credential-free `deploy-log` events and returns
-/// the generated credential only to the initiating IPC request.
-///
-/// Steps:
-///   1. Find the ThinClaw `deploy/` directory (bundled or source)
-///   2. SCP the deploy bundle to the target server
-///   3. Run `setup.sh` on the server:
-///      - Always: Docker, UFW firewall, Fail2ban
-///      - Optional: Tailscale VPN (--tailscale <key>)
-///      - Optional: systemd service (--systemd)
-///   4. Return the URL + generated token as the command result
+/// Deploy ThinClaw to a Linux host and return its connection details directly
+/// to the caller. Only one deployment may run at a time because progress logs
+/// are process-global rather than request-scoped.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_deploy_remote(
     app: AppHandle,
-    _state: State<'_, super::commands::ThinClawManager>,
+    state: State<'_, super::commands::ThinClawManager>,
     ip: String,
     user: String,
     tailscale_key: Option<String>,
     enable_systemd: Option<bool>,
 ) -> Result<RemoteDeployResult, crate::thinclaw::bridge::BridgeError> {
-    // ── Validate input ────────────────────────────────────────────────────────
-    let ip = validate_ssh_host(&ip)?;
-    let user = if user.trim().is_empty() {
-        "root".to_string()
-    } else {
-        validate_ssh_user(&user)?
-    };
-    let tailscale_key = tailscale_key
-        .filter(|key| !key.trim().is_empty())
-        .map(|key| validate_tailscale_key(&key).map(Zeroizing::new))
-        .transpose()?;
-    let ssh_target = format!("{}@{}", user, ip);
-    if tailscale_key.is_none() {
-        let candidate_url = format!("http://{}:{}", url_host(&ip), REMOTE_GATEWAY_PORT);
-        crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(
-            &candidate_url,
-            "transport-validation-only",
-        )
-        .map_err(|error| {
-            format!(
-                "This deployment would expose a bearer token over an unsafe transport: {error}. Use a private IP or configure Tailscale."
-            )
-        })?;
-    }
+    let _deployment_lease = state
+        .deploy_lock
+        .try_lock()
+        .map_err(|_| "another remote deployment is already in progress".to_string())?;
+    let target = validate_target(&ip, &user, tailscale_key)?;
+    let bundle = prepare_deploy_bundle(&app)?;
+    let token = Zeroizing::new(generate_secure_token());
+    let deployment_id = uuid::Uuid::new_v4().simple().to_string();
+    let remote_stage = format!("/tmp/thinclaw-deploy-upload-{deployment_id}");
 
-    // ── Locate deploy bundle ──────────────────────────────────────────────────
-    //
-    // In production builds: bundled with the app as `resources/deploy/`
-    // In dev builds: root `deploy/` from the ThinClaw repository.
-    let deploy_dir = find_deploy_dir(&app);
-
-    let emit = |app_handle: &AppHandle, msg: &str| {
-        let _ = app_handle.emit("deploy-log", msg);
-    };
-
-    emit(&app, "=== ThinClaw Remote Deploy ===");
-    emit(&app, &format!("Target: {}@{}", user, ip));
-
-    // ── Step 1: Copy deploy bundle via SCP ───────────────────────────────────
-    emit(&app, "[1/4] Copying deploy bundle to remote server...");
-
-    if let Some(ref dir) = deploy_dir {
-        let scp_result = run_command_with_events(
-            &app,
-            "scp",
-            &[
-                "-o".to_string(),
-                "StrictHostKeyChecking=accept-new".to_string(),
-                "-o".to_string(),
-                "BatchMode=yes".to_string(),
-                "-r".to_string(),
-                "--".to_string(),
-                dir.to_string_lossy().to_string(),
-                format!("{}@{}:/tmp/thinclaw-deploy", user, url_host(&ip)),
-            ],
-            None,
-            Vec::new(),
-        )
-        .await;
-
-        if let Err(e) = scp_result {
-            let msg = format!("SCP failed: {}. Is SSH access configured?", e);
-            return Err((msg).into());
-        }
-        emit(&app, "[1/4] Deploy bundle copied.");
-    } else {
-        emit(
-            &app,
-            "[1/4] Deploy bundle not found locally — fetching from git on remote...",
-        );
-    }
-
-    // ── Step 2: Run setup script on remote ──────────────────────────────────
-    emit(
+    emit_log(&app, "=== ThinClaw Remote Deploy ===");
+    emit_log(
         &app,
-        "[2/5] Setting up server (Docker, Firewall, Fail2ban)...",
+        &format!(
+            "Target: {}@{} (host key verification: accept-new)",
+            target.user, target.ip
+        ),
     );
+    emit_log(&app, "[1/4] Uploading the audited deployment bundle...");
 
-    // Generate a token locally so we know it before deploying
-    let token = generate_secure_token();
+    let mut scp_args = ssh_transport_options();
+    scp_args.push("-r".into());
+    scp_args.push("--".into());
+    scp_args.push(bundle.path().to_string_lossy().into_owned());
+    scp_args.push(target.scp_destination(&remote_stage));
+    run_command_with_events(&app, "scp", &scp_args, None, SCP_TIMEOUT).await?;
+    emit_log(&app, "[1/4] Deployment bundle uploaded.");
 
-    // Credentials travel over the SSH process stdin, never command arguments.
-    let mut setup_flags = "--credentials-stdin".to_string();
-    if enable_systemd.unwrap_or(false) {
-        setup_flags.push_str(" --systemd");
-    }
+    emit_log(
+        &app,
+        "[2/4] Installing Docker, firewall rules, and the ThinClaw service...",
+    );
+    let remote_script = remote_install_script(
+        &remote_stage,
+        &deployment_id,
+        enable_systemd.unwrap_or(false),
+    );
+    let remote_command = privilege_wrapped_shell_command(&remote_script);
+    let mut ssh_args = ssh_transport_options();
+    ssh_args.push("--".into());
+    ssh_args.push(target.ssh_destination());
+    ssh_args.push(remote_command);
 
-    let remote_cmds = if deploy_dir.is_some() {
-        // Bundle was copied
-        format!(
-            "chmod +x /tmp/thinclaw-deploy/setup.sh && \
-             /tmp/thinclaw-deploy/setup.sh {flags} 2>&1",
-            flags = setup_flags
-        )
-    } else {
-        // No local bundle — clone from GitHub + run setup
-        format!(
-            "apt-get update -q && \
-             apt-get install -y docker.io docker-compose-plugin curl git -q && \
-             systemctl start docker && \
-             {{ git clone --depth=1 https://github.com/RNT56/ThinClaw.git /opt/thinclaw 2>&1 || \
-             git -C /opt/thinclaw pull 2>&1; }} && \
-             chmod +x /opt/thinclaw/deploy/setup.sh && \
-             /opt/thinclaw/deploy/setup.sh {flags} 2>&1",
-            flags = setup_flags
-        )
-    };
-
-    let ssh_result = run_command_with_events(
+    let stdin_payload =
+        Zeroizing::new(format!("{}\n{}\n", &*token, &*target.tailscale_key).into_bytes());
+    if let Err(error) = run_command_with_events(
         &app,
         "ssh",
-        &[
-            "-o".to_string(),
-            "StrictHostKeyChecking=accept-new".to_string(),
-            "-o".to_string(),
-            "BatchMode=yes".to_string(),
-            "--".to_string(),
-            ssh_target.clone(),
-            remote_cmds,
-        ],
-        Some(format!(
-            "{}\n{}\n",
-            token,
-            tailscale_key.as_ref().map(|key| key.as_str()).unwrap_or("")
-        )),
-        vec![
-            token.clone(),
-            tailscale_key
-                .as_ref()
-                .map(|key| key.to_string())
-                .unwrap_or_default(),
-        ],
+        &ssh_args,
+        Some(stdin_payload.as_slice()),
+        SETUP_TIMEOUT,
     )
-    .await;
-
-    // ── Step 3: Verify ───────────────────────────────────────────────────────
-    emit(&app, "[3/5] Verifying connectivity to new deployment...");
-
-    let mut connection_note: Option<String> = None;
-    let gateway_host = if tailscale_key.is_some() {
-        match discover_tailscale_ip(&ssh_target).await {
-            Ok(tailscale_ip) => tailscale_ip,
-            Err(error) => {
-                connection_note = Some(error.to_string());
-                ip.clone()
-            }
-        }
-    } else {
-        ip.clone()
-    };
-    let gateway_url = format!("http://{}:{}", url_host(&gateway_host), REMOTE_GATEWAY_PORT);
-    let mut connected = false;
-
-    // Give Docker a moment to start
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-    for attempt in 1..=6 {
-        emit(&app, &format!("[3/5] Connection attempt {}/6...", attempt));
-        let proxy =
-            match crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&gateway_url, &token) {
-                Ok(proxy) => proxy,
-                Err(error) => {
-                    connection_note = Some(error.to_string());
-                    break;
-                }
-            };
-        match proxy.health_check().await {
-            Ok(true) => {
-                connected = true;
-                break;
-            }
-            Ok(false) => {
-                connection_note = Some("gateway rejected the generated credential".to_string());
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-            Err(error) => {
-                connection_note = Some(error.to_string());
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-        }
+    .await
+    {
+        let message = format!("remote setup failed: {error}");
+        emit_log(&app, &format!("[error] {message}"));
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime { message });
     }
 
-    // ── Step 4–5: Report result ──────────────────────────────────────────────
-    if connected {
-        emit(&app, "[4/5] Deployment successful!");
-        emit(&app, &format!("  URL:   {}", gateway_url));
-        emit(
+    emit_log(
+        &app,
+        "[3/4] Discovering the private Tailscale gateway address...",
+    );
+    let tailscale_ip = query_tailscale_ip(&app, &target).await?;
+    let gateway_url = format!("http://{tailscale_ip}:{GATEWAY_PORT}");
+
+    // The setup script performs a server-local health check before returning.
+    // This additional probe detects whether this desktop is already connected
+    // to the same tailnet, but its failure does not retroactively mark a valid
+    // deployment as failed.
+    let proxy = crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&gateway_url, &token)?;
+    let desktop_can_reach = matches!(
+        tokio::time::timeout(Duration::from_secs(10), proxy.health_check()).await,
+        Ok(Ok(true))
+    );
+    if desktop_can_reach {
+        emit_log(
             &app,
-            "The generated credential is ready in this deployment wizard; it was not written to deployment logs.",
+            "[4/4] Deployment complete and reachable over Tailscale.",
         );
-
-        Ok(RemoteDeployResult {
-            status: "success".to_string(),
-            url: gateway_url,
-            token,
-            message: None,
-        })
     } else {
-        let ssh_err = ssh_result.unwrap_err_or_default();
-        let detail = connection_note.unwrap_or_else(|| "gateway did not become ready".to_string());
-        let msg = format!(
-            "Deployment may have started but health check timed out. \
-             Try connecting manually to {} using the credential returned by this wizard. \
-             Connection detail: {}. SSH error (if any): {}",
-            gateway_url, detail, ssh_err
+        emit_log(
+            &app,
+            "[4/4] Deployment complete. This desktop is not yet able to reach the server's tailnet address; connect it to the same tailnet before using the agent.",
         );
-        emit(&app, &format!("[4/5] Warning: {}", msg));
-        Ok(RemoteDeployResult {
-            status: "timeout".to_string(),
-            url: gateway_url,
-            token,
-            message: Some(msg),
-        })
     }
+
+    Ok(RemoteDeployResult {
+        status: "success".to_string(),
+        url: gateway_url,
+        token: token.to_string(),
+        message: (!desktop_can_reach).then(|| {
+            "The server is healthy, but this desktop could not reach its Tailscale address yet."
+                .to_string()
+        }),
+        reachable: desktop_can_reach,
+    })
 }
 
-// ── Internal helpers ─────────────────────────────────────────────────────────
-
-/// Find the ThinClaw deploy bundle directory.
-///
-/// Looks in:
-///   1. Tauri resource_dir/deploy/ (production build)
-///   2. nearest ancestor deploy/ directory (development)
-fn find_deploy_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
-    // 1. Production bundle
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        let prod_path = resource_dir.join("deploy");
-        if prod_path.join("docker-compose.yml").exists() {
-            return Some(prod_path);
-        }
+fn validate_target(
+    raw_ip: &str,
+    raw_user: &str,
+    tailscale_key: Option<String>,
+) -> Result<DeployTarget, String> {
+    let ip = raw_ip
+        .trim()
+        .parse::<IpAddr>()
+        .map_err(|_| "server address must be a numeric IPv4 or IPv6 address".to_string())?;
+    if ip.is_unspecified() || ip.is_multicast() {
+        return Err("server address cannot be unspecified or multicast".to_string());
     }
 
-    // 2. Development: walk ancestors until the ThinClaw root deploy/ is found.
+    let user = if raw_user.trim().is_empty() {
+        "root"
+    } else {
+        raw_user.trim()
+    };
+    let mut chars = user.chars();
+    let valid_first = chars
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    let valid_rest = chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'));
+    if !valid_first || !valid_rest || user.len() > 32 {
+        return Err(
+            "SSH user must be 1-32 ASCII letters, digits, '.', '_' or '-', and may not start with punctuation"
+                .to_string(),
+        );
+    }
+
+    let key = tailscale_key.unwrap_or_default();
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(
+            "a Tailscale auth key is required: automated deployment refuses to expose a bearer-token gateway over plaintext public HTTP"
+                .to_string(),
+        );
+    }
+    if key.len() > MAX_TAILSCALE_KEY_BYTES
+        || !key.starts_with("tskey-")
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("malformed Tailscale auth key".to_string());
+    }
+
+    Ok(DeployTarget {
+        ip,
+        user: user.to_string(),
+        tailscale_key: Zeroizing::new(key.to_string()),
+    })
+}
+
+fn prepare_deploy_bundle(app: &AppHandle) -> Result<tempfile::TempDir, String> {
+    let source = find_deploy_dir(app)
+        .ok_or_else(|| "bundled deployment resources are unavailable".to_string())?;
+    let source = source
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve deployment resources: {error}"))?;
+    let bundle = tempfile::Builder::new()
+        .prefix("thinclaw-deploy-bundle-")
+        .tempdir()
+        .map_err(|error| format!("failed to stage deployment resources: {error}"))?;
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        bundle.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .map_err(|error| format!("failed to secure staged deployment resources: {error}"))?;
+
+    for (name, executable) in [
+        ("setup.sh", true),
+        ("docker-compose.yml", false),
+        ("env.example", false),
+    ] {
+        let candidate = source.join(name);
+        let metadata = std::fs::symlink_metadata(&candidate)
+            .map_err(|error| format!("deployment resource '{name}' is unavailable: {error}"))?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_BUNDLE_FILE_BYTES {
+            return Err(format!(
+                "deployment resource '{name}' must be a regular file no larger than {MAX_BUNDLE_FILE_BYTES} bytes"
+            ));
+        }
+        let canonical = candidate
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve deployment resource '{name}': {error}"))?;
+        if !canonical.starts_with(&source) {
+            return Err(format!("deployment resource '{name}' escapes its bundle"));
+        }
+        let destination = bundle.path().join(name);
+        std::fs::copy(&canonical, &destination)
+            .map_err(|error| format!("failed to stage deployment resource '{name}': {error}"))?;
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &destination,
+            std::os::unix::fs::PermissionsExt::from_mode(if executable { 0o700 } else { 0o600 }),
+        )
+        .map_err(|error| format!("failed to secure deployment resource '{name}': {error}"))?;
+    }
+    Ok(bundle)
+}
+
+fn find_deploy_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let production = resource_dir.join("deploy");
+        if production.join("docker-compose.yml").is_file() {
+            return Some(production);
+        }
+    }
     if let Ok(cwd) = std::env::current_dir() {
         for ancestor in cwd.ancestors() {
-            let path = ancestor.join("deploy");
-            if path.join("docker-compose.yml").exists() {
-                return Some(path);
+            let candidate = ancestor.join("deploy");
+            if candidate.join("docker-compose.yml").is_file() {
+                return Some(candidate);
             }
         }
     }
-
     None
 }
 
-/// Generate a cryptographically random hex token.
+fn remote_install_script(remote_stage: &str, deployment_id: &str, systemd: bool) -> String {
+    let systemd_flag = if systemd { " --systemd" } else { "" };
+    format!(
+        r#"set -eu
+umask 077
+stage={remote_stage}
+live=/opt/thinclaw-deploy
+previous=/opt/thinclaw-deploy.previous-{deployment_id}
+test ! -L "$stage"
+test -f "$stage/setup.sh"
+mkdir -p /opt
+had_previous=false
+if [ -e "$live" ]; then
+  test ! -L "$live"
+  mv "$live" "$previous"
+  had_previous=true
+fi
+mv "$stage" "$live"
+if [ "$had_previous" = true ] && [ -f "$previous/.env" ] && [ ! -L "$previous/.env" ]; then
+  cp -p "$previous/.env" "$live/.env"
+fi
+rollback_install() {{
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    rm -rf -- "$live"
+    if [ "$had_previous" = true ] && [ -e "$previous" ]; then
+      mv "$previous" "$live"
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      systemctl restart thinclaw.service >/dev/null 2>&1 || (cd "$live" && docker compose up -d >/dev/null 2>&1) || true
+    fi
+  fi
+  exit "$status"
+}}
+trap rollback_install EXIT
+chmod 0700 "$live/setup.sh"
+"$live/setup.sh" --secrets-stdin{systemd_flag}
+if [ "$had_previous" = true ]; then
+  rm -rf -- "$previous"
+fi
+trap - EXIT
+"#,
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn privilege_wrapped_shell_command(script: &str) -> String {
+    let quoted = shell_single_quote(script);
+    format!(
+        "if [ \"$(id -u)\" -eq 0 ]; then exec sh -c {quoted}; else exec sudo -n sh -c {quoted}; fi"
+    )
+}
+
+fn ssh_transport_options() -> Vec<String> {
+    [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=4",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+async fn query_tailscale_ip(app: &AppHandle, target: &DeployTarget) -> Result<Ipv4Addr, String> {
+    let query = privilege_wrapped_shell_command("exec tailscale ip -4");
+    let mut args = ssh_transport_options();
+    args.push("--".into());
+    args.push(target.ssh_destination());
+    args.push(query);
+    let output = run_command_with_events(app, "ssh", &args, None, SSH_QUERY_TIMEOUT).await?;
+    let ip = output
+        .stdout
+        .lines()
+        .find_map(|line| line.trim().parse::<Ipv4Addr>().ok())
+        .ok_or_else(|| {
+            "remote setup succeeded but returned no Tailscale IPv4 address".to_string()
+        })?;
+    let numeric = u32::from(ip);
+    let cgnat_start = u32::from(Ipv4Addr::new(100, 64, 0, 0));
+    if numeric < cgnat_start || numeric >= cgnat_start + (1 << 22) {
+        return Err("remote Tailscale address is outside the expected 100.64.0.0/10 range".into());
+    }
+    Ok(ip)
+}
+
 fn generate_secure_token() -> String {
     let bytes: [u8; 32] = rand::random();
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    hex::encode(bytes)
 }
 
-fn validate_ssh_host(raw: &str) -> Result<String, crate::thinclaw::bridge::BridgeError> {
-    let host = raw.trim();
-    if host.is_empty() || host.len() > 253 || host.starts_with('-') {
-        return Err(("SSH host must be a valid IP address or DNS hostname".to_string()).into());
-    }
-    if host.parse::<std::net::IpAddr>().is_ok() {
-        return Ok(host.to_string());
-    }
-    let valid = host.split('.').all(|label| {
-        !label.is_empty()
-            && label.len() <= 63
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-            && label
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    });
-    if !valid {
-        return Err(("SSH host must be a valid IP address or DNS hostname".to_string()).into());
-    }
-    Ok(host.to_string())
+fn emit_log(app: &AppHandle, message: &str) {
+    let _ = app.emit("deploy-log", message);
 }
 
-fn validate_ssh_user(raw: &str) -> Result<String, crate::thinclaw::bridge::BridgeError> {
-    let user = raw.trim();
-    let mut bytes = user.bytes();
-    let valid_start = bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
-    let valid_rest =
-        bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
-    if user.len() > 32 || !valid_start || !valid_rest {
-        return Err(("SSH user contains unsupported characters".to_string()).into());
-    }
-    Ok(user.to_string())
-}
+async fn stream_process_output<R: AsyncRead + Unpin>(
+    app: AppHandle,
+    mut reader: R,
+    prefix: &'static str,
+    total: Arc<AtomicUsize>,
+) -> Result<String, String> {
+    let mut chunk = [0_u8; 8192];
+    let mut line = Vec::with_capacity(1024);
+    let mut line_truncated = false;
+    let mut captured = Vec::new();
 
-fn validate_tailscale_key(raw: &str) -> Result<String, crate::thinclaw::bridge::BridgeError> {
-    let key = raw.trim();
-    if !key.starts_with("tskey-")
-        || key.len() > 512
-        || !key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(("Tailscale auth key has an invalid format".to_string()).into());
-    }
-    Ok(key.to_string())
-}
+    loop {
+        let count = reader
+            .read(&mut chunk)
+            .await
+            .map_err(|error| format!("failed to read subprocess output: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        let prior = total.fetch_add(count, Ordering::AcqRel);
+        if prior.saturating_add(count) > MAX_PROCESS_OUTPUT_BYTES {
+            return Err(format!(
+                "subprocess output exceeded the {MAX_PROCESS_OUTPUT_BYTES}-byte limit"
+            ));
+        }
+        let remaining_capture = MAX_CAPTURED_STDOUT_BYTES.saturating_sub(captured.len());
+        captured.extend_from_slice(&chunk[..count.min(remaining_capture)]);
 
-fn url_host(host: &str) -> String {
-    if host.parse::<std::net::Ipv6Addr>().is_ok() {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    }
-}
-
-async fn discover_tailscale_ip(
-    ssh_target: &str,
-) -> Result<String, crate::thinclaw::bridge::BridgeError> {
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        tokio::process::Command::new("ssh")
-            .args([
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "BatchMode=yes",
-                "--",
-                ssh_target,
-                "tailscale ip -4",
-            ])
-            .stdin(Stdio::null())
-            .output(),
-    )
-    .await
-    .map_err(|_| "timed out while discovering the deployed Tailscale address".to_string())?
-    .map_err(|error| format!("failed to discover the deployed Tailscale address: {error}"))?;
-
-    if !output.status.success() {
-        return Err(("the remote host did not report a Tailscale IPv4 address".to_string()).into());
-    }
-    let value = String::from_utf8_lossy(&output.stdout);
-    let candidate = value
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .ok_or_else(|| "the remote host reported an empty Tailscale address".to_string())?;
-    let address = candidate
-        .parse::<std::net::Ipv4Addr>()
-        .map_err(|_| "the remote host reported an invalid Tailscale address".to_string())?;
-    let octets = address.octets();
-    if octets[0] != 100 || !(64..=127).contains(&octets[1]) {
-        return Err(
-            ("the remote host reported an address outside Tailscale CGNAT space".to_string())
-                .into(),
-        );
-    }
-    Ok(address.to_string())
-}
-
-/// Trait extension to safely get the error from a Result.
-trait ResultExt<E: std::fmt::Display> {
-    fn unwrap_err_or_default(&self) -> String;
-}
-
-impl ResultExt<crate::thinclaw::bridge::BridgeError>
-    for Result<(), crate::thinclaw::bridge::BridgeError>
-{
-    fn unwrap_err_or_default(&self) -> String {
-        match self {
-            Err(e) => e.to_string(),
-            Ok(()) => String::new(),
+        for byte in &chunk[..count] {
+            if *byte == b'\n' {
+                emit_process_line(&app, prefix, &line, line_truncated);
+                line.clear();
+                line_truncated = false;
+            } else if line.len() < MAX_LOG_LINE_BYTES {
+                line.push(*byte);
+            } else {
+                line_truncated = true;
+            }
         }
     }
+    if !line.is_empty() || line_truncated {
+        emit_process_line(&app, prefix, &line, line_truncated);
+    }
+    Ok(String::from_utf8_lossy(&captured).into_owned())
 }
 
-/// Run a command, emitting stdout/stderr lines as `deploy-log` events.
-/// Returns Ok(()) on exit code 0, Err((message).into()) otherwise.
+fn emit_process_line(app: &AppHandle, prefix: &str, bytes: &[u8], truncated: bool) {
+    let decoded = String::from_utf8_lossy(bytes);
+    let sanitized: String = decoded
+        .chars()
+        .filter(|ch| *ch == '\t' || (!ch.is_control() && *ch != '\u{7f}'))
+        .collect();
+    let suffix = if truncated { " [line truncated]" } else { "" };
+    let _ = app.emit("deploy-log", format!("{prefix}{sanitized}{suffix}"));
+}
+
 async fn run_command_with_events(
     app: &AppHandle,
     program: &str,
     args: &[String],
-    stdin_payload: Option<String>,
-    mut redactions: Vec<String>,
-) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    let child_result = tokio::process::Command::new(program)
+    stdin_payload: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<CommandOutput, String> {
+    if stdin_payload.is_some_and(|payload| payload.len() > 4096) {
+        return Err("subprocess stdin payload exceeds the deployment limit".into());
+    }
+    let mut command = tokio::process::Command::new(program);
+    command
         .args(args)
         .stdin(if stdin_payload.is_some() {
             Stdio::piped()
@@ -450,169 +482,155 @@ async fn run_command_with_events(
                 "{}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                 std::env::var("PATH").unwrap_or_default()
             ),
-        )
-        .spawn();
-    let mut child = match child_result {
-        Ok(child) => child,
-        Err(error) => {
-            redactions.zeroize();
-            return Err((format!("Failed to run {program}: {error}")).into());
-        }
-    };
+        );
+    let mut child = OwnedChild::spawn(&mut command)
+        .map_err(|error| format!("failed to start {program}: {error}"))?;
 
-    if let Some(mut payload) = stdin_payload {
-        let Some(mut stdin) = child.stdin.take() else {
-            payload.zeroize();
-            redactions.zeroize();
-            return Err(("Failed to open command stdin".to_string()).into());
-        };
-        let write_result = stdin.write_all(payload.as_bytes()).await;
-        payload.zeroize();
-        if let Err(error) = write_result {
-            redactions.zeroize();
-            let _ = child.kill().await;
-            return Err((format!("Failed to send deployment credentials: {error}")).into());
-        }
-        drop(stdin);
-    }
-
-    let Some(stdout) = child.stdout.take() else {
-        redactions.zeroize();
-        let _ = child.kill().await;
-        return Err(("Failed to capture stdout".to_string()).into());
-    };
-    let Some(stderr) = child.stderr.take() else {
-        redactions.zeroize();
-        let _ = child.kill().await;
-        return Err(("Failed to capture stderr".to_string()).into());
-    };
-
-    let app_out = app.clone();
-    let app_err = app.clone();
-    let mut stdout_redactions = redactions.clone();
-    let mut stderr_redactions = redactions;
-
-    let stdout_task = tokio::spawn(async move {
-        stream_command_output(&app_out, stdout, "", &stdout_redactions).await;
-        stdout_redactions.zeroize();
-    });
-
-    let stderr_task = tokio::spawn(async move {
-        stream_command_output(&app_err, stderr, "[stderr] ", &stderr_redactions).await;
-        stderr_redactions.zeroize();
-    });
-
-    let status = child
-        .wait()
+    if let Some(payload) = stdin_payload {
+        let mut stdin = child
+            .take_stdin()
+            .ok_or_else(|| format!("failed to open {program} stdin"))?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            stdin.write_all(payload).await?;
+            stdin.shutdown().await
+        })
         .await
-        .map_err(|e| format!("Command '{}' failed to wait: {}", program, e))?;
-
-    let _ = tokio::join!(stdout_task, stderr_task);
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err((format!("Command '{}' exited with code {:?}", program, status.code())).into())
+        .map_err(|_| format!("timed out writing {program} stdin"))?
+        .map_err(|error| format!("failed to write {program} stdin: {error}"))?;
     }
-}
 
-async fn stream_command_output<R: AsyncRead + Unpin>(
-    app: &AppHandle,
-    mut reader: R,
-    prefix: &str,
-    redactions: &[String],
-) {
-    let mut chunk = [0_u8; 8192];
-    let mut line = Vec::new();
-    let mut truncated = false;
-
-    loop {
-        let count = match reader.read(&mut chunk).await {
-            Ok(0) => break,
-            Ok(count) => count,
-            Err(error) => {
-                let _ = app.emit(
-                    "deploy-log",
-                    format!("{prefix}[output read failed: {error}]"),
-                );
-                return;
+    let stdout = child
+        .take_stdout()
+        .ok_or_else(|| format!("failed to capture {program} stdout"))?;
+    let stderr = child
+        .take_stderr()
+        .ok_or_else(|| format!("failed to capture {program} stderr"))?;
+    let total = Arc::new(AtomicUsize::new(0));
+    let (failure_tx, mut failure_rx) = tokio::sync::mpsc::channel::<String>(2);
+    let stdout_task = {
+        let app = app.clone();
+        let total = Arc::clone(&total);
+        let failure_tx = failure_tx.clone();
+        tokio::spawn(async move {
+            let result = stream_process_output(app, stdout, "", total).await;
+            if let Err(error) = &result {
+                let _ = failure_tx.send(error.clone()).await;
             }
-        };
-
-        for byte in &chunk[..count] {
-            if *byte == b'\n' {
-                emit_bounded_deploy_line(app, prefix, &line, truncated, redactions);
-                line.clear();
-                truncated = false;
-            } else if line.len() < MAX_DEPLOY_LOG_LINE_BYTES {
-                line.push(*byte);
-            } else {
-                truncated = true;
+            result
+        })
+    };
+    let stderr_task = {
+        let app = app.clone();
+        let total = Arc::clone(&total);
+        let failure_tx = failure_tx.clone();
+        tokio::spawn(async move {
+            let result = stream_process_output(app, stderr, "[stderr] ", total).await;
+            if let Err(error) = &result {
+                let _ = failure_tx.send(error.clone()).await;
             }
+            result
+        })
+    };
+    // Keep the channel open so ordinary pipe EOF does not race process exit.
+    let _failure_guard = failure_tx;
+
+    enum WaitOutcome {
+        Exited(std::io::Result<std::process::ExitStatus>),
+        ReaderFailed(String),
+        TimedOut,
+    }
+    let outcome = {
+        let wait = child.wait();
+        tokio::pin!(wait);
+        tokio::select! {
+            status = &mut wait => WaitOutcome::Exited(status),
+            Some(error) = failure_rx.recv() => WaitOutcome::ReaderFailed(error),
+            _ = tokio::time::sleep(timeout) => WaitOutcome::TimedOut,
         }
-    }
+    };
 
-    if !line.is_empty() || truncated {
-        emit_bounded_deploy_line(app, prefix, &line, truncated, redactions);
-    }
-}
+    let status = match outcome {
+        WaitOutcome::Exited(status) => {
+            status.map_err(|error| format!("failed to wait for {program}: {error}"))?
+        }
+        WaitOutcome::ReaderFailed(error) => {
+            let _ = child.kill().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(error);
+        }
+        WaitOutcome::TimedOut => {
+            let _ = child.kill().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(format!(
+                "{program} timed out after {} seconds",
+                timeout.as_secs()
+            ));
+        }
+    };
 
-fn emit_bounded_deploy_line(
-    app: &AppHandle,
-    prefix: &str,
-    bytes: &[u8],
-    truncated: bool,
-    redactions: &[String],
-) {
-    let mut line = String::from_utf8_lossy(bytes).into_owned();
-    if truncated {
-        line.push_str(" … [line truncated]");
+    let stdout = tokio::time::timeout(Duration::from_secs(5), stdout_task)
+        .await
+        .map_err(|_| format!("timed out draining {program} stdout"))?
+        .map_err(|error| format!("{program} stdout task failed: {error}"))??;
+    let stderr = tokio::time::timeout(Duration::from_secs(5), stderr_task)
+        .await
+        .map_err(|_| format!("timed out draining {program} stderr"))?
+        .map_err(|error| format!("{program} stderr task failed: {error}"))??;
+    if !status.success() {
+        let detail = stderr
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map(str::trim)
+            .unwrap_or("no diagnostic output");
+        return Err(format!(
+            "{program} exited with status {}: {detail}",
+            status
+                .code()
+                .map_or_else(|| "signal".into(), |code| code.to_string())
+        ));
     }
-    let _ = app.emit(
-        "deploy-log",
-        format!("{prefix}{}", redact_line(line, redactions)),
-    );
-}
-
-fn redact_line(mut line: String, redactions: &[String]) -> String {
-    for secret in redactions.iter().filter(|secret| !secret.is_empty()) {
-        line = line.replace(secret, "[REDACTED]");
-    }
-    line
+    Ok(CommandOutput { stdout })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        redact_line, url_host, validate_ssh_host, validate_ssh_user, validate_tailscale_key,
-    };
+    use super::*;
 
     #[test]
-    fn deployment_targets_reject_shell_and_option_injection() {
-        assert_eq!(
-            validate_ssh_host("agent.tailnet.ts.net").unwrap(),
-            "agent.tailnet.ts.net"
+    fn deployment_input_validation_rejects_shell_syntax_and_public_plaintext_mode() {
+        assert!(validate_target(
+            "1.2.3.4; touch /tmp/pwn",
+            "root",
+            Some("tskey-auth-safe".into())
+        )
+        .is_err());
+        assert!(validate_target("1.2.3.4", "root;id", Some("tskey-auth-safe".into())).is_err());
+        assert!(
+            validate_target("1.2.3.4", "root", Some("tskey-auth-safe\nmalicious".into())).is_err()
         );
-        assert!(validate_ssh_host("-oProxyCommand=evil").is_err());
-        assert!(validate_ssh_host("host; touch /tmp/pwned").is_err());
-        assert_eq!(validate_ssh_user("deploy-user").unwrap(), "deploy-user");
-        assert!(validate_ssh_user("root;id").is_err());
+        assert!(validate_target("1.2.3.4", "root", None).is_err());
+        assert!(validate_target("1.2.3.4", "ubuntu", Some("tskey-auth-safe_123".into())).is_ok());
     }
 
     #[test]
-    fn tailscale_keys_are_validated_and_log_lines_are_redacted() {
-        let secret = "tskey-auth-private_123";
-        assert_eq!(validate_tailscale_key(secret).unwrap(), secret);
-        assert!(validate_tailscale_key("$(touch /tmp/pwned)").is_err());
-        assert_eq!(
-            redact_line(format!("credential={secret}"), &[secret.to_string()]),
-            "credential=[REDACTED]"
-        );
+    fn remote_script_and_debuggable_arguments_never_contain_secrets() {
+        let script = remote_install_script("/tmp/thinclaw-deploy-upload-safe", "abc123", true);
+        let command = privilege_wrapped_shell_command(&script);
+        assert!(command.contains("--secrets-stdin"));
+        assert!(!command.contains("gateway-live-secret"));
+        assert!(!command.contains("tailscale-live-secret"));
+        assert_eq!(shell_single_quote("a'b"), "'a'\\''b'");
     }
 
     #[test]
-    fn ipv6_hosts_are_bracketed_for_gateway_urls() {
-        assert_eq!(url_host("fd00::1"), "[fd00::1]");
-        assert_eq!(url_host("192.168.1.20"), "192.168.1.20");
+    fn tailscale_range_validation_boundaries_are_correct() {
+        let start = u32::from(Ipv4Addr::new(100, 64, 0, 0));
+        let end = start + (1 << 22);
+        assert!(u32::from(Ipv4Addr::new(100, 64, 0, 1)) >= start);
+        assert!(u32::from(Ipv4Addr::new(100, 127, 255, 254)) < end);
+        assert!(u32::from(Ipv4Addr::new(100, 128, 0, 1)) >= end);
     }
 }

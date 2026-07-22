@@ -128,6 +128,24 @@ fn test_tool_rpc_allowlist_blocks_nested_execute_code() {
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn test_tool_rpc_request_file_names_are_strict() {
+    let valid = Path::new("request-0123456789abcdef0123456789ABCDEF.json");
+    assert_eq!(
+        tool_rpc_request_id_from_path(valid).as_deref(),
+        Some("0123456789abcdef0123456789ABCDEF")
+    );
+    for invalid in [
+        "request-short.json",
+        "request-0123456789abcdef0123456789abcdeg.json",
+        "request-0123456789abcdef0123456789abcdef.tmp",
+        "response-0123456789abcdef0123456789abcdef.json",
+    ] {
+        assert!(tool_rpc_request_id_from_path(Path::new(invalid)).is_none());
+    }
+}
+
 #[test]
 fn test_tool_rpc_auto_approval_policy_is_read_only() {
     assert!(tool_rpc_auto_approves("read_file", &serde_json::json!({})));

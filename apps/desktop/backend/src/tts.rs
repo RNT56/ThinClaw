@@ -25,8 +25,22 @@ use uuid::Uuid;
 
 use crate::direct_assets::{DirectAssetStore, NewDirectAsset};
 use crate::file_store::FileStore;
-use crate::inference::tts::TtsRequest;
-use crate::inference::InferenceRouter;
+use crate::inference::tts::{
+    validate_tts_request, TtsRequest, MAX_TTS_AUDIO_BYTES, TTS_REQUEST_TIMEOUT,
+};
+use crate::inference::{AudioFormat, InferenceRouter};
+
+const MAX_PIPER_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+
+fn audio_metadata(format: AudioFormat) -> (&'static str, &'static str) {
+    match format {
+        AudioFormat::Wav => ("audio/wav", "wav"),
+        AudioFormat::Mp3 => ("audio/mpeg", "mp3"),
+        AudioFormat::Opus => ("audio/ogg", "opus"),
+        AudioFormat::Webm => ("audio/webm", "webm"),
+        AudioFormat::Pcm => ("audio/L16", "pcm"),
+    }
+}
 
 /// Synthesise `text` using the active TTS backend (cloud or local Piper).
 ///
@@ -55,6 +69,13 @@ pub async fn direct_media_tts_synthesize(
         .inference_models
         .as_ref()
         .and_then(|m| m.get("tts_voice").cloned());
+    let request = TtsRequest {
+        text,
+        voice: user_voice.clone(),
+        format: None,
+        speed: None,
+    };
+    validate_tts_request(&request).map_err(|error| error.to_string())?;
     // ── Cloud TTS backend ────────────────────────────────────────────────
     // If a cloud backend is active (user selected in InferenceModeTab),
     // use it directly — no need for a local Piper model or sidecar.
@@ -63,18 +84,12 @@ pub async fn direct_media_tts_synthesize(
         tracing::info!(
             "[tts] Using cloud TTS backend: {} ({} chars)",
             info.display_name,
-            text.len()
+            request.text.len()
         );
-
-        let request = TtsRequest {
-            text: text.clone(),
-            voice: user_voice.clone(),
-            format: None,
-            speed: None,
-        };
+        let output_format = backend.output_format();
 
         let audio_bytes = backend
-            .synthesize(request)
+            .synthesize(request.clone())
             .await
             .map_err(|e| format!("Cloud TTS failed ({}): {}", info.display_name, e))?;
 
@@ -85,16 +100,21 @@ pub async fn direct_media_tts_synthesize(
         );
 
         let mut metadata = std::collections::HashMap::new();
-        metadata.insert("text_length".to_string(), text.len().to_string());
+        metadata.insert("text_length".to_string(), request.text.len().to_string());
+        metadata.insert(
+            "format".to_string(),
+            format!("{output_format:?}").to_lowercase(),
+        );
         if let Some(voice) = user_voice.as_ref() {
             metadata.insert("voice".to_string(), voice.clone());
         }
+        let (mime_type, _) = audio_metadata(output_format);
         let asset = persist_voice_output(
             &app,
             pool.inner(),
             &audio_bytes,
             Some(info.display_name.to_string()),
-            "audio/mpeg",
+            mime_type,
             metadata,
         )
         .await?;
@@ -111,11 +131,28 @@ pub async fn direct_media_tts_synthesize(
         .filter(|p| !p.trim().is_empty())
         .or_else(|| state.inner().get_tts_model())
         .ok_or("No TTS model selected. Please select a Piper ONNX model in Settings, or enable a cloud TTS backend.")?;
+    let resolved_model = crate::sidecar::SidecarManager::validate_managed_model_path(
+        &app,
+        &resolved_model,
+        "TTS",
+        "TTS",
+        false,
+        &["onnx"],
+    )
+    .map_err(|error| error.to_string())?;
+    let config_path = std::path::PathBuf::from(format!("{resolved_model}.json"));
+    let config_bytes = thinclaw_platform::read_regular_file_bounded_single_link_async(
+        config_path,
+        MAX_PIPER_CONFIG_BYTES,
+    )
+    .await
+    .map_err(|error| format!("The selected Piper model config is invalid: {error}"))?;
+    serde_json::from_slice::<serde_json::Value>(&config_bytes)
+        .map_err(|error| format!("The selected Piper model config is not valid JSON: {error}"))?;
 
     tracing::info!(
-        "[tts] Using local Piper — synthesising {} chars with model: {}",
-        text.len(),
-        resolved_model
+        "[tts] Using local Piper — synthesising {} chars",
+        request.text.len()
     );
 
     // Build piper command
@@ -155,48 +192,77 @@ pub async fn direct_media_tts_synthesize(
 
     // Write text to stdin and close it so piper starts processing
     child
-        .write(text.as_bytes())
+        .write(request.text.as_bytes())
         .map_err(|e| format!("Failed to write to piper stdin: {e}"))?;
 
     // Collect stdout (raw PCM bytes) and stderr (log lines)
     let mut pcm_bytes: Vec<u8> = Vec::new();
 
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stdout(chunk) => {
-                pcm_bytes.extend_from_slice(&chunk);
-            }
-            CommandEvent::Stderr(line) => {
-                // Piper logs progress to stderr — not an error
-                let msg = String::from_utf8_lossy(&line);
-                tracing::debug!("[piper] {}", msg);
-            }
-            CommandEvent::Terminated(payload) => {
-                if let Some(code) = payload.code {
-                    if code != 0 {
-                        return Err((format!("piper exited with code {code}")).into());
+    let collection = tokio::time::timeout(TTS_REQUEST_TIMEOUT, async {
+        let mut terminated_cleanly = false;
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(chunk) => {
+                    if pcm_bytes.len().saturating_add(chunk.len()) > MAX_TTS_AUDIO_BYTES {
+                        return Err(format!(
+                            "Piper output exceeds the {MAX_TTS_AUDIO_BYTES}-byte limit"
+                        ));
                     }
+                    pcm_bytes.extend_from_slice(&chunk);
                 }
-                break;
+                CommandEvent::Stderr(line) => {
+                    tracing::debug!(bytes = line.len(), "[piper] emitted a diagnostic line");
+                }
+                CommandEvent::Terminated(payload) => {
+                    match payload.code {
+                        Some(0) => terminated_cleanly = true,
+                        Some(code) => return Err(format!("Piper exited with code {code}")),
+                        None => return Err("Piper terminated without an exit status".to_string()),
+                    }
+                    break;
+                }
+                CommandEvent::Error(error) => {
+                    return Err(format!("Piper process error: {error}"));
+                }
+                _ => {}
             }
-            CommandEvent::Error(e) => {
-                return Err((format!("piper process error: {e}")).into());
-            }
-            _ => {}
+        }
+        if !terminated_cleanly {
+            return Err("Piper output channel closed before process termination".to_string());
+        }
+        Ok(())
+    })
+    .await;
+    match collection {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            let _ = child.kill();
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime { message: error });
+        }
+        Err(_) => {
+            let _ = child.kill();
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Piper synthesis timed out".to_string(),
+            });
         }
     }
 
     if pcm_bytes.is_empty() {
-        return Err(
-            ("piper produced no audio output. Check that the model path is valid.".to_string())
-                .into(),
-        );
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "piper produced no audio output. Check that the model path is valid."
+                .to_string(),
+        });
+    }
+    if !pcm_bytes.len().is_multiple_of(2) {
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Piper returned malformed 16-bit PCM audio".to_string(),
+        });
     }
 
     tracing::info!("[tts] Synthesis complete — {} PCM bytes", pcm_bytes.len());
 
     let mut metadata = std::collections::HashMap::new();
-    metadata.insert("text_length".to_string(), text.len().to_string());
+    metadata.insert("text_length".to_string(), request.text.len().to_string());
     metadata.insert("format".to_string(), "pcm_s16le_22050_mono".to_string());
     let asset = persist_voice_output(
         &app,
@@ -221,17 +287,20 @@ async fn persist_voice_output(
     provider: Option<String>,
     mime_type: &str,
     metadata: std::collections::HashMap<String, String>,
-) -> Result<AssetRecord, crate::thinclaw::bridge::BridgeError> {
+) -> Result<AssetRecord, String> {
     let file_store = app.state::<FileStore>();
     file_store
         .create_dir_all("voice/output")
         .await
-        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+        .map_err(|e| e.to_string())?;
     let id = Uuid::new_v4().to_string();
-    let extension = if mime_type == "audio/mpeg" {
-        "mp3"
-    } else {
-        "pcm"
+    let extension = match mime_type {
+        "audio/mpeg" => "mp3",
+        "audio/wav" => "wav",
+        "audio/ogg" => "opus",
+        "audio/webm" => "webm",
+        "audio/L16" => "pcm",
+        _ => return Err("Unsupported TTS audio MIME type".to_string()),
     };
     let relative_path = format!("voice/output/{}.{}", id, extension);
     file_store
@@ -241,9 +310,9 @@ async fn persist_voice_output(
     let path = file_store
         .resolve_path(&relative_path)
         .await
-        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+        .map_err(|error| error.to_string())?;
 
-    Ok(DirectAssetStore::upsert(
+    let result = DirectAssetStore::upsert(
         pool,
         NewDirectAsset {
             id,
@@ -251,7 +320,10 @@ async fn persist_voice_output(
             origin: AssetOrigin::VoiceOutput,
             path: path.to_string_lossy().to_string(),
             mime_type: Some(mime_type.to_string()),
-            size_bytes: Some(audio_bytes.len() as u64),
+            size_bytes: Some(
+                u64::try_from(audio_bytes.len())
+                    .map_err(|_| "TTS audio size exceeds the supported range")?,
+            ),
             sha256: None,
             prompt: None,
             provider,
@@ -267,7 +339,11 @@ async fn persist_voice_output(
             metadata,
         },
     )
-    .await?)
+    .await;
+    if result.is_err() {
+        let _ = file_store.delete(&relative_path).await;
+    }
+    result
 }
 
 /// List available voices for the active TTS backend.

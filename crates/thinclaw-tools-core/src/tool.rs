@@ -409,6 +409,15 @@ pub trait Tool: Send + Sync {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError>;
 
+    /// Release long-lived resources owned by this tool.
+    ///
+    /// Most tools are stateless and use the default no-op. Tools that own
+    /// subprocesses, remote sessions, or background tasks override this so a
+    /// runtime can drain them before dropping the registry.
+    async fn shutdown(&self) -> Result<(), ToolError> {
+        Ok(())
+    }
+
     /// Estimate the cost of running this tool with the given parameters.
     fn estimated_cost(&self, _params: &serde_json::Value) -> Option<Decimal> {
         None

@@ -11,7 +11,6 @@ use crate::agent::SessionManager;
 use crate::channels::web::types::*;
 use crate::db::Database;
 use crate::history::ConversationKind;
-use crate::identity::scope_id_from_key;
 use thinclaw_gateway::web::chat::{
     GatewaySessionToolCallInfo, GatewaySessionTurnInfo, GatewayThreadSummaryInput, ThreadInfoInput,
     history_response, invalid_before_timestamp_message, no_active_thread_message,
@@ -101,7 +100,7 @@ pub async fn get_history(
 ) -> ApiResult<HistoryResponse> {
     let session = session_manager.get_or_create_session(user_id).await;
     let sess = session.lock().await;
-    let limit = limit.unwrap_or(50);
+    let limit = limit.unwrap_or(50).clamp(1, 500);
 
     let before_cursor = before
         .map(|s| {
@@ -150,9 +149,12 @@ pub async fn get_history(
     if let Some(thread) = sess.threads.get(&tid)
         && !thread.turns.is_empty()
     {
+        let first_turn = thread.turns.len().saturating_sub(limit);
+        let oldest_timestamp = thread.turns.get(first_turn).map(|turn| turn.started_at);
         let turns: Vec<TurnInfo> = thread
             .turns
             .iter()
+            .skip(first_turn)
             .map(|t| {
                 turn_info_from_session_turn(GatewaySessionTurnInfo {
                     turn_number: t.turn_number,
@@ -175,7 +177,12 @@ pub async fn get_history(
             })
             .collect();
 
-        return Ok(history_response(tid, turns, false, None));
+        return Ok(history_response(
+            tid,
+            turns,
+            first_turn > 0,
+            oldest_timestamp,
+        ));
     }
 
     // Fall back to DB
@@ -240,14 +247,17 @@ async fn persist_direct_side_thread(
         .ensure_conversation(thread_id, channel, principal_id, None)
         .await?;
 
+    let principal_key = thinclaw_identity::escape_stable_key_component(principal_id);
+    let actor_key = thinclaw_identity::escape_stable_key_component(actor_id);
+    let thread_key = thinclaw_identity::escape_stable_key_component(&thread_id.to_string());
     let stable_external_conversation_key =
-        format!("{channel}://direct/{principal_id}/actor/{actor_id}/thread/{thread_id}");
+        format!("{channel}://direct/{principal_key}/actor/{actor_key}/thread/{thread_key}");
     store
         .update_conversation_identity(
             thread_id,
             Some(principal_id),
             Some(actor_id),
-            Some(scope_id_from_key(&format!("principal:{principal_id}"))),
+            Some(thinclaw_identity::direct_scope_id(principal_id, actor_id)),
             ConversationKind::Direct,
             Some(&stable_external_conversation_key),
         )

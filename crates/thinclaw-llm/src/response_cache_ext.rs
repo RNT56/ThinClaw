@@ -86,6 +86,10 @@ impl CachedResponseStore {
 
     /// Store a response.
     pub fn set(&mut self, key: &str, response: String, model: &str) {
+        if self.config.max_size == 0 {
+            return;
+        }
+
         // Evict if at capacity (LRU: remove least recently accessed)
         if self.entries.len() >= self.config.max_size
             && !self.entries.contains_key(key)
@@ -281,5 +285,18 @@ mod tests {
         assert!(json.contains("\"hits\":1"));
         assert!(json.contains("\"misses\":1"));
         assert!(json.contains("\"size\":1"));
+    }
+
+    #[test]
+    fn zero_capacity_disables_storage() {
+        let mut store = CachedResponseStore::new(CacheConfig {
+            max_size: 0,
+            ..CacheConfig::default()
+        });
+
+        store.set("k", "response".to_string(), "model");
+
+        assert!(store.is_empty());
+        assert_eq!(store.get("k"), None);
     }
 }

@@ -425,7 +425,7 @@ pub struct ExperimentGpuCloudProviderListResponse {
     pub providers: Vec<ExperimentGpuCloudProviderInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ExperimentLaunchDetails {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -440,6 +440,26 @@ pub struct ExperimentLaunchDetails {
     pub auto_launched: bool,
     #[serde(default)]
     pub requires_operator_action: bool,
+}
+
+impl std::fmt::Debug for ExperimentLaunchDetails {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExperimentLaunchDetails")
+            .field("message", &self.message)
+            .field(
+                "bootstrap_command",
+                &self.bootstrap_command.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "provider_template",
+                &self.provider_template.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("provider_job_id", &self.provider_job_id)
+            .field("provider_job_metadata", &"[OMITTED]")
+            .field("auto_launched", &self.auto_launched)
+            .field("requires_operator_action", &self.requires_operator_action)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -554,9 +574,18 @@ pub struct ExperimentLeaseJobResponse {
     pub job: ExperimentRunnerJob,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ExperimentLeaseCredentialsResponse {
     pub credentials: serde_json::Value,
+}
+
+impl std::fmt::Debug for ExperimentLeaseCredentialsResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExperimentLeaseCredentialsResponse")
+            .field("credentials", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

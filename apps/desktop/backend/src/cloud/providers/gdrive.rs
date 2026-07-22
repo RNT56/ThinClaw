@@ -17,13 +17,17 @@
 //! - List: `GET https://www.googleapis.com/drive/v3/files?q=...`
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::HashSet;
 use tracing::{debug, info};
 
 use super::super::oauth::OAuthManager;
-use super::super::provider::{CloudEntry, CloudError, CloudProvider, CloudStatus};
+use super::super::provider::{
+    bounded_download_body, bounded_error_body, bounded_metadata_json, validate_object_key,
+    validate_object_prefix, CloudEntry, CloudError, CloudProvider, CloudStatus,
+};
 
 /// Google Drive API v3 base URL.
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
@@ -31,6 +35,12 @@ const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
 const GDRIVE_APP_FOLDER: &str = "ThinClaw Desktop";
 const LEGACY_GDRIVE_APP_FOLDER: &str = "Scrappy";
+const ENCODED_KEY_PREFIX: &str = ".thinclaw-key-v1.";
+const MAX_LIST_ENTRIES: usize = 100_000;
+const MAX_LIST_PAGES: usize = 1_000;
+const MULTIPART_UPLOAD_LIMIT: usize = 5 * 1024 * 1024;
+const RESUMABLE_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+const MAX_GDRIVE_UPLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 
 /// Google Drive cloud storage provider.
 pub struct GDriveProvider {
@@ -38,10 +48,8 @@ pub struct GDriveProvider {
     oauth: OAuthManager,
     /// HTTP client
     http: reqwest::Client,
-    /// ID of the app folder in Google Drive
-    app_folder_id: Mutex<Option<String>>,
-    /// Local cache: cloud_key → Google Drive file ID
-    key_map: Mutex<HashMap<String, String>>,
+    /// Serializes the search-or-create sequence for the app folder.
+    app_folder_lock: tokio::sync::Mutex<()>,
 }
 
 /// Google Drive file metadata (API response).
@@ -84,11 +92,16 @@ impl GDriveProvider {
     ///
     /// The OAuth manager must already be configured with valid tokens.
     pub fn new(oauth: OAuthManager) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_default();
         Self {
             oauth,
-            http: reqwest::Client::new(),
-            app_folder_id: Mutex::new(None),
-            key_map: Mutex::new(HashMap::new()),
+            http,
+            app_folder_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -99,10 +112,7 @@ impl GDriveProvider {
 
     /// Get or create the app folder in Google Drive.
     async fn ensure_app_folder(&self) -> Result<String, CloudError> {
-        // Check cache first
-        if let Some(id) = self.app_folder_id.lock().unwrap().as_ref() {
-            return Ok(id.clone());
-        }
+        let _folder_guard = self.app_folder_lock.lock().await;
 
         let token = self.token().await?;
 
@@ -110,7 +120,7 @@ impl GDriveProvider {
         // read fallback only, so new writes never target them.
         let query = format!(
             "name = '{}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-            GDRIVE_APP_FOLDER
+            escape_drive_query_literal(GDRIVE_APP_FOLDER)
         );
         let url = format!(
             "{}/files?q={}&fields=files(id,name)",
@@ -118,20 +128,18 @@ impl GDriveProvider {
             urlencoding::encode(&query)
         );
 
-        let resp: FileListResponse = self
+        let resp = self
             .http
             .get(&url)
             .bearer_auth(&token)
             .send()
             .await
-            .map_err(|e| CloudError::Provider(format!("Search app folder: {}", e)))?
-            .json()
-            .await
-            .map_err(|e| CloudError::Provider(format!("Parse folder search: {}", e)))?;
+            .map_err(|e| CloudError::Provider(format!("Search app folder: {}", e)))?;
+        let resp: FileListResponse = decode_gdrive_response(resp, "search app folder").await?;
 
         if let Some(folder) = resp.files.first() {
+            validate_drive_id(&folder.id)?;
             info!("[cloud/gdrive] Found existing app folder: {}", folder.id);
-            *self.app_folder_id.lock().unwrap() = Some(folder.id.clone());
             return Ok(folder.id.clone());
         }
 
@@ -151,40 +159,27 @@ impl GDriveProvider {
             .await
             .map_err(|e| CloudError::Provider(format!("Create app folder: {}", e)))?;
 
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(CloudError::Provider(format!(
-                "Create folder failed: {}",
-                body
-            )));
-        }
-
-        let folder: DriveFile = resp
-            .json()
-            .await
-            .map_err(|e| CloudError::Provider(format!("Parse created folder: {}", e)))?;
+        let folder: DriveFile = decode_gdrive_response(resp, "create app folder").await?;
+        validate_drive_id(&folder.id)?;
 
         info!("[cloud/gdrive] Created app folder: {}", folder.id);
-        *self.app_folder_id.lock().unwrap() = Some(folder.id.clone());
-
         Ok(folder.id)
     }
 
     /// Find a file by name within the app folder.
     async fn find_file(&self, key: &str) -> Result<Option<String>, CloudError> {
-        // Check local cache
-        if let Some(id) = self.key_map.lock().unwrap().get(key) {
-            return Ok(Some(id.clone()));
-        }
-
         let token = self.token().await?;
         let folder_id = self.ensure_app_folder().await?;
 
-        // Encode the key as the filename (replace / with _)
+        // New names use an injective base64url representation. The old
+        // slash-to-double-underscore encoding is checked as a read fallback.
         let filename = key_to_filename(key);
+        let legacy_filename = legacy_key_to_filename(key);
         let query = format!(
-            "name = '{}' and '{}' in parents and trashed = false",
-            filename, folder_id
+            "(name = '{}' or name = '{}') and '{}' in parents and trashed = false",
+            escape_drive_query_literal(&filename),
+            escape_drive_query_literal(&legacy_filename),
+            escape_drive_query_literal(&folder_id)
         );
 
         let url = format!(
@@ -193,22 +188,22 @@ impl GDriveProvider {
             urlencoding::encode(&query)
         );
 
-        let resp: FileListResponse = self
+        let resp = self
             .http
             .get(&url)
             .bearer_auth(&token)
             .send()
             .await
-            .map_err(|e| CloudError::Provider(format!("Find file '{}': {}", key, e)))?
-            .json()
-            .await
-            .map_err(|e| CloudError::Provider(format!("Parse find file: {}", e)))?;
+            .map_err(|e| CloudError::Provider(format!("Find file '{}': {}", key, e)))?;
+        let resp: FileListResponse = decode_gdrive_response(resp, "find Drive file").await?;
 
-        if let Some(file) = resp.files.first() {
-            self.key_map
-                .lock()
-                .unwrap()
-                .insert(key.to_string(), file.id.clone());
+        if let Some(file) = resp
+            .files
+            .iter()
+            .find(|file| file.name == filename)
+            .or_else(|| resp.files.iter().find(|file| file.name == legacy_filename))
+        {
+            validate_drive_id(&file.id)?;
             Ok(Some(file.id.clone()))
         } else {
             Ok(None)
@@ -228,24 +223,27 @@ impl GDriveProvider {
         let token = self.token().await?;
         let query = format!(
             "name = '{}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-            folder_name.replace('\'', "\\'")
+            escape_drive_query_literal(folder_name)
         );
         let url = format!(
             "{}/files?q={}&fields=files(id,name)",
             DRIVE_API,
             urlencoding::encode(&query)
         );
-        let resp: FileListResponse = self
+        let resp = self
             .http
             .get(&url)
             .bearer_auth(&token)
             .send()
             .await
-            .map_err(|e| CloudError::Provider(format!("Search folder '{}': {}", folder_name, e)))?
-            .json()
-            .await
-            .map_err(|e| CloudError::Provider(format!("Parse folder search: {}", e)))?;
-        Ok(resp.files.first().map(|folder| folder.id.clone()))
+            .map_err(|e| CloudError::Provider(format!("Search folder '{}': {}", folder_name, e)))?;
+        let resp: FileListResponse = decode_gdrive_response(resp, "find Drive folder").await?;
+        if let Some(folder) = resp.files.first() {
+            validate_drive_id(&folder.id)?;
+            Ok(Some(folder.id.clone()))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn find_file_in_folder(
@@ -255,26 +253,173 @@ impl GDriveProvider {
         key: &str,
     ) -> Result<Option<String>, CloudError> {
         let filename = key_to_filename(key);
+        let legacy_filename = legacy_key_to_filename(key);
         let query = format!(
-            "name = '{}' and '{}' in parents and trashed = false",
-            filename, folder_id
+            "(name = '{}' or name = '{}') and '{}' in parents and trashed = false",
+            escape_drive_query_literal(&filename),
+            escape_drive_query_literal(&legacy_filename),
+            escape_drive_query_literal(folder_id)
         );
         let url = format!(
             "{}/files?q={}&fields=files(id,name,size)",
             DRIVE_API,
             urlencoding::encode(&query)
         );
-        let resp: FileListResponse = self
+        let resp = self
             .http
             .get(&url)
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| CloudError::Provider(format!("Find file '{}': {}", key, e)))?
-            .json()
+            .map_err(|e| CloudError::Provider(format!("Find file '{}': {}", key, e)))?;
+        let resp: FileListResponse = decode_gdrive_response(resp, "find legacy Drive file").await?;
+        let file = resp
+            .files
+            .iter()
+            .find(|file| file.name == filename)
+            .or_else(|| resp.files.iter().find(|file| file.name == legacy_filename))
+            .map(|file| file.id.clone());
+        if let Some(id) = file.as_deref() {
+            validate_drive_id(id)?;
+        }
+        Ok(file)
+    }
+
+    async fn resumable_upload(
+        &self,
+        token: &str,
+        key: &str,
+        filename: &str,
+        folder_id: &str,
+        existing_file_id: Option<&str>,
+        data: &[u8],
+    ) -> Result<DriveFile, CloudError> {
+        let request = if let Some(file_id) = existing_file_id {
+            self.http.patch(format!(
+                "{UPLOAD_API}/files/{}?uploadType=resumable&fields=id,name,size",
+                urlencoding::encode(file_id)
+            ))
+        } else {
+            self.http.post(format!(
+                "{UPLOAD_API}/files?uploadType=resumable&fields=id,name,size"
+            ))
+        };
+        let metadata = if existing_file_id.is_some() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({
+                "name": filename,
+                "parents": [folder_id]
+            })
+        };
+        let response = request
+            .bearer_auth(token)
+            .header("Content-Type", "application/json; charset=UTF-8")
+            .header("X-Upload-Content-Type", "application/octet-stream")
+            .header("X-Upload-Content-Length", data.len())
+            .json(&metadata)
+            .send()
             .await
-            .map_err(|e| CloudError::Provider(format!("Parse find file: {}", e)))?;
-        Ok(resp.files.first().map(|file| file.id.clone()))
+            .map_err(|error| {
+                CloudError::UploadFailed(format!("start resumable upload for '{key}': {error}"))
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = bounded_error_body(response).await;
+            return Err(CloudError::UploadFailed(format!(
+                "start resumable upload for '{key}' failed ({status}): {body}"
+            )));
+        }
+        let session_url = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                CloudError::UploadFailed(
+                    "Google Drive omitted the resumable upload location".to_string(),
+                )
+            })?
+            .to_string();
+        validate_gdrive_upload_url(&session_url)?;
+
+        let mut offset = 0_usize;
+        while offset < data.len() {
+            let end = (offset + RESUMABLE_CHUNK_BYTES).min(data.len());
+            let response = self
+                .http
+                .put(&session_url)
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Length", end - offset)
+                .header(
+                    "Content-Range",
+                    format!(
+                        "bytes {}-{}/{data_len}",
+                        offset,
+                        end - 1,
+                        data_len = data.len()
+                    ),
+                )
+                .body(data[offset..end].to_vec())
+                .send()
+                .await
+                .map_err(|error| {
+                    CloudError::UploadFailed(format!(
+                        "upload '{key}' range {offset}-{}: {error}",
+                        end - 1
+                    ))
+                })?;
+
+            if end < data.len() {
+                if response.status().as_u16() != 308 {
+                    let status = response.status();
+                    let body = bounded_error_body(response).await;
+                    return Err(CloudError::UploadFailed(format!(
+                        "upload '{key}' range {offset}-{} failed ({status}): {body}",
+                        end - 1
+                    )));
+                }
+                let next_offset = response
+                    .headers()
+                    .get(reqwest::header::RANGE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_gdrive_received_range);
+                if next_offset != Some(end) {
+                    return Err(CloudError::UploadFailed(format!(
+                        "Google Drive reported an unexpected upload offset for '{key}'"
+                    )));
+                }
+            } else {
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let body = bounded_error_body(response).await;
+                    return Err(CloudError::UploadFailed(format!(
+                        "finish resumable upload for '{key}' failed ({status}): {body}"
+                    )));
+                }
+                let file: DriveFile =
+                    bounded_metadata_json(response, "parse Drive resumable upload result")
+                        .await
+                        .map_err(|error| CloudError::UploadFailed(error.to_string()))?;
+                validate_drive_id(&file.id)
+                    .map_err(|error| CloudError::UploadFailed(error.to_string()))?;
+                if file
+                    .size
+                    .as_deref()
+                    .and_then(|size| size.parse::<u64>().ok())
+                    != Some(data.len() as u64)
+                {
+                    return Err(CloudError::UploadFailed(format!(
+                        "Google Drive upload size mismatch for '{key}'"
+                    )));
+                }
+                return Ok(file);
+            }
+            offset = end;
+        }
+
+        Err(CloudError::UploadFailed(format!(
+            "resumable upload for '{key}' had no content"
+        )))
     }
 }
 
@@ -298,18 +443,16 @@ impl CloudProvider for GDriveProvider {
             .map_err(|e| CloudError::ConnectionFailed(format!("Drive API: {}", e)))?;
 
         if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let status = resp.status();
+            let body = bounded_error_body(resp).await;
             return Err(CloudError::ConnectionFailed(format!(
-                "Drive API (HTTP {}): {}",
-                body.len(),
-                body
+                "Drive API ({status}): {body}"
             )));
         }
 
-        let body: serde_json::Value = resp
-            .json()
+        let body: serde_json::Value = bounded_metadata_json(resp, "parse Drive quota")
             .await
-            .map_err(|e| CloudError::ConnectionFailed(format!("Parse about: {}", e)))?;
+            .map_err(|error| CloudError::ConnectionFailed(error.to_string()))?;
 
         let storage_used = body["storageQuota"]["usage"]
             .as_str()
@@ -331,6 +474,12 @@ impl CloudProvider for GDriveProvider {
     }
 
     async fn put(&self, key: &str, data: &[u8]) -> Result<(), CloudError> {
+        validate_object_key(key)?;
+        if data.len() as u64 > MAX_GDRIVE_UPLOAD_BYTES {
+            return Err(CloudError::ObjectTooLarge {
+                limit: usize::try_from(MAX_GDRIVE_UPLOAD_BYTES).unwrap_or(usize::MAX),
+            });
+        }
         let token = self.token().await?;
         let folder_id = self.ensure_app_folder().await?;
         let filename = key_to_filename(key);
@@ -344,8 +493,17 @@ impl CloudProvider for GDriveProvider {
 
         // Check if file already exists (update vs create)
         if let Some(file_id) = self.find_file(key).await? {
+            if data.len() > MULTIPART_UPLOAD_LIMIT {
+                self.resumable_upload(&token, key, &filename, &folder_id, Some(&file_id), data)
+                    .await?;
+                return Ok(());
+            }
             // Update existing file (PATCH with upload)
-            let url = format!("{}/files/{}?uploadType=media", UPLOAD_API, file_id);
+            let url = format!(
+                "{}/files/{}?uploadType=media&fields=id,name,size",
+                UPLOAD_API,
+                urlencoding::encode(&file_id)
+            );
 
             let resp = self
                 .http
@@ -358,13 +516,33 @@ impl CloudProvider for GDriveProvider {
                 .map_err(|e| CloudError::UploadFailed(format!("Update '{}': {}", key, e)))?;
 
             if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let body = bounded_error_body(resp).await;
                 return Err(CloudError::UploadFailed(format!(
                     "Update '{}' failed: {}",
                     key, body
                 )));
             }
+            let file: DriveFile = bounded_metadata_json(resp, "parse Drive update result")
+                .await
+                .map_err(|error| CloudError::UploadFailed(error.to_string()))?;
+            validate_drive_id(&file.id)
+                .map_err(|error| CloudError::UploadFailed(error.to_string()))?;
+            if file
+                .size
+                .as_deref()
+                .and_then(|size| size.parse::<u64>().ok())
+                != Some(data.len() as u64)
+            {
+                return Err(CloudError::UploadFailed(format!(
+                    "Google Drive upload size mismatch for '{key}'"
+                )));
+            }
         } else {
+            if data.len() > MULTIPART_UPLOAD_LIMIT {
+                self.resumable_upload(&token, key, &filename, &folder_id, None, data)
+                    .await?;
+                return Ok(());
+            }
             // Create new file (multipart: metadata + content)
             let metadata = serde_json::json!({
                 "name": filename,
@@ -383,7 +561,10 @@ impl CloudProvider for GDriveProvider {
                 .part("metadata", metadata_part)
                 .part("file", content_part);
 
-            let url = format!("{}/files?uploadType=multipart", UPLOAD_API);
+            let url = format!(
+                "{}/files?uploadType=multipart&fields=id,name,size",
+                UPLOAD_API
+            );
 
             let resp = self
                 .http
@@ -395,29 +576,35 @@ impl CloudProvider for GDriveProvider {
                 .map_err(|e| CloudError::UploadFailed(format!("Create '{}': {}", key, e)))?;
 
             if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let body = bounded_error_body(resp).await;
                 return Err(CloudError::UploadFailed(format!(
                     "Create '{}' failed: {}",
                     key, body
                 )));
             }
 
-            let file: DriveFile = resp
-                .json()
+            let file: DriveFile = decode_gdrive_response(resp, "parse Drive upload response")
                 .await
-                .map_err(|e| CloudError::UploadFailed(format!("Parse upload response: {}", e)))?;
-
-            // Cache the file ID
-            self.key_map
-                .lock()
-                .unwrap()
-                .insert(key.to_string(), file.id);
+                .map_err(|error| CloudError::UploadFailed(error.to_string()))?;
+            validate_drive_id(&file.id)
+                .map_err(|error| CloudError::UploadFailed(error.to_string()))?;
+            if file
+                .size
+                .as_deref()
+                .and_then(|size| size.parse::<u64>().ok())
+                != Some(data.len() as u64)
+            {
+                return Err(CloudError::UploadFailed(format!(
+                    "Google Drive upload size mismatch for '{key}'"
+                )));
+            }
         }
 
         Ok(())
     }
 
-    async fn get(&self, key: &str) -> Result<Vec<u8>, CloudError> {
+    async fn get_bounded(&self, key: &str, max_bytes: usize) -> Result<Vec<u8>, CloudError> {
+        validate_object_key(key)?;
         let file_id = match self.find_file(key).await? {
             Some(id) => id,
             None => self
@@ -427,7 +614,11 @@ impl CloudProvider for GDriveProvider {
         };
 
         let token = self.token().await?;
-        let url = format!("{}/files/{}?alt=media", DRIVE_API, file_id);
+        let url = format!(
+            "{}/files/{}?alt=media",
+            DRIVE_API,
+            urlencoding::encode(&file_id)
+        );
 
         debug!("[cloud/gdrive] GET {} (file_id={})", key, file_id);
 
@@ -441,35 +632,31 @@ impl CloudProvider for GDriveProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             if status.as_u16() == 404 {
                 return Err(CloudError::NotFound(format!(
                     "Drive file '{}' not found",
                     key
                 )));
             }
+            let body = bounded_error_body(resp).await;
             return Err(CloudError::DownloadFailed(format!(
                 "Download '{}' failed (HTTP {}): {}",
                 key, status, body
             )));
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| CloudError::DownloadFailed(format!("Read bytes '{}': {}", key, e)))?;
-
-        Ok(bytes.to_vec())
+        bounded_download_body(resp, max_bytes).await
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudError> {
+        validate_object_key(key)?;
         let file_id = match self.find_file(key).await? {
             Some(id) => id,
             None => return Ok(()), // Already deleted — no-op
         };
 
         let token = self.token().await?;
-        let url = format!("{}/files/{}", DRIVE_API, file_id);
+        let url = format!("{}/files/{}", DRIVE_API, urlencoding::encode(&file_id));
 
         debug!("[cloud/gdrive] DELETE {} (file_id={})", key, file_id);
 
@@ -482,35 +669,40 @@ impl CloudProvider for GDriveProvider {
             .map_err(|e| CloudError::DeleteFailed(format!("Delete '{}': {}", key, e)))?;
 
         if !resp.status().is_success() && resp.status().as_u16() != 404 {
-            let body = resp.text().await.unwrap_or_default();
+            let body = bounded_error_body(resp).await;
             return Err(CloudError::DeleteFailed(format!(
                 "Delete '{}' failed: {}",
                 key, body
             )));
         }
 
-        // Remove from cache
-        self.key_map.lock().unwrap().remove(key);
-
         Ok(())
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<CloudEntry>, CloudError> {
+        validate_object_prefix(prefix)?;
         let token = self.token().await?;
         let folder_id = self.ensure_app_folder().await?;
 
         debug!("[cloud/gdrive] LIST prefix={}", prefix);
 
-        let filename_prefix = key_to_filename(prefix);
         let query = format!(
-            "'{}' in parents and trashed = false and name contains '{}'",
-            folder_id, filename_prefix
+            "'{}' in parents and trashed = false",
+            escape_drive_query_literal(&folder_id)
         );
 
         let mut all_files = Vec::new();
+        let mut seen_keys = HashSet::new();
         let mut page_token: Option<String> = None;
+        let mut page_count = 0_usize;
 
         loop {
+            page_count += 1;
+            if page_count > MAX_LIST_PAGES || all_files.len() > MAX_LIST_ENTRIES {
+                return Err(CloudError::Provider(
+                    "Google Drive listing exceeds its safety limit".to_string(),
+                ));
+            }
             let mut url = format!(
                 "{}/files?q={}&fields=files(id,name,size,modifiedTime),nextPageToken&pageSize=1000",
                 DRIVE_API,
@@ -518,22 +710,36 @@ impl CloudProvider for GDriveProvider {
             );
 
             if let Some(token) = &page_token {
-                url.push_str(&format!("&pageToken={}", token));
+                if token.len() > 16 * 1024 || token.chars().any(char::is_control) {
+                    return Err(CloudError::Provider(
+                        "Google Drive returned an invalid page token".to_string(),
+                    ));
+                }
+                url.push_str("&pageToken=");
+                url.push_str(&urlencoding::encode(token));
             }
 
-            let resp: FileListResponse = self
+            let response = self
                 .http
                 .get(&url)
                 .bearer_auth(&token)
                 .send()
                 .await
-                .map_err(|e| CloudError::Provider(format!("List files: {}", e)))?
-                .json()
-                .await
-                .map_err(|e| CloudError::Provider(format!("Parse list: {}", e)))?;
+                .map_err(|e| CloudError::Provider(format!("List files: {}", e)))?;
+            let resp: FileListResponse =
+                decode_gdrive_response(response, "parse Drive listing").await?;
 
             for file in &resp.files {
-                let key = filename_to_key(&file.name);
+                validate_drive_id(&file.id)?;
+                let Some(key) = filename_to_key(&file.name) else {
+                    continue;
+                };
+                if !key.starts_with(prefix) || validate_object_key(&key).is_err() {
+                    continue;
+                }
+                if !seen_keys.insert(key.clone()) {
+                    continue;
+                }
                 let size = file
                     .size
                     .as_ref()
@@ -547,18 +753,17 @@ impl CloudProvider for GDriveProvider {
                     .map(|dt| dt.timestamp_millis())
                     .unwrap_or(0);
 
-                // Cache the file ID
-                self.key_map
-                    .lock()
-                    .unwrap()
-                    .insert(key.clone(), file.id.clone());
-
                 all_files.push(CloudEntry {
                     key,
                     size,
                     last_modified,
                     checksum: None,
                 });
+                if all_files.len() > MAX_LIST_ENTRIES {
+                    return Err(CloudError::Provider(
+                        "Google Drive listing exceeds its safety limit".to_string(),
+                    ));
+                }
             }
 
             match resp.next_page_token {
@@ -576,24 +781,94 @@ impl CloudProvider for GDriveProvider {
     }
 
     fn max_upload_size(&self) -> u64 {
-        // Google Drive: 5 TB max file size, 5 MB for simple upload
-        // For larger files, use resumable upload (not implemented yet)
-        5 * 1024 * 1024 // 5 MB — simple upload limit
+        MAX_GDRIVE_UPLOAD_BYTES
     }
+}
+
+async fn decode_gdrive_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+    context: &str,
+) -> Result<T, CloudError> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = bounded_error_body(response).await;
+        return Err(CloudError::Provider(format!(
+            "{context} failed ({status}): {body}"
+        )));
+    }
+    bounded_metadata_json(response, context).await
+}
+
+fn escape_drive_query_literal(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+fn validate_drive_id(id: &str) -> Result<(), CloudError> {
+    if id.is_empty() || id.len() > 1_024 || id.chars().any(char::is_control) {
+        return Err(CloudError::Provider(
+            "Google Drive returned an invalid file ID".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_gdrive_upload_url(url: &str) -> Result<(), CloudError> {
+    if url.len() > 16 * 1024 {
+        return Err(CloudError::UploadFailed(
+            "Google Drive upload location is too long".to_string(),
+        ));
+    }
+    let parsed = reqwest::Url::parse(url).map_err(|error| {
+        CloudError::UploadFailed(format!("invalid Google Drive upload location: {error}"))
+    })?;
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    if parsed.scheme() != "https"
+        || parsed.port_or_known_default() != Some(443)
+        || !(host == "googleapis.com" || host.ends_with(".googleapis.com"))
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(CloudError::UploadFailed(
+            "Google Drive returned an untrusted upload location".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_gdrive_received_range(range: &str) -> Option<usize> {
+    range
+        .strip_prefix("bytes=0-")?
+        .parse::<usize>()
+        .ok()?
+        .checked_add(1)
 }
 
 // ── Key ↔ Filename Conversion ────────────────────────────────────────────
 
 /// Convert a cloud key (e.g. "db/thinclaw.db.enc") to a safe filename.
 ///
-/// Replaces `/` with `__` to flatten the path for Google Drive.
+/// Uses tagged base64url so every distinct key has a distinct filename.
 fn key_to_filename(key: &str) -> String {
+    format!(
+        "{ENCODED_KEY_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.as_bytes())
+    )
+}
+
+fn legacy_key_to_filename(key: &str) -> String {
     key.replace('/', "__")
 }
 
-/// Convert a Google Drive filename back to a cloud key.
-fn filename_to_key(filename: &str) -> String {
-    filename.replace("__", "/")
+/// Convert a Google Drive filename back to a cloud key. Untagged names use
+/// the legacy, non-injective mapping for archives written by older builds.
+fn filename_to_key(filename: &str) -> Option<String> {
+    if let Some(encoded) = filename.strip_prefix(ENCODED_KEY_PREFIX) {
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .ok()?;
+        return String::from_utf8(bytes).ok();
+    }
+    Some(filename.replace("__", "/"))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -604,22 +879,30 @@ mod tests {
 
     #[test]
     fn test_key_to_filename() {
-        assert_eq!(key_to_filename("db/thinclaw.db.enc"), "db__thinclaw.db.enc");
+        let first = key_to_filename("db/thinclaw.db.enc");
+        let second = key_to_filename("db__thinclaw.db.enc");
+        assert!(first.starts_with(ENCODED_KEY_PREFIX));
+        assert_ne!(first, second);
         assert_eq!(
-            key_to_filename("documents/sub/file.pdf.enc"),
-            "documents__sub__file.pdf.enc"
+            filename_to_key(&first),
+            Some("db/thinclaw.db.enc".to_string())
         );
-        assert_eq!(key_to_filename("simple.txt"), "simple.txt");
     }
 
     #[test]
     fn test_filename_to_key() {
-        assert_eq!(filename_to_key("db__thinclaw.db.enc"), "db/thinclaw.db.enc");
+        assert_eq!(
+            filename_to_key("db__thinclaw.db.enc"),
+            Some("db/thinclaw.db.enc".to_string())
+        );
         assert_eq!(
             filename_to_key("documents__sub__file.pdf.enc"),
-            "documents/sub/file.pdf.enc"
+            Some("documents/sub/file.pdf.enc".to_string())
         );
-        assert_eq!(filename_to_key("simple.txt"), "simple.txt");
+        assert_eq!(
+            filename_to_key("simple.txt"),
+            Some("simple.txt".to_string())
+        );
     }
 
     #[test]
@@ -637,9 +920,12 @@ mod tests {
             let filename = key_to_filename(key);
             let restored = filename_to_key(&filename);
             assert_eq!(
-                restored, key,
-                "Roundtrip failed: {} → {} → {}",
-                key, filename, restored
+                restored.as_deref(),
+                Some(key),
+                "Roundtrip failed: {} → {} → {:?}",
+                key,
+                filename,
+                restored
             );
         }
     }

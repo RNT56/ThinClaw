@@ -13,6 +13,11 @@ use crate::wire::{
     SseEvent, ThreadListResponse,
 };
 
+const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_COMMAND_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_HISTORY_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_GATEWAY_TOKEN_BYTES: usize = 64 * 1024;
+
 /// Async client for a ThinClaw gateway.
 ///
 /// Wraps the gateway HTTP + SSE surface with bearer-token auth. Cheap to clone
@@ -41,10 +46,35 @@ impl Client {
     pub fn new(base_url: impl AsRef<str>, token: impl Into<String>) -> Result<Self> {
         let base_url = Url::parse(base_url.as_ref())
             .map_err(|e| ClientError::InvalidUrl(format!("{}: {e}", base_url.as_ref())))?;
+        if !matches!(base_url.scheme(), "http" | "https")
+            || base_url.host_str().is_none()
+            || !base_url.username().is_empty()
+            || base_url.password().is_some()
+            || base_url.query().is_some()
+            || base_url.fragment().is_some()
+        {
+            return Err(ClientError::InvalidUrl(
+                "gateway URL must be HTTP(S) without credentials, query, or fragment".to_string(),
+            ));
+        }
+        let token = token.into();
+        if token.is_empty()
+            || token.len() > MAX_GATEWAY_TOKEN_BYTES
+            || token.chars().any(char::is_control)
+        {
+            return Err(ClientError::InvalidUrl(
+                "gateway token is empty, oversized, or malformed".to_string(),
+            ));
+        }
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()?;
         Ok(Self {
-            http: reqwest::Client::new(),
+            http,
             base_url,
-            token: token.into(),
+            token,
         })
     }
 
@@ -77,7 +107,9 @@ impl Client {
         if status.is_success() {
             return Ok(resp);
         }
-        let body = resp.text().await.unwrap_or_default();
+        let body = thinclaw_types::http_response::bounded_text(resp, MAX_ERROR_RESPONSE_BYTES)
+            .await
+            .unwrap_or_default();
         let truncated: String = body.chars().take(500).collect();
         Err(ClientError::Status {
             status: status.as_u16(),
@@ -104,10 +136,13 @@ impl Client {
             .post(self.url("/api/chat/send")?)
             .bearer_auth(&self.token)
             .json(&body)
+            .timeout(Duration::from_secs(60))
             .send()
             .await?;
         let resp = Self::error_for_status(resp).await?;
-        Ok(resp.json().await?)
+        thinclaw_types::http_response::bounded_json(resp, MAX_COMMAND_RESPONSE_BYTES)
+            .await
+            .map_err(|error| ClientError::Response(error.to_string()))
     }
 
     /// Fetch the transcript for a thread.
@@ -128,9 +163,17 @@ impl Client {
                 q.append_pair("before", before);
             }
         }
-        let resp = self.http.get(url).bearer_auth(&self.token).send().await?;
+        let resp = self
+            .http
+            .get(url)
+            .bearer_auth(&self.token)
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await?;
         let resp = Self::error_for_status(resp).await?;
-        Ok(resp.json().await?)
+        thinclaw_types::http_response::bounded_json(resp, MAX_HISTORY_RESPONSE_BYTES)
+            .await
+            .map_err(|error| ClientError::Response(error.to_string()))
     }
 
     /// List conversation threads.
@@ -139,10 +182,13 @@ impl Client {
             .http
             .get(self.url("/api/chat/threads")?)
             .bearer_auth(&self.token)
+            .timeout(Duration::from_secs(60))
             .send()
             .await?;
         let resp = Self::error_for_status(resp).await?;
-        Ok(resp.json().await?)
+        thinclaw_types::http_response::bounded_json(resp, MAX_COMMAND_RESPONSE_BYTES)
+            .await
+            .map_err(|error| ClientError::Response(error.to_string()))
     }
 
     /// Create a new conversation thread. Returns the raw JSON response (the
@@ -153,10 +199,13 @@ impl Client {
             .post(self.url("/api/chat/thread/new")?)
             .bearer_auth(&self.token)
             .json(&serde_json::json!({}))
+            .timeout(Duration::from_secs(60))
             .send()
             .await?;
         let resp = Self::error_for_status(resp).await?;
-        Ok(resp.json().await?)
+        thinclaw_types::http_response::bounded_json(resp, MAX_COMMAND_RESPONSE_BYTES)
+            .await
+            .map_err(|error| ClientError::Response(error.to_string()))
     }
 
     /// Resolve a pending tool-approval request.
@@ -178,6 +227,7 @@ impl Client {
             .post(self.url("/api/chat/approval")?)
             .bearer_auth(&self.token)
             .json(&body)
+            .timeout(Duration::from_secs(60))
             .send()
             .await?;
         Self::error_for_status(resp).await?;
@@ -191,6 +241,7 @@ impl Client {
             .post(self.url("/api/chat/abort")?)
             .bearer_auth(&self.token)
             .json(&serde_json::json!({ "thread_id": thread_id.to_string() }))
+            .timeout(Duration::from_secs(60))
             .send()
             .await?;
         Self::error_for_status(resp).await?;
@@ -220,22 +271,24 @@ impl Client {
         // into an SseEvent.
         let stream = byte_stream.flat_map(move |chunk| {
             let events: Vec<Result<SseEvent>> = match chunk {
-                Ok(bytes) => decoder
-                    .push(&bytes)
-                    .into_iter()
-                    .filter_map(|payload| {
-                        // Ignore keep-alive/empty payloads.
-                        let trimmed = payload.trim();
-                        if trimmed.is_empty() {
-                            return None;
-                        }
-                        Some(
-                            serde_json::from_str::<serde_json::Value>(trimmed)
-                                .map(SseEvent::from_json)
-                                .map_err(ClientError::from),
-                        )
-                    })
-                    .collect(),
+                Ok(bytes) => match decoder.push(&bytes) {
+                    Ok(payloads) => payloads
+                        .into_iter()
+                        .filter_map(|payload| {
+                            // Ignore keep-alive/empty payloads.
+                            let trimmed = payload.trim();
+                            if trimmed.is_empty() {
+                                return None;
+                            }
+                            Some(
+                                serde_json::from_str::<serde_json::Value>(trimmed)
+                                    .map(SseEvent::from_json)
+                                    .map_err(ClientError::from),
+                            )
+                        })
+                        .collect(),
+                    Err(error) => vec![Err(ClientError::Response(error.to_string()))],
+                },
                 Err(e) => vec![Err(ClientError::from(e))],
             };
             futures::stream::iter(events)

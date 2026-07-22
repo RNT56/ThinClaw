@@ -195,10 +195,7 @@ pub async fn prepare_tool_call(
     if let crate::tools::policy::ArgPolicyDecision::Deny(reason) = &arg_decision {
         return Err(tool_execution_failed(request.tool_name, reason.clone()));
     }
-    let arg_force_approval = matches!(
-        arg_decision,
-        crate::tools::policy::ArgPolicyDecision::RequireApproval
-    );
+    let arg_force_approval = arg_policy_requires_approval(&arg_decision, request.approval_mode);
 
     let approval = tool.requires_approval(&params);
     if arg_force_approval || approval_required(approval, request.approval_mode) {
@@ -252,17 +249,28 @@ pub async fn prepare_tool_call(
     }))
 }
 
+fn arg_policy_requires_approval(
+    decision: &crate::tools::policy::ArgPolicyDecision,
+    approval_mode: ToolApprovalMode,
+) -> bool {
+    matches!(
+        decision,
+        crate::tools::policy::ArgPolicyDecision::RequireApproval
+    ) && !matches!(approval_mode, ToolApprovalMode::Bypass)
+}
+
 /// Execute a prepared tool call and return sanitized output.
 pub async fn execute_tool_call(
     prepared: &PreparedToolCall,
     safety: &SafetyLayer,
     job_ctx: &JobContext,
 ) -> Result<ToolExecutionOutput, Error> {
+    let parameter_summary = thinclaw_agent::session::summarized_tool_parameters(&prepared.params);
     tracing::debug!(
         tool = %prepared.descriptor.name,
         lane = %prepared.lane.as_str(),
         profile = %prepared.profile.as_str(),
-        params = %prepared.params,
+        parameter_summary = %parameter_summary,
         "Tool call started"
     );
 
@@ -487,6 +495,22 @@ mod tests {
                 route_intents: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn explicitly_approved_argument_policy_is_not_requested_twice() {
+        let decision = crate::tools::policy::ArgPolicyDecision::RequireApproval;
+        assert!(arg_policy_requires_approval(
+            &decision,
+            ToolApprovalMode::Interactive {
+                auto_approve_tools: false,
+                session_auto_approved: false,
+            }
+        ));
+        assert!(!arg_policy_requires_approval(
+            &decision,
+            ToolApprovalMode::Bypass
+        ));
     }
 
     #[test]

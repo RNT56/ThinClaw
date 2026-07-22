@@ -998,6 +998,9 @@ async fn pending_approval_reconciliation_keeps_only_runtime_pending_requests() {
             tool_call_id: "call-1".to_string(),
             context_messages: Vec::new(),
             deferred_tool_calls: Vec::new(),
+            requesting_identity: None,
+            request_channel: "gateway".to_string(),
+            request_metadata: serde_json::Value::Null,
         });
         session.threads.insert(active_thread_id, active);
         session.threads.insert(

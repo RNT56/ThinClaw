@@ -5,6 +5,13 @@ use std::path::{Component, Path, PathBuf};
 use sha2::{Digest, Sha256};
 use thinclaw_tools_core::ToolError;
 
+const MAX_SKILL_PACKAGE_FILES: usize = 256;
+const MAX_SKILL_PACKAGE_ENTRIES: usize = 2_048;
+const MAX_SKILL_PACKAGE_DEPTH: usize = 32;
+const MAX_SKILL_PACKAGE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SKILL_PACKAGE_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_SKILL_PACKAGE_RELATIVE_PATH_BYTES: usize = 1024;
+
 pub fn is_skipped_package_name(name: &str) -> bool {
     name == ".git"
         || name == ".DS_Store"
@@ -28,10 +35,43 @@ pub struct SkillPackageFile {
     pub relative_path: String,
     pub source_path: PathBuf,
     pub bytes: u64,
+    content_sha256: [u8; 32],
+}
+
+fn read_package_path(path: &Path, expected_bytes: u64) -> Result<Vec<u8>, ToolError> {
+    let bytes = thinclaw_platform::read_regular_file_bounded_single_link(
+        path,
+        MAX_SKILL_PACKAGE_FILE_BYTES,
+    )
+    .map_err(|error| {
+        ToolError::ExecutionFailed(format!("Failed to read package file safely: {error}"))
+    })?;
+    let actual_bytes = u64::try_from(bytes.len()).map_err(|_| {
+        ToolError::ExecutionFailed("Package file size does not fit this platform".to_string())
+    })?;
+    if actual_bytes != expected_bytes {
+        return Err(ToolError::ExecutionFailed(format!(
+            "Package file '{}' changed while reading",
+            path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 pub fn collect_skill_package_files(root: &Path) -> Result<Vec<SkillPackageFile>, ToolError> {
-    fn walk(root: &Path, dir: &Path, files: &mut Vec<SkillPackageFile>) -> Result<(), ToolError> {
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        depth: usize,
+        entries_seen: &mut usize,
+        total_bytes: &mut u64,
+        files: &mut Vec<SkillPackageFile>,
+    ) -> Result<(), ToolError> {
+        if depth > MAX_SKILL_PACKAGE_DEPTH {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Skill package exceeds the {MAX_SKILL_PACKAGE_DEPTH}-level depth limit"
+            )));
+        }
         let entries = std::fs::read_dir(dir).map_err(|err| {
             ToolError::ExecutionFailed(format!(
                 "Failed to read skill directory '{}': {}",
@@ -42,6 +82,14 @@ pub fn collect_skill_package_files(root: &Path) -> Result<Vec<SkillPackageFile>,
 
         for entry in entries {
             let entry = entry.map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+            *entries_seen = entries_seen.checked_add(1).ok_or_else(|| {
+                ToolError::ExecutionFailed("Skill package entry count overflow".to_string())
+            })?;
+            if *entries_seen > MAX_SKILL_PACKAGE_ENTRIES {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill package exceeds the {MAX_SKILL_PACKAGE_ENTRIES}-entry limit"
+                )));
+            }
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             if is_skipped_package_name(&name) {
@@ -58,7 +106,7 @@ pub fn collect_skill_package_files(root: &Path) -> Result<Vec<SkillPackageFile>,
                 )));
             }
             if meta.is_dir() {
-                walk(root, &path, files)?;
+                walk(root, &path, depth + 1, entries_seen, total_bytes, files)?;
                 continue;
             }
             if !meta.is_file() {
@@ -78,16 +126,50 @@ pub fn collect_skill_package_files(root: &Path) -> Result<Vec<SkillPackageFile>,
                     relative.display()
                 )));
             }
+            let relative_path = relative.to_string_lossy().replace('\\', "/");
+            if relative_path.is_empty()
+                || relative_path.len() > MAX_SKILL_PACKAGE_RELATIVE_PATH_BYTES
+                || relative_path.chars().any(char::is_control)
+            {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill package contains an invalid or oversized path '{}'",
+                    relative.display()
+                )));
+            }
+            if meta.len() > MAX_SKILL_PACKAGE_FILE_BYTES {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill package file '{}' exceeds the {MAX_SKILL_PACKAGE_FILE_BYTES}-byte limit",
+                    relative.display()
+                )));
+            }
+            *total_bytes = total_bytes.checked_add(meta.len()).ok_or_else(|| {
+                ToolError::ExecutionFailed("Skill package size overflow".to_string())
+            })?;
+            if *total_bytes > MAX_SKILL_PACKAGE_TOTAL_BYTES {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill package exceeds the {MAX_SKILL_PACKAGE_TOTAL_BYTES}-byte total limit"
+                )));
+            }
+            if files.len() >= MAX_SKILL_PACKAGE_FILES {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill package exceeds the {MAX_SKILL_PACKAGE_FILES}-file limit"
+                )));
+            }
+            let snapshot = read_package_path(&path, meta.len())?;
             files.push(SkillPackageFile {
-                relative_path: relative.to_string_lossy().replace('\\', "/"),
+                relative_path,
                 source_path: path,
                 bytes: meta.len(),
+                content_sha256: Sha256::digest(&snapshot).into(),
             });
         }
         Ok(())
     }
 
-    if !root.join("SKILL.md").is_file() {
+    let skill_file = root.join("SKILL.md");
+    if !std::fs::symlink_metadata(&skill_file)
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+    {
         return Err(ToolError::ExecutionFailed(format!(
             "Skill directory '{}' is missing SKILL.md",
             root.display()
@@ -95,7 +177,16 @@ pub fn collect_skill_package_files(root: &Path) -> Result<Vec<SkillPackageFile>,
     }
 
     let mut files = Vec::new();
-    walk(root, root, &mut files)?;
+    let mut entries_seen = 0usize;
+    let mut total_bytes = 0u64;
+    walk(
+        root,
+        root,
+        0,
+        &mut entries_seen,
+        &mut total_bytes,
+        &mut files,
+    )?;
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     if !files.iter().any(|file| file.relative_path == "SKILL.md") {
         return Err(ToolError::ExecutionFailed(
@@ -105,35 +196,42 @@ pub fn collect_skill_package_files(root: &Path) -> Result<Vec<SkillPackageFile>,
     Ok(files)
 }
 
+/// Read a collected package file without following a replacement symlink and
+/// reject any mutation since collection.
+pub fn read_skill_package_file(file: &SkillPackageFile) -> Result<Vec<u8>, ToolError> {
+    let bytes = read_package_path(&file.source_path, file.bytes)?;
+    let actual_sha256: [u8; 32] = Sha256::digest(&bytes).into();
+    if actual_sha256 != file.content_sha256 {
+        return Err(ToolError::ExecutionFailed(format!(
+            "Package file '{}' content changed after collection",
+            file.source_path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
 pub fn package_hash(files: &[SkillPackageFile]) -> Result<String, ToolError> {
     let mut hasher = Sha256::new();
     for file in files {
         hasher.update(file.relative_path.as_bytes());
         hasher.update(b"\0");
-        let bytes = std::fs::read(&file.source_path).map_err(|err| {
-            ToolError::ExecutionFailed(format!(
-                "Failed to read package file '{}': {}",
-                file.source_path.display(),
-                err
-            ))
-        })?;
+        let bytes = read_skill_package_file(file)?;
         hasher.update(&bytes);
         hasher.update(b"\0");
     }
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
-pub fn package_scan_content(files: &[SkillPackageFile]) -> String {
+pub fn package_scan_content(files: &[SkillPackageFile]) -> Result<String, ToolError> {
     let mut out = String::new();
     for file in files {
-        if let Ok(bytes) = std::fs::read(&file.source_path) {
-            out.push_str("\n--- ");
-            out.push_str(&file.relative_path);
-            out.push_str(" ---\n");
-            out.push_str(&String::from_utf8_lossy(&bytes));
-        }
+        let bytes = read_skill_package_file(file)?;
+        out.push_str("\n--- ");
+        out.push_str(&file.relative_path);
+        out.push_str(" ---\n");
+        out.push_str(&String::from_utf8_lossy(&bytes));
     }
-    out
+    Ok(out)
 }
 
 pub fn package_file_json(files: &[SkillPackageFile]) -> Vec<serde_json::Value> {

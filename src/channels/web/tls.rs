@@ -20,7 +20,6 @@ mod imp {
     use std::io;
     use std::net::{IpAddr, SocketAddr};
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
 
     use axum::Router;
     use axum_server::Handle;
@@ -40,6 +39,7 @@ mod imp {
     const GATEWAY_TLS_ENV: &str = "GATEWAY_TLS";
     /// Env var overriding the TLS listener port.
     const GATEWAY_TLS_PORT_ENV: &str = "GATEWAY_TLS_PORT";
+    const MAX_TLS_MATERIAL_BYTES: u64 = 1024 * 1024;
 
     /// TLS policy read from `GATEWAY_TLS` (default `auto`).
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,15 +118,39 @@ mod imp {
             key_pem_path: &Path,
             fingerprint_path: &Path,
         ) -> Option<Self> {
-            // The fingerprint sidecar is written atomically alongside the cert
-            // at generation time (see `generate`), so its presence implies a
-            // valid, matching cert/key pair.
-            let fingerprint_hex = std::fs::read_to_string(fingerprint_path).ok()?;
-            let spki_sha256 = hex_to_32_bytes(fingerprint_hex.trim())?;
+            let cert_pem = thinclaw_platform::read_regular_file_bounded_single_link(
+                cert_pem_path,
+                MAX_TLS_MATERIAL_BYTES,
+            )
+            .ok()?;
+            let key_pem = thinclaw_platform::read_regular_file_bounded_single_link(
+                key_pem_path,
+                MAX_TLS_MATERIAL_BYTES,
+            )
+            .ok()?;
+            let fingerprint = thinclaw_platform::read_regular_file_bounded_single_link(
+                fingerprint_path,
+                MAX_TLS_MATERIAL_BYTES,
+            )
+            .ok()?;
+
+            let key_pem = std::str::from_utf8(&key_pem).ok()?;
+            let key_pair = KeyPair::from_pem(key_pem).ok()?;
+            let key_spki_sha256: [u8; 32] =
+                Sha256::digest(key_pair.subject_public_key_info()).into();
+            let (_, cert_pem) = x509_parser::pem::parse_x509_pem(&cert_pem).ok()?;
+            let cert = cert_pem.parse_x509().ok()?;
+            let cert_spki_sha256: [u8; 32] =
+                Sha256::digest(cert.tbs_certificate.subject_pki.raw).into();
+            let fingerprint_hex = std::str::from_utf8(&fingerprint).ok()?;
+            let persisted_spki_sha256 = hex_to_32_bytes(fingerprint_hex.trim())?;
+            if cert_spki_sha256 != key_spki_sha256 || persisted_spki_sha256 != cert_spki_sha256 {
+                return None;
+            }
             Some(Self {
                 cert_pem_path: cert_pem_path.to_path_buf(),
                 key_pem_path: key_pem_path.to_path_buf(),
-                spki_sha256,
+                spki_sha256: cert_spki_sha256,
             })
         }
 
@@ -163,9 +187,21 @@ mod imp {
                 .self_signed(&key_pair)
                 .map_err(|e| io::Error::other(format!("failed to self-sign cert: {e}")))?;
 
-            std::fs::write(cert_pem_path, cert.pem())?;
-            write_private_pem(key_pem_path, &key_pair.serialize_pem())?;
-            std::fs::write(fingerprint_path, hex::encode(spki_sha256))?;
+            thinclaw_platform::write_private_file_atomic(
+                key_pem_path,
+                key_pair.serialize_pem().as_bytes(),
+                true,
+            )?;
+            thinclaw_platform::write_private_file_atomic(
+                cert_pem_path,
+                cert.pem().as_bytes(),
+                true,
+            )?;
+            thinclaw_platform::write_private_file_atomic(
+                fingerprint_path,
+                hex::encode(spki_sha256).as_bytes(),
+                true,
+            )?;
 
             tracing::info!(
                 cert_path = %cert_pem_path.display(),
@@ -181,42 +217,23 @@ mod imp {
 
         /// Load this material into an axum-server rustls config.
         pub async fn rustls_config(&self) -> io::Result<RustlsConfig> {
-            RustlsConfig::from_pem_file(&self.cert_pem_path, &self.key_pem_path).await
+            let cert = thinclaw_platform::read_regular_file_bounded_single_link_async(
+                self.cert_pem_path.clone(),
+                MAX_TLS_MATERIAL_BYTES,
+            )
+            .await?;
+            let key = thinclaw_platform::read_regular_file_bounded_single_link_async(
+                self.key_pem_path.clone(),
+                MAX_TLS_MATERIAL_BYTES,
+            )
+            .await?;
+            RustlsConfig::from_pem(cert, key).await
         }
     }
 
     fn hex_to_32_bytes(hex_str: &str) -> Option<[u8; 32]> {
         let bytes = hex::decode(hex_str).ok()?;
         bytes.try_into().ok()
-    }
-
-    /// Write PEM key material with owner-only permissions.
-    ///
-    /// On Unix the file is *created* with `0600` (via `OpenOptions::mode`)
-    /// rather than written then chmod'd — a write-then-chmod sequence leaves a
-    /// window where the private key is readable under the process umask on a
-    /// multi-user host. `set_permissions` afterwards covers the pre-existing-
-    /// file case, where `mode` does not apply. On Windows the `0600` bit has
-    /// no direct equivalent; the key inherits the (user-scoped) `~/.thinclaw`
-    /// directory ACL, so a plain write is used.
-    #[cfg(unix)]
-    fn write_private_pem(path: &Path, contents: &str) -> io::Result<()> {
-        use std::io::Write as _;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(contents.as_bytes())?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    fn write_private_pem(path: &Path, contents: &str) -> io::Result<()> {
-        std::fs::write(path, contents)
     }
 
     /// Non-loopback local IPs to embed as SAN entries.
@@ -255,27 +272,23 @@ mod imp {
     }
 
     fn local_hostname_dot_local() -> Option<String> {
-        let raw =
-            command_output_trimmed("hostname", &[]).or_else(|| std::env::var("HOSTNAME").ok())?;
-        let short = raw.split('.').next().unwrap_or(&raw);
-        if short.is_empty() {
-            return None;
-        }
-        Some(format!("{short}.local"))
+        let raw = std::env::var("HOSTNAME")
+            .ok()
+            .or_else(|| std::env::var("COMPUTERNAME").ok())?;
+        let label = raw.split('.').next().and_then(safe_dns_label)?;
+        Some(format!("{label}.local"))
     }
 
-    fn command_output_trimmed(program: &str, args: &[&str]) -> Option<String> {
-        let output = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if text.is_empty() { None } else { Some(text) }
+    fn safe_dns_label(value: &str) -> Option<&str> {
+        let value = value.trim();
+        (value.len() <= 63
+            && !value.is_empty()
+            && !value.starts_with('-')
+            && !value.ends_with('-')
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+        .then_some(value)
     }
 
     fn host_from_url(url: &str) -> Option<String> {
@@ -357,10 +370,11 @@ mod imp {
     /// cheap non-empty check, not the full device registry.
     pub fn has_paired_devices(base_dir: &Path) -> bool {
         let path = base_dir.join("devices.json");
-        let Ok(content) = std::fs::read_to_string(path) else {
+        let Ok(content) = thinclaw_platform::read_regular_file_bounded(&path, 16 * 1024 * 1024)
+        else {
             return false;
         };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&content) else {
             return false;
         };
         value
@@ -547,6 +561,43 @@ mod imp {
             let cert_bytes_1 = std::fs::read(&first.cert_pem_path).unwrap();
             let cert_bytes_2 = std::fs::read(&second.cert_pem_path).unwrap();
             assert_eq!(cert_bytes_1, cert_bytes_2);
+        }
+
+        #[test]
+        fn regenerates_material_when_fingerprint_does_not_match_certificate() {
+            let dir = TempDir::new().unwrap();
+            let first = TlsMaterial::load_or_generate(dir.path()).unwrap();
+            let fingerprint_path = dir.path().join("tls/gateway-cert.fingerprint");
+            thinclaw_platform::write_private_file_atomic(
+                &fingerprint_path,
+                b"0000000000000000000000000000000000000000000000000000000000000000",
+                true,
+            )
+            .unwrap();
+
+            let regenerated = TlsMaterial::load_or_generate(dir.path()).unwrap();
+
+            assert_ne!(first.spki_sha256, regenerated.spki_sha256);
+            assert_eq!(
+                std::fs::read_to_string(fingerprint_path).unwrap(),
+                hex::encode(regenerated.spki_sha256)
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn generation_does_not_follow_planted_key_symlink() {
+            use std::os::unix::fs::symlink;
+
+            let dir = TempDir::new().unwrap();
+            let tls_dir = dir.path().join("tls");
+            std::fs::create_dir_all(&tls_dir).unwrap();
+            let victim = dir.path().join("victim.txt");
+            std::fs::write(&victim, "keep-me").unwrap();
+            symlink(&victim, tls_dir.join("gateway-key.pem")).unwrap();
+
+            assert!(TlsMaterial::load_or_generate(dir.path()).is_err());
+            assert_eq!(std::fs::read_to_string(victim).unwrap(), "keep-me");
         }
 
         #[test]

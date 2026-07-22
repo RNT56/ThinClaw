@@ -1,51 +1,64 @@
-//! Docker Chromium support.
+//! Validated configuration for the Docker-backed Chromium fallback.
 //!
-//! Configuration for running a headless Chrome/Chromium browser
-//! inside a Docker container.
-//!
-//! This is used when no local Chrome/Chromium binary is available (e.g.
-//! headless Linux servers without a desktop environment).  The container
-//! exposes a CDP (Chrome DevTools Protocol) debugging port that the
-//! [`BrowserTool`](crate::tools::builtin::browser::BrowserTool) connects
-//! to via `chromiumoxide::Browser::connect()`.
+//! Container lifecycle and network isolation are owned by the root browser
+//! adapter. This module deliberately contains no `docker run -p 9222:9222`
+//! shortcut: CDP is a privileged unauthenticated control plane and must only be
+//! published on loopback, while page traffic must traverse ThinClaw's pinned,
+//! authenticated proxy on an isolated bridge.
 
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// Public multi-arch headless Chrome image used by default.
-///
-/// The image supports linux/amd64 and linux/arm64, which keeps the Pi OS Lite
-/// browser fallback aligned with the release artifact targets.
-pub const DEFAULT_CHROMIUM_IMAGE: &str = "chromedp/headless-shell:latest";
-
-/// Deterministic Docker container name so we can re-attach across restarts.
-const CONTAINER_NAME: &str = "thinclaw-chromium";
+/// Stable multi-architecture Chromium image. A tag alone is mutable; retaining
+/// both the human-readable version and OCI index digest makes startup
+/// reproducible on amd64 and arm64.
+pub const DEFAULT_CHROMIUM_IMAGE: &str = "chromedp/headless-shell:150.0.7871.125@sha256:7f8ec4782f1b138c30900e65ae53795d5966fbf52168b8fc062843db3e6d5be5";
 
 const DOCKER_COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_IMAGE_REFERENCE_BYTES: usize = 512;
+const MAX_CHROME_FLAGS: usize = 64;
+const MAX_CHROME_FLAG_BYTES: usize = 512;
+const MIN_BROWSER_MEMORY_BYTES: i64 = 128 * 1024 * 1024;
+const MAX_BROWSER_MEMORY_BYTES: i64 = 8 * 1024 * 1024 * 1024;
+const MIN_BROWSER_SHM_BYTES: i64 = 64 * 1024 * 1024;
+
+fn default_runtime_scope() -> String {
+    crate::runtime_lease::runtime_scope_id_for_path(&crate::platform::resolve_data_dir(""))
+}
+
+fn default_relay_image() -> String {
+    thinclaw_types::sandbox::SandboxConfig::default().image
+}
 
 /// Configuration for Docker-based Chromium.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DockerChromiumConfig {
-    /// Docker image containing Chromium + Xvfb.
+    /// Digest-pinned Docker image containing headless-shell.
     pub image: String,
-    /// Whether to pull the image on startup.
+    /// Whether to pull the image on startup when it is absent.
     pub auto_pull: bool,
-    /// Xvfb display number.
+    /// Legacy Xvfb display number (the default image is truly headless).
     pub display: String,
-    /// Screen resolution for Xvfb.
+    /// Browser viewport shape retained for compatibility/readiness output.
     pub resolution: String,
-    /// Color depth.
+    /// Legacy Xvfb color depth.
     pub color_depth: u8,
-    /// Port to expose for remote debugging.
+    /// CDP port inside the container. Docker assigns a random loopback host port.
     pub debug_port: u16,
-    /// Additional Chrome flags.
+    /// Additional safe Chrome flags.
     pub chrome_flags: Vec<String>,
     /// Memory limit for the container.
     pub memory_limit: String,
-    /// SHM size (shared memory for Chrome).
+    /// Shared-memory size for Chrome.
     pub shm_size: String,
+    /// Stable owner label for cleanup and collision isolation.
+    #[serde(default = "default_runtime_scope")]
+    pub runtime_scope: String,
+    /// ThinClaw worker image containing the narrow network-relay entrypoint.
+    #[serde(default = "default_relay_image")]
+    pub relay_image: String,
 }
 
 impl Default for DockerChromiumConfig {
@@ -58,41 +71,158 @@ impl Default for DockerChromiumConfig {
             color_depth: 24,
             debug_port: 9222,
             chrome_flags: vec![
-                "--no-sandbox".to_string(),
                 "--headless=new".to_string(),
                 "--disable-gpu".to_string(),
-                "--disable-dev-shm-usage".to_string(),
-                "--disable-setuid-sandbox".to_string(),
+                "--disable-background-networking".to_string(),
+                "--disable-component-update".to_string(),
+                "--disable-default-apps".to_string(),
+                "--disable-sync".to_string(),
+                "--metrics-recording-only".to_string(),
+                "--no-first-run".to_string(),
+                "--no-default-browser-check".to_string(),
             ],
             memory_limit: "2g".to_string(),
-            shm_size: "2g".to_string(),
+            shm_size: "512m".to_string(),
+            runtime_scope: default_runtime_scope(),
+            relay_image: default_relay_image(),
         }
     }
 }
 
 impl DockerChromiumConfig {
-    /// Create from environment.
+    /// Create from environment. Every override is validated before use.
     pub fn from_env() -> Self {
         let mut config = Self::default();
         if let Ok(image) = std::env::var("CHROMIUM_IMAGE") {
             config.image = image;
         }
-        if let Ok(res) = std::env::var("CHROMIUM_RESOLUTION") {
-            config.resolution = res;
+        if let Ok(resolution) = std::env::var("CHROMIUM_RESOLUTION") {
+            config.resolution = resolution;
         }
         if let Ok(port) = std::env::var("CHROMIUM_DEBUG_PORT")
-            && let Ok(p) = port.parse()
+            && let Ok(port) = port.parse()
         {
-            config.debug_port = p;
+            config.debug_port = port;
+        }
+        if let Ok(image) = std::env::var("BROWSER_RELAY_IMAGE") {
+            config.relay_image = image;
         }
         config
     }
 
-    /// Build a legacy Xvfb command string.
-    ///
-    /// The current default image is truly headless and does not need Xvfb. This
-    /// method is kept for compatibility with callers/tests that inspect the
-    /// configured display shape.
+    pub fn with_runtime_scope(mut self, runtime_scope: impl Into<String>) -> Self {
+        self.runtime_scope = runtime_scope.into();
+        self
+    }
+
+    pub fn with_relay_image(mut self, relay_image: impl Into<String>) -> Self {
+        self.relay_image = relay_image.into();
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), DockerError> {
+        validate_image_reference(&self.image, true)?;
+        validate_image_reference(&self.relay_image, false)?;
+        if self.runtime_scope.is_empty()
+            || self.runtime_scope.len() > 128
+            || !self.runtime_scope.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+        {
+            return Err(DockerError::InvalidConfig(
+                "Docker Chromium runtime scope is invalid".to_string(),
+            ));
+        }
+        if self.debug_port == 0 {
+            return Err(DockerError::InvalidConfig(
+                "Docker Chromium CDP port cannot be zero".to_string(),
+            ));
+        }
+        validate_resolution(&self.resolution)?;
+        if !(16..=32).contains(&self.color_depth) {
+            return Err(DockerError::InvalidConfig(
+                "Docker Chromium color depth must be between 16 and 32".to_string(),
+            ));
+        }
+        if self.display.len() > 32 || self.display.chars().any(char::is_control) {
+            return Err(DockerError::InvalidConfig(
+                "Docker Chromium display value is invalid".to_string(),
+            ));
+        }
+        if self.chrome_flags.len() > MAX_CHROME_FLAGS {
+            return Err(DockerError::InvalidConfig(format!(
+                "Docker Chromium has too many flags (maximum {MAX_CHROME_FLAGS})"
+            )));
+        }
+        for flag in &self.chrome_flags {
+            validate_chrome_flag(flag)?;
+        }
+        let memory = self.memory_bytes()?;
+        let shm = self.shm_bytes()?;
+        if !(MIN_BROWSER_MEMORY_BYTES..=MAX_BROWSER_MEMORY_BYTES).contains(&memory) {
+            return Err(DockerError::InvalidConfig(
+                "Docker Chromium memory limit must be between 128 MiB and 8 GiB".to_string(),
+            ));
+        }
+        if shm < MIN_BROWSER_SHM_BYTES || shm > memory {
+            return Err(DockerError::InvalidConfig(
+                "Docker Chromium shared memory must be at least 64 MiB and no larger than its memory limit"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn memory_bytes(&self) -> Result<i64, DockerError> {
+        parse_byte_size(&self.memory_limit)
+    }
+
+    pub fn shm_bytes(&self) -> Result<i64, DockerError> {
+        parse_byte_size(&self.shm_size)
+    }
+
+    /// Stable per-runtime name. Runtime leases prevent two live processes from
+    /// sharing the same scope, while labels protect against unrelated collisions.
+    pub fn container_name(&self) -> String {
+        let scope = self.runtime_scope.chars().take(32).collect::<String>();
+        format!("thinclaw-chromium-{scope}")
+    }
+
+    /// Chrome arguments installed behind the isolated relay. The caller passes
+    /// the relay's network alias; no direct host or LAN route is available.
+    pub fn chrome_args(
+        &self,
+        proxy_host: &str,
+        proxy_port: u16,
+    ) -> Result<Vec<String>, DockerError> {
+        self.validate()?;
+        if proxy_host.is_empty()
+            || proxy_host.len() > 128
+            || !proxy_host.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '.')
+            })
+            || proxy_port == 0
+        {
+            return Err(DockerError::InvalidConfig(
+                "Docker Chromium proxy endpoint is invalid".to_string(),
+            ));
+        }
+        let mut args = vec![
+            "--remote-debugging-address=0.0.0.0".to_string(),
+            format!("--remote-debugging-port={}", self.debug_port),
+            format!("--proxy-server=http://{proxy_host}:{proxy_port}"),
+            "--proxy-bypass-list=<-loopback>".to_string(),
+            "--disable-quic".to_string(),
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string(),
+            "--webrtc-ip-handling-policy=disable_non_proxied_udp".to_string(),
+            "--user-data-dir=/tmp/thinclaw-browser-profile".to_string(),
+        ];
+        args.extend(self.chrome_flags.clone());
+        args.push("about:blank".to_string());
+        Ok(args)
+    }
+
+    /// Build a legacy Xvfb command string for diagnostics.
     pub fn xvfb_command(&self) -> String {
         let display = if self.display.trim().is_empty() {
             ":99"
@@ -105,51 +235,28 @@ impl DockerChromiumConfig {
         )
     }
 
-    /// Build Chrome launch command.
+    /// Compatibility diagnostic: the executable followed by validated flags.
     pub fn chrome_command(&self, url: Option<&str>) -> Vec<String> {
-        let mut args = vec![
+        let mut command = vec![
             "headless-shell".to_string(),
             "--remote-debugging-address=0.0.0.0".to_string(),
             format!("--remote-debugging-port={}", self.debug_port),
         ];
-        args.extend(self.chrome_flags.clone());
-
+        command.extend(self.chrome_flags.clone());
         if let Some(url) = url {
-            args.push(url.to_string());
+            command.push(url.to_string());
         }
-        args
+        command
     }
 
-    /// Docker run arguments.
-    pub fn docker_args(&self) -> Vec<String> {
-        let mut args = vec![
-            "run".to_string(),
-            "--rm".to_string(),
-            "-d".to_string(),
-            format!("--name={}", CONTAINER_NAME),
-            format!("--memory={}", self.memory_limit),
-            format!("--shm-size={}", self.shm_size),
-            format!("-p={}:{}", self.debug_port, self.debug_port),
-            self.image.clone(),
-        ];
-        args.extend(self.chrome_command(Some("about:blank")).into_iter().skip(1));
-        args
+    pub fn debugger_url_for_host_port(host_port: u16) -> String {
+        format!("ws://127.0.0.1:{host_port}")
     }
 
-    /// WebSocket debugger URL.
-    pub fn debugger_url(&self) -> String {
-        format!("ws://127.0.0.1:{}", self.debug_port)
+    pub fn http_endpoint_for_host_port(host_port: u16) -> String {
+        format!("http://127.0.0.1:{host_port}")
     }
 
-    /// HTTP endpoint for Chrome's `/json/version` (used by `chromiumoxide` to
-    /// discover the WebSocket URL automatically).
-    pub fn http_endpoint(&self) -> String {
-        format!("http://127.0.0.1:{}", self.debug_port)
-    }
-
-    // ── Container lifecycle ─────────────────────────────────────────────
-
-    /// Check if Docker is available on this system.
     pub fn is_docker_available() -> bool {
         command_success_with_timeout(
             Command::new("docker").arg("version"),
@@ -157,240 +264,175 @@ impl DockerChromiumConfig {
         )
     }
 
-    /// Check whether the configured image is already present locally.
     pub fn image_available_locally(&self) -> bool {
-        command_success_with_timeout(
-            Command::new("docker").args(["image", "inspect", &self.image]),
-            Duration::from_secs(5),
-        )
+        self.validate().is_ok() && image_reference_available_locally(&self.image)
     }
 
-    /// Check whether Docker can resolve the configured image manifest.
+    pub fn relay_image_available_locally(&self) -> bool {
+        self.validate().is_ok() && image_reference_available_locally(&self.relay_image)
+    }
+
     pub fn image_manifest_available(&self) -> bool {
-        command_success_with_timeout(
-            Command::new("docker").args(["manifest", "inspect", &self.image]),
-            DOCKER_COMMAND_TIMEOUT,
-        )
+        self.validate().is_ok() && image_manifest_available(&self.image)
     }
 
-    /// Human-readable readiness detail for diagnostics.
     pub fn image_readiness_detail(&self) -> Result<String, DockerError> {
-        if self.image_available_locally() {
-            return Ok(format!(
-                "Docker Chromium image `{}` is present locally.",
+        self.validate()?;
+        let browser_ready =
+            self.image_available_locally() || (self.auto_pull && self.image_manifest_available());
+        if !browser_ready {
+            return Err(DockerError::ImageUnavailable(format!(
+                "Docker Chromium image `{}` is unavailable. Set CHROMIUM_IMAGE to a reachable digest-pinned CDP image, or install a local browser.",
                 self.image
-            ));
-        }
-
-        if self.auto_pull && self.image_manifest_available() {
-            return Ok(format!(
-                "Docker Chromium image `{}` is pullable for this host.",
-                self.image
-            ));
-        }
-
-        Err(DockerError::ImageUnavailable(format!(
-            "Docker Chromium image `{}` is not present locally and its manifest could not be resolved. Set CHROMIUM_IMAGE to a reachable CDP-capable Chromium image, or install a local browser.",
-            self.image
-        )))
-    }
-
-    /// Check if our container is already running.
-    pub fn is_container_running(&self) -> bool {
-        command_output_with_timeout(
-            Command::new("docker").args(["inspect", "-f", "{{.State.Running}}", CONTAINER_NAME]),
-            Duration::from_secs(5),
-        )
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
-        .unwrap_or(false)
-    }
-
-    /// Start the Chromium Docker container.
-    ///
-    /// If a container with the same name is already running, it is left as-is.
-    /// Returns the container ID on success.
-    pub fn start_container(&self) -> Result<String, DockerError> {
-        // If container is already running, return its ID.
-        if self.is_container_running() {
-            let id = command_output_with_timeout(
-                Command::new("docker").args(["inspect", "-f", "{{.Id}}", CONTAINER_NAME]),
-                Duration::from_secs(5),
-            )
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-            tracing::debug!(id = %id, "Chromium container already running");
-            return Ok(id);
-        }
-
-        // Pull image if configured.
-        if self.auto_pull && !self.image_available_locally() {
-            tracing::info!(image = %self.image, "Pulling Chromium Docker image");
-            let pull = command_output_with_timeout(
-                Command::new("docker").args(["pull", &self.image]),
-                DOCKER_COMMAND_TIMEOUT,
-            )
-            .map_err(DockerError::CommandFailed)?;
-            if !pull.status.success() {
-                return Err(DockerError::ImageUnavailable(format!(
-                    "failed to pull `{}`: {}",
-                    self.image,
-                    command_error_text(&pull)
-                )));
-            }
-        }
-
-        // Remove any stopped container with the same name.
-        let _ = command_output_with_timeout(
-            Command::new("docker").args(["rm", "-f", CONTAINER_NAME]),
-            Duration::from_secs(10),
-        );
-
-        // Build full docker run command.
-        let output = command_output_with_timeout(
-            Command::new("docker").args(self.docker_args()),
-            DOCKER_COMMAND_TIMEOUT,
-        )
-        .map_err(|e| DockerError::CommandFailed(format!("Failed to run docker: {e}")))?;
-
-        if !output.status.success() {
-            return Err(DockerError::ContainerStart(format!(
-                "docker run failed: {}",
-                command_error_text(&output)
             )));
         }
-
-        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        tracing::info!(id = %container_id, "Started Chromium Docker container");
-        Ok(container_id)
-    }
-
-    /// Wait for Chrome inside the container to accept CDP connections.
-    ///
-    /// Polls the debug port via TCP until a connection succeeds or the
-    /// timeout expires.
-    pub async fn wait_for_ready(&self, timeout: Duration) -> Result<(), DockerError> {
-        let start = Instant::now();
-        let addr = format!("127.0.0.1:{}", self.debug_port);
-
-        loop {
-            if start.elapsed() > timeout {
-                return Err(DockerError::Timeout(format!(
-                    "Chrome in Docker not ready after {timeout:?}"
-                )));
-            }
-
-            // Try a TCP connection to the debug port — async + bounded so we
-            // never block a tokio worker thread (a blocking connect_timeout here
-            // would steal a worker for up to a second per poll).
-            match tokio::time::timeout(
-                Duration::from_secs(1),
-                tokio::net::TcpStream::connect(&addr),
-            )
-            .await
-            {
-                Ok(Ok(_)) => {
-                    tracing::debug!(
-                        elapsed = ?start.elapsed(),
-                        "Chrome in Docker is ready (port {} open)",
-                        self.debug_port
-                    );
-                    return Ok(());
-                }
-                // Connection refused (Ok(Err)) or timed out (Err): not ready yet.
-                Ok(Err(_)) | Err(_) => {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            }
-        }
-    }
-
-    /// Stop and remove the Chromium Docker container.
-    pub fn stop_container(&self) -> Result<(), DockerError> {
-        let output = command_output_with_timeout(
-            Command::new("docker").args(["rm", "-f", CONTAINER_NAME]),
-            Duration::from_secs(10),
-        )
-        .map_err(|e| DockerError::CommandFailed(format!("Failed to run docker rm: {e}")))?;
-
-        if output.status.success() {
-            tracing::info!("Stopped Chromium Docker container");
-        } else {
-            return Err(DockerError::CommandFailed(format!(
-                "docker rm failed: {}",
-                command_error_text(&output)
+        let relay_ready = self.relay_image_available_locally()
+            || (self.auto_pull
+                && self.relay_image.contains("@sha256:")
+                && image_manifest_available(&self.relay_image));
+        if !relay_ready {
+            return Err(DockerError::ImageUnavailable(format!(
+                "Browser relay image `{}` is not available locally. Build Dockerfile.worker with that tag, or set BROWSER_RELAY_IMAGE to a local or digest-pinned ThinClaw image.",
+                self.relay_image
             )));
         }
-        Ok(())
+        Ok(format!(
+            "Docker Chromium image `{}` and relay image `{}` are ready.",
+            self.image, self.relay_image
+        ))
     }
 }
 
-/// Errors related to Docker Chromium container management.
+fn image_reference_available_locally(reference: &str) -> bool {
+    command_success_with_timeout(
+        Command::new("docker").args(["image", "inspect", reference]),
+        Duration::from_secs(5),
+    )
+}
+
+fn image_manifest_available(reference: &str) -> bool {
+    command_success_with_timeout(
+        Command::new("docker").args(["manifest", "inspect", reference]),
+        DOCKER_COMMAND_TIMEOUT,
+    )
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DockerError {
-    #[error("Docker command failed: {0}")]
-    CommandFailed(String),
-
-    #[error("Container start failed: {0}")]
-    ContainerStart(String),
-
+    #[error("Invalid Docker Chromium configuration: {0}")]
+    InvalidConfig(String),
     #[error("Docker Chromium image unavailable: {0}")]
     ImageUnavailable(String),
-
-    #[error("Timeout waiting for Chrome: {0}")]
+    #[error("Docker command failed: {0}")]
+    CommandFailed(String),
+    #[error("Docker Chromium operation timed out: {0}")]
     Timeout(String),
 }
 
-fn command_success_with_timeout(command: &mut Command, timeout: Duration) -> bool {
-    command_output_with_timeout(command, timeout)
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn command_output_with_timeout(
-    command: &mut Command,
-    timeout: Duration,
-) -> Result<std::process::Output, String> {
-    let mut child = command
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to spawn command: {error}"))?;
-
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|error| format!("failed to collect command output: {error}"));
-            }
-            Ok(None) if started.elapsed() < timeout => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("command timed out after {timeout:?}"));
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("failed to poll command: {error}"));
-            }
+fn validate_image_reference(reference: &str, require_digest: bool) -> Result<(), DockerError> {
+    if reference.is_empty()
+        || reference.len() > MAX_IMAGE_REFERENCE_BYTES
+        || !reference.is_ascii()
+        || reference
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(DockerError::InvalidConfig(
+            "Docker image reference is empty, oversized, or malformed".to_string(),
+        ));
+    }
+    if require_digest {
+        let Some((name, digest)) = reference.rsplit_once("@sha256:") else {
+            return Err(DockerError::InvalidConfig(
+                "CHROMIUM_IMAGE must be pinned with an @sha256 digest".to_string(),
+            ));
+        };
+        if name.is_empty()
+            || digest.len() != 64
+            || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(DockerError::InvalidConfig(
+                "CHROMIUM_IMAGE has an invalid sha256 digest".to_string(),
+            ));
         }
     }
+    Ok(())
 }
 
-fn command_error_text(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr;
+fn validate_resolution(resolution: &str) -> Result<(), DockerError> {
+    let Some((width, height)) = resolution.split_once('x') else {
+        return Err(DockerError::InvalidConfig(
+            "Docker Chromium resolution must use WIDTHxHEIGHT".to_string(),
+        ));
+    };
+    let width = width.parse::<u32>().unwrap_or(0);
+    let height = height.parse::<u32>().unwrap_or(0);
+    if !(320..=7_680).contains(&width) || !(200..=4_320).contains(&height) {
+        return Err(DockerError::InvalidConfig(
+            "Docker Chromium resolution is outside the supported range".to_string(),
+        ));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stdout.is_empty() {
-        return stdout;
+    Ok(())
+}
+
+fn validate_chrome_flag(flag: &str) -> Result<(), DockerError> {
+    const RESERVED: &[&str] = &[
+        "--proxy-server",
+        "--proxy-bypass-list",
+        "--no-proxy-server",
+        "--remote-debugging",
+        "--host-resolver-rules",
+        "--user-data-dir",
+        "--disable-web-security",
+        "--allow-running-insecure-content",
+    ];
+    if !flag.starts_with("--")
+        || flag.len() > MAX_CHROME_FLAG_BYTES
+        || !flag.is_ascii()
+        || flag.chars().any(char::is_control)
+        || RESERVED.iter().any(|reserved| flag.starts_with(reserved))
+    {
+        return Err(DockerError::InvalidConfig(format!(
+            "Docker Chromium flag is invalid or reserved: {}",
+            flag.chars().take(64).collect::<String>()
+        )));
     }
-    format!("exit status {}", output.status)
+    Ok(())
+}
+
+fn parse_byte_size(value: &str) -> Result<i64, DockerError> {
+    let value = value.trim().to_ascii_lowercase();
+    let split = value
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(value.len());
+    let (number, suffix) = value.split_at(split);
+    if number.is_empty() {
+        return Err(DockerError::InvalidConfig(
+            "Docker Chromium byte size is invalid".to_string(),
+        ));
+    }
+    let number = number.parse::<i64>().map_err(|_| {
+        DockerError::InvalidConfig("Docker Chromium byte size is invalid".to_string())
+    })?;
+    let multiplier = match suffix {
+        "" | "b" => 1_i64,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+        _ => {
+            return Err(DockerError::InvalidConfig(
+                "Docker Chromium byte size suffix is invalid".to_string(),
+            ));
+        }
+    };
+    number.checked_mul(multiplier).ok_or_else(|| {
+        DockerError::InvalidConfig("Docker Chromium byte size overflowed".to_string())
+    })
+}
+
+fn command_success_with_timeout(command: &mut Command, timeout: Duration) -> bool {
+    thinclaw_platform::bounded_std_command_output(command, timeout, 1024, 1024)
+        .is_ok_and(|output| output.status.success())
 }
 
 #[cfg(test)]
@@ -398,68 +440,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
+    fn default_config_is_pinned_and_valid() {
         let config = DockerChromiumConfig::default();
         assert_eq!(config.image, DEFAULT_CHROMIUM_IMAGE);
+        assert!(config.image.contains("@sha256:"));
         assert_eq!(config.debug_port, 9222);
+        config.validate().unwrap();
     }
 
     #[test]
-    fn test_xvfb_command() {
+    fn chrome_arguments_force_proxy_and_reserve_security_flags() {
         let config = DockerChromiumConfig::default();
-        let cmd = config.xvfb_command();
-        assert!(cmd.contains(":99"));
-        assert!(cmd.contains("1920x1080"));
+        let args = config.chrome_args("relay-browser", 18_080).unwrap();
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--proxy-server=http://relay-browser:18080")
+        );
+        assert!(args.iter().any(|arg| arg == "--disable-quic"));
+        assert!(!args.iter().any(|arg| arg == "--no-sandbox"));
+
+        let mut invalid = config;
+        invalid
+            .chrome_flags
+            .push("--proxy-server=http://evil:1".to_string());
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
-    fn test_chrome_command() {
+    fn legacy_diagnostics_remain_well_formed() {
         let config = DockerChromiumConfig::default();
-        let cmd = config.chrome_command(Some("https://example.com"));
-        assert!(cmd.iter().any(|a| a.contains("9222")));
-        assert!(cmd.contains(&"https://example.com".to_string()));
+        let xvfb = config.xvfb_command();
+        assert!(xvfb.contains(":99"));
+        assert!(xvfb.contains("1920x1080"));
+        let command = config.chrome_command(Some("https://example.com"));
+        assert!(command.iter().any(|arg| arg.contains("9222")));
+        assert!(command.contains(&"https://example.com".to_string()));
     }
 
     #[test]
-    fn test_chrome_command_no_url() {
-        let config = DockerChromiumConfig::default();
-        let cmd = config.chrome_command(None);
-        assert!(!cmd.iter().any(|a| a.starts_with("http")));
+    fn endpoint_helpers_only_publish_loopback() {
+        assert_eq!(
+            DockerChromiumConfig::http_endpoint_for_host_port(39_123),
+            "http://127.0.0.1:39123"
+        );
+        assert_eq!(
+            DockerChromiumConfig::debugger_url_for_host_port(39_123),
+            "ws://127.0.0.1:39123"
+        );
     }
 
     #[test]
-    fn test_docker_args() {
-        let config = DockerChromiumConfig::default();
-        let args = config.docker_args();
-        assert!(args.contains(&"run".to_string()));
-        assert!(args.iter().any(|a| a.contains("shm-size")));
-        assert!(args.contains(&"--remote-debugging-address=0.0.0.0".to_string()));
+    fn names_are_scoped_and_resource_sizes_are_bounded() {
+        let config = DockerChromiumConfig::default().with_runtime_scope("abc123");
+        assert_eq!(config.container_name(), "thinclaw-chromium-abc123");
+        assert_eq!(parse_byte_size("512m").unwrap(), 512 * 1024 * 1024);
+        assert!(parse_byte_size("2tb").is_err());
     }
 
     #[test]
-    fn test_debugger_url() {
-        let config = DockerChromiumConfig::default();
-        assert_eq!(config.debugger_url(), "ws://127.0.0.1:9222");
-    }
-
-    #[test]
-    fn test_http_endpoint() {
-        let config = DockerChromiumConfig::default();
-        assert_eq!(config.http_endpoint(), "http://127.0.0.1:9222");
-    }
-
-    #[test]
-    fn test_container_name_is_deterministic() {
-        assert_eq!(CONTAINER_NAME, "thinclaw-chromium");
-    }
-
-    #[test]
-    fn test_custom_debug_port_in_endpoints() {
-        let config = DockerChromiumConfig {
-            debug_port: 9333,
-            ..Default::default()
-        };
-        assert_eq!(config.http_endpoint(), "http://127.0.0.1:9333");
-        assert_eq!(config.debugger_url(), "ws://127.0.0.1:9333");
+    fn mutable_or_malformed_images_fail_closed() {
+        let mut config = DockerChromiumConfig::default();
+        config.image = "chromedp/headless-shell:latest".to_string();
+        assert!(config.validate().is_err());
+        config.image = "repo@sha256:not-a-digest".to_string();
+        assert!(config.validate().is_err());
     }
 }

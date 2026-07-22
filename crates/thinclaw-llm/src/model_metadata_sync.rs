@@ -9,13 +9,48 @@ use thinclaw_config::model_compat::{
     MODEL_CATALOG_VERSION, ModelCatalogSnapshot, ModelCompat, normalize_lookup_id,
 };
 
+const MAX_MODEL_LIST_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PROVIDER_MODELS: usize = 4096;
+const MAX_PROVIDER_MODEL_ID_BYTES: usize = 1024;
+const MAX_PROVIDER_MODEL_ALIASES: usize = 64;
+const MAX_PROVIDER_METADATA_ITEMS: usize = 256;
+const MAX_PROVIDER_METADATA_VALUE_BYTES: usize = 4096;
+
+fn credential_is_valid(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 * 1024 && !value.chars().any(char::is_control)
+}
+
+fn provider_text_is_valid(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
+}
+
+fn provider_text_list_is_valid(values: &[String], max_items: usize, max_bytes: usize) -> bool {
+    values.len() <= max_items
+        && values
+            .iter()
+            .all(|value| provider_text_is_valid(value, max_bytes))
+}
+
 /// Sync options for refreshing the local model compat DB.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ModelMetadataSyncOptions {
     pub providers: Vec<String>,
     pub timeout: Duration,
     /// Provider slug -> API key/token.
     pub credentials: HashMap<String, String>,
+}
+
+impl std::fmt::Debug for ModelMetadataSyncOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut credential_providers = self.credentials.keys().collect::<Vec<_>>();
+        credential_providers.sort_unstable();
+        formatter
+            .debug_struct("ModelMetadataSyncOptions")
+            .field("providers", &self.providers)
+            .field("timeout", &self.timeout)
+            .field("credential_providers", &credential_providers)
+            .finish()
+    }
 }
 
 /// Per-provider sync report.
@@ -95,26 +130,6 @@ pub async fn refresh_model_catalog(
         options.providers.clone()
     };
 
-    let client = match reqwest::Client::builder().timeout(options.timeout).build() {
-        Ok(client) => client,
-        Err(error) => {
-            return ModelMetadataSyncResult {
-                snapshot: ModelCatalogSnapshot {
-                    version: MODEL_CATALOG_VERSION,
-                    generated_at: Some(chrono::Utc::now().to_rfc3339()),
-                    models: existing.to_vec(),
-                },
-                reports: vec![ProviderSyncReport {
-                    provider: "client".to_string(),
-                    source_url: None,
-                    upserted: 0,
-                    unresolved: Vec::new(),
-                    error: Some(format!("failed to build HTTP client: {error}")),
-                }],
-            };
-        }
-    };
-
     let mut catalog: BTreeMap<(String, String), ModelCompat> = existing
         .iter()
         .cloned()
@@ -124,10 +139,10 @@ pub async fn refresh_model_catalog(
 
     for provider in providers {
         let outcome = fetch_provider(
-            &client,
             &provider,
             existing,
             options.credentials.get(&provider).map(String::as_str),
+            options.timeout,
         )
         .await;
 
@@ -169,40 +184,40 @@ pub async fn refresh_model_catalog(
 }
 
 async fn fetch_provider(
-    client: &reqwest::Client,
     provider: &str,
     existing: &[ModelCompat],
     credential: Option<&str>,
+    timeout: Duration,
 ) -> ProviderFetchOutcome {
     match provider {
-        "openrouter" => fetch_openrouter_models(client).await,
-        "moonshot" => fetch_moonshot_models(client, existing, credential).await,
-        "xai" => fetch_xai_models(client, existing, credential).await,
+        "openrouter" => fetch_openrouter_models(timeout).await,
+        "moonshot" => fetch_moonshot_models(existing, credential, timeout).await,
+        "xai" => fetch_xai_models(existing, credential, timeout).await,
         "openai" => {
             fetch_presence_sync_openai_compatible(
-                client,
                 provider,
                 "https://api.openai.com/v1",
                 "https://platform.openai.com/docs/api-reference/models/list",
                 existing,
                 credential,
                 false,
+                timeout,
             )
             .await
         }
         "deepseek" => {
             fetch_presence_sync_openai_compatible(
-                client,
                 provider,
                 "https://api.deepseek.com/v1",
                 "https://api-docs.deepseek.com/api/list-models",
                 existing,
                 credential,
                 false,
+                timeout,
             )
             .await
         }
-        "anthropic" => fetch_presence_sync_anthropic(client, existing, credential).await,
+        "anthropic" => fetch_presence_sync_anthropic(existing, credential, timeout).await,
         other => ProviderFetchOutcome {
             error: Some(format!(
                 "no provider-specific model ingester is implemented for '{other}'"
@@ -213,13 +228,13 @@ async fn fetch_provider(
 }
 
 async fn fetch_presence_sync_openai_compatible(
-    _client: &reqwest::Client,
     provider: &str,
     base_url: &str,
     source_url: &str,
     existing: &[ModelCompat],
     credential: Option<&str>,
     include_context_from_response: bool,
+    timeout: Duration,
 ) -> ProviderFetchOutcome {
     let Some(token) = credential else {
         return ProviderFetchOutcome {
@@ -228,10 +243,17 @@ async fn fetch_presence_sync_openai_compatible(
             ..ProviderFetchOutcome::default()
         };
     };
+    if !credential_is_valid(token) {
+        return ProviderFetchOutcome {
+            source_url: Some(source_url.to_string()),
+            error: Some("credentials are empty, oversized, or malformed".to_string()),
+            ..ProviderFetchOutcome::default()
+        };
+    }
 
-    let discovery = crate::discovery::ModelDiscovery::with_timeout(Duration::from_secs(15));
+    let discovery = crate::discovery::ModelDiscovery::with_timeout(timeout);
     let result = discovery
-        .discover_openai_compatible(base_url, Some(&format!("Bearer {token}")))
+        .discover_public_openai_compatible(base_url, Some(&format!("Bearer {token}")))
         .await;
     if let Some(error) = result.error {
         return ProviderFetchOutcome {
@@ -273,9 +295,9 @@ async fn fetch_presence_sync_openai_compatible(
 }
 
 async fn fetch_presence_sync_anthropic(
-    _client: &reqwest::Client,
     existing: &[ModelCompat],
     credential: Option<&str>,
+    timeout: Duration,
 ) -> ProviderFetchOutcome {
     let Some(api_key) = credential else {
         return ProviderFetchOutcome {
@@ -284,8 +306,15 @@ async fn fetch_presence_sync_anthropic(
             ..ProviderFetchOutcome::default()
         };
     };
+    if !credential_is_valid(api_key) {
+        return ProviderFetchOutcome {
+            source_url: Some("https://docs.anthropic.com/en/api/models-list".to_string()),
+            error: Some("credentials are empty, oversized, or malformed".to_string()),
+            ..ProviderFetchOutcome::default()
+        };
+    }
 
-    let discovery = crate::discovery::ModelDiscovery::with_timeout(Duration::from_secs(15));
+    let discovery = crate::discovery::ModelDiscovery::with_timeout(timeout);
     let result = discovery.discover_anthropic(api_key).await;
     if let Some(error) = result.error {
         return ProviderFetchOutcome {
@@ -323,9 +352,9 @@ async fn fetch_presence_sync_anthropic(
 }
 
 async fn fetch_moonshot_models(
-    client: &reqwest::Client,
     existing: &[ModelCompat],
     credential: Option<&str>,
+    timeout: Duration,
 ) -> ProviderFetchOutcome {
     let Some(token) = credential else {
         return ProviderFetchOutcome {
@@ -334,9 +363,33 @@ async fn fetch_moonshot_models(
             ..ProviderFetchOutcome::default()
         };
     };
+    if !credential_is_valid(token) {
+        return ProviderFetchOutcome {
+            source_url: Some("https://platform.kimi.ai/docs/api/list-models".to_string()),
+            error: Some("credentials are empty, oversized, or malformed".to_string()),
+            ..ProviderFetchOutcome::default()
+        };
+    }
+
+    let (client, endpoint) = match crate::discovery::client_for_endpoint(
+        "https://api.moonshot.ai/v1/models",
+        timeout,
+        true,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return ProviderFetchOutcome {
+                source_url: Some("https://platform.kimi.ai/docs/api/list-models".to_string()),
+                error: Some(error),
+                ..ProviderFetchOutcome::default()
+            };
+        }
+    };
 
     let response = match client
-        .get("https://api.moonshot.ai/v1/models")
+        .get(endpoint)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/json")
         .send()
@@ -346,7 +399,10 @@ async fn fetch_moonshot_models(
         Err(error) => {
             return ProviderFetchOutcome {
                 source_url: Some("https://platform.kimi.ai/docs/api/list-models".to_string()),
-                error: Some(format!("moonshot model list request failed: {error}")),
+                error: Some(format!(
+                    "moonshot model list request failed: {}",
+                    error.without_url()
+                )),
                 ..ProviderFetchOutcome::default()
             };
         }
@@ -363,16 +419,32 @@ async fn fetch_moonshot_models(
         };
     }
 
-    let body: MoonshotModelsResponse = match response.json().await {
-        Ok(body) => body,
-        Err(error) => {
-            return ProviderFetchOutcome {
-                source_url: Some("https://platform.kimi.ai/docs/api/list-models".to_string()),
-                error: Some(format!("failed to parse moonshot model list: {error}")),
-                ..ProviderFetchOutcome::default()
-            };
-        }
-    };
+    let body: MoonshotModelsResponse =
+        match thinclaw_types::http_response::bounded_json(response, MAX_MODEL_LIST_RESPONSE_BYTES)
+            .await
+        {
+            Ok(body) => body,
+            Err(error) => {
+                return ProviderFetchOutcome {
+                    source_url: Some("https://platform.kimi.ai/docs/api/list-models".to_string()),
+                    error: Some(format!("failed to parse moonshot model list: {error}")),
+                    ..ProviderFetchOutcome::default()
+                };
+            }
+        };
+
+    if body.data.len() > MAX_PROVIDER_MODELS
+        || body
+            .data
+            .iter()
+            .any(|entry| !provider_text_is_valid(&entry.id, MAX_PROVIDER_MODEL_ID_BYTES))
+    {
+        return ProviderFetchOutcome {
+            source_url: Some("https://platform.kimi.ai/docs/api/list-models".to_string()),
+            error: Some("moonshot returned malformed or excessive model metadata".to_string()),
+            ..ProviderFetchOutcome::default()
+        };
+    }
 
     let index = ExistingProviderIndex::new(existing, "moonshot");
     let fetched_at = chrono::Utc::now().to_rfc3339();
@@ -401,9 +473,9 @@ async fn fetch_moonshot_models(
 }
 
 async fn fetch_xai_models(
-    client: &reqwest::Client,
     existing: &[ModelCompat],
     credential: Option<&str>,
+    timeout: Duration,
 ) -> ProviderFetchOutcome {
     let Some(token) = credential else {
         return ProviderFetchOutcome {
@@ -414,9 +486,37 @@ async fn fetch_xai_models(
             ..ProviderFetchOutcome::default()
         };
     };
+    if !credential_is_valid(token) {
+        return ProviderFetchOutcome {
+            source_url: Some(
+                "https://docs.x.ai/developers/rest-api-reference/inference/models".to_string(),
+            ),
+            error: Some("credentials are empty, oversized, or malformed".to_string()),
+            ..ProviderFetchOutcome::default()
+        };
+    }
+
+    let (client, endpoint) = match crate::discovery::client_for_endpoint(
+        "https://api.x.ai/v1/language-models",
+        timeout,
+        true,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return ProviderFetchOutcome {
+                source_url: Some(
+                    "https://docs.x.ai/developers/rest-api-reference/inference/models".to_string(),
+                ),
+                error: Some(error),
+                ..ProviderFetchOutcome::default()
+            };
+        }
+    };
 
     let response = match client
-        .get("https://api.x.ai/v1/language-models")
+        .get(endpoint)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/json")
         .send()
@@ -428,7 +528,10 @@ async fn fetch_xai_models(
                 source_url: Some(
                     "https://docs.x.ai/developers/rest-api-reference/inference/models".to_string(),
                 ),
-                error: Some(format!("xAI language models request failed: {error}")),
+                error: Some(format!(
+                    "xAI language models request failed: {}",
+                    error.without_url()
+                )),
                 ..ProviderFetchOutcome::default()
             };
         }
@@ -447,18 +550,52 @@ async fn fetch_xai_models(
         };
     }
 
-    let body: XaiLanguageModelsResponse = match response.json().await {
-        Ok(body) => body,
-        Err(error) => {
-            return ProviderFetchOutcome {
-                source_url: Some(
-                    "https://docs.x.ai/developers/rest-api-reference/inference/models".to_string(),
-                ),
-                error: Some(format!("failed to parse xAI language models: {error}")),
-                ..ProviderFetchOutcome::default()
-            };
-        }
-    };
+    let body: XaiLanguageModelsResponse =
+        match thinclaw_types::http_response::bounded_json(response, MAX_MODEL_LIST_RESPONSE_BYTES)
+            .await
+        {
+            Ok(body) => body,
+            Err(error) => {
+                return ProviderFetchOutcome {
+                    source_url: Some(
+                        "https://docs.x.ai/developers/rest-api-reference/inference/models"
+                            .to_string(),
+                    ),
+                    error: Some(format!("failed to parse xAI language models: {error}")),
+                    ..ProviderFetchOutcome::default()
+                };
+            }
+        };
+
+    if body.models.len() > MAX_PROVIDER_MODELS
+        || body.models.iter().any(|model| {
+            !provider_text_is_valid(&model.id, MAX_PROVIDER_MODEL_ID_BYTES)
+                || !provider_text_list_is_valid(
+                    &model.aliases,
+                    MAX_PROVIDER_MODEL_ALIASES,
+                    MAX_PROVIDER_MODEL_ID_BYTES,
+                )
+                || !provider_text_list_is_valid(
+                    &model.input_modalities,
+                    MAX_PROVIDER_METADATA_ITEMS,
+                    128,
+                )
+                || model.version.as_deref().is_some_and(|value| {
+                    !provider_text_is_valid(value, MAX_PROVIDER_METADATA_VALUE_BYTES)
+                })
+                || model.fingerprint.as_deref().is_some_and(|value| {
+                    !provider_text_is_valid(value, MAX_PROVIDER_METADATA_VALUE_BYTES)
+                })
+        })
+    {
+        return ProviderFetchOutcome {
+            source_url: Some(
+                "https://docs.x.ai/developers/rest-api-reference/inference/models".to_string(),
+            ),
+            error: Some("xAI returned malformed or excessive model metadata".to_string()),
+            ..ProviderFetchOutcome::default()
+        };
+    }
 
     let index = ExistingProviderIndex::new(existing, "xai");
     let fetched_at = chrono::Utc::now().to_rfc3339();
@@ -509,9 +646,25 @@ async fn fetch_xai_models(
     }
 }
 
-async fn fetch_openrouter_models(client: &reqwest::Client) -> ProviderFetchOutcome {
+async fn fetch_openrouter_models(timeout: Duration) -> ProviderFetchOutcome {
+    let (client, endpoint) = match crate::discovery::client_for_endpoint(
+        "https://openrouter.ai/api/v1/models",
+        timeout,
+        true,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return ProviderFetchOutcome {
+                source_url: Some("https://openrouter.ai/api/v1/models".to_string()),
+                error: Some(error),
+                ..ProviderFetchOutcome::default()
+            };
+        }
+    };
     let response = match client
-        .get("https://openrouter.ai/api/v1/models")
+        .get(endpoint)
         .header("Accept", "application/json")
         .send()
         .await
@@ -520,7 +673,10 @@ async fn fetch_openrouter_models(client: &reqwest::Client) -> ProviderFetchOutco
         Err(error) => {
             return ProviderFetchOutcome {
                 source_url: Some("https://openrouter.ai/api/v1/models".to_string()),
-                error: Some(format!("openrouter model list request failed: {error}")),
+                error: Some(format!(
+                    "openrouter model list request failed: {}",
+                    error.without_url()
+                )),
                 ..ProviderFetchOutcome::default()
             };
         }
@@ -537,16 +693,32 @@ async fn fetch_openrouter_models(client: &reqwest::Client) -> ProviderFetchOutco
         };
     }
 
-    let body: OpenRouterModelsResponse = match response.json().await {
-        Ok(body) => body,
-        Err(error) => {
-            return ProviderFetchOutcome {
-                source_url: Some("https://openrouter.ai/api/v1/models".to_string()),
-                error: Some(format!("failed to parse openrouter model list: {error}")),
-                ..ProviderFetchOutcome::default()
-            };
-        }
-    };
+    let body: OpenRouterModelsResponse =
+        match thinclaw_types::http_response::bounded_json(response, MAX_MODEL_LIST_RESPONSE_BYTES)
+            .await
+        {
+            Ok(body) => body,
+            Err(error) => {
+                return ProviderFetchOutcome {
+                    source_url: Some("https://openrouter.ai/api/v1/models".to_string()),
+                    error: Some(format!("failed to parse openrouter model list: {error}")),
+                    ..ProviderFetchOutcome::default()
+                };
+            }
+        };
+
+    if body.data.len() > MAX_PROVIDER_MODELS
+        || body
+            .data
+            .iter()
+            .any(|model| !openrouter_model_is_valid(model))
+    {
+        return ProviderFetchOutcome {
+            source_url: Some("https://openrouter.ai/api/v1/models".to_string()),
+            error: Some("openrouter returned malformed or excessive model metadata".to_string()),
+            ..ProviderFetchOutcome::default()
+        };
+    }
 
     let fetched_at = chrono::Utc::now().to_rfc3339();
     let mut records = Vec::new();
@@ -635,6 +807,50 @@ fn openrouter_record_from_model(model: &OpenRouterModel, fetched_at: &str) -> Op
     })
 }
 
+fn openrouter_model_is_valid(model: &OpenRouterModel) -> bool {
+    provider_text_is_valid(&model.id, MAX_PROVIDER_MODEL_ID_BYTES)
+        && model
+            .canonical_slug
+            .as_deref()
+            .is_none_or(|value| provider_text_is_valid(value, MAX_PROVIDER_MODEL_ID_BYTES))
+        && model
+            .name
+            .as_deref()
+            .is_none_or(|value| provider_text_is_valid(value, MAX_PROVIDER_METADATA_VALUE_BYTES))
+        && model.architecture.as_ref().is_none_or(|architecture| {
+            provider_text_list_is_valid(
+                &architecture.input_modalities,
+                MAX_PROVIDER_METADATA_ITEMS,
+                128,
+            ) && provider_text_list_is_valid(
+                &architecture.output_modalities,
+                MAX_PROVIDER_METADATA_ITEMS,
+                128,
+            )
+        })
+        && model
+            .supported_parameters
+            .as_deref()
+            .is_none_or(|parameters| {
+                provider_text_list_is_valid(parameters, MAX_PROVIDER_METADATA_ITEMS, 256)
+            })
+        && model.pricing.as_ref().is_none_or(|pricing| {
+            pricing
+                .prompt
+                .as_deref()
+                .is_none_or(|value| provider_text_is_valid(value, 128))
+                && pricing
+                    .completion
+                    .as_deref()
+                    .is_none_or(|value| provider_text_is_valid(value, 128))
+        })
+        && model.links.as_ref().is_none_or(|links| {
+            links.details.as_deref().is_none_or(|value| {
+                provider_text_is_valid(value, MAX_PROVIDER_METADATA_VALUE_BYTES)
+            })
+        })
+}
+
 fn normalize_openrouter_alias(model_id: &str) -> Option<String> {
     let stripped = model_id.strip_prefix('~').unwrap_or(model_id);
     stripped
@@ -654,14 +870,15 @@ fn supports_visual_input(modalities: &[String]) -> bool {
 
 fn parse_openrouter_price_per_m(raw: Option<&str>) -> Option<f64> {
     let value = raw?.parse::<f64>().ok()?;
-    if value <= 0.0 {
+    if !value.is_finite() || value <= 0.0 {
         return None;
     }
     Some(value * 1_000_000.0)
 }
 
 fn xai_price_to_per_m(raw: Option<i64>) -> Option<f64> {
-    raw.map(|value| value as f64 / 10_000.0)
+    raw.filter(|value| *value > 0)
+        .map(|value| value as f64 / 10_000.0)
 }
 
 #[derive(Debug, Deserialize)]

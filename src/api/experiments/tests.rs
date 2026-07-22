@@ -324,6 +324,7 @@ async fn launch_campaign_baseline_runs_local_docker_trial_end_to_end() {
     let now = Utc::now();
     let project = ExperimentProject {
         id: Uuid::new_v4(),
+        owner_user_id: "owner-a".to_string(),
         name: "docker-baseline".to_string(),
         workspace_path: repo.path().to_string_lossy().to_string(),
         git_remote_name: "origin".to_string(),
@@ -358,6 +359,7 @@ async fn launch_campaign_baseline_runs_local_docker_trial_end_to_end() {
 
     let runner = ExperimentRunnerProfile {
         id: Uuid::new_v4(),
+        owner_user_id: "owner-a".to_string(),
         name: "local-docker".to_string(),
         backend: ExperimentRunnerBackend::LocalDocker,
         backend_config: serde_json::json!({}),
@@ -543,6 +545,79 @@ async fn agent_env_terminal_bench_completion_writes_metrics_and_artifact() {
     assert!(log.contains("agent-env-ok"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn agent_env_artifacts_do_not_follow_planted_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().expect("tempdir");
+    let run_root = dir.path().join("run");
+    let artifact_dir = dir.path().join("artifacts");
+    std::fs::create_dir_all(&run_root).expect("run root");
+    std::fs::create_dir_all(&artifact_dir).expect("artifact root");
+    let victim = dir.path().join("victim.txt");
+    std::fs::write(&victim, "keep-me").expect("write victim");
+    let log_path = dir.path().join("bench.log");
+    let now = Utc::now();
+    let trial = ExperimentTrial {
+        id: Uuid::new_v4(),
+        campaign_id: Uuid::new_v4(),
+        sequence: 1,
+        candidate_commit: None,
+        parent_best_commit: None,
+        status: ExperimentTrialStatus::Running,
+        runner_backend: ExperimentRunnerBackend::AgentEnv,
+        exit_code: None,
+        metrics_json: serde_json::json!({}),
+        summary: None,
+        decision_reason: None,
+        artifact_manifest_json: serde_json::json!({}),
+        log_preview_path: None,
+        reviewer_decision: None,
+        runtime_ms: None,
+        attributed_cost_usd: None,
+        llm_cost_usd: None,
+        runner_cost_usd: None,
+        hypothesis: None,
+        mutation_summary: None,
+        provider_job_id: None,
+        provider_job_metadata: serde_json::json!({}),
+        started_at: Some(now),
+        completed_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let trajectory_path =
+        artifact_dir.join(format!("{}-agent-env-trajectory.json", trial.id.simple()));
+    symlink(&victim, &trajectory_path).expect("plant artifact symlink");
+
+    let result = super::execute_agent_env_benchmark_trial(
+        super::AgentEnvBenchmarkConfig::TerminalBench {
+            live_agent: false,
+            cases: vec![crate::agent::env::TerminalBenchCase {
+                name: "echo".to_string(),
+                command: "printf agent-env-ok".to_string(),
+                cwd: None,
+                expected_stdout_contains: vec!["agent-env-ok".to_string()],
+                expected_exit_code: Some(0),
+                timeout_secs: 5,
+            }],
+        },
+        &run_root,
+        std::time::Instant::now(),
+        &log_path,
+        &artifact_dir,
+        &trial,
+    )
+    .await;
+
+    assert!(result.is_err(), "planted artifact symlink must be rejected");
+    assert_eq!(
+        std::fs::read_to_string(&victim).expect("read victim"),
+        "keep-me"
+    );
+}
+
 #[tokio::test]
 async fn agent_env_skill_bench_completion_writes_metrics_and_artifact() {
     let dir = TempDir::new().expect("tempdir");
@@ -632,6 +707,7 @@ async fn local_trial_artifact_refs_include_agent_env_paths() {
     let now = Utc::now();
     let project = ExperimentProject {
         id: Uuid::new_v4(),
+        owner_user_id: "owner-a".to_string(),
         name: "artifact-ref-project".to_string(),
         workspace_path: dir.path().to_string_lossy().to_string(),
         git_remote_name: "origin".to_string(),
@@ -665,6 +741,7 @@ async fn local_trial_artifact_refs_include_agent_env_paths() {
         .expect("store project");
     let runner = ExperimentRunnerProfile {
         id: Uuid::new_v4(),
+        owner_user_id: "owner-a".to_string(),
         name: "artifact-ref-runner".to_string(),
         backend: ExperimentRunnerBackend::AgentEnv,
         backend_config: serde_json::json!({}),
@@ -806,6 +883,7 @@ async fn autonomous_campaign_runs_planner_mutator_reviewer_and_docker_trial_end_
     let now = Utc::now();
     let project = ExperimentProject {
         id: Uuid::new_v4(),
+        owner_user_id: "owner-a".to_string(),
         name: "autonomous-docker".to_string(),
         workspace_path: repo.path().to_string_lossy().to_string(),
         git_remote_name: "origin".to_string(),
@@ -840,6 +918,7 @@ async fn autonomous_campaign_runs_planner_mutator_reviewer_and_docker_trial_end_
 
     let runner = ExperimentRunnerProfile {
         id: Uuid::new_v4(),
+        owner_user_id: "owner-a".to_string(),
         name: "local-docker".to_string(),
         backend: ExperimentRunnerBackend::LocalDocker,
         backend_config: serde_json::json!({}),
@@ -1018,6 +1097,7 @@ async fn complete_trial_terminal_rejects_repeated_completed_lease() {
     let now = Utc::now();
     let project = ExperimentProject {
         id: Uuid::new_v4(),
+        owner_user_id: "owner-a".to_string(),
         name: "demo".to_string(),
         workspace_path: ".".to_string(),
         git_remote_name: "origin".to_string(),
@@ -1107,7 +1187,10 @@ async fn complete_trial_terminal_rejects_repeated_completed_lease() {
         status: ExperimentLeaseStatus::Completed,
         token_hash: "hash".to_string(),
         job_payload: serde_json::json!({}),
-        credentials_payload: serde_json::json!({}),
+        credentials_payload: serde_json::json!({
+            "env": {},
+            "secret_references": [],
+        }),
         expires_at: now,
         claimed_at: Some(now),
         completed_at: Some(now),
@@ -1152,6 +1235,199 @@ fn git(repo: &std::path::Path, args: &[&str]) {
     assert!(status.success(), "git {:?} failed with {:?}", args, status);
 }
 
+#[tokio::test]
+async fn project_and_runner_crud_is_strictly_owner_scoped() {
+    let (store, _guard) = crate::testing::test_db().await;
+    for owner in ["owner-a", "owner-b"] {
+        store
+            .set_setting(owner, "experiments.enabled", &serde_json::Value::Bool(true))
+            .await
+            .expect("enable experiments");
+    }
+
+    let runner = super::create_runner(
+        &store,
+        "owner-a",
+        super::CreateExperimentRunnerProfileRequest {
+            name: "private-runner".to_string(),
+            backend: ExperimentRunnerBackend::GenericRemoteRunner,
+            backend_config: serde_json::json!({}),
+            image_or_runtime: None,
+            gpu_requirements: serde_json::json!({}),
+            env_grants: serde_json::json!({}),
+            secret_references: Vec::new(),
+            cache_policy: serde_json::json!({}),
+        },
+    )
+    .await
+    .expect("create owner-a runner");
+    let project = super::create_project(
+        &store,
+        "owner-a",
+        super::CreateExperimentProjectRequest {
+            name: "private-project".to_string(),
+            workspace_path: ".".to_string(),
+            git_remote_name: "origin".to_string(),
+            base_branch: "main".to_string(),
+            preset: None,
+            strategy_prompt: None,
+            workdir: ".".to_string(),
+            prepare_command: None,
+            run_command: "true".to_string(),
+            mutable_paths: vec!["src".to_string()],
+            fixed_paths: Vec::new(),
+            primary_metric: ExperimentMetricDefinition::default(),
+            secondary_metrics: Vec::new(),
+            comparison_policy: None,
+            stop_policy: None,
+            default_runner_profile_id: Some(runner.id),
+            promotion_mode: None,
+            autonomy_mode: None,
+        },
+    )
+    .await
+    .expect("create owner-a project");
+
+    assert_eq!(project.owner_user_id, "owner-a");
+    assert_eq!(runner.owner_user_id, "owner-a");
+    assert!(
+        super::list_projects(&store, "owner-b")
+            .await
+            .expect("list owner-b projects")
+            .projects
+            .is_empty()
+    );
+    assert!(
+        super::list_runners(&store, "owner-b")
+            .await
+            .expect("list owner-b runners")
+            .runners
+            .is_empty()
+    );
+    assert!(
+        super::get_project(&store, "owner-b", project.id)
+            .await
+            .is_err()
+    );
+    assert!(
+        super::get_runner(&store, "owner-b", runner.id)
+            .await
+            .is_err()
+    );
+    assert!(
+        !super::delete_project(&store, "owner-b", project.id)
+            .await
+            .expect("cross-owner project deletion is a no-op")
+    );
+    assert!(
+        !super::delete_runner(&store, "owner-b", runner.id)
+            .await
+            .expect("cross-owner runner deletion is a no-op")
+    );
+
+    let cross_owner_project = super::create_project(
+        &store,
+        "owner-b",
+        super::CreateExperimentProjectRequest {
+            name: "invalid-cross-owner-project".to_string(),
+            workspace_path: ".".to_string(),
+            git_remote_name: "origin".to_string(),
+            base_branch: "main".to_string(),
+            preset: None,
+            strategy_prompt: None,
+            workdir: ".".to_string(),
+            prepare_command: None,
+            run_command: "true".to_string(),
+            mutable_paths: vec!["src".to_string()],
+            fixed_paths: Vec::new(),
+            primary_metric: ExperimentMetricDefinition::default(),
+            secondary_metrics: Vec::new(),
+            comparison_policy: None,
+            stop_policy: None,
+            default_runner_profile_id: Some(runner.id),
+            promotion_mode: None,
+            autonomy_mode: None,
+        },
+    )
+    .await;
+    assert!(cross_owner_project.is_err());
+
+    assert!(
+        super::delete_project(&store, "owner-a", project.id)
+            .await
+            .expect("delete owner-a project")
+    );
+    assert!(
+        super::delete_runner(&store, "owner-a", runner.id)
+            .await
+            .expect("delete owner-a runner")
+    );
+}
+
+#[tokio::test]
+async fn runner_crud_rejects_malformed_or_ambiguous_secret_references() {
+    let (store, _guard) = crate::testing::test_db().await;
+    store
+        .set_setting(
+            "runner-owner",
+            "experiments.enabled",
+            &serde_json::Value::Bool(true),
+        )
+        .await
+        .expect("enable experiments");
+
+    let request = |secret_references| super::CreateExperimentRunnerProfileRequest {
+        name: "credential-runner".to_string(),
+        backend: ExperimentRunnerBackend::GenericRemoteRunner,
+        backend_config: serde_json::json!({}),
+        image_or_runtime: None,
+        gpu_requirements: serde_json::json!({}),
+        env_grants: serde_json::json!({}),
+        secret_references,
+        cache_policy: serde_json::json!({}),
+    };
+    assert!(
+        super::create_runner(
+            &store,
+            "runner-owner",
+            request(vec!["secret:BAD-NAME".to_string()]),
+        )
+        .await
+        .is_err()
+    );
+
+    let runner = super::create_runner(
+        &store,
+        "runner-owner",
+        request(vec!["secret:SAFE_NAME".to_string()]),
+    )
+    .await
+    .expect("valid secret mapping should be accepted");
+    let update = super::UpdateExperimentRunnerProfileRequest {
+        name: None,
+        backend: None,
+        backend_config: None,
+        image_or_runtime: None,
+        gpu_requirements: None,
+        env_grants: None,
+        secret_references: Some(vec![
+            "secret_a:SHARED_DESTINATION".to_string(),
+            "secret_b:SHARED_DESTINATION".to_string(),
+        ]),
+        cache_policy: None,
+        status: None,
+    };
+    assert!(
+        super::update_runner(&store, "runner-owner", runner.id, update)
+            .await
+            .is_err()
+    );
+    let persisted = super::get_runner(&store, "runner-owner", runner.id)
+        .await
+        .expect("runner should remain readable");
+    assert_eq!(persisted.secret_references, vec!["secret:SAFE_NAME"]);
+}
+
 /// Seed an `ExperimentProject` + `ExperimentRunnerProfile` so a campaign's
 /// foreign keys (project_id, runner_profile_id) resolve, and return their ids.
 async fn seed_reaper_project_and_runner(
@@ -1160,6 +1436,7 @@ async fn seed_reaper_project_and_runner(
 ) -> (Uuid, Uuid) {
     let project = ExperimentProject {
         id: Uuid::new_v4(),
+        owner_user_id: "default".to_string(),
         name: "reaper-test".to_string(),
         workspace_path: "/tmp/reaper-test".to_string(),
         git_remote_name: "origin".to_string(),
@@ -1194,6 +1471,7 @@ async fn seed_reaper_project_and_runner(
 
     let runner = ExperimentRunnerProfile {
         id: Uuid::new_v4(),
+        owner_user_id: "default".to_string(),
         name: "reaper-runner".to_string(),
         backend: ExperimentRunnerBackend::GenericRemoteRunner,
         backend_config: serde_json::json!({}),
@@ -1417,7 +1695,10 @@ async fn lease_artifact_with_inline_bytes_persists_durable_fetchable_ref() {
         status: ExperimentLeaseStatus::Claimed,
         token_hash: super::hash_lease_token(token),
         job_payload: serde_json::json!({}),
-        credentials_payload: serde_json::json!({}),
+        credentials_payload: serde_json::json!({
+            "env": {},
+            "secret_references": [],
+        }),
         expires_at: now + chrono::Duration::hours(1),
         claimed_at: Some(now),
         completed_at: None,
@@ -1456,8 +1737,10 @@ async fn lease_artifact_with_inline_bytes_persists_durable_fetchable_ref() {
     assert!(recorded.fetchable, "durable artifact should be fetchable");
     let durable_path = Path::new(&recorded.uri_or_local_path);
     assert!(durable_path.exists(), "durable artifact path should exist");
+    let canonical_artifact_dir =
+        std::fs::canonicalize(artifact_dir.path()).expect("canonical artifact dir");
     assert!(
-        durable_path.starts_with(artifact_dir.path()),
+        durable_path.starts_with(canonical_artifact_dir),
         "artifact must live under the durable root"
     );
     let bytes = std::fs::read(durable_path).expect("read durable artifact");

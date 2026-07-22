@@ -1,6 +1,7 @@
 use rhai::{Dynamic, Engine, EvalAltResult, Scope};
 use serde::Serialize;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -99,24 +100,52 @@ pub struct SandboxResult {
 // ---------------------------------------------------------------------------
 
 const FORBIDDEN_PATTERNS: &[&str] = &["std::fs", "std::net", "std::process", "unsafe", "extern"];
+const MAX_SANDBOX_SCRIPT_BYTES: usize = 256 * 1024;
+const MAX_SANDBOX_TIMEOUT_SECONDS: u64 = 5 * 60;
+
+fn monotonic_millis() -> u64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 // ---------------------------------------------------------------------------
 // Sandbox
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct Sandbox {
-    engine: Engine,
+    engine: Arc<Engine>,
     config: SandboxConfig,
     reporter: Arc<dyn StatusReporter>,
+    deadline_millis: Arc<AtomicU64>,
+    execution_lock: Arc<Mutex<()>>,
 }
 
 impl Sandbox {
     pub fn new(config: SandboxConfig, reporter: Arc<dyn StatusReporter>) -> Self {
+        let config = SandboxConfig {
+            max_operations: config.max_operations.max(1),
+            timeout_seconds: config.timeout_seconds.clamp(1, MAX_SANDBOX_TIMEOUT_SECONDS),
+            max_result_size: config.max_result_size.max(1),
+        };
         let mut engine = Engine::new();
+        let deadline_millis = Arc::new(AtomicU64::new(u64::MAX));
 
         // Apply resource limits
         engine.set_max_operations(config.max_operations);
         engine.set_max_call_levels(32);
+        engine.set_max_variables(256);
+        engine.set_max_functions(256);
+        engine.set_max_modules(64);
+        engine.set_max_expr_depths(64, 32);
+        engine.set_max_string_size(config.max_result_size.saturating_mul(2).max(1_024));
+        engine.set_max_array_size(10_000);
+        engine.set_max_map_size(10_000);
+        let progress_deadline = deadline_millis.clone();
+        engine.on_progress(move |_| {
+            (monotonic_millis() >= progress_deadline.load(Ordering::Relaxed))
+                .then(|| rhai::Dynamic::from("sandbox execution deadline exceeded"))
+        });
 
         // Register built-in utility functions
         engine.register_fn("json_stringify", |map: rhai::Map| -> String {
@@ -135,9 +164,11 @@ impl Sandbox {
         });
 
         Self {
-            engine,
+            engine: Arc::new(engine),
             config,
             reporter,
+            deadline_millis,
+            execution_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -151,26 +182,35 @@ impl Sandbox {
     /// });
     /// ```
     pub fn engine_mut(&mut self) -> &mut Engine {
-        &mut self.engine
+        Arc::get_mut(&mut self.engine)
+            .expect("sandbox engine cannot be modified after the sandbox has been cloned")
     }
 
     /// Execute a script in the sandbox.
     pub fn execute(&self, script: &str) -> Result<SandboxResult, SandboxError> {
         // 1. Validate
         Self::validate_script(script)?;
+        let _execution_guard = self
+            .execution_lock
+            .lock()
+            .map_err(|_| SandboxError::System("sandbox execution lock is poisoned".to_string()))?;
+        self.deadline_millis.store(
+            monotonic_millis().saturating_add(self.config.timeout_seconds.saturating_mul(1_000)),
+            Ordering::Relaxed,
+        );
 
         // 2. Report start
         let reporter = self.reporter.clone();
-        // Fire-and-forget status (we are in sync context)
-        let _ = std::thread::spawn(move || {
-            let rt = tokio::runtime::Handle::try_current();
-            if let Ok(handle) = rt {
-                handle.block_on(reporter.report(ToolEvent::Status {
-                    msg: "Executing script...".into(),
-                    icon: None,
-                }));
-            }
-        });
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                reporter
+                    .report(ToolEvent::Status {
+                        msg: "Executing script...".into(),
+                        icon: None,
+                    })
+                    .await;
+            });
+        }
 
         // 3. Execute with timeout
         let start = Instant::now();
@@ -179,22 +219,14 @@ impl Sandbox {
         let result = self
             .engine
             .eval_with_scope::<Dynamic>(&mut scope, script)
-            .map_err(|e| Self::map_rhai_error(*e))?;
+            .map_err(|e| Self::map_rhai_error(*e, self.config.timeout_seconds));
+
+        self.deadline_millis.store(u64::MAX, Ordering::Relaxed);
+        let result = result?;
 
         let elapsed = start.elapsed();
-
-        // 4. Check elapsed time (informational only).
-        // NOTE: We intentionally do NOT reject the result here. The script
-        // already completed and `result` holds valid data. Discarding it
-        // would waste expensive work (e.g. web_search with deep scraping +
-        // LLM summarization can legitimately take 60-90s). The Rhai
-        // `max_operations` limit already guards against infinite loops.
         if elapsed > Duration::from_secs(self.config.timeout_seconds) {
-            eprintln!(
-                "[sandbox] Warning: script took {}s (limit {}s) but completed successfully — keeping result.",
-                elapsed.as_secs(),
-                self.config.timeout_seconds
-            );
+            return Err(SandboxError::Timeout(self.config.timeout_seconds));
         }
 
         // 5. Serialize result
@@ -222,11 +254,33 @@ impl Sandbox {
         })
     }
 
+    /// Execute without blocking an async runtime worker. The Rhai progress
+    /// callback interrupts CPU-bound scripts, while this outer deadline also
+    /// releases the caller if a synchronous host function stalls.
+    pub async fn execute_async(&self, script: String) -> Result<SandboxResult, SandboxError> {
+        Self::validate_script(&script)?;
+        let timeout_seconds = self.config.timeout_seconds;
+        let sandbox = self.clone();
+        let task = tokio::task::spawn_blocking(move || sandbox.execute(&script));
+        match tokio::time::timeout(Duration::from_secs(timeout_seconds), task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(SandboxError::System(format!(
+                "sandbox worker failed: {error}"
+            ))),
+            Err(_) => Err(SandboxError::Timeout(timeout_seconds)),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
 
     fn validate_script(script: &str) -> Result<(), SandboxError> {
+        if script.len() > MAX_SANDBOX_SCRIPT_BYTES || script.contains('\0') {
+            return Err(SandboxError::Compilation(
+                "script is malformed or exceeds the 256 KiB limit".to_string(),
+            ));
+        }
         for pattern in FORBIDDEN_PATTERNS {
             if script.contains(pattern) {
                 return Err(SandboxError::ForbiddenPattern(pattern.to_string()));
@@ -235,15 +289,14 @@ impl Sandbox {
         Ok(())
     }
 
-    fn map_rhai_error(err: EvalAltResult) -> SandboxError {
+    fn map_rhai_error(err: EvalAltResult, timeout_seconds: u64) -> SandboxError {
         match err {
             EvalAltResult::ErrorRuntime(msg, _pos) => SandboxError::Runtime(msg.to_string()),
             EvalAltResult::ErrorFunctionNotFound(sig, _pos) => {
                 SandboxError::Compilation(format!("Unknown function: {}", sig))
             }
-            EvalAltResult::ErrorTooManyOperations(_pos) => {
-                SandboxError::Timeout(0) // ops limit hit
-            }
+            EvalAltResult::ErrorTooManyOperations(_pos) => SandboxError::Timeout(timeout_seconds),
+            EvalAltResult::ErrorTerminated(_, _) => SandboxError::Timeout(timeout_seconds),
             EvalAltResult::ErrorParsing(parse_err, _pos) => {
                 SandboxError::Compilation(format!("Parse error: {}", parse_err))
             }

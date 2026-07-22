@@ -35,6 +35,7 @@ expression: settings
     "public_url": null,
     "provider": null,
     "cf_token": null,
+    "cf_hostname": null,
     "ngrok_token": null,
     "ngrok_domain": null,
     "ts_funnel": false,
@@ -56,6 +57,8 @@ expression: settings
     "signal_dm_policy": null,
     "signal_group_policy": null,
     "signal_group_allow_from": null,
+    "signal_ignore_attachments": false,
+    "signal_ignore_stories": true,
     "matrix_enabled": false,
     "voice_call_enabled": false,
     "apns_enabled": false,
@@ -286,11 +289,7 @@ expression: settings
   },
   "learning": {
     "enabled": true,
-    "auto_apply_classes": [
-      "memory",
-      "skill",
-      "prompt"
-    ],
+    "auto_apply_classes": [],
     "safe_mode": {
       "enabled": true,
       "thresholds": {
@@ -309,7 +308,7 @@ expression: settings
       "auto_apply": false
     },
     "prompt_mutation": {
-      "enabled": true
+      "enabled": false
     },
     "providers": {
       "active": "none",

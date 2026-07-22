@@ -87,6 +87,16 @@ async fn main() -> anyhow::Result<()> {
             model: cli.model,
         }),
     );
+    let runtime_lease = thinclaw::runtime_lease::RuntimeLease::acquire_default()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    #[cfg(feature = "docker-sandbox")]
+    match thinclaw::sandbox::cleanup_stale_sandbox_resources(runtime_lease.scope_id()).await {
+        Ok((containers, networks)) if containers > 0 || networks > 0 => {
+            tracing::info!(containers, networks, "Cleaned stale ACP sandbox resources")
+        }
+        Ok(_) => {}
+        Err(error) => tracing::debug!(%error, "ACP sandbox startup cleanup unavailable"),
+    }
 
     let components = AppBuilder::new(
         config.clone(),
@@ -94,8 +104,16 @@ async fn main() -> anyhow::Result<()> {
         cli.config.clone(),
         Arc::clone(&log_broadcaster),
     )
+    .with_runtime_scope(runtime_lease.scope_id())
     .build_all()
     .await?;
+    if let Some(db) = components.db.as_ref()
+        && let Err(error) = db
+            .cleanup_stale_sandbox_jobs(runtime_lease.scope_id())
+            .await
+    {
+        tracing::warn!(%error, "Failed to clean up owned stale ACP sandbox jobs");
+    }
 
     let channels = Arc::new(ChannelManager::new());
     let (acp_channel, acp_outbound_rx) = acp::channel_pair();
@@ -196,7 +214,15 @@ async fn main() -> anyhow::Result<()> {
         shared_secrets_store,
     );
 
-    acp::run_stdio(agent, acp_outbound_tx, acp_outbound_rx, acp_state).await?;
+    let result = acp::run_stdio(
+        Arc::clone(&agent),
+        acp_outbound_tx,
+        acp_outbound_rx,
+        acp_state,
+    )
+    .await;
+    agent.tools().shutdown_all().await;
+    result?;
 
     if restart_requested.load(Ordering::SeqCst) {
         eprintln!("ThinClaw ACP restart was requested; exiting for supervisor restart.");
@@ -306,7 +332,15 @@ async fn run_agent_stdio_smoke() -> anyhow::Result<()> {
         Some(Arc::new(SessionManager::new())),
     ));
 
-    acp::run_stdio(agent, acp_outbound_tx, acp_outbound_rx, acp_state).await
+    let result = acp::run_stdio(
+        Arc::clone(&agent),
+        acp_outbound_tx,
+        acp_outbound_rx,
+        acp_state,
+    )
+    .await;
+    agent.tools().shutdown_all().await;
+    result
 }
 
 struct SmokeLlm;
@@ -316,7 +350,7 @@ impl SmokeLlm {
         messages
             .iter()
             .rev()
-            .find(|message| matches!(message.role, Role::User))
+            .find(|message| message.is_user_instruction())
             .map(|message| message.content.clone())
             .unwrap_or_default()
     }

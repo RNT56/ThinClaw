@@ -52,10 +52,10 @@ pub fn parse_skill_check_input(params: &serde_json::Value) -> Result<SkillCheckI
     } else if let Some(url) = url {
         Ok(SkillCheckInput::Url(url.to_string()))
     } else {
-        Ok(SkillCheckInput::Path(
-            path.expect("provided count checked path presence")
-                .to_string(),
-        ))
+        let path = path.ok_or_else(|| {
+            ToolError::InvalidParameters("Provide exactly one of content, path, or url".to_string())
+        })?;
+        Ok(SkillCheckInput::Path(path.to_string()))
     }
 }
 

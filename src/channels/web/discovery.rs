@@ -177,16 +177,25 @@ mod imp {
     /// trailing dot; derive it from the OS hostname and fall back to a stable
     /// literal.
     fn hostname_for_mdns() -> String {
-        let base = std::process::Command::new("hostname")
-            .output()
+        let base = std::env::var("HOSTNAME")
             .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("COMPUTERNAME").ok())
             .unwrap_or_else(|| "thinclaw".to_string());
         // Strip any existing domain, keep the leaf label, ensure a single
         // `.local.` suffix as mdns-sd expects.
-        let leaf = base.split('.').next().unwrap_or("thinclaw");
+        let leaf = base
+            .split('.')
+            .next()
+            .filter(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+            .unwrap_or("thinclaw");
         format!("{leaf}.local.")
     }
 }

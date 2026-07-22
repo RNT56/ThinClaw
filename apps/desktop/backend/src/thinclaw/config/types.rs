@@ -20,7 +20,7 @@ fn default_workspace_mode() -> String {
 }
 use zeroize::Zeroize;
 
-#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, Default)]
+#[derive(Clone, Serialize, Deserialize, specta::Type, Default)]
 pub struct CustomSecret {
     pub id: String,
     pub name: String,
@@ -34,36 +34,31 @@ pub struct CustomSecret {
     pub granted: bool,
 }
 
+impl std::fmt::Debug for CustomSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CustomSecret")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("value", &crate::debug_redaction::Redacted)
+            .field("granted", &self.granted)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, specta::Type, Default)]
 pub struct AgentProfile {
     pub id: String,
     pub name: String,
     pub url: String,
-    /// Remote bearer token. Accepted on input, but always redacted from serialized
-    /// profile metadata; the durable value lives in the encrypted Keychain envelope.
-    #[serde(default, serialize_with = "serialize_redacted_profile_token")]
+    /// Stored in the platform credential store under a key derived from the
+    /// profile ID. The field remains deserializable for one-time migration of
+    /// legacy identity files, but it is never serialized back to disk.
+    #[serde(default, skip_serializing)]
     pub token: Option<String>,
     pub mode: String, // "local" | "remote"
     #[serde(default)]
     pub auto_connect: bool,
-}
-
-fn serialize_redacted_profile_token<S>(
-    _token: &Option<String>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_none()
-}
-
-impl AgentProfile {
-    pub fn redacted(&self) -> Self {
-        let mut profile = self.clone();
-        profile.token = None;
-        profile
-    }
 }
 
 impl std::fmt::Debug for AgentProfile {
@@ -72,29 +67,40 @@ impl std::fmt::Debug for AgentProfile {
             .debug_struct("AgentProfile")
             .field("id", &self.id)
             .field("name", &self.name)
-            .field("url", &self.url)
-            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("url_configured", &!self.url.is_empty())
+            .field(
+                "token",
+                &crate::debug_redaction::RedactedOption(&self.token),
+            )
             .field("mode", &self.mode)
             .field("auto_connect", &self.auto_connect)
             .finish()
     }
 }
 
-impl Drop for AgentProfile {
-    fn drop(&mut self) {
-        if let Some(token) = &mut self.token {
-            token.zeroize();
+impl AgentProfile {
+    /// Renderer-safe profile metadata. Credentials are resolved exclusively by
+    /// backend profile ID when the user switches or fleet checks run.
+    pub fn without_token(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            url: self.url.clone(),
+            token: None,
+            mode: self.mode.clone(),
+            auto_connect: self.auto_connect,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct ThinClawIdentity {
     pub device_id: String,
+    /// Legacy on-disk field, retained only for migration into secure storage.
     #[serde(default, skip_serializing)]
     pub auth_token: String,
-    /// Ed25519 key pair for protocol signing (not an API credential, generated locally)
-    #[serde(default)]
+    /// Legacy private signing key, retained only for secure-store migration.
+    #[serde(default, skip_serializing)]
     pub private_key: Option<String>,
     #[serde(default)]
     pub public_key: Option<String>,
@@ -202,30 +208,58 @@ pub struct ThinClawIdentity {
     pub bedrock_granted: bool,
 }
 
+impl std::fmt::Debug for ThinClawIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ThinClawIdentity")
+            .field("device_id", &self.device_id)
+            .field("auth_token", &crate::debug_redaction::Redacted)
+            .field(
+                "private_key",
+                &crate::debug_redaction::RedactedOption(&self.private_key),
+            )
+            .field("public_key_configured", &self.public_key.is_some())
+            .field("profiles", &self.profiles)
+            .field("gateway_mode", &self.gateway_mode)
+            .field("remote_url_configured", &self.remote_url.is_some())
+            .field("custom_secrets", &self.custom_secrets)
+            .field("allow_local_tools", &self.allow_local_tools)
+            .field("workspace_mode", &self.workspace_mode)
+            .field("local_inference_enabled", &self.local_inference_enabled)
+            .field("expose_inference", &self.expose_inference)
+            .field("setup_completed", &self.setup_completed)
+            .field("auto_start_gateway", &self.auto_start_gateway)
+            .field("auto_approve_tools", &self.auto_approve_tools)
+            .field("bootstrap_completed", &self.bootstrap_completed)
+            .field("enabled_cloud_providers", &self.enabled_cloud_providers)
+            .finish_non_exhaustive()
+    }
+}
+
 // IC-021: Zeroize key material to prevent leaking sensitive data.
 // NOTE: Using an explicit method instead of Drop because ThinClawIdentity
 // is moved/destructured in many places, which is incompatible with Drop.
 impl ThinClawIdentity {
-    /// Zeroize private and public key material in place.
+    /// Zeroize all sensitive material that may have been loaded from a legacy
+    /// identity document in place.
     ///
     /// Call this before discarding an identity that held real key data.
     pub fn zeroize_keys(&mut self) {
+        self.auth_token.zeroize();
         if let Some(ref mut key) = self.private_key {
-            // SAFETY: we own the String and are about to drop it
-            unsafe {
-                let bytes = key.as_bytes_mut();
-                for b in bytes.iter_mut() {
-                    std::ptr::write_volatile(b, 0);
-                }
-            }
+            key.zeroize();
         }
         if let Some(ref mut key) = self.public_key {
-            unsafe {
-                let bytes = key.as_bytes_mut();
-                for b in bytes.iter_mut() {
-                    std::ptr::write_volatile(b, 0);
-                }
+            key.zeroize();
+        }
+        for profile in &mut self.profiles {
+            if let Some(token) = &mut profile.token {
+                token.zeroize();
             }
+            profile.token = None;
+        }
+        for secret in &mut self.custom_secrets {
+            secret.value.zeroize();
         }
         self.private_key = None;
         self.public_key = None;
@@ -366,9 +400,6 @@ impl Drop for ThinClawConfig {
         z!(self.gemini_api_key);
         z!(self.groq_api_key);
         z!(self.remote_token);
-        for profile in &mut self.profiles {
-            z!(profile.token);
-        }
         z!(self.custom_llm_key);
         z!(self.xai_api_key);
         z!(self.venice_api_key);
@@ -390,6 +421,10 @@ impl Drop for ThinClawConfig {
         z!(self.private_key);
         z!(self.public_key);
 
+        for profile in &mut self.profiles {
+            z!(profile.token);
+        }
+
         // Custom secrets: zeroize each value
         for secret in &mut self.custom_secrets {
             secret.value.zeroize();
@@ -398,7 +433,7 @@ impl Drop for ThinClawConfig {
 }
 
 /// Slack connector configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SlackConfig {
     pub enabled: bool,
     #[serde(rename = "botToken", skip_serializing_if = "Option::is_none")]
@@ -409,6 +444,28 @@ pub struct SlackConfig {
     pub dm_policy: String,
     /// Must be an object, not null
     pub channels: serde_json::Value,
+}
+
+impl std::fmt::Debug for SlackConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SlackConfig")
+            .field("enabled", &self.enabled)
+            .field(
+                "bot_token",
+                &crate::debug_redaction::RedactedOption(&self.bot_token),
+            )
+            .field(
+                "app_token",
+                &crate::debug_redaction::RedactedOption(&self.app_token),
+            )
+            .field("dm_policy", &self.dm_policy)
+            .field(
+                "channel_count",
+                &self.channels.as_object().map_or(0, |c| c.len()),
+            )
+            .finish()
+    }
 }
 
 // IC-032: Private — only used as serde default, no external callers
@@ -429,7 +486,7 @@ impl Default for SlackConfig {
 }
 
 /// Telegram connector configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TelegramConfig {
     pub enabled: bool,
     #[serde(rename = "botToken", skip_serializing_if = "Option::is_none")]
@@ -438,6 +495,21 @@ pub struct TelegramConfig {
     pub dm_policy: String,
     #[serde(default)]
     pub groups: TelegramGroupsConfig,
+}
+
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TelegramConfig")
+            .field("enabled", &self.enabled)
+            .field(
+                "bot_token",
+                &crate::debug_redaction::RedactedOption(&self.bot_token),
+            )
+            .field("dm_policy", &self.dm_policy)
+            .field("groups", &self.groups)
+            .finish()
+    }
 }
 
 impl Default for TelegramConfig {
@@ -471,7 +543,7 @@ impl Default for TelegramGroupConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ThinClawEngineConfig {
     pub gateway: GatewayConfig,
     pub discovery: DiscoveryConfig,
@@ -481,6 +553,25 @@ pub struct ThinClawEngineConfig {
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub meta: MetaConfig,
+}
+
+impl std::fmt::Debug for ThinClawEngineConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ThinClawEngineConfig")
+            .field("gateway", &self.gateway)
+            .field("discovery", &self.discovery)
+            .field(
+                "model_provider_count",
+                &self
+                    .models
+                    .as_ref()
+                    .map_or(0, |models| models.providers.len()),
+            )
+            .field("channels", &self.channels)
+            .field("meta", &self.meta)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ThinClawEngineConfig {
@@ -522,7 +613,7 @@ impl ThinClawEngineConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct ModelsConfig {
     #[serde(default)]
     pub providers: serde_json::Map<String, serde_json::Value>,
@@ -533,6 +624,19 @@ pub struct ModelsConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub bedrock_discovery: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for ModelsConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModelsConfig")
+            .field("provider_names", &self.providers.keys().collect::<Vec<_>>())
+            .field(
+                "bedrock_discovery_configured",
+                &self.bedrock_discovery.is_some(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -576,10 +680,120 @@ pub fn default_gateway_mode() -> String {
     "local".into()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     pub mode: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthConfig")
+            .field("mode", &self.mode)
+            .field("token", &crate::debug_redaction::Redacted)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod debug_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn identity_and_engine_debug_redact_all_credentials() {
+        let identity = ThinClawIdentity {
+            auth_token: "gateway-bearer".into(),
+            private_key: Some("private-signing-key".into()),
+            profiles: vec![AgentProfile {
+                token: Some("remote-profile-token".into()),
+                url: "https://user:url-secret@example.test".into(),
+                ..AgentProfile::default()
+            }],
+            custom_secrets: vec![CustomSecret {
+                value: "custom-secret-value".into(),
+                ..CustomSecret::default()
+            }],
+            ..ThinClawIdentity::default()
+        };
+        let identity_debug = format!("{identity:?}");
+        for secret in [
+            "gateway-bearer",
+            "private-signing-key",
+            "remote-profile-token",
+            "url-secret",
+            "custom-secret-value",
+        ] {
+            assert!(!identity_debug.contains(secret), "debug leaked {secret}");
+        }
+
+        let identity_json = serde_json::to_string(&identity).expect("serialize identity");
+        for secret in [
+            "gateway-bearer",
+            "private-signing-key",
+            "remote-profile-token",
+            "custom-secret-value",
+        ] {
+            assert!(
+                !identity_json.contains(secret),
+                "identity persistence leaked {secret}"
+            );
+        }
+        assert!(!identity_json.contains("\"auth_token\""));
+        assert!(!identity_json.contains("\"private_key\""));
+
+        let engine = ThinClawEngineConfig {
+            gateway: GatewayConfig {
+                mode: "local".into(),
+                bind: "127.0.0.1".into(),
+                port: 3000,
+                auth: AuthConfig {
+                    mode: "token".into(),
+                    token: "engine-gateway-token".into(),
+                },
+            },
+            discovery: DiscoveryConfig {
+                mdns: MdnsConfig { mode: "off".into() },
+            },
+            agents: AgentsConfig {
+                defaults: AgentDefaults {
+                    workspace: String::new(),
+                    model: None,
+                    models: Default::default(),
+                },
+                list: Vec::new(),
+            },
+            models: Some(ModelsConfig {
+                providers: serde_json::from_value(serde_json::json!({
+                    "openai": {"apiKey": "provider-api-key"}
+                }))
+                .unwrap(),
+                bedrock_discovery: None,
+            }),
+            channels: ChannelsConfig {
+                slack: SlackConfig {
+                    bot_token: Some("slack-secret".into()),
+                    app_token: None,
+                    ..SlackConfig::default()
+                },
+                telegram: TelegramConfig {
+                    bot_token: Some("telegram-secret".into()),
+                    ..TelegramConfig::default()
+                },
+            },
+            meta: MetaConfig::default(),
+        };
+        let engine_debug = format!("{engine:?}");
+        for secret in [
+            "engine-gateway-token",
+            "provider-api-key",
+            "slack-secret",
+            "telegram-secret",
+        ] {
+            assert!(!engine_debug.contains(secret), "debug leaked {secret}");
+        }
+        assert!(engine_debug.contains("[REDACTED]"));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

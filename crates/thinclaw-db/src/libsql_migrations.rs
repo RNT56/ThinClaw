@@ -31,11 +31,11 @@ CREATE TABLE IF NOT EXISTS _migrations (
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     channel TEXT NOT NULL,
+    surface TEXT NOT NULL DEFAULT 'agent_cockpit',
     user_id TEXT NOT NULL,
     actor_id TEXT,
     conversation_scope_id TEXT,
     conversation_kind TEXT NOT NULL DEFAULT 'direct',
-    surface TEXT NOT NULL DEFAULT 'agent_cockpit',
     thread_id TEXT,
     stable_external_conversation_key TEXT,
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -44,12 +44,18 @@ CREATE TABLE IF NOT EXISTS conversations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
+CREATE INDEX IF NOT EXISTS idx_conversations_surface_activity
+    ON conversations(surface, last_activity DESC);
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_actor ON conversations(actor_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_scope ON conversations(conversation_scope_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_last_activity ON conversations(last_activity);
-CREATE INDEX IF NOT EXISTS idx_conversations_surface_activity
-    ON conversations(surface, last_activity DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_ingress_direct
+    ON conversations(user_id, actor_id, channel, thread_id, last_activity DESC)
+    WHERE conversation_kind = 'direct';
+CREATE INDEX IF NOT EXISTS idx_conversations_ingress_group
+    ON conversations(user_id, conversation_scope_id, last_activity DESC)
+    WHERE conversation_kind = 'group';
 
 CREATE TABLE IF NOT EXISTS conversation_messages (
     id TEXT PRIMARY KEY,
@@ -324,15 +330,18 @@ CREATE TABLE IF NOT EXISTS experiment_runner_profiles (
     env_grants TEXT NOT NULL DEFAULT '{}',
     secret_references TEXT NOT NULL DEFAULT '[]',
     cache_policy TEXT NOT NULL DEFAULT '{}',
-    status TEXT NOT NULL DEFAULT 'draft',
-    readiness_class TEXT NOT NULL DEFAULT 'manual_only',
+    status TEXT NOT NULL DEFAULT '"draft"',
+    readiness_class TEXT NOT NULL DEFAULT '"manual_only"',
     launch_eligible INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    owner_user_id TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_experiment_runner_profiles_updated
     ON experiment_runner_profiles(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_experiment_runner_profiles_owner_updated
+    ON experiment_runner_profiles(owner_user_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS experiment_projects (
     id TEXT PRIMARY KEY,
@@ -340,7 +349,7 @@ CREATE TABLE IF NOT EXISTS experiment_projects (
     workspace_path TEXT NOT NULL,
     git_remote_name TEXT NOT NULL,
     base_branch TEXT NOT NULL,
-    preset TEXT NOT NULL DEFAULT 'autoresearch_single_file',
+    preset TEXT NOT NULL DEFAULT '"autoresearch_single_file"',
     strategy_prompt TEXT NOT NULL DEFAULT '',
     workdir TEXT NOT NULL DEFAULT '.',
     prepare_command TEXT,
@@ -353,21 +362,24 @@ CREATE TABLE IF NOT EXISTS experiment_projects (
     stop_policy TEXT NOT NULL DEFAULT '{}',
     default_runner_profile_id TEXT REFERENCES experiment_runner_profiles(id) ON DELETE SET NULL,
     promotion_mode TEXT NOT NULL DEFAULT 'branch_pr_draft',
-    autonomy_mode TEXT NOT NULL DEFAULT 'autonomous',
-    status TEXT NOT NULL DEFAULT 'draft',
+    autonomy_mode TEXT NOT NULL DEFAULT '"autonomous"',
+    status TEXT NOT NULL DEFAULT '"draft"',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    owner_user_id TEXT NOT NULL DEFAULT 'default'
 );
 
 CREATE INDEX IF NOT EXISTS idx_experiment_projects_updated
     ON experiment_projects(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_experiment_projects_owner_updated
+    ON experiment_projects(owner_user_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS experiment_campaigns (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES experiment_projects(id) ON DELETE CASCADE,
     runner_profile_id TEXT NOT NULL REFERENCES experiment_runner_profiles(id) ON DELETE RESTRICT,
     owner_user_id TEXT NOT NULL DEFAULT 'default',
-    status TEXT NOT NULL DEFAULT 'pending_baseline',
+    status TEXT NOT NULL DEFAULT '"pending_baseline"',
     baseline_commit TEXT,
     best_commit TEXT,
     best_metrics TEXT NOT NULL DEFAULT '{}',
@@ -403,7 +415,7 @@ CREATE TABLE IF NOT EXISTS experiment_trials (
     sequence INTEGER NOT NULL,
     candidate_commit TEXT,
     parent_best_commit TEXT,
-    status TEXT NOT NULL DEFAULT 'preparing',
+    status TEXT NOT NULL DEFAULT '"preparing"',
     runner_backend TEXT NOT NULL,
     exit_code INTEGER,
     metrics_json TEXT NOT NULL DEFAULT '{}',
@@ -449,7 +461,7 @@ CREATE TABLE IF NOT EXISTS experiment_leases (
     campaign_id TEXT NOT NULL REFERENCES experiment_campaigns(id) ON DELETE CASCADE,
     trial_id TEXT NOT NULL REFERENCES experiment_trials(id) ON DELETE CASCADE,
     runner_profile_id TEXT NOT NULL REFERENCES experiment_runner_profiles(id) ON DELETE CASCADE,
-    status TEXT NOT NULL DEFAULT 'pending',
+    status TEXT NOT NULL DEFAULT '"pending"',
     token_hash TEXT NOT NULL,
     job_payload TEXT NOT NULL DEFAULT '{}',
     credentials_payload TEXT NOT NULL DEFAULT '{}',
@@ -1530,12 +1542,12 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
     LibsqlColumnUpgrade {
         version: 16,
         description: "Add autonomy mode to experiment projects",
-        sql: "ALTER TABLE experiment_projects ADD COLUMN autonomy_mode TEXT NOT NULL DEFAULT 'autonomous'",
+        sql: "ALTER TABLE experiment_projects ADD COLUMN autonomy_mode TEXT NOT NULL DEFAULT '\"autonomous\"'",
     },
     LibsqlColumnUpgrade {
         version: 17,
         description: "Add readiness class to experiment runners",
-        sql: "ALTER TABLE experiment_runner_profiles ADD COLUMN readiness_class TEXT NOT NULL DEFAULT 'manual_only'",
+        sql: "ALTER TABLE experiment_runner_profiles ADD COLUMN readiness_class TEXT NOT NULL DEFAULT '\"manual_only\"'",
     },
     LibsqlColumnUpgrade {
         version: 17,
@@ -1872,16 +1884,37 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         description: "Index active tool failure incidents",
         sql: "CREATE INDEX IF NOT EXISTS idx_tool_failures_active_incident ON tool_failures(tool_name) WHERE repaired_at IS NULL AND quarantined_at IS NULL",
     },
-    // -- V30: shared Desktop conversation surfaces -------------------------
+    // ── V30: canonical conversation surfaces ────────────────────────────
     LibsqlColumnUpgrade {
         version: 30,
-        description: "Add conversation surface discriminator",
+        description: "Add canonical conversation surface",
         sql: "ALTER TABLE conversations ADD COLUMN surface TEXT NOT NULL DEFAULT 'agent_cockpit'",
     },
     LibsqlColumnUpgrade {
         version: 30,
-        description: "Index conversation surface activity",
+        description: "Index conversations by surface and activity",
         sql: "CREATE INDEX IF NOT EXISTS idx_conversations_surface_activity ON conversations(surface, last_activity DESC)",
+    },
+    // ── V31: experiment project/runner ownership ────────────────────────
+    LibsqlColumnUpgrade {
+        version: 31,
+        description: "Add experiment project owner",
+        sql: "ALTER TABLE experiment_projects ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT 'default'",
+    },
+    LibsqlColumnUpgrade {
+        version: 31,
+        description: "Add experiment runner owner",
+        sql: "ALTER TABLE experiment_runner_profiles ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT 'default'",
+    },
+    LibsqlColumnUpgrade {
+        version: 31,
+        description: "Index experiment projects by owner",
+        sql: "CREATE INDEX IF NOT EXISTS idx_experiment_projects_owner_updated ON experiment_projects(owner_user_id, updated_at DESC)",
+    },
+    LibsqlColumnUpgrade {
+        version: 31,
+        description: "Index experiment runners by owner",
+        sql: "CREATE INDEX IF NOT EXISTS idx_experiment_runner_profiles_owner_updated ON experiment_runner_profiles(owner_user_id, updated_at DESC)",
     },
 ];
 
@@ -1892,90 +1925,8 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
 /// receiving the PostgreSQL-style backfill that populates them. Run these on
 /// every startup after `SCHEMA` so null/empty legacy identity fields are
 /// repaired in place.
-pub const DATA_REPAIRS: &[&str] = &[
-    r#"
-    UPDATE conversations
-    SET surface = 'agent_cockpit'
-    WHERE surface IS NULL OR surface = ''
-    "#,
-    r#"
-    UPDATE conversations
-    SET actor_id = COALESCE(NULLIF(actor_id, ''), user_id),
-        conversation_scope_id = COALESCE(NULLIF(conversation_scope_id, ''), id),
-        conversation_kind = COALESCE(NULLIF(conversation_kind, ''), 'direct'),
-        stable_external_conversation_key = COALESCE(
-            NULLIF(stable_external_conversation_key, ''),
-            channel || ':' || COALESCE(NULLIF(thread_id, ''), id)
-        )
-    WHERE actor_id IS NULL
-       OR actor_id = ''
-       OR conversation_scope_id IS NULL
-       OR conversation_scope_id = ''
-       OR conversation_kind IS NULL
-       OR conversation_kind = ''
-       OR stable_external_conversation_key IS NULL
-       OR stable_external_conversation_key = ''
-    "#,
-    r#"
-    UPDATE agent_jobs
-    SET principal_id = CASE
-            WHEN principal_id IS NULL OR principal_id = '' OR principal_id = 'default'
-                THEN COALESCE(user_id, 'default')
-            ELSE principal_id
-        END,
-        actor_id = CASE
-            WHEN actor_id IS NULL OR actor_id = '' OR actor_id = 'default'
-                THEN COALESCE(user_id, NULLIF(principal_id, ''), 'default')
-            ELSE actor_id
-        END
-    WHERE principal_id IS NULL
-       OR principal_id = ''
-       OR actor_id IS NULL
-       OR actor_id = ''
-       OR actor_id = 'default'
-    "#,
-    r#"
-    UPDATE agent_jobs
-    SET credential_grants = COALESCE(NULLIF(description, ''), '[]')
-    WHERE source = 'sandbox'
-      AND (credential_grants IS NULL OR credential_grants = '' OR credential_grants = '[]')
-      AND description LIKE '[%'
-    "#,
-    r#"
-    UPDATE routines
-    SET actor_id = CASE
-            WHEN actor_id IS NULL OR actor_id = '' OR actor_id = 'default'
-                THEN COALESCE(user_id, 'default')
-            ELSE actor_id
-        END
-    WHERE actor_id IS NULL
-       OR actor_id = ''
-       OR actor_id = 'default'
-    "#,
-    r#"
-    UPDATE routine_event_inbox
-    SET idempotency_key = COALESCE(NULLIF(idempotency_key, ''), id),
-        event_type = COALESCE(NULLIF(event_type, ''), 'message'),
-        attempt_count = COALESCE(attempt_count, 0)
-    WHERE idempotency_key IS NULL
-       OR idempotency_key = ''
-       OR event_type IS NULL
-       OR event_type = ''
-       OR attempt_count IS NULL
-    "#,
-    r#"
-    UPDATE memory_chunks
-    SET embedding_blob = COALESCE(embedding_blob, embedding),
-        embedding_dim = COALESCE(embedding_dim, 1536)
-    WHERE embedding IS NOT NULL
-      AND (embedding_blob IS NULL OR embedding_dim IS NULL)
-    "#,
-    r#"
-    INSERT INTO conversation_messages_fts(conversation_messages_fts)
-    VALUES ('rebuild')
-    "#,
-];
+mod data_repairs;
+pub use data_repairs::DATA_REPAIRS;
 
 #[cfg(test)]
-#[path = "libsql_migrations_tests.rs"]
 mod tests;

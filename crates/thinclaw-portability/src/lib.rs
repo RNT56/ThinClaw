@@ -19,6 +19,6 @@ pub mod envelope;
 pub mod error;
 pub mod manifest;
 
-pub use bundle::{BundleWriter, OpenBundle};
+pub use bundle::{BundleWriter, MAX_SEALED_BUNDLE_BYTES, OpenBundle};
 pub use error::{PortabilityError, Result};
 pub use manifest::{BundleManifest, BundleSection, MANIFEST_VERSION, SectionKind};

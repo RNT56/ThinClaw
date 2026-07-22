@@ -15,8 +15,9 @@ impl DesktopAutonomyManager {
         tokio::fs::create_dir_all(&export_dir)
             .await
             .map_err(|e| format!("failed to create canary export dir: {e}"))?;
-        if tokio::fs::metadata(&textedit_doc).await.is_err() {
-            tokio::fs::write(&textedit_doc, "")
+        ensure_fixture_directory(&export_dir, "canary export directory")?;
+        if !fixture_target_exists(&textedit_doc, false, "text canary fixture")? {
+            write_autonomy_file(textedit_doc.clone(), Vec::new())
                 .await
                 .map_err(|e| format!("failed to create TextEdit canary fixture: {e}"))?;
         }
@@ -30,7 +31,7 @@ impl DesktopAutonomyManager {
         )
         .await?;
 
-        if tokio::fs::metadata(&numbers_doc).await.is_err() {
+        if !fixture_target_exists(&numbers_doc, true, "Numbers canary fixture")? {
             self.bridge_domain_action(
                 "numbers",
                 "create_doc",
@@ -38,9 +39,12 @@ impl DesktopAutonomyManager {
                 false,
             )
             .await?;
+            fixture_target_exists(&numbers_doc, true, "Numbers canary fixture")?
+                .then_some(())
+                .ok_or_else(|| "Numbers bridge did not create its canary fixture".to_string())?;
         }
 
-        if tokio::fs::metadata(&pages_doc).await.is_err() {
+        if !fixture_target_exists(&pages_doc, true, "Pages canary fixture")? {
             self.bridge_domain_action(
                 "pages",
                 "create_doc",
@@ -48,6 +52,9 @@ impl DesktopAutonomyManager {
                 false,
             )
             .await?;
+            fixture_target_exists(&pages_doc, true, "Pages canary fixture")?
+                .then_some(())
+                .ok_or_else(|| "Pages bridge did not create its canary fixture".to_string())?;
         }
 
         Ok(DesktopFixturePaths {
@@ -64,11 +71,19 @@ impl DesktopAutonomyManager {
         _user_id: &str,
         proposal_id: Uuid,
         build_id: &str,
-        build_dir: &Path,
     ) -> Result<DesktopCanaryManifest, String> {
         let live_fixtures = self.ensure_canary_fixtures().await?;
-        let shadow_home = build_dir.join("shadow-home");
-        let shadow_fixtures_dir = build_dir.join("canary-fixtures");
+        let canary_dir = self.canaries_dir().join(build_id);
+        match tokio::fs::symlink_metadata(&canary_dir).await {
+            Ok(_) => return Err("canary runtime directory already exists".to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to inspect canary runtime dir: {error}")),
+        }
+        tokio::fs::create_dir(&canary_dir)
+            .await
+            .map_err(|e| format!("failed to create canary runtime dir: {e}"))?;
+        let shadow_home = canary_dir.join("shadow-home");
+        let shadow_fixtures_dir = canary_dir.join("canary-fixtures");
         let shadow_export_dir = shadow_fixtures_dir.join("exports");
         tokio::fs::create_dir_all(&shadow_home)
             .await
@@ -102,7 +117,7 @@ impl DesktopAutonomyManager {
         let manifest = DesktopCanaryManifest {
             build_id: build_id.to_string(),
             proposal_id: proposal_id.to_string(),
-            report_path: build_dir.join("canary-report.json"),
+            report_path: canary_dir.join("canary-report.json"),
             shadow_home,
             session_id: self.default_session_id(),
             fixture_paths: DesktopFixturePaths {
@@ -113,10 +128,10 @@ impl DesktopAutonomyManager {
                 export_dir: Some(shadow_export_dir),
             },
         };
-        let manifest_path = build_dir.join("canary-manifest.json");
+        let manifest_path = canary_dir.join("canary-manifest.json");
         let raw = serde_json::to_string_pretty(&manifest)
             .map_err(|e| format!("failed to serialize canary manifest: {e}"))?;
-        tokio::fs::write(&manifest_path, raw)
+        write_autonomy_file(manifest_path.clone(), raw.into_bytes())
             .await
             .map_err(|e| format!("failed to write canary manifest: {e}"))?;
         Ok(manifest)
@@ -142,7 +157,7 @@ impl DesktopAutonomyManager {
                     err,
                     serde_json::json!({
                         "binary": self.shadow_binary_path(build_dir),
-                        "manifest": build_dir.join("canary-manifest.json"),
+                        "manifest": manifest.report_path.with_file_name("canary-manifest.json"),
                     }),
                 )],
             },
@@ -192,14 +207,25 @@ impl DesktopAutonomyManager {
                 command.env("LIBSQL_PATH", manifest.shadow_home.join("thinclaw.db"));
             }
         }
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        let output = command
-            .output()
-            .await
-            .map_err(|e| format!("failed to spawn shadow canary runner: {e}"))?;
+        let timeout_secs = self
+            .config
+            .desktop_action_timeout_secs
+            .max(5)
+            .saturating_mul(30)
+            .clamp(60, 30 * 60);
+        let output = thinclaw_platform::bounded_command_output(
+            &mut command,
+            std::time::Duration::from_secs(timeout_secs),
+            8 * 1024 * 1024,
+            1024 * 1024,
+        )
+        .await
+        .map_err(|e| format!("shadow canary runner failed: {e}"))?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stderr =
+                String::from_utf8_lossy(output.stderr.get(..32 * 1024).unwrap_or(&output.stderr))
+                    .trim()
+                    .to_string();
             return Err(if stderr.is_empty() {
                 format!("shadow canary runner exited with {}", output.status)
             } else {
@@ -207,7 +233,72 @@ impl DesktopAutonomyManager {
             });
         }
 
-        serde_json::from_slice::<DesktopCanaryReport>(&output.stdout)
-            .map_err(|e| format!("failed to decode shadow canary report: {e}"))
+        let report = serde_json::from_slice::<DesktopCanaryReport>(&output.stdout)
+            .map_err(|e| format!("failed to decode shadow canary report: {e}"))?;
+        validate_canary_report(manifest, &report)?;
+        Ok(report)
     }
+}
+
+fn ensure_fixture_directory(path: &Path, label: &str) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to inspect {label}: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!("{label} is not a real directory"));
+    }
+    Ok(())
+}
+
+fn fixture_target_exists(path: &Path, allow_directory: bool, label: &str) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                || !(metadata.is_file() || (allow_directory && metadata.is_dir())) =>
+        {
+            Err(format!("{label} is not a real file or package directory"))
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("failed to inspect {label}: {error}")),
+    }
+}
+
+fn validate_canary_report(
+    manifest: &DesktopCanaryManifest,
+    report: &DesktopCanaryReport,
+) -> Result<(), String> {
+    const REQUIRED_CHECKS: &[&str] = &[
+        "bridge_health",
+        "permissions",
+        "apps_list",
+        "calendar_crud",
+        "numbers_open_write_read_export",
+        "pages_open_insert_find_export",
+        "generic_ui_textedit_fallback",
+    ];
+
+    if report.build_id != manifest.build_id || report.fixture_paths != manifest.fixture_paths {
+        return Err("shadow canary report does not match its manifest".to_string());
+    }
+    let now = Utc::now();
+    if report.generated_at < now - chrono::Duration::hours(2)
+        || report.generated_at > now + chrono::Duration::minutes(5)
+    {
+        return Err("shadow canary report timestamp is outside the accepted window".to_string());
+    }
+    if report.passed != report.checks.iter().all(|check| check.passed)
+        || report.checks.len() != REQUIRED_CHECKS.len()
+    {
+        return Err("shadow canary report has inconsistent results".to_string());
+    }
+    let mut observed = std::collections::HashSet::new();
+    for check in &report.checks {
+        if !REQUIRED_CHECKS.contains(&check.name.as_str()) || !observed.insert(check.name.as_str())
+        {
+            return Err(
+                "shadow canary report has missing, duplicate, or unknown checks".to_string(),
+            );
+        }
+    }
+    Ok(())
 }

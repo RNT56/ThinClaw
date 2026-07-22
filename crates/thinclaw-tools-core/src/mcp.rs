@@ -217,7 +217,11 @@ pub struct McpResponse {
     /// Request ID.
     pub id: u64,
     /// Result (on success).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present_json_value"
+    )]
     pub result: Option<serde_json::Value>,
     /// Error (on failure).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -244,6 +248,15 @@ impl McpResponse {
             error: Some(error),
         }
     }
+}
+
+fn deserialize_present_json_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 /// MCP error.
@@ -304,19 +317,66 @@ impl McpTransportMessage {
 
     /// Parse a single JSON-RPC message from a value.
     pub fn from_value(value: serde_json::Value) -> Result<Self, serde_json::Error> {
-        let has_method = value.get("method").is_some();
-        let has_id = value.get("id").is_some();
+        let object = value
+            .as_object()
+            .ok_or_else(|| invalid_transport_message("JSON-RPC message must be an object"))?;
+        if object.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0") {
+            return Err(invalid_transport_message(
+                "JSON-RPC message must declare jsonrpc as exactly '2.0'",
+            ));
+        }
+
+        let has_method = object.contains_key("method");
+        let has_id = object.contains_key("id");
+        let has_result = object.contains_key("result");
+        let has_error = object.contains_key("error");
 
         match (has_method, has_id) {
-            (true, true) => serde_json::from_value(value).map(Self::Request),
-            (true, false) => serde_json::from_value(value).map(Self::Notification),
-            (false, true) => serde_json::from_value(value).map(Self::Response),
-            (false, false) => Err(serde_json::Error::io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            (true, true) => {
+                let request: McpRequest = serde_json::from_value(value)?;
+                if request.method.is_empty() {
+                    return Err(invalid_transport_message(
+                        "JSON-RPC request method cannot be empty",
+                    ));
+                }
+                Ok(Self::Request(request))
+            }
+            (true, false) => {
+                let notification: McpNotification = serde_json::from_value(value)?;
+                if notification.method.is_empty() {
+                    return Err(invalid_transport_message(
+                        "JSON-RPC notification method cannot be empty",
+                    ));
+                }
+                Ok(Self::Notification(notification))
+            }
+            (false, true) => {
+                if has_result == has_error {
+                    return Err(invalid_transport_message(
+                        "JSON-RPC response must contain exactly one of result or error",
+                    ));
+                }
+                let response: McpResponse = serde_json::from_value(value)?;
+                if has_result && response.result.is_none() || has_error && response.error.is_none()
+                {
+                    return Err(invalid_transport_message(
+                        "JSON-RPC response contains an invalid result or error member",
+                    ));
+                }
+                Ok(Self::Response(response))
+            }
+            (false, false) => Err(invalid_transport_message(
                 "message is missing both method and id",
-            ))),
+            )),
         }
     }
+}
+
+fn invalid_transport_message(message: &str) -> serde_json::Error {
+    serde_json::Error::io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message,
+    ))
 }
 
 /// Client capabilities advertised during initialization.
@@ -999,6 +1059,34 @@ mod tests {
             request,
             McpTransportMessage::Request(McpRequest { .. })
         ));
+    }
+
+    #[test]
+    fn transport_parser_enforces_json_rpc_envelope_invariants() {
+        for invalid in [
+            r#"{"id":1,"result":{}}"#,
+            r#"{"jsonrpc":"1.0","id":1,"result":{}}"#,
+            r#"{"jsonrpc":"2.0","id":1}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-1,"message":"bad"}}"#,
+            r#"{"jsonrpc":"2.0","method":""}"#,
+            r#"[]"#,
+        ] {
+            assert!(
+                McpTransportMessage::parse_str(invalid).is_err(),
+                "accepted invalid JSON-RPC envelope: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn transport_parser_preserves_an_explicit_null_result() {
+        let message = McpTransportMessage::parse_str(r#"{"jsonrpc":"2.0","id":1,"result":null}"#)
+            .expect("null is a valid JSON-RPC result");
+        let McpTransportMessage::Response(response) = message else {
+            panic!("expected response");
+        };
+        assert_eq!(response.result, Some(serde_json::Value::Null));
+        assert!(response.error.is_none());
     }
 
     #[test]

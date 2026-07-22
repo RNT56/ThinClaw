@@ -1,5 +1,10 @@
 use super::*;
 
+/// A channel implementation is external code and may stop making progress.
+/// Streaming must never keep the owning turn (and its scope execution lock)
+/// alive indefinitely while waiting for one draft/status delivery.
+const STREAM_DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Map the smart-routing complexity classifier's richer `TaskComplexity`
 /// into the config crate's minimal `SimpleComplexity`. `thinclaw-config`
 /// cannot depend on `thinclaw-llm-core` (see crate ownership docs), so the
@@ -126,6 +131,7 @@ impl Agent {
         context_messages: &mut Vec<ChatMessage>,
         context_documents: &[String],
         thread_id: Uuid,
+        session: &Arc<tokio::sync::Mutex<Session>>,
         message: &IncomingMessage,
         persistent_draft: &Arc<tokio::sync::Mutex<Option<crate::channels::DraftReplyState>>>,
         original_llm: &Arc<dyn crate::llm::LlmProvider>,
@@ -136,7 +142,7 @@ impl Agent {
         let final_last_user_message = context_messages
             .iter()
             .rev()
-            .find(|m| m.role == crate::llm::Role::User)
+            .find(|m| m.is_user_instruction())
             .map(|m| m.content.clone())
             .unwrap_or_default();
         let final_turn = self
@@ -145,6 +151,7 @@ impl Agent {
                 context_messages,
                 Vec::new(),
                 thread_id,
+                session,
                 message,
                 persistent_draft,
                 original_llm,
@@ -202,6 +209,74 @@ impl Agent {
         persist.as_ref().map(|d| (d.posted, d.accumulated.len()))
     }
 
+    /// Mirror an emergency provider context-overflow trim into canonical
+    /// thread/runtime state. Without this, the retry succeeds only in the
+    /// local request vector and a restart immediately resurrects the history
+    /// that overflowed.
+    async fn persist_context_overflow_compaction(
+        &self,
+        message: &IncomingMessage,
+        thread_id: Uuid,
+    ) -> Result<(), Error> {
+        let session = self
+            .session_manager
+            .session_for_thread(thread_id)
+            .await
+            .ok_or(crate::error::JobError::NotFound { id: thread_id })?;
+        let overflow_note = "Earlier conversation turns were removed from active context after the provider rejected the request for exceeding its model window. Durable transcript rows remain available through session search.";
+        let existing_fragment = if let Some(store) = self.store() {
+            crate::agent::load_thread_runtime(store, thread_id)
+                .await?
+                .and_then(|runtime| runtime.post_compaction_context)
+        } else {
+            None
+        };
+        let fragment = Some(match existing_fragment {
+            Some(existing) if !existing.trim().is_empty() => {
+                format!("{existing}\n\n{overflow_note}")
+            }
+            _ => overflow_note.to_string(),
+        });
+        let (original_thread, removed_rows, active_rows) = {
+            let mut session = session.lock().await;
+            let thread = session
+                .threads
+                .get_mut(&thread_id)
+                .ok_or(crate::error::JobError::NotFound { id: thread_id })?;
+            let original = thread.clone();
+            let before = thread.persisted_message_count() as i64;
+            thread.truncate_turns(1);
+            let after = thread.persisted_message_count() as i64;
+            (original, before.saturating_sub(after), after)
+        };
+        if removed_rows == 0 {
+            return Ok(());
+        }
+
+        if let Err(error) = self
+            .advance_active_history_window(thread_id, removed_rows, active_rows, fragment)
+            .await
+        {
+            let mut session = session.lock().await;
+            if let Some(thread) = session.threads.get_mut(&thread_id) {
+                thinclaw_agent::thread_ops::restore_thread_after_failed_persistence(
+                    thread,
+                    original_thread,
+                );
+            }
+            return Err(error);
+        }
+        self.session_manager
+            .get_undo_manager(thread_id)
+            .await
+            .lock()
+            .await
+            .clear();
+        self.persist_thread_runtime_snapshot(message, &session, thread_id)
+            .await;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_llm_turn(
         &self,
@@ -209,6 +284,7 @@ impl Agent {
         context_messages: &mut Vec<ChatMessage>,
         available_tools: Vec<ToolDefinition>,
         thread_id: Uuid,
+        session: &Arc<tokio::sync::Mutex<Session>>,
         message: &IncomingMessage,
         persistent_draft: &Arc<tokio::sync::Mutex<Option<crate::channels::DraftReplyState>>>,
         original_llm: &Arc<dyn crate::llm::LlmProvider>,
@@ -237,7 +313,7 @@ impl Agent {
             let last_user_msg = context_messages
                 .iter()
                 .rev()
-                .find(|m| m.role == crate::llm::Role::User)
+                .find(|m| m.is_user_instruction())
                 .map(|m| m.content.clone())
                 .unwrap_or_default();
             let system_msg = context_messages
@@ -247,42 +323,49 @@ impl Agent {
             let event = crate::hooks::HookEvent::LlmInput {
                 model: request_model_name,
                 system_message: system_msg.clone(),
-                user_message: last_user_msg,
+                user_message: last_user_msg.clone(),
                 message_count: context_messages.len(),
                 user_id: message.user_id.clone(),
             };
             match self.hooks().run_returning_event(&event).await {
-                Ok((crate::hooks::HookOutcome::Continue { modified }, final_event)) => {
+                Ok((crate::hooks::HookOutcome::Continue { .. }, final_event)) => {
                     let mut hook_changed_context = false;
-                    if let Some(new_content) = modified {
-                        if let Some(last) = context_messages
-                            .iter_mut()
-                            .rev()
-                            .find(|m| m.role == crate::llm::Role::User)
-                        {
-                            last.content = new_content;
-                        }
-                        hook_changed_context = true;
-                    }
-                    // Typed HookPatch consumption: honor user- and
-                    // system-message overrides from the final event. The
-                    // string-diff outcome above already covers user-message
-                    // changes made via HookOutcome::Continue; this also
-                    // catches a patch-only user_message override, which the
-                    // outcome cannot express.
                     if let crate::hooks::HookEvent::LlmInput {
                         system_message: final_system,
                         user_message: final_user,
                         ..
                     } = final_event
                     {
-                        if !hook_changed_context
-                            && let Some(last) = context_messages
+                        if final_user != last_user_msg {
+                            let validation = self.safety().validate_input(&final_user);
+                            if !validation.is_valid {
+                                let reason = validation
+                                    .errors
+                                    .iter()
+                                    .map(|error| format!("{}: {}", error.field, error.message))
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                return Err(crate::hooks::HookError::ExecutionFailed {
+                                    reason: format!(
+                                        "BeforeLlmInput produced an invalid user instruction: {reason}"
+                                    ),
+                                }
+                                .into());
+                            }
+                            self.persist_effective_user_instruction(
+                                thread_id,
+                                session,
+                                &final_user,
+                            )
+                            .await?;
+                            let last = context_messages
                                 .iter_mut()
                                 .rev()
-                                .find(|m| m.role == crate::llm::Role::User)
-                            && last.content != final_user
-                        {
+                                .find(|m| m.is_user_instruction())
+                                .ok_or_else(|| crate::hooks::HookError::ExecutionFailed {
+                                    reason: "BeforeLlmInput changed a missing user instruction"
+                                        .to_string(),
+                                })?;
                             last.content = final_user;
                             hook_changed_context = true;
                         }
@@ -345,9 +428,22 @@ impl Agent {
             crate::channels::StreamMode::None
         };
         let native_streaming_available = reasoning.current_llm().supports_streaming_for_model(None);
+        let output_policy_requires_buffering = self
+            .hooks()
+            .has_enabled_hook(crate::hooks::HookPoint::AfterLlmOutput)
+            .await
+            || self
+                .hooks()
+                .has_enabled_hook(crate::hooks::HookPoint::TransformResponse)
+                .await
+            || self
+                .hooks()
+                .has_enabled_hook(crate::hooks::HookPoint::BeforeOutbound)
+                .await;
         let use_streaming = options.stream_to_user
             && channel_stream_mode != crate::channels::StreamMode::None
-            && native_streaming_available;
+            && native_streaming_available
+            && !output_policy_requires_buffering;
         if options.stream_to_user
             && channel_stream_mode != crate::channels::StreamMode::None
             && !native_streaming_available
@@ -386,7 +482,7 @@ impl Agent {
         let mut compacted_for_retry = false;
         let mut transient_retries_used: u32 = 0;
         let mut streamed_text = false;
-        let output = loop {
+        let mut output = loop {
             // Snapshot the streaming draft so retry decisions can tell whether
             // this attempt already delivered partial output to the user.
             let draft_state_before = Self::draft_retry_snapshot(persistent_draft).await;
@@ -405,36 +501,71 @@ impl Agent {
                     Arc::new(tokio::sync::Mutex::new(new_draft))
                 };
 
-                let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<String>(64);
+                // The streaming callback is synchronous, so a bounded Tokio
+                // sender can only use `try_send`. Dropping on saturation makes
+                // the visible draft diverge from the provider's full response
+                // while still suppressing final delivery. The provider already
+                // accumulates this same max-token-bounded response, so an
+                // unbounded handoff adds no new asymptotic memory exposure and
+                // guarantees every emitted delta reaches the consumer.
+                let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
                 let consumer_draft = Arc::clone(&draft);
                 let consumer_channels = Arc::clone(&channels);
                 let consumer_ch_name = message.channel.clone();
                 let consumer_md = message.metadata.clone();
                 let saw_event_chunk = Arc::new(AtomicBool::new(false));
                 let consumer_saw_event_chunk = Arc::clone(&saw_event_chunk);
+                let event_delivery_failed = Arc::new(AtomicBool::new(false));
+                let consumer_event_delivery_failed = Arc::clone(&event_delivery_failed);
 
-                let consumer_handle = tokio::spawn(async move {
+                let mut consumer_handle = tokio::spawn(async move {
                     while let Some(chunk) = chunk_rx.recv().await {
                         if mode == crate::channels::StreamMode::EventChunks {
-                            consumer_saw_event_chunk.store(true, Ordering::Relaxed);
-                            // Record delivered content in the draft accumulator
-                            // even though EventChunks doesn't edit a posted
-                            // message: draft_retry_snapshot uses accumulated
-                            // length to decide whether a failed attempt may be
-                            // retried, and without this every EventChunks
-                            // attempt looked untouched — a retry would replay
-                            // content the user already saw.
+                            // Record attempted content in the retry snapshot even
+                            // when delivery fails. A timed-out channel call may
+                            // already have produced an external side effect, so a
+                            // provider retry is no longer provably safe.
                             {
                                 let mut d = consumer_draft.lock().await;
                                 d.accumulated.push_str(&chunk);
                             }
-                            let _ = consumer_channels
-                                .send_status(
+
+                            // Once an event delivery fails, drain the provider's
+                            // remaining deltas without emitting a partial tail.
+                            // The caller will send the complete final response.
+                            if consumer_event_delivery_failed.load(Ordering::Relaxed) {
+                                continue;
+                            }
+                            match tokio::time::timeout(
+                                STREAM_DELIVERY_TIMEOUT,
+                                consumer_channels.send_status(
                                     &consumer_ch_name,
                                     StatusUpdate::StreamChunk(chunk),
                                     &consumer_md,
-                                )
-                                .await;
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    consumer_saw_event_chunk.store(true, Ordering::Relaxed);
+                                }
+                                Ok(Err(error)) => {
+                                    tracing::warn!(
+                                        %error,
+                                        channel = %consumer_ch_name,
+                                        "Event stream delivery failed; falling back to the complete response"
+                                    );
+                                    consumer_event_delivery_failed.store(true, Ordering::Relaxed);
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        channel = %consumer_ch_name,
+                                        timeout_ms = STREAM_DELIVERY_TIMEOUT.as_millis() as u64,
+                                        "Event stream delivery timed out; falling back to the complete response"
+                                    );
+                                    consumer_event_delivery_failed.store(true, Ordering::Relaxed);
+                                }
+                            }
                             continue;
                         }
 
@@ -455,19 +586,33 @@ impl Agent {
                             send_draft.message_id = d.message_id.clone();
                             send_draft.posted = d.posted;
 
-                            match consumer_channels
-                                .send_draft(&consumer_ch_name, &send_draft, &consumer_md)
-                                .await
+                            match tokio::time::timeout(
+                                STREAM_DELIVERY_TIMEOUT,
+                                consumer_channels.send_draft(
+                                    &consumer_ch_name,
+                                    &send_draft,
+                                    &consumer_md,
+                                ),
+                            )
+                            .await
                             {
-                                Ok(msg_id) => d.mark_sent(msg_id),
-                                Err(crate::error::ChannelError::MessageTooLong { .. }) => {
+                                Ok(Ok(msg_id)) => d.mark_sent(msg_id),
+                                Ok(Err(crate::error::ChannelError::MessageTooLong { .. })) => {
                                     tracing::info!(
                                         "Streaming overflow detected, will fall back to on_respond()"
                                     );
                                     d.overflow = true;
                                 }
-                                Err(e) => {
+                                Ok(Err(e)) => {
                                     tracing::debug!("Draft edit failed (non-fatal): {}", e);
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        channel = %consumer_ch_name,
+                                        timeout_ms = STREAM_DELIVERY_TIMEOUT.as_millis() as u64,
+                                        "Draft delivery timed out; falling back to the complete response"
+                                    );
+                                    d.overflow = true;
                                 }
                             }
                         }
@@ -480,44 +625,84 @@ impl Agent {
                         Err(Self::turn_interrupted_error(thread_id))
                     }
                     result = reasoning.respond_with_tools_streaming(&context, move |chunk: &str| {
-                        let _ = chunk_tx.try_send(chunk.to_string());
+                        let _ = chunk_tx.send(chunk.to_string());
                     }) => {
                         result.map_err(crate::error::Error::from)
                     }
                 };
 
-                let _ = consumer_handle.await;
+                match tokio::time::timeout(STREAM_DELIVERY_TIMEOUT, &mut consumer_handle).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "Streaming consumer task failed");
+                        event_delivery_failed.store(true, Ordering::Relaxed);
+                        draft.lock().await.overflow = true;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            timeout_ms = STREAM_DELIVERY_TIMEOUT.as_millis() as u64,
+                            "Streaming consumer did not drain; aborting it and falling back to the complete response"
+                        );
+                        consumer_handle.abort();
+                        let _ = consumer_handle.await;
+                        event_delivery_failed.store(true, Ordering::Relaxed);
+                        draft.lock().await.overflow = true;
+                    }
+                }
 
                 if mode == crate::channels::StreamMode::EventChunks {
-                    let marker = if stream_result.is_ok() {
+                    let marker = if stream_result.is_ok()
+                        && !event_delivery_failed.load(Ordering::Relaxed)
+                    {
                         "stream_complete"
                     } else {
                         "stream_error"
                     };
-                    let _ = self
-                        .channels
-                        .send_status(
+                    match tokio::time::timeout(
+                        STREAM_DELIVERY_TIMEOUT,
+                        self.channels.send_status(
                             &message.channel,
                             StatusUpdate::Status(marker.to_string()),
                             &message.metadata,
-                        )
-                        .await;
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            tracing::warn!(%error, "Event stream completion marker failed");
+                            event_delivery_failed.store(true, Ordering::Relaxed);
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                timeout_ms = STREAM_DELIVERY_TIMEOUT.as_millis() as u64,
+                                "Event stream completion marker timed out"
+                            );
+                            event_delivery_failed.store(true, Ordering::Relaxed);
+                        }
+                    }
                 }
 
                 let was_streamed = {
                     let d = draft.lock().await;
                     if mode == crate::channels::StreamMode::EventChunks {
                         saw_event_chunk.load(Ordering::Relaxed)
+                            && !event_delivery_failed.load(Ordering::Relaxed)
                     } else if d.overflow {
                         if let Some(ref msg_id) = d.message_id {
                             tracing::info!(
                                 msg_id = %msg_id,
                                 "Deleting partial streaming message before fallback"
                             );
-                            let _ = self
-                                .channels
-                                .delete_message(&message.channel, msg_id, &message.metadata)
-                                .await;
+                            let _ = tokio::time::timeout(
+                                STREAM_DELIVERY_TIMEOUT,
+                                self.channels.delete_message(
+                                    &message.channel,
+                                    msg_id,
+                                    &message.metadata,
+                                ),
+                            )
+                            .await;
                         }
                         false
                     } else if d.posted && !d.accumulated.is_empty() {
@@ -527,21 +712,33 @@ impl Agent {
                         final_draft.message_id = d.message_id.clone();
                         final_draft.posted = true;
 
-                        let final_edit_ok = self
-                            .channels
-                            .send_draft(&message.channel, &final_draft, &message.metadata)
-                            .await
-                            .is_ok();
+                        let final_edit_ok = matches!(
+                            tokio::time::timeout(
+                                STREAM_DELIVERY_TIMEOUT,
+                                self.channels.send_draft(
+                                    &message.channel,
+                                    &final_draft,
+                                    &message.metadata,
+                                ),
+                            )
+                            .await,
+                            Ok(Ok(_))
+                        );
 
                         if !final_edit_ok {
                             tracing::warn!(
                                 "Final streaming edit failed, falling back to on_respond()"
                             );
                             if let Some(ref msg_id) = d.message_id {
-                                let _ = self
-                                    .channels
-                                    .delete_message(&message.channel, msg_id, &message.metadata)
-                                    .await;
+                                let _ = tokio::time::timeout(
+                                    STREAM_DELIVERY_TIMEOUT,
+                                    self.channels.delete_message(
+                                        &message.channel,
+                                        msg_id,
+                                        &message.metadata,
+                                    ),
+                                )
+                                .await;
                             }
                         }
                         final_edit_ok
@@ -626,6 +823,8 @@ impl Agent {
                                 .await;
                         }
                         *context_messages = compact_messages_for_retry(context_messages);
+                        self.persist_context_overflow_compaction(message, thread_id)
+                            .await?;
                         context = self.build_turn_context(
                             context_messages,
                             available_tools.clone(),
@@ -761,7 +960,15 @@ impl Agent {
                 user_id: message.user_id.clone(),
             };
             match self.hooks().run(&event).await {
-                Ok(crate::hooks::HookOutcome::Continue { .. }) => {}
+                Ok(crate::hooks::HookOutcome::Continue {
+                    modified: Some(modified),
+                }) => match &mut output.result {
+                    crate::llm::RespondResult::Text(text) => *text = modified,
+                    crate::llm::RespondResult::ToolCalls { content, .. } => {
+                        *content = Some(modified);
+                    }
+                },
+                Ok(crate::hooks::HookOutcome::Continue { modified: None }) => {}
                 Ok(crate::hooks::HookOutcome::Reject { reason }) => {
                     tracing::info!(reason = %reason, "AfterLlmOutput hook rejected response");
                     let streamed_msg_id = if streamed_text {

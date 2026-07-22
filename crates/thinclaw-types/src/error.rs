@@ -278,6 +278,9 @@ pub enum RepairError {
 /// Workspace/memory errors.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceError {
+    #[error("Workspace access denied for '{path}': {reason}")]
+    AccessDenied { path: String, reason: String },
+
     #[error("Document not found: {doc_type} for user {user_id}")]
     DocumentNotFound { doc_type: String, user_id: String },
 

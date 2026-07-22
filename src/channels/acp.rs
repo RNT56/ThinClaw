@@ -26,7 +26,7 @@ use crate::channels::{
     Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate, StreamMode,
 };
 use crate::error::ChannelError;
-use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
+use crate::identity::{ConversationKind, ResolvedIdentity, direct_scope_id};
 use crate::tools::mcp::McpServerConfig;
 
 const ACP_PROTOCOL_VERSION: u64 = 1;
@@ -963,7 +963,7 @@ async fn approve_pending_tool(
         .with_metadata(metadata)
         .with_identity(acp_identity(&pending.session_id));
 
-    match agent.handle_message_external(&message).await {
+    match agent.handle_message_text_external(&message).await {
         Ok(Some(response)) if !response.trim().is_empty() => {
             let _ = send_outbound(
                 writer_tx,
@@ -1351,7 +1351,7 @@ async fn handle_prompt(
         .with_metadata(metadata)
         .with_identity(acp_identity(&request.session_id));
 
-    let response = match agent.handle_message_external(&message).await {
+    let response = match agent.handle_message_text_external(&message).await {
         Ok(response) => response,
         Err(error) => {
             let message = error.to_string();
@@ -1455,7 +1455,7 @@ async fn interrupt_acp_session(agent: Arc<Agent>, state: &AcpSharedState, sessio
             .with_thread(session_id.to_string())
             .with_metadata(metadata)
             .with_identity(identity);
-        let _ = agent.handle_message_external(&message).await;
+        let _ = agent.handle_message_text_external(&message).await;
     }
 }
 
@@ -1952,7 +1952,7 @@ fn acp_identity(session_id: &str) -> ResolvedIdentity {
     ResolvedIdentity {
         principal_id: ACP_USER_ID.to_string(),
         actor_id: ACP_USER_ID.to_string(),
-        conversation_scope_id: scope_id_from_key(&key),
+        conversation_scope_id: direct_scope_id(ACP_USER_ID, ACP_USER_ID),
         conversation_kind: ConversationKind::Direct,
         raw_sender_id: ACP_USER_ID.to_string(),
         stable_external_conversation_key: key,

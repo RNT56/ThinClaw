@@ -4,14 +4,18 @@
 //! MinIO, Google Cloud Storage (XML API), and any other S3-compatible service.
 
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use opendal::services::S3;
 use opendal::Operator;
 use std::collections::HashSet;
 use tracing::{debug, info};
 
+const MAX_LIST_ENTRIES: usize = 100_000;
+
 use super::super::provider::{
-    opendal_timestamp_millis, primary_object_root, should_read_legacy_object_root, CloudEntry,
-    CloudError, CloudProvider, CloudProviderConfig, CloudStatus, LEGACY_OBJECT_ROOT,
+    opendal_timestamp_millis, primary_object_root, should_read_legacy_object_root,
+    validate_object_key, validate_object_prefix, validate_provider_config, CloudEntry, CloudError,
+    CloudProvider, CloudProviderConfig, CloudStatus, LEGACY_OBJECT_ROOT,
 };
 
 /// S3-compatible storage provider.
@@ -26,6 +30,7 @@ pub struct S3Provider {
 impl S3Provider {
     /// Create a new S3 provider from user configuration.
     pub fn from_config(config: &CloudProviderConfig) -> Result<Self, CloudError> {
+        validate_provider_config(config)?;
         let root = primary_object_root(config).to_string();
         let operator = Self::build_operator(config, &root)?;
         let legacy_operator = if should_read_legacy_object_root(config) {
@@ -104,36 +109,81 @@ impl S3Provider {
             .map_err(|e| CloudError::Provider(format!("Failed to create S3 operator: {}", e)))
     }
 
-    async fn read_key(operator: &Operator, key: &str) -> Result<Vec<u8>, CloudError> {
-        let data = operator.read(key).await.map_err(|e| {
+    async fn read_key(
+        operator: &Operator,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CloudError> {
+        let metadata = operator.stat(key).await.map_err(|e| {
             if e.kind() == opendal::ErrorKind::NotFound {
                 CloudError::NotFound(format!("S3 key not found: '{}'", key))
             } else {
                 CloudError::DownloadFailed(format!("S3 GET '{}': {}", key, e))
             }
         })?;
+        if metadata.content_length() > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+            return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+        }
+        if metadata.content_length() == 0 {
+            return Ok(Vec::new());
+        }
+        let reader = operator
+            .reader(key)
+            .await
+            .map_err(|e| CloudError::DownloadFailed(format!("S3 GET '{}': {}", key, e)))?;
+        let data = reader
+            .read(0..metadata.content_length())
+            .await
+            .map_err(|e| CloudError::DownloadFailed(format!("S3 GET '{}': {}", key, e)))?;
+        if data.len() > max_bytes {
+            return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+        }
         Ok(data.to_vec())
     }
 
     async fn list_from(operator: &Operator, prefix: &str) -> Result<Vec<CloudEntry>, CloudError> {
-        let entries = operator.list(prefix).await.map_err(|e| {
-            if e.kind() == opendal::ErrorKind::NotFound {
-                CloudError::NotFound(format!("S3 prefix not found: '{}'", prefix))
-            } else {
-                CloudError::Provider(format!("S3 LIST '{}': {}", prefix, e))
-            }
-        })?;
+        let mut entries = operator
+            .lister_with(prefix)
+            .recursive(true)
+            .await
+            .map_err(|e| {
+                if e.kind() == opendal::ErrorKind::NotFound {
+                    CloudError::NotFound(format!("S3 prefix not found: '{}'", prefix))
+                } else {
+                    CloudError::Provider(format!("S3 LIST '{}': {}", prefix, e))
+                }
+            })?;
 
         let mut result = Vec::new();
-        for entry in entries {
+        let mut entries_seen = 0_usize;
+        while let Some(entry) = entries
+            .try_next()
+            .await
+            .map_err(|error| CloudError::Provider(format!("S3 LIST '{}': {}", prefix, error)))?
+        {
+            entries_seen += 1;
+            if entries_seen > MAX_LIST_ENTRIES {
+                return Err(CloudError::Provider(
+                    "S3 listing exceeds its safety limit".to_string(),
+                ));
+            }
             // Skip directories
             if entry.path().ends_with('/') {
                 continue;
             }
-            let meta = operator
-                .stat(entry.path())
-                .await
-                .unwrap_or_else(|_| opendal::Metadata::new(opendal::EntryMode::Unknown));
+            validate_object_key(entry.path())?;
+            let meta = match operator.stat(entry.path()).await {
+                Ok(metadata) if metadata.is_file() => metadata,
+                Ok(_) => continue,
+                Err(error) if error.kind() == opendal::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(CloudError::Provider(format!(
+                        "S3 stat '{}': {}",
+                        entry.path(),
+                        error
+                    )))
+                }
+            };
 
             result.push(CloudEntry {
                 key: entry.path().to_string(),
@@ -157,13 +207,22 @@ impl S3Provider {
         }
     }
 
-    fn merge_legacy_entries(primary: &mut Vec<CloudEntry>, legacy: Vec<CloudEntry>) {
+    fn merge_legacy_entries(
+        primary: &mut Vec<CloudEntry>,
+        legacy: Vec<CloudEntry>,
+    ) -> Result<(), CloudError> {
         let mut seen: HashSet<String> = primary.iter().map(|entry| entry.key.clone()).collect();
         for entry in legacy {
             if seen.insert(entry.key.clone()) {
                 primary.push(entry);
+                if primary.len() > MAX_LIST_ENTRIES {
+                    return Err(CloudError::Provider(
+                        "S3 listing exceeds its safety limit".to_string(),
+                    ));
+                }
             }
         }
+        Ok(())
     }
 }
 
@@ -174,23 +233,13 @@ impl CloudProvider for S3Provider {
     }
 
     async fn test_connection(&self) -> Result<CloudStatus, CloudError> {
-        // List root to verify connectivity and auth
         let entries = self
-            .operator
             .list("")
             .await
-            .map_err(|e| CloudError::ConnectionFailed(format!("S3 list failed: {}", e)))?;
-
-        // Calculate approximate usage from listing
-        let mut total_size: u64 = 0;
-        for entry in &entries {
-            let meta = self
-                .operator
-                .stat(entry.path())
-                .await
-                .unwrap_or_else(|_| opendal::Metadata::new(opendal::EntryMode::Unknown));
-            total_size += meta.content_length();
-        }
+            .map_err(|error| CloudError::ConnectionFailed(format!("S3 list failed: {error}")))?;
+        let total_size = entries
+            .iter()
+            .fold(0_u64, |total, entry| total.saturating_add(entry.size));
 
         Ok(CloudStatus {
             connected: true,
@@ -201,6 +250,7 @@ impl CloudProvider for S3Provider {
     }
 
     async fn put(&self, key: &str, data: &[u8]) -> Result<(), CloudError> {
+        validate_object_key(key)?;
         debug!("[cloud/s3] PUT {} ({} bytes)", key, data.len());
         self.operator
             .write(key, data.to_vec())
@@ -209,14 +259,15 @@ impl CloudProvider for S3Provider {
         Ok(())
     }
 
-    async fn get(&self, key: &str) -> Result<Vec<u8>, CloudError> {
+    async fn get_bounded(&self, key: &str, max_bytes: usize) -> Result<Vec<u8>, CloudError> {
+        validate_object_key(key)?;
         debug!("[cloud/s3] GET {}", key);
-        match Self::read_key(&self.operator, key).await {
+        match Self::read_key(&self.operator, key, max_bytes).await {
             Ok(data) => Ok(data),
             Err(CloudError::NotFound(_)) => {
                 if let Some(legacy_operator) = &self.legacy_operator {
                     debug!("[cloud/s3] GET {} falling back to legacy root", key);
-                    Self::read_key(legacy_operator, key).await
+                    Self::read_key(legacy_operator, key, max_bytes).await
                 } else {
                     Err(CloudError::NotFound(format!("S3 key not found: '{}'", key)))
                 }
@@ -226,6 +277,7 @@ impl CloudProvider for S3Provider {
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudError> {
+        validate_object_key(key)?;
         debug!("[cloud/s3] DELETE {}", key);
         self.operator
             .delete(key)
@@ -235,6 +287,7 @@ impl CloudProvider for S3Provider {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<CloudEntry>, CloudError> {
+        validate_object_prefix(prefix)?;
         debug!("[cloud/s3] LIST prefix={}", prefix);
         let mut result = match Self::list_from(&self.operator, prefix).await {
             Ok(entries) => entries,
@@ -249,13 +302,14 @@ impl CloudProvider for S3Provider {
                 Err(CloudError::NotFound(_)) => Vec::new(),
                 Err(e) => return Err(e),
             };
-            Self::merge_legacy_entries(&mut result, legacy_entries);
+            Self::merge_legacy_entries(&mut result, legacy_entries)?;
         }
 
         Ok(result)
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudError> {
+        validate_object_key(key)?;
         if Self::exists_in(&self.operator, key).await? {
             return Ok(true);
         }
@@ -270,7 +324,9 @@ impl CloudProvider for S3Provider {
     async fn usage(&self) -> Result<u64, CloudError> {
         // S3 doesn't have a native usage API; sum up all objects
         let entries = self.list("").await?;
-        Ok(entries.iter().map(|e| e.size).sum())
+        Ok(entries
+            .iter()
+            .fold(0_u64, |total, entry| total.saturating_add(entry.size)))
     }
 
     fn max_upload_size(&self) -> u64 {

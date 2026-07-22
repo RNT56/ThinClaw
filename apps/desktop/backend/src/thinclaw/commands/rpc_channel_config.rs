@@ -7,8 +7,6 @@
 use serde_json::{json, Value};
 use tauri::State;
 
-use super::ThinClawManager;
-use crate::secret_store::SecretStore;
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 /// Return the configuration schema for a single channel, if it exposes one.
@@ -54,8 +52,6 @@ pub async fn thinclaw_channel_config_schemas(
 #[specta::specta]
 pub async fn thinclaw_channel_config_submit(
     ironclaw: State<'_, ThinClawRuntimeState>,
-    manager: State<'_, ThinClawManager>,
-    secret_store: State<'_, SecretStore>,
     channel_id: String,
     values: Value,
 ) -> Result<Value, crate::thinclaw::bridge::BridgeError> {
@@ -88,28 +84,23 @@ pub async fn thinclaw_channel_config_submit(
     let obj = values.as_object().cloned().ok_or_else(|| {
         crate::thinclaw::bridge::BridgeError::from("channel config must be a JSON object")
     })?;
+    if channel_id.trim().is_empty()
+        || channel_id.len() > 128
+        || channel_id.chars().any(char::is_control)
+        || obj.len() > 256
+    {
+        return Err(crate::thinclaw::bridge::BridgeError::from(
+            "channel config target is malformed or oversized",
+        ));
+    }
 
     let schema = agent
         .channels()
         .config_schema_for(&channel_id)
         .await
         .ok_or_else(|| {
-            crate::thinclaw::bridge::BridgeError::from(format!(
-                "channel '{channel_id}' does not expose a configuration schema"
-            ))
+            crate::thinclaw::bridge::BridgeError::from("channel does not expose a config schema")
         })?;
-    for field in schema
-        .fields
-        .iter()
-        .filter(|field| field.required && field.field_type != "password")
-    {
-        if !obj.contains_key(&field.id) {
-            return Err(crate::thinclaw::bridge::BridgeError::from(format!(
-                "missing required channel config field: {}",
-                field.id
-            )));
-        }
-    }
     for (field_id, value) in &obj {
         let field = schema
             .fields
@@ -120,13 +111,16 @@ pub async fn thinclaw_channel_config_submit(
                     "unknown channel config field: {field_id}"
                 ))
             })?;
+        if field.field_type == "password" {
+            return Err(crate::thinclaw::bridge::BridgeError::from(
+                "password fields require an encrypted channel-secret binding",
+            ));
+        }
         let required_value_missing = field.required
-            && field.field_type != "password"
             && (value.is_null() || value.as_str().is_some_and(|value| value.trim().is_empty()));
         let value_valid = (!field.required && value.is_null())
             || match field.field_type.as_str() {
-                "password" => value.is_null() || value.is_string(),
-                "text" | "textarea" => value.is_string(),
+                "text" | "password" | "textarea" => value.is_string(),
                 "number" => value.is_number(),
                 "checkbox" => value.is_boolean(),
                 "select" => value.as_str().is_some_and(|value| {
@@ -144,67 +138,41 @@ pub async fn thinclaw_channel_config_submit(
         }
     }
 
-    let mut setting_values = obj.clone();
-    let mut secrets_updated = 0usize;
-    for field in schema
-        .fields
-        .iter()
-        .filter(|field| field.field_type == "password")
-    {
-        setting_values.remove(&field.id);
-        let Some(value) = obj
-            .get(&field.id)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        super::keys::upsert_granted_channel_secret(
-            &manager,
-            &secret_store,
-            &channel_id,
-            &field.id,
-            value,
-        )
-        .await?;
-        secrets_updated += 1;
-    }
-
-    // Persist non-secret fields under channels.{channel_id}_{field}.
+    // Persist the submitted fields atomically under channels.{channel_id}_{field}.
     let mut persisted = false;
     if let Some(store) = agent.store() {
-        for (field, val) in &setting_values {
+        let mut settings = std::collections::HashMap::with_capacity(obj.len());
+        for (field, val) in &obj {
             let key = format!("channels.{channel_id}_{field}");
-            thinclaw_core::api::config::set_setting(store, "local_user", &key, val)
-                .await
-                .map_err(|error| {
-                    crate::thinclaw::bridge::BridgeError::from(format!(
-                        "failed to persist {key}: {error}"
-                    ))
-                })?;
+            settings.insert(key, val.clone());
         }
+        thinclaw_core::api::config::import_settings(store, "local_user", &settings)
+            .await
+            .map_err(|error| {
+                crate::thinclaw::bridge::BridgeError::from(format!(
+                    "failed to persist channel config: {error}"
+                ))
+            })?;
         persisted = true;
     }
 
     // Forward to the live channel (no-op for native channels that don't override).
-    let updates: std::collections::HashMap<String, Value> = setting_values.into_iter().collect();
-    agent
+    let updates: std::collections::HashMap<String, Value> = obj.into_iter().collect();
+    let forwarded = agent
         .channels()
         .update_channel_runtime_config(&channel_id, updates)
         .await
-        .map_err(|error| {
-            crate::thinclaw::bridge::BridgeError::from(format!(
-                "failed to update channel '{channel_id}': {error}"
-            ))
-        })?;
+        .is_ok();
 
     Ok(json!({
-        "ok": true,
+        "ok": forwarded,
         "channel_id": channel_id,
         "persisted": persisted,
-        "forwarded": true,
-        "secrets_updated": secrets_updated,
-        "note": "Settings were saved without exposing credentials. Restart or reactivate native and WASM channels after replacing startup-only fields.",
+        "forwarded": forwarded,
+        "note": if forwarded {
+            "Settings saved and forwarded to the channel. Native channels (e.g. Signal, Discord) may require a channel restart to take effect."
+        } else {
+            "Channel is not currently registered; settings were saved and will apply when it starts."
+        },
     }))
 }

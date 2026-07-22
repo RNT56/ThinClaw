@@ -6,7 +6,7 @@ use super::*;
 
 #[cfg(feature = "postgres")]
 impl Store {
-    async fn bump_routine_event_cache_version(
+    pub(super) async fn bump_routine_event_cache_version(
         &self,
         conn: &tokio_postgres::Client,
     ) -> Result<(), DatabaseError> {
@@ -260,6 +260,43 @@ impl Store {
                 &(consecutive_failures as i32),
                 state,
             ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn advance_routine_runtime(
+        &self,
+        id: Uuid,
+        last_run_at: DateTime<Utc>,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            UPDATE routines SET
+                last_run_at = $2,
+                next_fire_at = $3,
+                run_count = run_count + 1,
+                consecutive_failures = 0,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+            &[&id, &last_run_at, &next_fire_at],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_routine_next_fire_at(
+        &self,
+        id: Uuid,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE routines SET next_fire_at = $2, updated_at = now() WHERE id = $1",
+            &[&id, &next_fire_at],
         )
         .await?;
         Ok(())

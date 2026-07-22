@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// `token_hash` is `hex(SHA-256(full token string))` — see
 /// [`super::store::hash_token`]. The raw token is never stored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeviceRecord {
     /// UUID v4, stringified.
@@ -75,6 +75,35 @@ pub struct DeviceRecord {
     pub expires_at: Option<String>,
 }
 
+impl std::fmt::Debug for DeviceRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DeviceRecord")
+            .field("device_id", &self.device_id)
+            .field("name", &self.name)
+            .field("platform", &self.platform)
+            .field("created_at", &self.created_at)
+            .field("last_seen_at", &self.last_seen_at)
+            .field("token_hash", &"[REDACTED]")
+            .field("token_prefix", &self.token_prefix)
+            .field("scopes", &self.scopes)
+            .field("pubkey_configured", &self.pubkey.is_some())
+            .field("apns", &self.apns)
+            .field("live_activities", &self.live_activities)
+            .field(
+                "live_activity_start_token",
+                &self
+                    .live_activity_start_token
+                    .as_ref()
+                    .map(|_| "[REDACTED]"),
+            )
+            .field("parent_device_id", &self.parent_device_id)
+            .field("revoked_at", &self.revoked_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 impl DeviceRecord {
     /// True if this device is a companion (has a parent device). Companions
     /// are subject to the watch low-risk-only approval rule and are cascade-
@@ -105,7 +134,7 @@ pub const MAX_LIVE_ACTIVITIES_PER_DEVICE: usize = 16;
 /// Persisted APNs registration for a device's content-free pushes (D-N1).
 /// Only the device token, target environment, and last-updated timestamp are
 /// stored; payload content is never persisted here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeviceApnsRegistration {
     /// APNs device token (hex string from `didRegisterForRemoteNotifications`).
@@ -115,6 +144,17 @@ pub struct DeviceApnsRegistration {
     pub environment: String,
     /// RFC 3339 timestamp of the last registration update.
     pub updated_at: String,
+}
+
+impl std::fmt::Debug for DeviceApnsRegistration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DeviceApnsRegistration")
+            .field("device_token", &"[REDACTED]")
+            .field("environment", &self.environment)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 /// The kind of Live Activity a registered push token drives (D-N2). Mirrors
@@ -138,7 +178,7 @@ impl DeviceLiveActivityKind {
 }
 
 /// Persisted Live Activity update-push token for one `activity_id` (D-N2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeviceLiveActivityToken {
     /// APNs Live Activity update token.
@@ -159,6 +199,19 @@ pub struct DeviceLiveActivityToken {
     /// RFC 3339 timestamp of the last registration update. Also the key used
     /// for oldest-first eviction when the per-device cap is exceeded.
     pub updated_at: String,
+}
+
+impl std::fmt::Debug for DeviceLiveActivityToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DeviceLiveActivityToken")
+            .field("push_token", &"[REDACTED]")
+            .field("kind", &self.kind)
+            .field("thread_id", &self.thread_id)
+            .field("job_id", &self.job_id)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 /// Platform family of a paired device.
@@ -259,7 +312,7 @@ impl DeviceScope {
 ///
 /// Field names are intentionally short — this travels through a QR code.
 /// Unknown fields must be ignored by readers (versioned via `v`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct QrPairingPayload {
     /// Payload version.
@@ -279,8 +332,23 @@ pub struct QrPairingPayload {
     pub exp: i64,
 }
 
+impl std::fmt::Debug for QrPairingPayload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QrPairingPayload")
+            .field("v", &self.v)
+            .field("url_count", &self.urls.len())
+            .field("fingerprint_configured", &self.fp.is_some())
+            .field("iid", &self.iid)
+            .field("name", &self.name)
+            .field("sec", &"[REDACTED]")
+            .field("exp", &self.exp)
+            .finish()
+    }
+}
+
 /// Response to `POST /api/devices/pair/start` (admin-only).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PairStartResponse {
     pub qr_payload: QrPairingPayload,
@@ -301,9 +369,22 @@ pub struct PairStartResponse {
     pub pairing_id: String,
 }
 
+impl std::fmt::Debug for PairStartResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PairStartResponse")
+            .field("qr_payload", &self.qr_payload)
+            .field("qr_uri", &"[REDACTED]")
+            .field("human_code", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("pairing_id", &self.pairing_id)
+            .finish()
+    }
+}
+
 /// `POST /api/devices/pair/complete` request body (public endpoint,
 /// protected only by the one-time secret / human code).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PairCompleteRequest {
     /// One-time 32-byte secret (base64url) from the QR, OR the short human
@@ -319,9 +400,22 @@ pub struct PairCompleteRequest {
     pub pubkey: Option<String>,
 }
 
+impl std::fmt::Debug for PairCompleteRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PairCompleteRequest")
+            .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
+            .field("code", &self.code.as_ref().map(|_| "[REDACTED]"))
+            .field("name", &self.name)
+            .field("platform", &self.platform)
+            .field("pubkey_configured", &self.pubkey.is_some())
+            .finish()
+    }
+}
+
 /// `POST /api/devices/pair/complete` response — the only place the raw
 /// device token is ever returned.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PairCompleteResponse {
     pub device_id: String,
@@ -329,6 +423,18 @@ pub struct PairCompleteResponse {
     pub token: String,
     pub scopes: Vec<DeviceScope>,
     pub gateway_instance: String,
+}
+
+impl std::fmt::Debug for PairCompleteResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PairCompleteResponse")
+            .field("device_id", &self.device_id)
+            .field("token", &"[REDACTED]")
+            .field("scopes", &self.scopes)
+            .field("gateway_instance", &self.gateway_instance)
+            .finish()
+    }
 }
 
 // --- Device management DTOs ---
@@ -380,7 +486,7 @@ pub struct DeviceListResponse {
 
 /// `POST /api/devices/{id}/rotate` response — the only other place a raw
 /// token is returned.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RotateTokenResponse {
     pub device_id: String,
@@ -388,8 +494,18 @@ pub struct RotateTokenResponse {
     pub token: String,
 }
 
+impl std::fmt::Debug for RotateTokenResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RotateTokenResponse")
+            .field("device_id", &self.device_id)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// `POST /api/devices/{id}/rename` request body.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RenameDeviceRequest {
     pub name: String,
@@ -399,7 +515,7 @@ pub struct RenameDeviceRequest {
 
 /// `PUT /api/devices/me/push` request body: register (or replace) the
 /// device's APNs token for content-free pushes.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RegisterPushRequest {
     /// APNs device token (hex from `didRegisterForRemoteNotifications`).
@@ -408,9 +524,19 @@ pub struct RegisterPushRequest {
     pub environment: String,
 }
 
+impl std::fmt::Debug for RegisterPushRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegisterPushRequest")
+            .field("apns_token", &"[REDACTED]")
+            .field("environment", &self.environment)
+            .finish()
+    }
+}
+
 /// `PUT /api/devices/me/live-activity/{activity_id}` request body: register
 /// (or replace) the Live Activity update-push token for one activity.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RegisterLiveActivityRequest {
     /// APNs Live Activity update token.
@@ -428,13 +554,34 @@ pub struct RegisterLiveActivityRequest {
     pub job_id: Option<String>,
 }
 
+impl std::fmt::Debug for RegisterLiveActivityRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegisterLiveActivityRequest")
+            .field("push_token", &"[REDACTED]")
+            .field("kind", &self.kind)
+            .field("thread_id", &self.thread_id)
+            .field("job_id", &self.job_id)
+            .finish()
+    }
+}
+
 /// `PUT /api/devices/me/live-activity-start-token` request body: register (or
 /// replace) the device's Live Activity push-to-start token.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RegisterLiveActivityStartTokenRequest {
     /// APNs Live Activity push-to-start token.
     pub push_token: String,
+}
+
+impl std::fmt::Debug for RegisterLiveActivityStartTokenRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegisterLiveActivityStartTokenRequest")
+            .field("push_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 // --- Companion device DTOs (milestone M4, device-token-only, `devices:self`) ---
@@ -464,7 +611,7 @@ impl CreateCompanionRequest {
 
 /// `POST /api/devices/me/companions` response — the only place the companion's
 /// raw token is ever returned.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CreateCompanionResponse {
     pub device_id: String,
@@ -473,6 +620,18 @@ pub struct CreateCompanionResponse {
     pub scopes: Vec<DeviceScope>,
     /// The parent (minting) device id, echoed for the client's record.
     pub parent_device_id: String,
+}
+
+impl std::fmt::Debug for CreateCompanionResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CreateCompanionResponse")
+            .field("device_id", &self.device_id)
+            .field("token", &"[REDACTED]")
+            .field("scopes", &self.scopes)
+            .field("parent_device_id", &self.parent_device_id)
+            .finish()
+    }
 }
 
 /// `GET /api/devices/me/companions` response: the calling device's own

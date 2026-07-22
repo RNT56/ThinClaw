@@ -17,7 +17,7 @@ use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 #[cfg(feature = "browser")]
-use crate::tools::builtin::{AgentBrowserTool, BrowserTool};
+use crate::tools::builtin::{AgentBrowserTool, BrowserTool, RootBrowserEgressRuntime};
 use crate::tools::builtin::{
     DesktopAutonomyPort, ExecuteCodeTool, ExtensionManagementPort, ExternalMemoryExportTool,
     ExternalMemoryOffTool, ExternalMemoryPort, ExternalMemoryRecallTool, ExternalMemorySetupTool,
@@ -71,6 +71,10 @@ pub struct ToolRegistry {
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     /// Secrets store for credential injection (shared with HTTP tool).
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Stable owner for Docker-backed built-ins created by this runtime.
+    runtime_scope: String,
+    /// Image containing ThinClaw's narrow network-relay entrypoint.
+    browser_relay_image: String,
 }
 
 impl ToolRegistry {
@@ -80,7 +84,21 @@ impl ToolRegistry {
             inner: thinclaw_tools::ToolRegistry::new(),
             credential_registry: None,
             secrets_store: None,
+            runtime_scope: crate::runtime_lease::runtime_scope_id_for_path(
+                &crate::platform::resolve_data_dir(""),
+            ),
+            browser_relay_image: thinclaw_types::sandbox::SandboxConfig::default().image,
         }
+    }
+
+    pub fn with_runtime_scope(mut self, runtime_scope: impl Into<String>) -> Self {
+        self.runtime_scope = runtime_scope.into();
+        self
+    }
+
+    pub fn with_browser_relay_image(mut self, image: impl Into<String>) -> Self {
+        self.browser_relay_image = image.into();
+        self
     }
 
     /// Create a registry with credential injection support.
@@ -105,8 +123,16 @@ impl ToolRegistry {
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a built-in name.
-    pub async fn register(&self, tool: Arc<dyn Tool>) {
-        self.inner.register(tool).await;
+    pub async fn register(&self, tool: Arc<dyn Tool>) -> bool {
+        let name = tool.name().to_string();
+        let registered = self.inner.register(tool).await;
+        if !registered {
+            tracing::warn!(
+                tool = name,
+                "Rejected dynamic tool registration because its name is protected"
+            );
+        }
+        registered
     }
 
     /// Register a tool as built-in using async locks.
@@ -123,6 +149,9 @@ impl ToolRegistry {
 
     /// Unregister a tool.
     pub async fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        if let Some(registry) = self.credential_registry.as_ref() {
+            registry.remove_source(name);
+        }
         self.inner.unregister(name).await
     }
 
@@ -149,6 +178,12 @@ impl ToolRegistry {
     /// Get all tools.
     pub async fn all(&self) -> Vec<Arc<dyn Tool>> {
         self.inner.all().await
+    }
+
+    /// Release subprocesses, remote sessions, and background tasks owned by
+    /// registered tools.
+    pub async fn shutdown_all(&self) {
+        self.inner.shutdown_all().await;
     }
 
     /// Get tool descriptors for internal routing and policy decisions.
@@ -302,7 +337,9 @@ impl ToolRegistry {
                 || browser_backend.eq_ignore_ascii_case("agent-browser")
             {
                 tracing::info!("Registering browser tool with agent-browser backend");
-                Arc::new(AgentBrowserTool::new())
+                Arc::new(AgentBrowserTool::new_with_egress(Arc::new(
+                    RootBrowserEgressRuntime::default(),
+                )))
             } else if cloud_browser_provider.is_some() {
                 tracing::info!(
                     provider = cloud_browser_provider.unwrap_or("auto"),
@@ -313,8 +350,13 @@ impl ToolRegistry {
                     cloud_browser_provider.map(std::borrow::ToOwned::to_owned),
                 ))
             } else if crate::platform::BrowserDockerMode::from_env_lossy().allows_docker() {
-                let docker_config =
-                    crate::sandbox::docker_chromium::DockerChromiumConfig::from_env();
+                let mut docker_config =
+                    crate::sandbox::docker_chromium::DockerChromiumConfig::from_env()
+                        .with_runtime_scope(self.runtime_scope.clone());
+                if std::env::var_os("BROWSER_RELAY_IMAGE").is_none() {
+                    docker_config =
+                        docker_config.with_relay_image(self.browser_relay_image.clone());
+                }
                 tracing::info!(
                     image = %docker_config.image,
                     port = docker_config.debug_port,

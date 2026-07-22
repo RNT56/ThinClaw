@@ -33,6 +33,8 @@ use thinclaw_tools::execution::{
     SandboxJobExecutionBackend as RootIndependentSandboxJobExecutionBackend,
 };
 
+const SANDBOX_JOB_PERSIST_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 pub struct JobOrchestrationContext {
     context_manager: Arc<ContextManager>,
@@ -82,13 +84,19 @@ impl JobOrchestrationContext {
             .unwrap_or(false)
     }
 
-    fn persist_job(&self, job: SandboxJobRecord) {
-        if let Some(store) = self.store.clone() {
-            tokio::spawn(async move {
-                if let Err(error) = store.save_sandbox_job(&job).await {
-                    tracing::warn!(job_id = %job.id, "Failed to persist sandbox job: {}", error);
-                }
-            });
+    async fn persist_job(&self, job: &SandboxJobRecord) -> Result<(), ToolError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        match tokio::time::timeout(SANDBOX_JOB_PERSIST_TIMEOUT, store.save_sandbox_job(job)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(ToolError::ExecutionFailed(format!(
+                "failed to persist sandbox job before execution: {error}"
+            ))),
+            Err(_) => Err(ToolError::ExecutionFailed(format!(
+                "timed out persisting sandbox job before execution after {} seconds",
+                SANDBOX_JOB_PERSIST_TIMEOUT.as_secs()
+            ))),
         }
     }
 
@@ -101,7 +109,7 @@ impl JobOrchestrationContext {
         )
     }
 
-    fn update_status(
+    async fn update_status(
         &self,
         job_id: Uuid,
         status: &str,
@@ -110,23 +118,30 @@ impl JobOrchestrationContext {
         started_at: Option<chrono::DateTime<Utc>>,
         completed_at: Option<chrono::DateTime<Utc>>,
     ) {
-        if let Some(store) = self.store.clone() {
-            let status = status.to_string();
-            tokio::spawn(async move {
-                if let Err(error) = store
-                    .update_sandbox_job_status(
-                        job_id,
-                        &status,
-                        success,
-                        message.as_deref(),
-                        started_at,
-                        completed_at,
-                    )
-                    .await
-                {
-                    tracing::warn!(job_id = %job_id, "Failed to update sandbox job status: {}", error);
-                }
-            });
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let update = store.update_sandbox_job_status(
+            job_id,
+            status,
+            success,
+            message.as_deref(),
+            started_at,
+            completed_at,
+        );
+        match tokio::time::timeout(SANDBOX_JOB_PERSIST_TIMEOUT, update).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(job_id = %job_id, %status, "Failed to update sandbox job status: {error}");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    job_id = %job_id,
+                    %status,
+                    timeout_secs = SANDBOX_JOB_PERSIST_TIMEOUT.as_secs(),
+                    "Timed out updating sandbox job status"
+                );
+            }
         }
     }
 
@@ -189,12 +204,16 @@ impl JobOrchestrationContext {
         let explicit_project_dir = request.explicit_project_dir.clone();
         let (project_dir, browse_id) = resolve_project_dir(explicit_project_dir, job_id)?;
         let project_dir_str = project_dir.display().to_string();
-        let spec = build_sandbox_job_spec(
+        let mut spec = build_sandbox_job_spec(
             &request,
             mode,
             project_dir_str.clone(),
             job_manager.interactive_idle_timeout_secs(),
         );
+        job_manager.stamp_job_spec(&mut spec);
+        job_manager
+            .validate_job_spec(job_id, &spec)
+            .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
 
         let credential_grants_json = match credential_grants_restart_json(
             &request.credential_grants,
@@ -210,7 +229,7 @@ impl JobOrchestrationContext {
             }
         };
 
-        self.persist_job(SandboxJobRecord {
+        self.persist_job(&SandboxJobRecord {
             id: job_id,
             spec: spec.clone(),
             status: "creating".to_string(),
@@ -220,25 +239,31 @@ impl JobOrchestrationContext {
             started_at: None,
             completed_at: None,
             credential_grants_json,
-        });
+        })
+        .await?;
 
-        job_manager
+        if let Err(error) = job_manager
             .create_job(job_id, spec.clone(), request.credential_grants.clone())
             .await
-            .map_err(|error| {
-                self.update_status(
-                    job_id,
-                    "failed",
-                    Some(false),
-                    Some(error.to_string()),
-                    None,
-                    Some(Utc::now()),
-                );
-                ToolError::ExecutionFailed(format!("failed to create container: {}", error))
-            })?;
+        {
+            self.update_status(
+                job_id,
+                "failed",
+                Some(false),
+                Some(error.to_string()),
+                None,
+                Some(Utc::now()),
+            )
+            .await;
+            return Err(ToolError::ExecutionFailed(format!(
+                "failed to create container: {}",
+                error
+            )));
+        }
 
         let now = Utc::now();
-        self.update_status(job_id, "running", None, None, Some(now), None);
+        self.update_status(job_id, "running", None, None, Some(now), None)
+            .await;
 
         if spec.interactive
             && let (Some(parent_job_id), Some(children)) =
@@ -249,11 +274,21 @@ impl JobOrchestrationContext {
 
         if !request.wait {
             if let (Some(event_tx), Some(inject_tx)) = (&self.event_tx, &self.inject_tx) {
-                crate::agent::job_monitor::spawn_job_monitor(
+                let monitor = crate::agent::job_monitor::run_job_monitor(
                     job_id,
                     event_tx.subscribe(),
                     inject_tx.clone(),
                 );
+                if let Some(tasks) = self.sandbox_children.as_ref() {
+                    if !tasks.spawn_auxiliary_task(monitor) {
+                        tracing::warn!(
+                            %job_id,
+                            "Sandbox runtime rejected job monitor during shutdown"
+                        );
+                    }
+                } else {
+                    tokio::spawn(monitor);
+                }
             }
             return Ok(JobExecutionResult::sandbox_started(
                 job_id,
@@ -341,7 +376,8 @@ impl JobOrchestrationContext {
                         None,
                         None,
                         Some(Utc::now()),
-                    );
+                    )
+                    .await;
                     return Ok(JobExecutionResult::sandbox_completed(
                         job_id,
                         mode,
@@ -536,27 +572,32 @@ impl ExecutionBackend for DockerSandboxExecutionBackend {
         .await;
 
         match result {
-            Ok(Ok(output)) => Ok(ExecutionResult {
-                stdout: truncate_output(&output.stdout),
-                stderr: truncate_output(&output.stderr),
-                output: truncate_output(&output.output),
-                exit_code: output.exit_code,
-                backend: self.kind(),
-                runtime: RuntimeDescriptor::execution_surface(
-                    self.kind(),
-                    "shell",
-                    vec![
-                        "captured_output".to_string(),
-                        "short_lived_command".to_string(),
-                    ],
-                    if request.allow_network {
-                        NetworkIsolationKind::None
-                    } else {
-                        NetworkIsolationKind::Hard
-                    },
-                ),
-                duration: start.elapsed(),
-            }),
+            Ok(Ok(output)) => {
+                let mut runtime_capabilities = vec![
+                    "captured_output".to_string(),
+                    "short_lived_command".to_string(),
+                ];
+                if request.allow_network {
+                    runtime_capabilities.push("allowlisted_proxy_egress".to_string());
+                }
+                Ok(ExecutionResult {
+                    stdout: truncate_output(&output.stdout),
+                    stderr: truncate_output(&output.stderr),
+                    output: truncate_output(&output.output),
+                    exit_code: output.exit_code,
+                    backend: self.kind(),
+                    runtime: RuntimeDescriptor::execution_surface(
+                        self.kind(),
+                        "shell",
+                        runtime_capabilities,
+                        // Network-enabled Docker commands still have hard direct-
+                        // egress isolation; the authenticated allowlist proxy is
+                        // their only external route.
+                        NetworkIsolationKind::Hard,
+                    ),
+                    duration: start.elapsed(),
+                })
+            }
             Ok(Err(e)) => Err(ToolError::ExecutionFailed(format!("Sandbox error: {}", e))),
             Err(_) => Err(ToolError::Timeout(request.timeout)),
         }

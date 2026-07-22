@@ -1,6 +1,9 @@
 //! Local embedding backend — wraps existing llama-server / MLX embed server.
 
-use crate::inference::embedding::{validate_embedding_batch, EmbeddingBackend};
+use crate::inference::embedding::{
+    bounded_embedding_json, embedding_http_client, normalize_embedding_response,
+    validate_embedding_request, EmbeddingBackend,
+};
 use crate::inference::{BackendInfo, InferenceError, InferenceResult};
 use async_trait::async_trait;
 
@@ -16,6 +19,8 @@ pub struct LocalEmbeddingBackend {
     pub model_name: String,
     /// Output dimensions.
     pub dimensions: usize,
+    /// Opaque fingerprint of the selected local model artifact.
+    pub profile_id: String,
 }
 
 #[async_trait]
@@ -31,16 +36,17 @@ impl EmbeddingBackend for LocalEmbeddingBackend {
     }
 
     async fn embed_batch(&self, texts: Vec<String>) -> InferenceResult<Vec<Vec<f32>>> {
-        let expected_count = texts.len();
-        let client = reqwest::Client::new();
+        validate_embedding_request(&texts)?;
+        let input_count = texts.len();
+        let client = embedding_http_client(true)?;
         let url = format!("http://127.0.0.1:{}/v1/embeddings", self.port);
 
         let response = client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.token))
+            .bearer_auth(&self.token)
             .json(&serde_json::json!({
                 "input": texts,
-                "model": "default"
+                "model": "thinclaw-embedding"
             }))
             .send()
             .await
@@ -48,10 +54,8 @@ impl EmbeddingBackend for LocalEmbeddingBackend {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
             return Err(InferenceError::provider(format!(
-                "Embedding server error ({}): {}",
-                status, text
+                "Embedding server returned HTTP {status}"
             )));
         }
 
@@ -61,19 +65,21 @@ impl EmbeddingBackend for LocalEmbeddingBackend {
         }
         #[derive(serde::Deserialize)]
         struct EmbeddingData {
+            #[serde(default)]
+            index: Option<usize>,
             embedding: Vec<f32>,
         }
 
-        let result: EmbeddingResponse = response
-            .json()
-            .await
-            .map_err(|e| InferenceError::provider(format!("Failed to parse embedding: {}", e)))?;
+        let result: EmbeddingResponse = bounded_embedding_json(response).await?;
 
-        validate_embedding_batch(
-            result.data.into_iter().map(|d| d.embedding).collect(),
-            expected_count,
+        normalize_embedding_response(
+            result
+                .data
+                .into_iter()
+                .map(|data| (data.index, data.embedding))
+                .collect(),
+            input_count,
             self.dimensions,
-            "local embedding server",
         )
     }
 
@@ -83,5 +89,9 @@ impl EmbeddingBackend for LocalEmbeddingBackend {
 
     fn model_name(&self) -> &str {
         &self.model_name
+    }
+
+    fn profile_id(&self) -> String {
+        format!("local:{}:{}", self.profile_id, self.dimensions)
     }
 }

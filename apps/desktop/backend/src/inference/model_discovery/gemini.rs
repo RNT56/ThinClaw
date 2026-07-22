@@ -5,23 +5,15 @@ use super::types::*;
 use std::collections::HashMap;
 
 pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
-    let client = reqwest::Client::new();
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models?key={}",
-        api_key
-    );
+    let client = super::http_client(api_key)?;
+    let url = "https://generativelanguage.googleapis.com/v1beta/models";
 
     let response = client
-        .get(&url)
+        .get(url)
+        .header("x-goog-api-key", api_key)
         .send()
         .await
         .map_err(|e| format!("Gemini API request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("Gemini API error ({}): {}", status, body));
-    }
 
     #[derive(serde::Deserialize)]
     struct ModelsResponse {
@@ -42,10 +34,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
         output_token_limit: Option<u32>,
     }
 
-    let resp: ModelsResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse Gemini models: {}", e))?;
+    let resp: ModelsResponse = super::bounded_json(response, "Gemini").await?;
 
     let models: Vec<CloudModelEntry> = resp
         .models

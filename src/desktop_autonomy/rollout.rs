@@ -1,23 +1,37 @@
 use super::*;
 impl DesktopAutonomyManager {
     pub async fn rollback(&self) -> Result<serde_json::Value, String> {
+        let _rollout_guard = self.rollout_lock.lock().await;
         self.ensure_dirs().await?;
-        let current = self.current_build_id();
+        self.recover_pending_promotion_locked().await?;
+        let current = self.current_build_id_checked()?;
         let manifests = self.list_build_manifests().await?;
-        let Some(target) = manifests
-            .iter()
-            .filter(|manifest| manifest.promoted)
-            .find(|manifest| current.as_deref() != Some(manifest.build_id.as_str()))
-        else {
+        let mut rollout = self.load_rollout_state().await?;
+        let (target_id, history) = super::rollout_helpers::rollback_target_and_history(
+            &manifests,
+            &rollout.selected_build_history,
+            current.as_deref(),
+        );
+        let Some(target) = target_id.as_deref().and_then(|target_id| {
+            manifests
+                .iter()
+                .find(|manifest| manifest.build_id == target_id)
+        }) else {
             return Err("no previous promoted build available for rollback".to_string());
         };
 
         let build_dir = self.builds_dir().join(&target.build_id);
-        self.promote_build(&build_dir).await?;
-
-        let mut rollout = self.load_rollout_state().await.unwrap_or_default();
         rollout.last_promoted_build_id = Some(target.build_id.clone());
-        self.save_rollout_state(&rollout).await?;
+        rollout.selected_build_history = history;
+        let mut target_manifest = target.clone();
+        if let Some(metadata) = target_manifest.metadata.as_object_mut() {
+            metadata.insert(
+                "activation".to_string(),
+                serde_json::json!("on_next_session_launcher_start"),
+            );
+            metadata.insert("selected_at".to_string(), serde_json::json!(Utc::now()));
+        }
+        self.commit_promotion(rollout, target_manifest).await?;
 
         if let Some(current_build_id) = current.as_deref() {
             let _ = self.record_rollback_observation(current_build_id).await;
@@ -31,19 +45,21 @@ impl DesktopAutonomyManager {
     }
 
     pub async fn rollout_summary(&self) -> Result<AutonomyRolloutSummary, String> {
+        let _rollout_guard = self.rollout_lock.lock().await;
         self.ensure_dirs().await?;
-        let rollout = self.load_rollout_state().await.unwrap_or_default();
+        self.recover_pending_promotion_locked().await?;
+        let rollout = self.load_rollout_state().await?;
         let manifests = self.list_build_manifests().await?;
-        let current_build_id = self.current_build_id();
+        let current_build_id = self.current_build_id_checked()?;
         let last_successful_build_id = manifests
             .iter()
             .find(|manifest| manifest.promoted)
             .map(|manifest| manifest.build_id.clone());
-        let rollback_target_build_id = manifests
-            .iter()
-            .filter(|manifest| manifest.promoted)
-            .find(|manifest| current_build_id.as_deref() != Some(manifest.build_id.as_str()))
-            .map(|manifest| manifest.build_id.clone());
+        let (rollback_target_build_id, _) = super::rollout_helpers::rollback_target_and_history(
+            &manifests,
+            &rollout.selected_build_history,
+            current_build_id.as_deref(),
+        );
 
         Ok(AutonomyRolloutSummary {
             current_build_id,
@@ -112,7 +128,7 @@ impl DesktopAutonomyManager {
             }));
         }
 
-        let manifests = self.list_build_manifests().await.unwrap_or_default();
+        let manifests = self.list_build_manifests().await?;
         recent_events.extend(manifests.iter().take(5).map(|manifest| AutonomyEventItem {
             kind: if manifest.promoted {
                 "rollout_promoted".to_string()
@@ -148,8 +164,10 @@ impl DesktopAutonomyManager {
         diff: &str,
         title: &str,
     ) -> Result<LocalAutorolloutOutcome, String> {
+        let _rollout_guard = self.rollout_lock.lock().await;
         self.ensure_dirs().await?;
-        let mut rollout_state = self.load_rollout_state().await.unwrap_or_default();
+        self.recover_pending_promotion_locked().await?;
+        let mut rollout_state = self.load_rollout_state().await?;
         if rollout_state.code_auto_apply_paused {
             return Err(rollout_state
                 .pause_reason
@@ -159,12 +177,12 @@ impl DesktopAutonomyManager {
 
         let managed_source = self.sync_managed_source_clone().await?;
         let build_id = format!(
-            "{}-{}",
+            "{}-{}-{}",
             Utc::now().format("%Y%m%d%H%M%S"),
-            &proposal_id.to_string()[..8]
+            &proposal_id.to_string()[..8],
+            &Uuid::new_v4().simple().to_string()[..8],
         );
         let build_dir = self.builds_dir().join(&build_id);
-        let patch_path = build_dir.join("proposal.patch");
 
         run_cmd(
             Command::new("git")
@@ -178,9 +196,17 @@ impl DesktopAutonomyManager {
         )
         .await?;
 
-        tokio::fs::write(&patch_path, diff)
-            .await
+        let cleanup_build_id = build_id.clone();
+        let rollout_result: Result<LocalAutorolloutOutcome, String> = async move {
+        let mut patch_file = tempfile::Builder::new()
+            .prefix(".rollout-patch-")
+            .suffix(".diff")
+            .tempfile_in(&self.state_root)
+            .map_err(|e| format!("failed to create rollout patch: {e}"))?;
+        std::io::Write::write_all(patch_file.as_file_mut(), diff.as_bytes())
+            .and_then(|()| patch_file.as_file().sync_all())
             .map_err(|e| format!("failed to write rollout patch: {e}"))?;
+        let patch_path = patch_file.path().to_path_buf();
 
         run_cmd(
             Command::new("git")
@@ -199,12 +225,21 @@ impl DesktopAutonomyManager {
                 .arg(&patch_path),
         )
         .await?;
+        drop(patch_file);
+
+        let cargo_target_dir = build_dir.join("target");
+        tokio::fs::create_dir(&cargo_target_dir)
+            .await
+            .map_err(|e| format!("failed to create isolated Cargo target directory: {e}"))?;
 
         let mut checks = Vec::new();
         checks.push(
             run_command_check(
                 "cargo check",
-                Command::new("cargo").arg("check").current_dir(&build_dir),
+                Command::new("cargo")
+                    .arg("check")
+                    .env("CARGO_TARGET_DIR", &cargo_target_dir)
+                    .current_dir(&build_dir),
             )
             .await,
         );
@@ -214,6 +249,7 @@ impl DesktopAutonomyManager {
                 Command::new("cargo")
                     .arg("test")
                     .arg("desktop_autonomy")
+                    .env("CARGO_TARGET_DIR", &cargo_target_dir)
                     .current_dir(&build_dir),
             )
             .await,
@@ -221,12 +257,15 @@ impl DesktopAutonomyManager {
         checks.push(
             run_command_check(
                 "cargo build",
-                Command::new("cargo").arg("build").current_dir(&build_dir),
+                Command::new("cargo")
+                    .arg("build")
+                    .env("CARGO_TARGET_DIR", &cargo_target_dir)
+                    .current_dir(&build_dir),
             )
             .await,
         );
         let canary_manifest = self
-            .write_canary_manifest(user_id, proposal_id, &build_id, &build_dir)
+            .write_canary_manifest(user_id, proposal_id, &build_id)
             .await?;
         let canary_report = self.run_canaries(&build_dir, &canary_manifest).await;
         let canary_report_path = canary_manifest.report_path.clone();
@@ -248,7 +287,6 @@ impl DesktopAutonomyManager {
         });
 
         if all_passed {
-            self.promote_build(&build_dir).await?;
             rollout_state.consecutive_failed_promotions = 0;
             rollout_state.last_promoted_build_id = Some(build_id.clone());
         } else {
@@ -265,8 +303,21 @@ impl DesktopAutonomyManager {
                 "code auto-rollout paused after repeated promotion/canary failures".to_string(),
             );
         }
-        self.save_rollout_state(&rollout_state).await?;
-
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert("promoted".to_string(), serde_json::json!(all_passed));
+            obj.insert(
+                "activation".to_string(),
+                serde_json::json!(if all_passed {
+                    "on_next_session_launcher_start"
+                } else {
+                    "not_selected"
+                }),
+            );
+            obj.insert(
+                "code_auto_apply_paused".to_string(),
+                serde_json::json!(rollout_state.code_auto_apply_paused),
+            );
+        }
         let manifest = BuildManifest {
             build_id: build_id.clone(),
             user_id: user_id.to_string(),
@@ -277,17 +328,16 @@ impl DesktopAutonomyManager {
             checks: checks.clone(),
             metadata: metadata.clone(),
         };
-        self.write_build_manifest(&build_id, &manifest).await?;
-        if let Some(obj) = metadata.as_object_mut() {
-            obj.insert("promoted".to_string(), serde_json::json!(all_passed));
-            obj.insert(
-                "code_auto_apply_paused".to_string(),
-                serde_json::json!(rollout_state.code_auto_apply_paused),
-            );
+        if all_passed {
+            self.commit_promotion(rollout_state.clone(), manifest)
+                .await?;
+        } else {
+            self.save_rollout_state(&rollout_state).await?;
+            self.write_build_manifest(&build_id, &manifest).await?;
         }
 
-        if all_passed {
-            self.trim_old_builds().await?;
+        if let Err(error) = self.trim_old_builds().await {
+            tracing::warn!(%error, %build_id, "failed to trim old autonomy rollout artifacts");
         }
 
         Ok(LocalAutorolloutOutcome {
@@ -297,5 +347,17 @@ impl DesktopAutonomyManager {
             checks,
             publish_metadata: metadata,
         })
+        }
+        .await;
+
+        match rollout_result {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => match self.cleanup_failed_rollout_build(&cleanup_build_id).await {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(format!(
+                    "{error}; failed to clean incomplete rollout {cleanup_build_id}: {cleanup_error}"
+                )),
+            },
+        }
     }
 }

@@ -119,8 +119,53 @@ impl ConversationStore for LibSqlBackend {
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        self.touch_conversation(conversation_id).await?;
+        // The row is already committed at this point. A secondary activity
+        // timestamp failure must not turn a successful append into an
+        // ambiguous error that makes the caller roll back only its in-memory
+        // turn while the durable row remains present.
+        if let Err(error) = self.touch_conversation(conversation_id).await {
+            tracing::warn!(
+                conversation = %conversation_id,
+                %error,
+                "Conversation message persisted but activity timestamp update failed"
+            );
+        }
         Ok(id)
+    }
+
+    async fn set_effective_user_instruction(
+        &self,
+        conversation_id: Uuid,
+        message_id: Uuid,
+        effective_instruction: &str,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let changed = conn
+            .execute(
+                r#"
+                UPDATE conversation_messages
+                SET metadata = json_set(
+                    CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                    '$._thinclaw_effective_user_instruction_version', 1,
+                    '$._thinclaw_effective_user_instruction', ?3
+                )
+                WHERE conversation_id = ?1 AND id = ?2 AND role = 'user'
+                "#,
+                params![
+                    conversation_id.to_string(),
+                    message_id.to_string(),
+                    effective_instruction,
+                ],
+            )
+            .await
+            .map_err(|error| DatabaseError::Query(error.to_string()))?;
+        if changed != 1 {
+            return Err(DatabaseError::NotFound {
+                entity: "conversation user message".to_string(),
+                id: message_id.to_string(),
+            });
+        }
+        Ok(())
     }
 
     async fn ensure_conversation(
@@ -332,7 +377,10 @@ impl ConversationStore for LibSqlBackend {
             r#"
             UPDATE conversations
             SET user_id = COALESCE(?2, user_id),
-                actor_id = ?3,
+                actor_id = CASE
+                    WHEN ?5 = 'group' THEN COALESCE(NULLIF(trim(actor_id), ''), ?3)
+                    ELSE ?3
+                END,
                 conversation_scope_id = COALESCE(?4, conversation_scope_id),
                 conversation_kind = ?5,
                 stable_external_conversation_key = COALESCE(?6, stable_external_conversation_key)
@@ -350,6 +398,59 @@ impl ConversationStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn find_latest_conversation_for_ingress(
+        &self,
+        principal_id: &str,
+        actor_id: &str,
+        conversation_scope_id: Uuid,
+        conversation_kind: ConversationKind,
+        channel: &str,
+        external_thread_id: Option<&str>,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT c.id
+                FROM conversations c
+                WHERE c.user_id = ?1
+                  AND c.conversation_kind = ?4
+                  AND (
+                    (?4 = 'direct'
+                      AND (
+                        c.actor_id = ?2
+                        OR ((c.actor_id IS NULL OR trim(c.actor_id) = '') AND ?2 = ?1)
+                      )
+                      AND (?6 IS NULL OR (c.channel = ?5 AND c.thread_id = ?6)))
+                    OR
+                    (?4 = 'group' AND c.conversation_scope_id = ?3)
+                  )
+                ORDER BY c.last_activity DESC, c.started_at DESC, c.id DESC
+                LIMIT 1
+                "#,
+                params![
+                    principal_id,
+                    actor_id,
+                    conversation_scope_id.to_string(),
+                    conversation_kind.as_str(),
+                    channel,
+                    opt_text(external_thread_id),
+                ],
+            )
+            .await
+            .map_err(|error| DatabaseError::Query(error.to_string()))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| DatabaseError::Query(error.to_string()))?;
+        row.map(|row| {
+            get_text(&row, 0).parse().map_err(|error| {
+                DatabaseError::Serialization(format!("invalid conversation id: {error}"))
+            })
+        })
+        .transpose()
     }
 
     async fn set_conversation_handoff_metadata(
@@ -407,8 +508,18 @@ impl ConversationStore for LibSqlBackend {
                     FROM conversations c
                     WHERE c.user_id = ?1
                       AND (
-                        c.actor_id = ?2
-                        OR ((c.actor_id IS NULL OR trim(c.actor_id) = '') AND ?2 = ?1)
+                        (c.conversation_kind = 'direct' AND (
+                          c.actor_id = ?2
+                          OR ((c.actor_id IS NULL OR trim(c.actor_id) = '') AND ?2 = ?1)
+                        ))
+                        OR (c.conversation_kind = 'group' AND (
+                          c.actor_id = ?2
+                          OR EXISTS (
+                            SELECT 1 FROM conversation_messages membership
+                            WHERE membership.conversation_id = c.id
+                              AND membership.actor_id = ?2
+                          )
+                        ))
                       )
                       AND {kind_predicate}
                     ORDER BY c.last_activity DESC
@@ -551,6 +662,64 @@ impl ConversationStore for LibSqlBackend {
             messages.push(message_from_row(&row));
         }
         Ok(messages)
+    }
+
+    async fn list_conversation_messages_window(
+        &self,
+        conversation_id: Uuid,
+        start_row: i64,
+        limit: i64,
+    ) -> Result<Vec<ConversationMessage>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, role, content, actor_id, actor_display_name, raw_sender_id, metadata, created_at
+                FROM conversation_messages
+                WHERE conversation_id = ?1
+                ORDER BY created_at ASC, rowid ASC
+                LIMIT ?2 OFFSET ?3
+                "#,
+                params![conversation_id.to_string(), limit, start_row.max(0)],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut messages = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            messages.push(message_from_row(&row));
+        }
+        Ok(messages)
+    }
+
+    async fn count_conversation_messages(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?1",
+                params![conversation_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        else {
+            return Ok(0);
+        };
+        Ok(row.get::<i64>(0).unwrap_or(0).max(0))
     }
 
     async fn search_conversation_messages(
@@ -1299,80 +1468,7 @@ impl ConversationStore for LibSqlBackend {
         &self,
         contract: &OutcomeContract,
     ) -> Result<Uuid, DatabaseError> {
-        let conn = self.connect().await?;
-        let id = if contract.id.is_nil() {
-            Uuid::new_v4()
-        } else {
-            contract.id
-        };
-        let affected = conn
-            .execute(
-                r#"
-                INSERT OR IGNORE INTO outcome_contracts (
-                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
-                    contract_type, status, summary, due_at, expires_at, final_verdict,
-                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
-                    claimed_by, lease_expires_at, attempt_count, next_attempt_at,
-                    evaluated_at, created_at, updated_at
-                ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7,
-                    ?8, ?9, ?10, ?11, ?12, ?13,
-                    ?14, ?15, ?16, ?17, ?18,
-                    ?19, ?20, ?21, ?22,
-                    ?23, ?24, ?25
-                )
-                "#,
-                params![
-                    id.to_string(),
-                    contract.user_id.as_str(),
-                    contract.actor_id.as_deref(),
-                    contract.channel.as_deref(),
-                    contract.thread_id.as_deref(),
-                    contract.source_kind.as_str(),
-                    contract.source_id.as_str(),
-                    contract.contract_type.as_str(),
-                    contract.status.as_str(),
-                    contract.summary.as_deref(),
-                    fmt_ts(&contract.due_at),
-                    fmt_ts(&contract.expires_at),
-                    contract.final_verdict.as_deref(),
-                    contract.final_score,
-                    contract.evaluation_details.to_string(),
-                    contract.metadata.to_string(),
-                    contract.dedupe_key.as_str(),
-                    contract.claimed_at.as_ref().map(fmt_ts),
-                    contract.claimed_by.as_deref(),
-                    contract.lease_expires_at.as_ref().map(fmt_ts),
-                    contract.attempt_count as i64,
-                    contract.next_attempt_at.as_ref().map(fmt_ts),
-                    contract.evaluated_at.as_ref().map(fmt_ts),
-                    fmt_ts(&contract.created_at),
-                    fmt_ts(&contract.updated_at),
-                ],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        if affected > 0 {
-            return Ok(id);
-        }
-
-        let mut rows = conn
-            .query(
-                "SELECT id FROM outcome_contracts WHERE dedupe_key = ?1 LIMIT 1",
-                params![contract.dedupe_key.as_str()],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        else {
-            return Err(DatabaseError::Query(
-                "failed to resolve existing outcome contract".to_string(),
-            ));
-        };
-        Ok(get_text(&row, 0).parse().unwrap_or_default())
+        outcomes::insert_contract(self, contract).await
     }
 
     async fn get_outcome_contract(
@@ -1380,84 +1476,14 @@ impl ConversationStore for LibSqlBackend {
         user_id: &str,
         contract_id: Uuid,
     ) -> Result<Option<OutcomeContract>, DatabaseError> {
-        let conn = self.connect().await?;
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT
-                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
-                    contract_type, status, summary, due_at, expires_at, final_verdict,
-                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
-                    claimed_by, lease_expires_at, attempt_count, next_attempt_at,
-                    evaluated_at, created_at, updated_at
-                FROM outcome_contracts
-                WHERE id = ?1 AND user_id = ?2
-                LIMIT 1
-                "#,
-                params![contract_id.to_string(), user_id],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(outcome_contract_from_row(&row)))
+        outcomes::get_contract(self, user_id, contract_id).await
     }
 
     async fn list_outcome_contracts(
         &self,
         query: &OutcomeContractQuery,
     ) -> Result<Vec<OutcomeContract>, DatabaseError> {
-        if query.limit <= 0 {
-            return Ok(Vec::new());
-        }
-        let conn = self.connect().await?;
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT
-                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
-                    contract_type, status, summary, due_at, expires_at, final_verdict,
-                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
-                    claimed_by, lease_expires_at, attempt_count, next_attempt_at,
-                    evaluated_at, created_at, updated_at
-                FROM outcome_contracts
-                WHERE user_id = ?1
-                  AND (?2 IS NULL OR COALESCE(NULLIF(actor_id, ''), user_id) = ?2)
-                  AND (?3 IS NULL OR status = ?3)
-                  AND (?4 IS NULL OR contract_type = ?4)
-                  AND (?5 IS NULL OR source_kind = ?5)
-                  AND (?6 IS NULL OR source_id = ?6)
-                  AND (?7 IS NULL OR thread_id = ?7)
-                ORDER BY created_at DESC, rowid DESC
-                LIMIT ?8
-                "#,
-                params![
-                    query.user_id.as_str(),
-                    query.actor_id.as_deref(),
-                    query.status.as_deref(),
-                    query.contract_type.as_deref(),
-                    query.source_kind.as_deref(),
-                    query.source_id.as_deref(),
-                    query.thread_id.as_deref(),
-                    query.limit,
-                ],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        let mut contracts = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        {
-            contracts.push(outcome_contract_from_row(&row));
-        }
-        Ok(contracts)
+        outcomes::list_contracts(self, query).await
     }
 
     async fn claim_due_outcome_contracts(
@@ -1506,67 +1532,7 @@ impl ConversationStore for LibSqlBackend {
         &self,
         contract: &OutcomeContract,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connect().await?;
-        conn.execute(
-            r#"
-            UPDATE outcome_contracts
-            SET user_id = ?2,
-                actor_id = ?3,
-                channel = ?4,
-                thread_id = ?5,
-                source_kind = ?6,
-                source_id = ?7,
-                contract_type = ?8,
-                status = ?9,
-                summary = ?10,
-                due_at = ?11,
-                expires_at = ?12,
-                final_verdict = ?13,
-                final_score = ?14,
-                evaluation_details = ?15,
-                metadata = ?16,
-                dedupe_key = ?17,
-                claimed_at = ?18,
-                claimed_by = ?19,
-                lease_expires_at = ?20,
-                attempt_count = ?21,
-                next_attempt_at = ?22,
-                evaluated_at = ?23,
-                created_at = ?24,
-                updated_at = ?25
-            WHERE id = ?1
-            "#,
-            params![
-                contract.id.to_string(),
-                contract.user_id.as_str(),
-                contract.actor_id.as_deref(),
-                contract.channel.as_deref(),
-                contract.thread_id.as_deref(),
-                contract.source_kind.as_str(),
-                contract.source_id.as_str(),
-                contract.contract_type.as_str(),
-                contract.status.as_str(),
-                contract.summary.as_deref(),
-                fmt_ts(&contract.due_at),
-                fmt_ts(&contract.expires_at),
-                contract.final_verdict.as_deref(),
-                contract.final_score,
-                contract.evaluation_details.to_string(),
-                contract.metadata.to_string(),
-                contract.dedupe_key.as_str(),
-                contract.claimed_at.as_ref().map(fmt_ts),
-                contract.claimed_by.as_deref(),
-                contract.lease_expires_at.as_ref().map(fmt_ts),
-                contract.attempt_count as i64,
-                contract.next_attempt_at.as_ref().map(fmt_ts),
-                contract.evaluated_at.as_ref().map(fmt_ts),
-                fmt_ts(&contract.created_at),
-                fmt_ts(&contract.updated_at),
-            ],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(())
+        outcomes::update_contract(self, contract).await
     }
 
     async fn update_claimed_outcome_contract(
@@ -1574,71 +1540,7 @@ impl ConversationStore for LibSqlBackend {
         contract: &OutcomeContract,
         worker_id: &str,
     ) -> Result<bool, DatabaseError> {
-        let conn = self.connect().await?;
-        let affected = conn
-            .execute(
-                r#"
-                UPDATE outcome_contracts
-                SET user_id = ?2,
-                    actor_id = ?3,
-                    channel = ?4,
-                    thread_id = ?5,
-                    source_kind = ?6,
-                    source_id = ?7,
-                    contract_type = ?8,
-                    status = ?9,
-                    summary = ?10,
-                    due_at = ?11,
-                    expires_at = ?12,
-                    final_verdict = ?13,
-                    final_score = ?14,
-                    evaluation_details = ?15,
-                    metadata = ?16,
-                    dedupe_key = ?17,
-                    claimed_at = ?18,
-                    claimed_by = ?19,
-                    lease_expires_at = ?20,
-                    attempt_count = ?21,
-                    next_attempt_at = ?22,
-                    evaluated_at = ?23,
-                    created_at = ?24,
-                    updated_at = ?25
-                WHERE id = ?1
-                  AND status = 'evaluating'
-                  AND claimed_by = ?26
-                "#,
-                params![
-                    contract.id.to_string(),
-                    contract.user_id.as_str(),
-                    contract.actor_id.as_deref(),
-                    contract.channel.as_deref(),
-                    contract.thread_id.as_deref(),
-                    contract.source_kind.as_str(),
-                    contract.source_id.as_str(),
-                    contract.contract_type.as_str(),
-                    contract.status.as_str(),
-                    contract.summary.as_deref(),
-                    fmt_ts(&contract.due_at),
-                    fmt_ts(&contract.expires_at),
-                    contract.final_verdict.as_deref(),
-                    contract.final_score,
-                    contract.evaluation_details.to_string(),
-                    contract.metadata.to_string(),
-                    contract.dedupe_key.as_str(),
-                    contract.claimed_at.as_ref().map(fmt_ts),
-                    contract.claimed_by.as_deref(),
-                    contract.lease_expires_at.as_ref().map(fmt_ts),
-                    contract.attempt_count as i64,
-                    contract.next_attempt_at.as_ref().map(fmt_ts),
-                    contract.evaluated_at.as_ref().map(fmt_ts),
-                    fmt_ts(&contract.created_at),
-                    fmt_ts(&contract.updated_at),
-                    worker_id,
-                ],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(affected > 0)
+        outcomes::update_claimed_contract(self, contract, worker_id).await
     }
 
     async fn outcome_summary_stats(
@@ -1906,15 +1808,71 @@ impl ConversationStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT 1
-                FROM conversations
-                WHERE id = ?1
-                  AND user_id = ?2
+                FROM conversations c
+                WHERE c.id = ?1
+                  AND c.user_id = ?2
                   AND (
-                    actor_id = ?3
-                    OR ((actor_id IS NULL OR trim(actor_id) = '') AND ?3 = ?2)
+                    (c.conversation_kind = 'direct' AND (
+                      c.actor_id = ?3
+                      OR ((c.actor_id IS NULL OR trim(c.actor_id) = '') AND ?3 = ?2)
+                    ))
+                    OR (c.conversation_kind = 'group' AND (
+                      c.actor_id = ?3
+                      OR EXISTS (
+                        SELECT 1 FROM conversation_messages membership
+                        WHERE membership.conversation_id = c.id
+                          AND membership.actor_id = ?3
+                      )
+                    ))
                   )
                 "#,
                 params![conversation_id.to_string(), principal_id, actor_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let found = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(found.is_some())
+    }
+
+    async fn conversation_belongs_to_identity(
+        &self,
+        conversation_id: Uuid,
+        principal_id: &str,
+        actor_id: &str,
+        conversation_scope_id: Uuid,
+        conversation_kind: ConversationKind,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT 1
+                FROM conversations c
+                WHERE c.id = ?1
+                  AND c.user_id = ?2
+                  AND (
+                    (?5 = 'direct'
+                      AND c.conversation_kind = 'direct'
+                      AND (
+                        c.actor_id = ?3
+                        OR ((c.actor_id IS NULL OR trim(c.actor_id) = '') AND ?3 = ?2)
+                      ))
+                    OR
+                    (?5 = 'group'
+                      AND c.conversation_kind = 'group'
+                      AND c.conversation_scope_id = ?4)
+                  )
+                "#,
+                params![
+                    conversation_id.to_string(),
+                    principal_id,
+                    actor_id,
+                    conversation_scope_id.to_string(),
+                    conversation_kind.as_str(),
+                ],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -1958,3 +1916,6 @@ mod outcomes;
 mod rows;
 
 pub(crate) use rows::*;
+
+#[cfg(test)]
+mod tests;

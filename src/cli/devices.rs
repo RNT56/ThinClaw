@@ -32,6 +32,7 @@ mod qr;
 pub use qr::render_qr_unicode;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+const MAX_GATEWAY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Mirrors `thinclaw_gateway::web::devices::PairStartResponse` (server DTO is
 /// `Serialize`-only; the CLI is a client so it needs `Deserialize`).
@@ -129,6 +130,8 @@ pub async fn run_devices_command(cmd: DeviceCommand) -> anyhow::Result<()> {
 fn build_client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()?)
 }
 
@@ -148,7 +151,7 @@ fn connect_error(base: &str, source: reqwest::Error) -> anyhow::Error {
     } else if source.is_timeout() {
         anyhow::anyhow!("Timed out talking to the gateway at {}.", base)
     } else {
-        anyhow::anyhow!("Request to the gateway failed: {}", source)
+        anyhow::anyhow!("Request to the gateway failed: {}", source.without_url())
     }
 }
 
@@ -169,7 +172,9 @@ async fn send_and_parse<T: serde::de::DeserializeOwned>(
 ) -> anyhow::Result<T> {
     let response = request.send().await.map_err(|e| connect_error(base, e))?;
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = crate::http_response::bounded_text(response, MAX_GATEWAY_RESPONSE_BYTES)
+        .await
+        .map_err(|error| anyhow::anyhow!("Could not read the gateway response: {error}"))?;
 
     if !status.is_success() {
         anyhow::bail!("Gateway returned HTTP {}: {}", status.as_u16(), body);

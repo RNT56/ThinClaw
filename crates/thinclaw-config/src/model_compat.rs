@@ -223,9 +223,11 @@ fn parse_catalog(contents: &str) -> Result<ModelCatalogSnapshot, String> {
 
 /// Load a catalog snapshot from a specific path.
 pub fn load_catalog_from_path(path: &Path) -> Result<ModelCatalogSnapshot, String> {
-    let contents = std::fs::read_to_string(path)
+    let contents = thinclaw_platform::read_regular_file_bounded(path, 16 * 1024 * 1024)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    parse_catalog(&contents)
+    let contents = std::str::from_utf8(&contents)
+        .map_err(|_| format!("model catalog {} is not UTF-8", path.display()))?;
+    parse_catalog(contents)
 }
 
 fn embedded_catalog() -> ModelCatalogSnapshot {
@@ -234,19 +236,11 @@ fn embedded_catalog() -> ModelCatalogSnapshot {
 }
 
 fn disk_catalog_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    paths.push(
+    vec![
         thinclaw_platform::state_paths()
             .home
             .join("registry/models.json"),
-    );
-    if let Some(registry_dir) = find_registry_dir() {
-        let candidate = registry_dir.join("models.json");
-        if !paths.iter().any(|existing| existing == &candidate) {
-            paths.push(candidate);
-        }
-    }
-    paths
+    ]
 }
 
 /// Return the first existing disk-backed catalog path.
@@ -256,47 +250,9 @@ pub fn disk_catalog_path() -> Option<PathBuf> {
 
 /// Preferred path to write a refreshed catalog.
 pub fn preferred_catalog_write_path() -> PathBuf {
-    if let Some(existing) = disk_catalog_path() {
-        return existing;
-    }
-    if let Some(registry_dir) = find_registry_dir() {
-        return registry_dir.join("models.json");
-    }
     thinclaw_platform::state_paths()
         .home
         .join("registry/models.json")
-}
-
-fn find_registry_dir() -> Option<PathBuf> {
-    if let Ok(cwd) = std::env::current_dir() {
-        let candidate = cwd.join("registry");
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        let mut dir = Some(parent);
-        for _ in 0..3 {
-            if let Some(d) = dir {
-                let candidate = d.join("registry");
-                if candidate.is_dir() {
-                    return Some(candidate);
-                }
-                dir = d.parent();
-            }
-        }
-    }
-
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    [
-        manifest_dir.join("registry"),
-        manifest_dir.join("../../registry"),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.is_dir())
 }
 
 fn load_catalog() -> ModelCatalogSnapshot {
@@ -357,7 +313,8 @@ pub fn write_catalog_snapshot(path: &Path, snapshot: &ModelCatalogSnapshot) -> R
     }
     let json = serde_json::to_string_pretty(snapshot)
         .map_err(|err| format!("failed to serialize model catalog: {err}"))?;
-    std::fs::write(path, json).map_err(|err| format!("failed to write {}: {err}", path.display()))
+    thinclaw_platform::write_private_file_atomic(path, json.as_bytes(), true)
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
 /// Normalize a model lookup key for alias/snapshot matching.

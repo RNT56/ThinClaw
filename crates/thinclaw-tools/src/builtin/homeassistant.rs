@@ -15,29 +15,39 @@ use thinclaw_tools_core::{
 use thinclaw_types::JobContext;
 
 /// Home Assistant REST API client.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HassClient {
     base_url: String,
     token: String,
-    client: reqwest::Client,
+}
+
+const MAX_HASS_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_HASS_BASE_URL_BYTES: usize = 16 * 1024;
+const MAX_HASS_TOKEN_BYTES: usize = 64 * 1024;
+const MAX_HASS_DNS_ADDRESSES: usize = 64;
+const MAX_HASS_IDENTIFIER_BYTES: usize = 128;
+const MAX_HASS_SERVICE_DATA_BYTES: usize = 64 * 1024;
+const MAX_HASS_OUTPUT_ITEMS: usize = 100;
+const MAX_HASS_OUTPUT_STRING_CHARS: usize = 4096;
+const MAX_HASS_OUTPUT_DEPTH: usize = 8;
+
+impl std::fmt::Debug for HassClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HassClient")
+            .field("base_url", &redacted_hass_url(&self.base_url))
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl HassClient {
     /// Create from explicit URL and token.
     pub fn new(base_url: String, token: String) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .unwrap_or_default();
-
         // Strip trailing slash
         let base_url = base_url.trim_end_matches('/').to_string();
 
-        Self {
-            base_url,
-            token,
-            client,
-        }
+        Self { base_url, token }
     }
 
     /// Try to create from environment variables.
@@ -59,16 +69,153 @@ impl HassClient {
         format!("Bearer {}", self.token)
     }
 
+    fn endpoint(&self, path: &str) -> Result<reqwest::Url, ToolError> {
+        if self.base_url.is_empty() || self.base_url.len() > MAX_HASS_BASE_URL_BYTES {
+            return Err(ToolError::InvalidParameters(
+                "Home Assistant base URL is empty or oversized".to_string(),
+            ));
+        }
+        let mut base = reqwest::Url::parse(&self.base_url).map_err(|error| {
+            ToolError::InvalidParameters(format!("invalid Home Assistant base URL: {error}"))
+        })?;
+        if !matches!(base.scheme(), "http" | "https")
+            || base.host_str().is_none()
+            || !base.username().is_empty()
+            || base.password().is_some()
+            || base.query().is_some()
+            || base.fragment().is_some()
+        {
+            return Err(ToolError::NotAuthorized(
+                "Home Assistant base URL must be an HTTP(S) URL without credentials, query, or fragment"
+                    .to_string(),
+            ));
+        }
+        if path.is_empty()
+            || path.len() > 1024
+            || path.split('/').any(|segment| {
+                segment.is_empty()
+                    || matches!(segment, "." | "..")
+                    || !segment.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+            })
+        {
+            return Err(ToolError::InvalidParameters(
+                "Home Assistant API path is malformed".to_string(),
+            ));
+        }
+        {
+            let mut segments = base.path_segments_mut().map_err(|_| {
+                ToolError::InvalidParameters(
+                    "Home Assistant URL cannot be used as an API base".to_string(),
+                )
+            })?;
+            segments.pop_if_empty();
+            segments.push("api");
+            segments.extend(path.split('/'));
+        }
+        Ok(base)
+    }
+
+    async fn http_client(&self, endpoint: &reqwest::Url) -> Result<reqwest::Client, ToolError> {
+        if self.token.trim().is_empty()
+            || self.token.len() > MAX_HASS_TOKEN_BYTES
+            || self.token.chars().any(char::is_control)
+        {
+            return Err(ToolError::NotAuthorized(
+                "Home Assistant token is malformed or exceeds its size limit".to_string(),
+            ));
+        }
+        let host = endpoint.host_str().ok_or_else(|| {
+            ToolError::InvalidParameters("Home Assistant URL has no host".to_string())
+        })?;
+        let port = endpoint.port_or_known_default().ok_or_else(|| {
+            ToolError::InvalidParameters("Home Assistant URL has no usable port".to_string())
+        })?;
+        let addresses = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::lookup_host((host, port)),
+        )
+        .await
+        .map_err(|_| {
+            ToolError::ExternalService("Home Assistant hostname resolution timed out".to_string())
+        })?
+        .map_err(|_| {
+            ToolError::ExternalService("Home Assistant hostname resolution failed".to_string())
+        })?;
+        let mut addresses = addresses.collect::<Vec<_>>();
+        addresses.sort_unstable();
+        addresses.dedup();
+        if addresses.is_empty()
+            || addresses.len() > MAX_HASS_DNS_ADDRESSES
+            || addresses.iter().any(|address| {
+                let ip = address.ip();
+                !is_usable_hass_ip(ip)
+                    || endpoint.scheme() == "http" && thinclaw_tools_core::is_public_outbound_ip(ip)
+            })
+        {
+            return Err(ToolError::NotAuthorized(
+                "Home Assistant hostname resolved outside its permitted network boundary"
+                    .to_string(),
+            ));
+        }
+
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .resolve_to_addrs(host, &addresses)
+            .build()
+            .map_err(|error| {
+                ToolError::ExternalService(format!(
+                    "Home Assistant HTTP client is unavailable: {error}"
+                ))
+            })
+    }
+
+    async fn response_bytes(
+        response: reqwest::Response,
+        limit: usize,
+    ) -> Result<Vec<u8>, ToolError> {
+        if response
+            .content_length()
+            .is_some_and(|length| usize::try_from(length).map_or(true, |length| length > limit))
+        {
+            return Err(ToolError::ExternalService(
+                "Home Assistant response is oversized".to_string(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        use futures::StreamExt as _;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                ToolError::ExternalService(format!(
+                    "Home Assistant response failed: {}",
+                    error.without_url()
+                ))
+            })?;
+            if bytes.len().saturating_add(chunk.len()) > limit {
+                return Err(ToolError::ExternalService(
+                    "Home Assistant response is oversized".to_string(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+
     async fn get(&self, path: &str) -> Result<serde_json::Value, ToolError> {
-        let url = format!("{}/api/{}", self.base_url, path);
+        let url = self.endpoint(path)?;
+        let client = self.http_client(&url).await?;
         let response = self
-            .client
-            .get(&url)
-            .header("Authorization", self.auth_header())
-            .header("Content-Type", "application/json")
+            .request(&client, reqwest::Method::GET, url)
             .send()
             .await
-            .map_err(|e| ToolError::ExternalService(format!("HA request failed: {}", e)))?;
+            .map_err(|e| {
+                ToolError::ExternalService(format!("HA request failed: {}", e.without_url()))
+            })?;
 
         if !response.status().is_success() {
             return Err(ToolError::ExternalService(format!(
@@ -77,9 +224,8 @@ impl HassClient {
             )));
         }
 
-        response
-            .json()
-            .await
+        let body = Self::response_bytes(response, MAX_HASS_RESPONSE_BYTES).await?;
+        serde_json::from_slice(&body)
             .map_err(|e| ToolError::ExternalService(format!("HA response parse error: {}", e)))
     }
 
@@ -88,31 +234,167 @@ impl HassClient {
         path: &str,
         body: serde_json::Value,
     ) -> Result<serde_json::Value, ToolError> {
-        let url = format!("{}/api/{}", self.base_url, path);
+        let url = self.endpoint(path)?;
+        let client = self.http_client(&url).await?;
         let response = self
-            .client
-            .post(&url)
-            .header("Authorization", self.auth_header())
+            .request(&client, reqwest::Method::POST, url)
             .json(&body)
             .send()
             .await
-            .map_err(|e| ToolError::ExternalService(format!("HA request failed: {}", e)))?;
+            .map_err(|e| {
+                ToolError::ExternalService(format!("HA request failed: {}", e.without_url()))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body_text = response.text().await.unwrap_or_default();
             return Err(ToolError::ExternalService(format!(
-                "HA returned HTTP {}: {}",
-                status,
-                body_text.chars().take(200).collect::<String>()
+                "HA returned HTTP {}",
+                status
             )));
         }
 
-        response
-            .json()
-            .await
+        let body = Self::response_bytes(response, MAX_HASS_RESPONSE_BYTES).await?;
+        serde_json::from_slice(&body)
             .map_err(|e| ToolError::ExternalService(format!("HA response parse error: {}", e)))
     }
+
+    fn request(
+        &self,
+        client: &reqwest::Client,
+        method: reqwest::Method,
+        url: reqwest::Url,
+    ) -> reqwest::RequestBuilder {
+        client
+            .request(method, url)
+            .header("Authorization", self.auth_header())
+            .header("Content-Type", "application/json")
+    }
+}
+
+fn redacted_hass_url(value: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return "<invalid-url>".to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return "<invalid-url>".to_string();
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
+}
+
+fn is_usable_hass_ip(ip: std::net::IpAddr) -> bool {
+    thinclaw_tools_core::is_public_outbound_ip(ip)
+        || match ip {
+            std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_loopback(),
+            std::net::IpAddr::V6(ip) => ip.is_unique_local() || ip.is_loopback(),
+        }
+}
+
+fn valid_hass_identifier(value: &str, allow_dot: bool) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_HASS_IDENTIFIER_BYTES
+        && !matches!(value, "." | "..")
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') || allow_dot && byte == b'.'
+        })
+        && (!allow_dot
+            || value.split_once('.').is_some_and(|(domain, name)| {
+                !domain.is_empty() && !name.is_empty() && !name.contains('.')
+            }))
+}
+
+fn bounded_hass_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(512)
+        .collect()
+}
+
+fn bounded_hass_json(value: serde_json::Value, depth: usize) -> serde_json::Value {
+    if depth >= MAX_HASS_OUTPUT_DEPTH {
+        return serde_json::Value::String("[depth limit reached]".to_string());
+    }
+    match value {
+        serde_json::Value::String(value) => {
+            serde_json::Value::String(value.chars().take(MAX_HASS_OUTPUT_STRING_CHARS).collect())
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .take(MAX_HASS_OUTPUT_ITEMS)
+                .map(|value| bounded_hass_json(value, depth + 1))
+                .collect(),
+        ),
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .into_iter()
+                .take(MAX_HASS_OUTPUT_ITEMS)
+                .map(|(key, value)| {
+                    (
+                        key.chars().take(MAX_HASS_IDENTIFIER_BYTES).collect(),
+                        bounded_hass_json(value, depth + 1),
+                    )
+                })
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+fn validate_hass_params(params: &serde_json::Value) -> Result<(), ToolError> {
+    let object = params.as_object().ok_or_else(|| {
+        ToolError::InvalidParameters("Home Assistant parameters must be an object".to_string())
+    })?;
+    const ALLOWED: &[&str] = &["action", "entity_id", "domain", "service", "service_data"];
+    if object.len() > ALLOWED.len() || object.keys().any(|key| !ALLOWED.contains(&key.as_str())) {
+        return Err(ToolError::InvalidParameters(
+            "Home Assistant parameters contain unsupported fields".to_string(),
+        ));
+    }
+    if !object
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|action| {
+            matches!(
+                action,
+                "list_entities" | "get_state" | "list_services" | "call_service"
+            )
+        })
+    {
+        return Err(ToolError::InvalidParameters(
+            "Unknown or missing Home Assistant action".to_string(),
+        ));
+    }
+    for (key, allow_dot) in [("entity_id", true), ("domain", false), ("service", false)] {
+        if let Some(value) = object.get(key) {
+            let value = value
+                .as_str()
+                .ok_or_else(|| ToolError::InvalidParameters(format!("{key} must be a string")))?;
+            if !valid_hass_identifier(value, allow_dot) {
+                return Err(ToolError::InvalidParameters(format!(
+                    "{key} is malformed or exceeds its size limit"
+                )));
+            }
+        }
+    }
+    if let Some(service_data) = object.get("service_data")
+        && (!service_data.is_object()
+            || serde_json::to_vec(service_data)
+                .map_or(true, |encoded| encoded.len() > MAX_HASS_SERVICE_DATA_BYTES))
+    {
+        return Err(ToolError::InvalidParameters(
+            "service_data must be a bounded object".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Home Assistant integration tool.
@@ -154,14 +436,20 @@ impl Tool for HomeAssistantTool {
                 },
                 "entity_id": {
                     "type": "string",
+                    "maxLength": MAX_HASS_IDENTIFIER_BYTES,
+                    "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
                     "description": "Entity ID (for get_state and call_service, e.g. 'light.living_room')"
                 },
                 "domain": {
                     "type": "string",
+                    "maxLength": MAX_HASS_IDENTIFIER_BYTES,
+                    "pattern": "^[A-Za-z0-9_-]+$",
                     "description": "Filter by domain (for list_entities: 'light', 'switch', 'sensor', etc.)"
                 },
                 "service": {
                     "type": "string",
+                    "maxLength": MAX_HASS_IDENTIFIER_BYTES,
+                    "pattern": "^[A-Za-z0-9_-]+$",
                     "description": "Service to call (for call_service, e.g. 'turn_on', 'turn_off')"
                 },
                 "service_data": {
@@ -169,7 +457,8 @@ impl Tool for HomeAssistantTool {
                     "description": "Additional data for the service call (e.g. {\"brightness\": 255})"
                 }
             },
-            "required": ["action"]
+            "required": ["action"],
+            "additionalProperties": false
         })
     }
 
@@ -190,6 +479,7 @@ impl Tool for HomeAssistantTool {
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        validate_hass_params(&params)?;
         let action = require_str(&params, "action")?;
 
         match action {
@@ -212,13 +502,14 @@ impl Tool for HomeAssistantTool {
                         }
                     })
                     .map(|s| {
-                        let entity_id = s["entity_id"].as_str().unwrap_or("");
-                        let state = s["state"].as_str().unwrap_or("unknown");
+                        let entity_id = bounded_hass_label(s["entity_id"].as_str().unwrap_or(""));
+                        let state = bounded_hass_label(s["state"].as_str().unwrap_or("unknown"));
                         let friendly_name = s
                             .get("attributes")
                             .and_then(|a| a.get("friendly_name"))
                             .and_then(|n| n.as_str())
-                            .unwrap_or(entity_id);
+                            .map(bounded_hass_label)
+                            .unwrap_or_else(|| entity_id.clone());
 
                         serde_json::json!({
                             "entity_id": entity_id,
@@ -229,13 +520,14 @@ impl Tool for HomeAssistantTool {
                     .collect();
 
                 // Truncate for LLM context budget
-                let truncated = entities.len() > 100;
-                entities.truncate(100);
+                let total = entities.len();
+                let truncated = entities.len() > MAX_HASS_OUTPUT_ITEMS;
+                entities.truncate(MAX_HASS_OUTPUT_ITEMS);
 
                 Ok(ToolOutput::success(
                     serde_json::json!({
                         "entities": entities,
-                        "total": entities.len(),
+                        "total": total,
                         "truncated": truncated,
                         "domain_filter": domain_filter,
                     }),
@@ -248,7 +540,10 @@ impl Tool for HomeAssistantTool {
 
                 let state = self.client.get(&format!("states/{}", entity_id)).await?;
 
-                Ok(ToolOutput::success(state, start.elapsed()))
+                Ok(ToolOutput::success(
+                    bounded_hass_json(state, 0),
+                    start.elapsed(),
+                ))
             }
 
             "list_services" => {
@@ -266,12 +561,12 @@ impl Tool for HomeAssistantTool {
                                     .is_some_and(|d| d == domain)
                             })
                             .collect();
-                        serde_json::json!(matching)
+                        bounded_hass_json(serde_json::json!(matching), 0)
                     } else {
-                        services
+                        bounded_hass_json(services, 0)
                     }
                 } else {
-                    services
+                    bounded_hass_json(services, 0)
                 };
 
                 Ok(ToolOutput::success(
@@ -315,16 +610,15 @@ impl Tool for HomeAssistantTool {
                         "success": true,
                         "entity_id": entity_id,
                         "service": format!("{}.{}", domain, service),
-                        "result": result,
+                        "result": bounded_hass_json(result, 0),
                     }),
                     start.elapsed(),
                 ))
             }
 
-            _ => Err(ToolError::InvalidParameters(format!(
-                "Unknown action: '{}'. Use: list_entities, get_state, list_services, call_service",
-                action
-            ))),
+            _ => Err(ToolError::InvalidParameters(
+                "Unknown Home Assistant action".to_string(),
+            )),
         }
     }
 
@@ -362,6 +656,39 @@ mod tests {
     fn test_hass_client_auth_header() {
         let client = HassClient::new("http://ha.local".to_string(), "my_token".to_string());
         assert_eq!(client.auth_header(), "Bearer my_token");
+        assert!(!format!("{client:?}").contains("my_token"));
+    }
+
+    #[test]
+    fn hass_endpoint_rejects_path_traversal() {
+        let client = HassClient::new("http://ha.local".to_string(), "token".to_string());
+        assert!(client.endpoint("states/light.kitchen").is_ok());
+        assert!(client.endpoint("states/../../config").is_err());
+        assert!(
+            client
+                .endpoint("states/light.kitchen?token=secret")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn hass_params_reject_malformed_identifiers_and_large_service_data() {
+        assert!(
+            validate_hass_params(&serde_json::json!({
+                "action": "get_state",
+                "entity_id": "../../config",
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_hass_params(&serde_json::json!({
+                "action": "call_service",
+                "entity_id": "light.kitchen",
+                "service": "turn_on",
+                "service_data": {"payload": "x".repeat(MAX_HASS_SERVICE_DATA_BYTES)},
+            }))
+            .is_err()
+        );
     }
 
     #[test]

@@ -114,7 +114,7 @@ pub(super) fn extract_essential_instructions(agents_content: &str) -> String {
         cap_chars(agents_content, 400)
     } else {
         essential.push(String::new());
-        essential.push("Full instructions: `memory_read AGENTS.md`".to_string());
+        essential.push("Full instructions are runtime-managed trusted context.".to_string());
         essential.join("\n")
     }
 }
@@ -143,7 +143,8 @@ pub(super) fn upsert_timezone_line(content: &str, timezone: Option<&str>) -> Str
 
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("- **Timezone:**") || trimmed.starts_with("- **Timezone**:") {
+        let field = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+        if field.starts_with("**Timezone:**") || field.starts_with("**Timezone**:") {
             lines.push(replacement.clone());
             replaced = true;
         } else {

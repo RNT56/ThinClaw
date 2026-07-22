@@ -12,7 +12,7 @@ use thinclaw_agent::session_manager::SessionLifecycleHooks;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-use crate::agent::session::Session;
+use crate::agent::session::{PendingApproval, Session};
 use crate::agent::undo::UndoManager;
 use crate::hooks::HookRegistry;
 use crate::identity::{ConversationKind, ResolvedIdentity};
@@ -40,12 +40,27 @@ impl SessionManager {
         thinclaw_agent::session_manager::SessionManager::scope_id_for_user_id(user_id)
     }
 
+    pub fn session_scope_for_identity(identity: &ResolvedIdentity) -> Uuid {
+        thinclaw_agent::session_manager::SessionManager::session_scope_for_identity(identity)
+    }
+
     pub async fn workspace_lock(&self, user_id: &str) -> Arc<RwLock<()>> {
         self.inner.workspace_lock(user_id).await
     }
 
+    pub async fn execution_lock_for_identity(&self, identity: &ResolvedIdentity) -> Arc<Mutex<()>> {
+        self.inner.execution_lock_for_identity(identity).await
+    }
+
     pub async fn session_for_thread(&self, thread_id: Uuid) -> Option<Arc<Mutex<Session>>> {
         self.inner.session_for_thread(thread_id).await
+    }
+
+    pub async fn find_pending_approval(
+        &self,
+        request_id: Uuid,
+    ) -> Option<(Arc<Mutex<Session>>, Uuid, PendingApproval)> {
+        self.inner.find_pending_approval(request_id).await
     }
 
     pub async fn get_or_create_session_for_identity(
@@ -83,6 +98,17 @@ impl SessionManager {
             .await
     }
 
+    pub async fn lookup_thread_for_identity(
+        &self,
+        identity: &ResolvedIdentity,
+        channel: &str,
+        external_thread_id: Option<&str>,
+    ) -> Option<(Arc<Mutex<Session>>, Uuid)> {
+        self.inner
+            .lookup_thread_for_identity(identity, channel, external_thread_id)
+            .await
+    }
+
     pub async fn register_thread(
         &self,
         user_id: &str,
@@ -103,6 +129,27 @@ impl SessionManager {
     ) {
         self.inner
             .register_direct_main_thread_for_scope(scope_id, thread_id, session)
+            .await;
+    }
+
+    pub async fn register_thread_alias_for_scope(
+        &self,
+        scope_id: Uuid,
+        conversation_kind: ConversationKind,
+        channel: &str,
+        external_thread_id: Option<&str>,
+        thread_id: Uuid,
+        session: Arc<Mutex<Session>>,
+    ) {
+        self.inner
+            .register_thread_alias_for_scope(
+                scope_id,
+                conversation_kind,
+                channel,
+                external_thread_id,
+                thread_id,
+                session,
+            )
             .await;
     }
 

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 /// Minimum allowed polling interval (30 seconds).
 pub const MIN_POLL_INTERVAL_MS: u32 = 30_000;
@@ -15,6 +16,44 @@ pub const MIN_POLL_INTERVAL_MS: u32 = 30_000;
 /// Default emit rate limit.
 pub const DEFAULT_EMIT_RATE_PER_MINUTE: u32 = 100;
 pub const DEFAULT_EMIT_RATE_PER_HOUR: u32 = 5000;
+
+/// Channel names are also used as persistence and pairing namespace keys.
+pub(crate) fn is_valid_channel_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+}
+
+/// Convert a manifest secret name into the only placeholder namespace exposed
+/// to channel guests. Keeping this grammar deliberately narrower than general
+/// secret names prevents case-folding collisions and ambiguous placeholders.
+pub(crate) fn credential_placeholder_name(secret_name: &str) -> Option<String> {
+    if secret_name.is_empty()
+        || secret_name.len() > 128
+        || !secret_name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return None;
+    }
+
+    Some(secret_name.to_ascii_uppercase())
+}
+
+/// Return a traversal-safe persistence component even for test-only callers
+/// that bypass the production loader's strict name validation.
+pub(crate) fn channel_storage_key(name: &str) -> String {
+    if is_valid_channel_name(name) {
+        return name.to_string();
+    }
+    let digest = Sha256::digest(name.as_bytes());
+    format!("invalid-{}", hex::encode(&digest[..16]))
+}
 
 /// Tool-runtime capabilities required by a channel.
 ///
@@ -221,6 +260,12 @@ pub enum CredentialLocation {
     UrlPath {
         placeholder: String,
     },
+    UrlBase {
+        placeholder: String,
+    },
+    Body {
+        placeholder: String,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -331,7 +376,7 @@ impl ChannelCapabilities {
     /// Create capabilities for a channel with the given name.
     pub fn for_channel(name: &str) -> Self {
         Self {
-            workspace_prefix: format!("channels/{}/", name),
+            workspace_prefix: format!("channels/{}/", channel_storage_key(name)),
             ..Default::default()
         }
     }
@@ -398,23 +443,44 @@ impl ChannelCapabilities {
     ///
     /// Paths cannot escape the channel's namespace.
     pub fn validate_workspace_path(&self, path: &str) -> Result<String, String> {
-        // Block absolute paths
-        if path.starts_with('/') {
-            return Err("Absolute paths not allowed".to_string());
+        const MAX_WORKSPACE_PATH_BYTES: usize = 1024;
+
+        let valid_relative = |value: &str, allow_trailing_slash: bool| {
+            if value.is_empty()
+                || value.len() > MAX_WORKSPACE_PATH_BYTES
+                || value.starts_with('/')
+                || value.contains('\\')
+                || value.chars().any(char::is_control)
+                || (!allow_trailing_slash && value.ends_with('/'))
+            {
+                return false;
+            }
+            let normalized = if allow_trailing_slash {
+                value.strip_suffix('/').unwrap_or(value)
+            } else {
+                value
+            };
+            !normalized.is_empty()
+                && normalized
+                    .split('/')
+                    .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+        };
+
+        if !valid_relative(path, false) {
+            return Err("Workspace path must be a safe, non-empty relative path".to_string());
+        }
+        if !self.workspace_prefix.is_empty()
+            && (!self.workspace_prefix.ends_with('/')
+                || !valid_relative(&self.workspace_prefix, true))
+        {
+            return Err("Configured workspace prefix is invalid".to_string());
         }
 
-        // Block path traversal
-        if path.contains("..") {
-            return Err("Parent directory references not allowed".to_string());
+        let full_path = self.prefix_workspace_path(path);
+        if full_path.len() > MAX_WORKSPACE_PATH_BYTES {
+            return Err("Workspace path is too long".to_string());
         }
-
-        // Block null bytes
-        if path.contains('\0') {
-            return Err("Null bytes not allowed".to_string());
-        }
-
-        // Prefix with channel namespace
-        Ok(self.prefix_workspace_path(path))
+        Ok(full_path)
     }
 }
 

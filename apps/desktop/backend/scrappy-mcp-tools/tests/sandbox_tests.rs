@@ -231,4 +231,32 @@ a + b
             other => panic!("Expected ResultTooLarge, got {:?}", other),
         }
     }
+
+    #[test]
+    fn test_script_size_limit() {
+        let sb = make_sandbox();
+        let script = " ".repeat(256 * 1024 + 1);
+        assert!(matches!(
+            sb.execute(&script),
+            Err(SandboxError::Compilation(message)) if message.contains("256 KiB")
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_async_deadline_releases_caller_when_host_function_stalls() {
+        let mut config = SandboxConfig::default();
+        config.timeout_seconds = 1;
+        let mut sb = Sandbox::new(config, Arc::new(NullReporter));
+        sb.engine_mut().register_fn("stall", || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            1_i64
+        });
+
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            sb.execute_async("stall()".to_string()).await,
+            Err(SandboxError::Timeout(1))
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_millis(1_800));
+    }
 }

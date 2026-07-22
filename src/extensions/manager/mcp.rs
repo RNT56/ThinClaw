@@ -9,15 +9,12 @@ use tokio::time::MissedTickBehavior;
 
 use crate::extensions::{ActivateResult, AuthResult, ExtensionError, ExtensionKind};
 use crate::secrets::CreateSecretParams;
-use crate::tools::mcp::auth::{
-    PkceChallenge, authorize_mcp_server, build_authorization_url, discover_oauth_bundle,
-    find_available_port, is_authenticated, register_client,
-};
+use crate::tools::mcp::auth::{is_authenticated, prepare_mcp_authorization};
 use crate::tools::mcp::config::{McpConfigStore, McpServerConfig};
 use crate::tools::mcp::{McpClient, McpPendingInteraction};
 
 use super::ExtensionManager;
-use super::core::PendingAuth;
+use super::core::{AuthRequestContext, PendingAuth};
 
 const MCP_LOOP_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -69,7 +66,12 @@ impl ExtensionManager {
         &self,
         config: McpServerConfig,
     ) -> Result<(), crate::tools::mcp::config::ConfigError> {
-        self.add_mcp_server(config).await
+        let name = config.name.clone();
+        let _operation = self.mcp_operation_lock.lock().await;
+        self.add_mcp_server(config).await?;
+        self.discard_mcp_client_unlocked(&name).await;
+        self.unregister_mcp_tools_unlocked(&name).await;
+        Ok(())
     }
 
     pub async fn get_active_mcp_client(&self, name: &str) -> Option<Arc<McpClient>> {
@@ -129,8 +131,34 @@ impl ExtensionManager {
         }
     }
 
+    /// Remove and stop a published MCP client so changed credentials or config
+    /// cannot be masked by a stale authenticated transport.
+    pub(super) async fn discard_mcp_client_unlocked(&self, name: &str) {
+        self.stop_mcp_watcher(name).await;
+        let client = self.mcp_clients.write().await.remove(name);
+        if let Some(client) = client {
+            client.shutdown().await;
+        }
+    }
+
+    pub(super) async fn unregister_mcp_tools_unlocked(&self, name: &str) -> Vec<String> {
+        let prefix = McpClient::registered_tool_prefix(name);
+        let names = self
+            .tool_registry
+            .list()
+            .await
+            .into_iter()
+            .filter(|tool_name| tool_name.starts_with(&prefix))
+            .collect::<Vec<_>>();
+        for tool_name in &names {
+            self.tool_registry.unregister(tool_name).await;
+        }
+        names
+    }
+
     pub async fn stop_mcp_background_tasks(&self) {
         self.stop_mcp_health_monitor().await;
+        let _operation = self.mcp_operation_lock.lock().await;
 
         let watchers = {
             let mut guard = self.mcp_watchers.write().await;
@@ -139,6 +167,25 @@ impl ExtensionManager {
         for (_name, (handle, shutdown_tx)) in watchers {
             let _ = shutdown_tx.send(());
             drain_mcp_task(handle, "mcp_roots_grant_watcher").await;
+        }
+
+        let clients = {
+            let mut clients = self.mcp_clients.write().await;
+            clients
+                .drain()
+                .map(|(_, client)| client)
+                .collect::<Vec<_>>()
+        };
+        let mut shutdowns = tokio::task::JoinSet::new();
+        for client in clients {
+            shutdowns.spawn(async move {
+                client.shutdown().await;
+            });
+        }
+        while let Some(result) = shutdowns.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "MCP client shutdown task failed");
+            }
         }
     }
 
@@ -201,9 +248,9 @@ impl ExtensionManager {
     /// first so `activate_mcp` builds a fresh one rather than reusing the crashed
     /// handle.
     pub async fn reconnect_mcp_server(&self, name: &str) -> bool {
-        self.stop_mcp_watcher(name).await;
-        self.mcp_clients.write().await.remove(name);
-        match self.activate_mcp(name).await {
+        let _operation = self.mcp_operation_lock.lock().await;
+        self.discard_mcp_client_unlocked(name).await;
+        match self.activate_mcp_unlocked(name).await {
             Ok(_) => {
                 tracing::info!(server = %name, "Reconnected MCP server after health failure");
                 self.record_mcp_health(name, None).await;
@@ -338,6 +385,14 @@ impl ExtensionManager {
     }
 
     pub async fn connect_mcp_client(&self, name: &str) -> Result<Arc<McpClient>, ExtensionError> {
+        let _operation = self.mcp_operation_lock.lock().await;
+        self.connect_mcp_client_unlocked(name).await
+    }
+
+    async fn connect_mcp_client_unlocked(
+        &self,
+        name: &str,
+    ) -> Result<Arc<McpClient>, ExtensionError> {
         if let Some(client) = self.get_active_mcp_client(name).await {
             return Ok(client);
         }
@@ -346,11 +401,20 @@ impl ExtensionManager {
             .get_mcp_server(name)
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
-        let client = self.build_mcp_client(&server).await?;
-        self.mcp_clients
-            .write()
-            .await
-            .insert(name.to_string(), Arc::clone(&client));
+        let candidate = self.build_mcp_client(&server).await?;
+        let client = {
+            let mut clients = self.mcp_clients.write().await;
+            clients
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::clone(&candidate))
+                .clone()
+        };
+        if !Arc::ptr_eq(&client, &candidate) {
+            // Concurrent callers may race through the initial read/build. Keep
+            // the atomically published client and deterministically stop the
+            // losing candidate so its stdio child cannot leak.
+            candidate.shutdown().await;
+        }
         self.ensure_mcp_watcher(name, &client).await;
         Ok(client)
     }
@@ -419,7 +483,9 @@ impl ExtensionManager {
         &self,
         name: &str,
         token: Option<&str>,
+        context: AuthRequestContext,
     ) -> Result<AuthResult, ExtensionError> {
+        let _operation = self.mcp_operation_lock.lock().await;
         let server = self
             .get_mcp_server(name)
             .await
@@ -427,6 +493,14 @@ impl ExtensionManager {
 
         // If a token was provided directly, store it and we're done.
         if let Some(token_value) = token {
+            if token_value.is_empty()
+                || token_value.len() > 64 * 1024
+                || token_value.chars().any(char::is_control)
+            {
+                return Err(ExtensionError::AuthFailed(
+                    "MCP bearer token is empty, malformed, or oversized".to_string(),
+                ));
+            }
             let secret_name = server.token_secret_name();
             let params =
                 CreateSecretParams::new(&secret_name, token_value).with_provider(name.to_string());
@@ -434,6 +508,8 @@ impl ExtensionManager {
                 .create(&self.user_id, params)
                 .await
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+            self.discard_mcp_client_unlocked(name).await;
+            self.unregister_mcp_tools_unlocked(name).await;
 
             tracing::info!("MCP server '{}' authenticated via manual token", name);
             return Ok(self.auth_result(
@@ -449,33 +525,26 @@ impl ExtensionManager {
             return Ok(self.auth_result(name, ExtensionKind::McpServer, "oauth", "authenticated"));
         }
 
-        // Run the full OAuth flow (opens browser, waits for callback)
-        match authorize_mcp_server(&server, &self.secrets, &self.user_id).await {
-            Ok(_token) => {
-                tracing::info!("MCP server '{}' authenticated via OAuth", name);
-                Ok(self.auth_result(name, ExtensionKind::McpServer, "oauth", "authenticated"))
-            }
+        // Build a non-blocking transaction for the gateway callback route. The
+        // CLI has its own loopback listener flow; extension-management requests
+        // must return an authorization URL instead of occupying a request task
+        // for up to five minutes.
+        match self.auth_mcp_build_url(name, &server, context).await {
+            Ok(result) => Ok(result),
             Err(crate::tools::mcp::auth::AuthError::NotSupported) => {
-                // Server doesn't support OAuth, try building a URL first
-                match self.auth_mcp_build_url(name, &server).await {
-                    Ok(result) => Ok(result),
-                    Err(_) => {
-                        // No OAuth, no DCR: fall back to manual token entry
-                        let mut result = self.auth_result(
-                            name,
-                            ExtensionKind::McpServer,
-                            "manual_token",
-                            "awaiting_token",
-                        );
-                        result.instructions = Some(format!(
-                            "Server '{}' does not support OAuth. \
-                             Please provide an API token/key for this server.",
-                            name
-                        ));
-                        result.awaiting_token = true;
-                        Ok(result)
-                    }
-                }
+                let mut result = self.auth_result(
+                    name,
+                    ExtensionKind::McpServer,
+                    "manual_token",
+                    "awaiting_token",
+                );
+                result.instructions = Some(format!(
+                    "Server '{}' does not support OAuth. \
+                     Please provide an API token/key for this server.",
+                    name
+                ));
+                result.awaiting_token = true;
+                Ok(result)
             }
             Err(e) => {
                 // OAuth failed for some other reason, fall back to manual token
@@ -502,69 +571,36 @@ impl ExtensionManager {
         &self,
         name: &str,
         server: &McpServerConfig,
-    ) -> Result<AuthResult, ExtensionError> {
-        // Try to discover OAuth metadata and build a URL the user can open manually
-        let bundle = discover_oauth_bundle(&server.url)
+        context: AuthRequestContext,
+    ) -> Result<AuthResult, crate::tools::mcp::auth::AuthError> {
+        let callback_base = self
+            .resolve_callback_base_url(context.callback_base_url.as_deref())
             .await
-            .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-        let metadata = bundle.authorization_server;
-
-        // Try DCR if no client_id configured
-        let (client_id, redirect_uri) = if let Some(ref oauth) = server.oauth {
-            let port = find_available_port()
-                .await
-                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-            let redirect = format!("http://localhost:{}/callback", port.1);
-            (oauth.client_id.clone(), redirect)
-        } else if let Some(ref reg_endpoint) = metadata.registration_endpoint {
-            let port = find_available_port()
-                .await
-                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-            let redirect = format!("http://localhost:{}/callback", port.1);
-
-            let registration = register_client(reg_endpoint, &redirect)
-                .await
-                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-
-            (registration.client_id, redirect)
-        } else {
-            return Err(ExtensionError::AuthFailed(
-                "Server doesn't support OAuth or Dynamic Client Registration".to_string(),
-            ));
-        };
-
-        // Generate a state nonce for CSRF protection
+            .ok_or_else(|| {
+                crate::tools::mcp::auth::AuthError::DiscoveryFailed(
+                    "No HTTPS (or loopback) OAuth callback URL is configured for this gateway"
+                        .to_string(),
+                )
+            })?;
+        let redirect_uri = format!("{}/oauth/callback", callback_base.trim_end_matches('/'));
         let state_nonce = uuid::Uuid::new_v4().to_string();
-        let pkce = PkceChallenge::generate();
-        let auth_url = build_authorization_url(
-            &metadata.authorization_endpoint,
-            &client_id,
-            &redirect_uri,
-            &metadata.scopes_supported,
-            Some(&pkce),
-            Some(&state_nonce),
-            Some(
-                server
-                    .oauth
-                    .as_ref()
-                    .and_then(|oauth| oauth.resource.as_deref())
-                    .unwrap_or(&bundle.protected_resource.resource),
-            ),
-            &std::collections::HashMap::new(),
-        );
+        let prepared = prepare_mcp_authorization(server, &redirect_uri, &state_nonce).await?;
+        let auth_url = prepared.authorization_url().to_string();
 
         // Store pending auth for later callback handling
-        self.pending_auth.write().await.insert(
+        self.insert_pending_auth(
             state_nonce.clone(),
             PendingAuth {
                 name: name.to_string(),
                 kind: ExtensionKind::McpServer,
                 code_verifier: None,
+                mcp_authorization: Some(prepared),
                 redirect_uri: Some(redirect_uri.clone()),
-                thread_id: None,
+                thread_id: context.thread_id.clone(),
                 created_at: std::time::Instant::now(),
             },
-        );
+        )
+        .await;
 
         let mut result = self.auth_result(
             name,
@@ -573,45 +609,71 @@ impl ExtensionManager {
             "awaiting_authorization",
         );
         result.auth_url = Some(auth_url);
-        result.callback_type = Some("local".to_string());
+        result.callback_type = Some(context.callback_type.unwrap_or_else(|| "web".to_string()));
+        result.instructions = Some(format!("Connect {} to continue.", server.display_label()));
         Ok(result)
     }
 
     pub(super) async fn activate_mcp(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
-        let client = if let Some(existing) = self.get_active_mcp_client(name).await {
-            existing
-        } else {
-            let server = self
-                .get_mcp_server(name)
-                .await
-                .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
-            let client = self.build_mcp_client(&server).await?;
-            self.mcp_clients
-                .write()
-                .await
-                .insert(name.to_string(), Arc::clone(&client));
-            self.ensure_mcp_watcher(name, &client).await;
-            client
-        };
+        let _operation = self.mcp_operation_lock.lock().await;
+        self.activate_mcp_unlocked(name).await
+    }
+
+    pub(super) async fn activate_mcp_unlocked(
+        &self,
+        name: &str,
+    ) -> Result<ActivateResult, ExtensionError> {
+        let client = self.connect_mcp_client_unlocked(name).await?;
 
         // Try to list and create tools
-        let mcp_tools = client
-            .list_tools()
-            .await
-            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+        let mcp_tools = match client.list_tools().await {
+            Ok(tools) => tools,
+            Err(error) => {
+                self.discard_mcp_client_unlocked(name).await;
+                self.unregister_mcp_tools_unlocked(name).await;
+                return Err(ExtensionError::ActivationFailed(error.to_string()));
+            }
+        };
 
-        let tool_impls = client
-            .create_tools()
-            .await
-            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+        let tool_impls = match client.create_tools().await {
+            Ok(tools) => tools,
+            Err(error) => {
+                self.discard_mcp_client_unlocked(name).await;
+                self.unregister_mcp_tools_unlocked(name).await;
+                return Err(ExtensionError::ActivationFailed(error.to_string()));
+            }
+        };
 
         let tool_names: Vec<String> = mcp_tools
             .iter()
             .map(|t| McpClient::registered_tool_name(name, &t.name))
             .collect();
 
+        let prefix = McpClient::registered_tool_prefix(name);
+        let desired = tool_names
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let stale_tools = self
+            .tool_registry
+            .list()
+            .await
+            .into_iter()
+            .filter(|tool_name| tool_name.starts_with(&prefix) && !desired.contains(tool_name))
+            .collect::<Vec<_>>();
+
         for tool in tool_impls {
-            self.tool_registry.register(tool).await;
+            let tool_name = tool.name().to_string();
+            if !self.tool_registry.register(tool).await {
+                self.discard_mcp_client_unlocked(name).await;
+                self.unregister_mcp_tools_unlocked(name).await;
+                return Err(ExtensionError::ActivationFailed(format!(
+                    "MCP tool '{tool_name}' conflicts with a protected built-in tool name"
+                )));
+            }
+        }
+        for tool_name in stale_tools {
+            self.tool_registry.unregister(&tool_name).await;
         }
 
         tracing::info!(

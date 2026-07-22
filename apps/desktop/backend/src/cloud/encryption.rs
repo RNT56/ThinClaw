@@ -22,6 +22,7 @@ use aes_gcm::{
 use hkdf::Hkdf;
 use rand::{rngs::OsRng, RngCore};
 use sha2::Sha256;
+use std::io::Read;
 use zeroize::Zeroize;
 
 /// Magic bytes identifying an encrypted Scrappy file.
@@ -32,6 +33,17 @@ const FORMAT_VERSION: u16 = 1;
 const HEADER_SIZE: usize = 16;
 /// Nonce size for AES-256-GCM.
 const NONCE_SIZE: usize = 12;
+/// Defense-in-depth ceiling for legacy callers that do not yet choose a
+/// smaller, purpose-specific plaintext limit.
+pub const DEFAULT_MAX_DECRYPTED_BYTES: usize = 512 * 1024 * 1024;
+/// Conservative upper bound for the zstd + AES-GCM envelope produced from a
+/// plaintext of at most `max_plaintext_bytes`. zstd's incompressible overhead
+/// is well below 1%; the fixed allowance covers small frames and our header.
+pub const fn encrypted_size_limit(max_plaintext_bytes: usize) -> usize {
+    max_plaintext_bytes
+        .saturating_add(max_plaintext_bytes / 100)
+        .saturating_add(64 * 1024)
+}
 // Auth tag is included in ciphertext by aes-gcm crate.
 
 // ── Master Key Management ────────────────────────────────────────────────────
@@ -123,6 +135,9 @@ pub enum EncryptionError {
     #[error("Invalid encrypted file: {0}")]
     InvalidFormat(String),
 
+    #[error("Decrypted file exceeds the {limit}-byte limit")]
+    OutputTooLarge { limit: usize },
+
     #[error("Invalid key: {0}")]
     InvalidKey(String),
 
@@ -194,6 +209,23 @@ pub fn decrypt(
     file_path: &str,
     encrypted: &[u8],
 ) -> Result<Vec<u8>, EncryptionError> {
+    decrypt_bounded(
+        master_key,
+        file_path,
+        encrypted,
+        DEFAULT_MAX_DECRYPTED_BYTES,
+    )
+}
+
+/// Decrypt with an explicit ceiling on the decompressed plaintext. The cloud
+/// object is attacker-controlled, and a tiny authenticated compressed payload
+/// can otherwise expand until memory or disk is exhausted after decryption.
+pub fn decrypt_bounded(
+    master_key: &MasterKey,
+    file_path: &str,
+    encrypted: &[u8],
+    max_plaintext_bytes: usize,
+) -> Result<Vec<u8>, EncryptionError> {
     // 1. Validate minimum size
     let min_size = HEADER_SIZE + NONCE_SIZE + 16; // at minimum: header + nonce + auth tag
     if encrypted.len() < min_size {
@@ -243,8 +275,22 @@ pub fn decrypt(
     })?;
 
     // 7. Decompress
-    let plaintext = zstd::decode_all(compressed.as_slice())
-        .map_err(|e| EncryptionError::DecryptFailed(format!("Decompression failed: {}", e)))?;
+    let decoder = zstd::stream::read::Decoder::new(compressed.as_slice()).map_err(|error| {
+        EncryptionError::DecryptFailed(format!("Decompression failed: {error}"))
+    })?;
+    let read_limit = u64::try_from(max_plaintext_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut limited = decoder.take(read_limit);
+    let mut plaintext = Vec::with_capacity(compressed.len().min(max_plaintext_bytes));
+    limited.read_to_end(&mut plaintext).map_err(|error| {
+        EncryptionError::DecryptFailed(format!("Decompression failed: {error}"))
+    })?;
+    if plaintext.len() > max_plaintext_bytes {
+        return Err(EncryptionError::OutputTooLarge {
+            limit: max_plaintext_bytes,
+        });
+    }
 
     Ok(plaintext)
 }
@@ -381,6 +427,18 @@ mod tests {
         assert_eq!(decrypted, data);
         // Compressed + encrypted should be smaller than raw for repetitive data
         assert!(encrypted.len() < data.len());
+    }
+
+    #[test]
+    fn bounded_decrypt_rejects_compression_bombs() {
+        let key = MasterKey::generate();
+        let data = vec![0_u8; 1_000_000];
+        let encrypted = encrypt(&key, "bomb.bin", &data).unwrap();
+        assert!(encrypted.len() < 1_024);
+        assert!(matches!(
+            decrypt_bounded(&key, "bomb.bin", &encrypted, 8_192),
+            Err(EncryptionError::OutputTooLarge { limit: 8_192 })
+        ));
     }
 
     #[test]

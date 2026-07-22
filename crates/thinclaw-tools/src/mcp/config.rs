@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use thinclaw_tools_core::{OutboundUrlGuardOptions, ToolError, validate_outbound_url};
+use thinclaw_tools_core::{OutboundUrlGuardOptions, ToolError, validate_outbound_url_structure};
+
+const MAX_MCP_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Transport type for MCP servers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,7 +80,7 @@ impl McpConfigStore {
 }
 
 /// Configuration for connecting to a remote MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Unique name for this server (e.g., "notion", "github").
     #[serde(alias = "id")]
@@ -117,7 +119,7 @@ pub struct McpServerConfig {
     #[serde(default = "default_true", alias = "auto_activate")]
     pub enabled: bool,
 
-    /// Allow loopback/private HTTP endpoints for local development.
+    /// Allow loopback/private-IP HTTP endpoints for local development.
     #[serde(default)]
     pub allow_local_http: bool,
 
@@ -144,6 +146,33 @@ pub struct McpServerConfig {
     /// Optional description for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpServerConfig")
+            .field("name", &self.name)
+            .field("display_name", &self.display_name)
+            .field("url", &"[REDACTED URL]")
+            .field("transport", &self.transport)
+            .field("command", &self.command)
+            .field("argument_count", &self.args.len())
+            .field("environment_keys", &self.env.keys().collect::<Vec<_>>())
+            .field("oauth", &self.oauth)
+            .field("enabled", &self.enabled)
+            .field("allow_local_http", &self.allow_local_http)
+            .field("capability_policy", &self.capability_policy)
+            .field("root_grant_count", &self.roots_grants.len())
+            .field("logging_level", &self.logging_level)
+            .field("metadata_present", &self.metadata.is_some())
+            .field(
+                "runtime_connected",
+                &self.runtime_health.as_ref().map(|health| health.connected),
+            )
+            .field("description", &self.description)
+            .finish()
+    }
 }
 
 fn default_true() -> bool {
@@ -230,47 +259,45 @@ impl McpServerConfig {
 
     /// Validate the server configuration.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.name.is_empty() {
+        if self.name.is_empty()
+            || self.name.len() > 128
+            || !self
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
             return Err(ConfigError::InvalidConfig {
-                reason: "Server name cannot be empty".to_string(),
+                reason: "Server name must be 1-128 safe identifier characters".to_string(),
             });
         }
 
         match self.transport {
             McpTransport::Http => {
-                if self.url.is_empty() {
+                if self.url.is_empty() || self.url.len() > 16 * 1024 {
                     return Err(ConfigError::InvalidConfig {
                         reason: "Server URL cannot be empty for HTTP transport".to_string(),
                     });
                 }
 
-                let options = OutboundUrlGuardOptions {
-                    require_https: !self.allow_local_http,
-                    upgrade_http_to_https: false,
-                    allowlist: Vec::new(),
-                };
-
-                if let Err(error) = validate_outbound_url(&self.url, &options) {
-                    if !self.allow_local_http && is_localhost_url(&self.url) {
-                        return Ok(());
-                    }
-
+                let parsed =
+                    url::Url::parse(&self.url).map_err(|e| ConfigError::InvalidConfig {
+                        reason: format!("Invalid MCP server URL: {e}"),
+                    })?;
+                if !matches!(parsed.scheme(), "http" | "https")
+                    || !parsed.username().is_empty()
+                    || parsed.password().is_some()
+                    || parsed.fragment().is_some()
+                {
                     return Err(ConfigError::InvalidConfig {
-                        reason: error.to_string(),
+                        reason: "MCP server URLs must use http:// or https:// without embedded credentials or fragments"
+                            .to_string(),
                     });
                 }
 
-                if self.allow_local_http {
-                    let parsed =
-                        url::Url::parse(&self.url).map_err(|e| ConfigError::InvalidConfig {
-                            reason: format!("Invalid MCP server URL: {e}"),
-                        })?;
-                    if !matches!(parsed.scheme(), "http" | "https") {
-                        return Err(ConfigError::InvalidConfig {
-                            reason: "MCP server URLs must use http:// or https://".to_string(),
-                        });
-                    }
+                if !(self.allow_local_http && is_local_network_url(&parsed)) {
+                    validate_public_mcp_url(&self.url)?;
                 }
+                validate_oauth_config(self.oauth.as_ref(), self.allow_local_http)?;
             }
             McpTransport::Stdio => {
                 if self.command.is_none() || self.command.as_deref() == Some("") {
@@ -344,7 +371,7 @@ impl McpServerConfig {
 }
 
 /// OAuth 2.1 configuration for an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthConfig {
     /// OAuth client ID.
     pub client_id: String,
@@ -374,6 +401,24 @@ pub struct OAuthConfig {
     /// Extra parameters to include in the authorization request.
     #[serde(default)]
     pub extra_params: HashMap<String, String>,
+}
+
+impl std::fmt::Debug for OAuthConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OAuthConfig")
+            .field("client_id", &self.client_id)
+            .field("authorization_url", &"[REDACTED URL]")
+            .field("token_url", &"[REDACTED URL]")
+            .field("scopes", &self.scopes)
+            .field("resource", &"[REDACTED URL]")
+            .field("use_pkce", &self.use_pkce)
+            .field(
+                "extra_param_names",
+                &self.extra_params.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 impl OAuthConfig {
@@ -557,14 +602,20 @@ impl From<ConfigError> for ToolError {
 
 /// Load MCP server configurations from a specific path.
 pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersFile, ConfigError> {
-    let path = path.as_ref();
-
-    if !path.exists() {
-        return Ok(McpServersFile::default());
-    }
-
-    let content = fs::read_to_string(path).await?;
-    let mut config: McpServersFile = serde_json::from_str(&content)?;
+    let path = path.as_ref().to_path_buf();
+    let content = match thinclaw_platform::read_regular_file_bounded_single_link_async(
+        path,
+        MAX_MCP_CONFIG_BYTES,
+    )
+    .await
+    {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(McpServersFile::default());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut config: McpServersFile = serde_json::from_slice(&content)?;
     config.migrate_in_place();
 
     Ok(config)
@@ -624,7 +675,7 @@ pub async fn save_mcp_servers_to(
     config: &McpServersFile,
     path: impl AsRef<Path>,
 ) -> Result<(), ConfigError> {
-    let path = path.as_ref();
+    let path = path.as_ref().to_path_buf();
 
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
@@ -634,7 +685,7 @@ pub async fn save_mcp_servers_to(
     let mut config = config.clone();
     config.migrate_in_place();
     let content = serde_json::to_string_pretty(&config)?;
-    fs::write(path, content).await?;
+    thinclaw_platform::write_private_file_atomic_async(path, content.into_bytes(), true).await?;
 
     Ok(())
 }
@@ -651,6 +702,99 @@ fn is_localhost_url(url: &str) -> bool {
         Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
         Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+fn validate_public_mcp_url(value: &str) -> Result<(), ConfigError> {
+    let options = OutboundUrlGuardOptions {
+        require_https: true,
+        upgrade_http_to_https: false,
+        allowlist: Vec::new(),
+    };
+    validate_outbound_url_structure(value, &options)
+        .map(|_| ())
+        .map_err(|error| ConfigError::InvalidConfig {
+            reason: error.to_string(),
+        })
+}
+
+fn validate_oauth_endpoint(value: &str, allow_local: bool) -> Result<(), ConfigError> {
+    if value.is_empty() || value.len() > 16 * 1024 {
+        return Err(ConfigError::InvalidConfig {
+            reason: "OAuth endpoint is empty or oversized".to_string(),
+        });
+    }
+    let parsed = url::Url::parse(value).map_err(|error| ConfigError::InvalidConfig {
+        reason: format!("Invalid OAuth endpoint: {error}"),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ConfigError::InvalidConfig {
+            reason: "OAuth endpoints must use HTTP(S) without credentials or fragments".to_string(),
+        });
+    }
+    if allow_local && is_local_network_url(&parsed) {
+        Ok(())
+    } else {
+        validate_public_mcp_url(value)
+    }
+}
+
+fn validate_oauth_config(
+    oauth: Option<&OAuthConfig>,
+    allow_local: bool,
+) -> Result<(), ConfigError> {
+    let Some(oauth) = oauth else {
+        return Ok(());
+    };
+    if oauth.client_id.is_empty()
+        || oauth.client_id.len() > 8 * 1024
+        || oauth.client_id.chars().any(char::is_control)
+        || !oauth.use_pkce
+        || oauth.scopes.len() > 256
+        || oauth.scopes.iter().any(|scope| {
+            scope.is_empty() || scope.len() > 1024 || scope.chars().any(char::is_control)
+        })
+        || oauth.extra_params.len() > 32
+        || oauth.extra_params.iter().any(|(key, value)| {
+            key.is_empty()
+                || key.len() > 128
+                || value.len() > 8 * 1024
+                || key.chars().any(char::is_control)
+                || value.chars().any(char::is_control)
+        })
+        || oauth.resource.as_ref().is_some_and(|resource| {
+            resource.is_empty()
+                || resource.len() > 16 * 1024
+                || resource.chars().any(char::is_control)
+        })
+    {
+        return Err(ConfigError::InvalidConfig {
+            reason: "OAuth configuration is malformed or oversized".to_string(),
+        });
+    }
+    if let Some(endpoint) = oauth.authorization_url.as_deref() {
+        validate_oauth_endpoint(endpoint, allow_local)?;
+    }
+    if let Some(endpoint) = oauth.token_url.as_deref() {
+        validate_oauth_endpoint(endpoint, allow_local)?;
+    }
+    Ok(())
+}
+
+fn is_local_network_url(parsed: &url::Url) -> bool {
+    match parsed.host() {
+        Some(url::Host::Domain(domain)) => {
+            let domain = domain.trim_end_matches('.');
+            domain.eq_ignore_ascii_case("localhost")
+                || domain.to_ascii_lowercase().ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(ip)) => ip.is_private() || ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_unique_local() || ip.is_loopback(),
         None => false,
     }
 }
@@ -693,9 +837,25 @@ mod tests {
         let config = McpServerConfig::new("notion", "https://mcp.notion.com");
         assert!(config.validate().is_ok());
 
-        // Valid localhost (allowed for dev)
+        // Local HTTP is opt-in.
         let config = McpServerConfig::new("local", "http://localhost:8080");
+        assert!(config.validate().is_err());
+        let mut config = McpServerConfig::new("local", "http://localhost:8080");
+        config.allow_local_http = true;
         assert!(config.validate().is_ok());
+
+        let mut private = McpServerConfig::new("private", "http://192.168.1.10:8080");
+        private.allow_local_http = true;
+        assert!(private.validate().is_ok());
+
+        let mut link_local =
+            McpServerConfig::new("metadata", "http://169.254.169.254/latest/meta-data");
+        link_local.allow_local_http = true;
+        assert!(link_local.validate().is_err());
+
+        let mut credentialed = McpServerConfig::new("bad", "http://user:secret@localhost:8080");
+        credentialed.allow_local_http = true;
+        assert!(credentialed.validate().is_err());
 
         // Invalid: empty name
         let config = McpServerConfig::new("", "https://example.com");
@@ -704,6 +864,12 @@ mod tests {
         // Invalid: HTTP for remote server
         let config = McpServerConfig::new("remote", "http://mcp.example.com");
         assert!(config.validate().is_err());
+
+        let mut no_pkce = McpServerConfig::new("legacy", "https://example.com");
+        let mut oauth = OAuthConfig::new("client");
+        oauth.use_pkce = false;
+        no_pkce.oauth = Some(oauth);
+        assert!(no_pkce.validate().is_err());
     }
 
     #[test]

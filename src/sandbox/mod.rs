@@ -3,7 +3,7 @@
 //! This module provides a complete sandboxing solution for running untrusted commands:
 //! - **Container isolation**: Commands run in ephemeral Docker containers
 //! - **Network proxy**: All network traffic goes through a validating proxy
-//! - **Credential injection**: Secrets are injected by the proxy, never exposed in containers
+//! - **Credential scoping**: Network and worker credentials are per-job and revoked on completion
 //! - **Resource limits**: Memory, CPU, and timeout enforcement
 //!
 //! # Architecture
@@ -77,12 +77,12 @@
 //!
 //! # Security Properties
 //!
-//! - **No credentials in containers**: Environment variables with secrets never enter containers
-//! - **Network isolation**: All traffic routes through the proxy (validated domains only)
-//! - **Non-root execution**: Containers run as UID 1000
+//! - **Scoped credentials**: Workers receive explicit grants, ephemeral control/proxy tokens, and only the provider credential required by their selected CLI mode
+//! - **Network isolation**: Sandboxed traffic uses an internal bridge and authenticated allowlisting proxy
+//! - **Non-root execution**: Containers run as an unprivileged workspace owner
 //! - **Read-only root**: Container filesystem is read-only (except workspace mount)
-//! - **Capability dropping**: All Linux capabilities dropped, only essential ones added back
-//! - **Auto-cleanup**: Containers are removed after execution (--rm + explicit cleanup)
+//! - **Capability dropping**: All Linux capabilities are dropped
+//! - **Auto-cleanup**: Containers are explicitly removed after execution, including cancellation paths
 //! - **Timeout enforcement**: Commands are killed after the timeout
 
 pub mod config;
@@ -93,10 +93,15 @@ pub mod detect;
 pub mod docker_chromium;
 pub mod docker_init;
 pub mod error;
+mod host_process;
 #[cfg(feature = "docker-sandbox")]
 pub mod manager;
+#[cfg(feature = "docker-sandbox")]
+pub(crate) mod network;
 pub mod podman;
 pub mod proxy;
+#[cfg(feature = "docker-sandbox")]
+pub mod relay;
 
 pub use config::{ResourceLimits, SandboxConfig, SandboxPolicy};
 #[cfg(feature = "docker-sandbox")]
@@ -109,6 +114,8 @@ pub use error::{Result, SandboxError};
 pub use manager::{ExecOutput, SandboxManager, SandboxManagerBuilder};
 #[cfg(not(feature = "docker-sandbox"))]
 pub use manager_stub::{ExecOutput, SandboxManager, SandboxManagerBuilder};
+#[cfg(feature = "docker-sandbox")]
+pub use network::cleanup_stale_sandbox_resources;
 pub use proxy::{
     CredentialResolver, DefaultPolicyDecider, DomainAllowlist, EnvCredentialResolver, HttpProxy,
     NetworkDecision, NetworkPolicyDecider, NetworkProxyBuilder, NetworkRequest,
@@ -182,6 +189,13 @@ mod manager_stub {
 
         pub fn with_defaults() -> Self {
             Self::new(SandboxConfig::default())
+        }
+
+        /// API-compatible no-op with the docker-sandbox manager. Reduced
+        /// builds never create managed containers, so there is no resource
+        /// scope to bind.
+        pub fn with_runtime_scope(self, _runtime_scope: impl Into<String>) -> Self {
+            self
         }
 
         /// API-compatible no-op with the docker-sandbox manager.
@@ -260,42 +274,28 @@ mod manager_stub {
             cwd: &Path,
             env: HashMap<String, String>,
         ) -> Result<ExecOutput> {
-            use tokio::process::Command;
-
-            let start = std::time::Instant::now();
-            let mut cmd = if cfg!(target_os = "windows") {
-                let mut c = Command::new("cmd");
-                c.args(["/C", command]);
-                c
+            let result = super::host_process::execute_host_command(
+                command,
+                cwd,
+                env,
+                self.config.timeout,
+                64 * 1024,
+            )
+            .await?;
+            let combined = if result.stderr.is_empty() {
+                result.stdout.clone()
+            } else if result.stdout.is_empty() {
+                result.stderr.clone()
             } else {
-                let mut c = Command::new("sh");
-                c.args(["-c", command]);
-                c
-            };
-            cmd.current_dir(cwd);
-            cmd.envs(env);
-            let output = tokio::time::timeout(self.config.timeout, cmd.output())
-                .await
-                .map_err(|_| SandboxError::Timeout(self.config.timeout))?
-                .map_err(|e| SandboxError::ExecutionFailed {
-                    reason: e.to_string(),
-                })?;
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let combined = if stderr.is_empty() {
-                stdout.clone()
-            } else if stdout.is_empty() {
-                stderr.clone()
-            } else {
-                format!("{}\n\n--- stderr ---\n{}", stdout, stderr)
+                format!("{}\n\n--- stderr ---\n{}", result.stdout, result.stderr)
             };
             Ok(ExecOutput {
-                exit_code: output.status.code().unwrap_or(-1) as i64,
-                stdout,
-                stderr,
+                exit_code: result.exit_code,
+                stdout: result.stdout,
+                stderr: result.stderr,
                 output: combined,
-                duration: start.elapsed(),
-                truncated: false,
+                duration: result.duration,
+                truncated: result.truncated,
             })
         }
 

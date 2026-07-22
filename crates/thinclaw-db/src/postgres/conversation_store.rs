@@ -53,6 +53,17 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+    async fn set_effective_user_instruction(
+        &self,
+        conversation_id: Uuid,
+        message_id: Uuid,
+        effective_instruction: &str,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .set_effective_user_instruction(conversation_id, message_id, effective_instruction)
+            .await
+    }
+
     async fn ensure_conversation(
         &self,
         id: Uuid,
@@ -125,6 +136,27 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+    async fn find_latest_conversation_for_ingress(
+        &self,
+        principal_id: &str,
+        actor_id: &str,
+        conversation_scope_id: Uuid,
+        conversation_kind: thinclaw_history::ConversationKind,
+        channel: &str,
+        external_thread_id: Option<&str>,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.store
+            .find_latest_conversation_for_ingress(
+                principal_id,
+                actor_id,
+                conversation_scope_id,
+                conversation_kind,
+                channel,
+                external_thread_id,
+            )
+            .await
+    }
+
     async fn set_conversation_handoff_metadata(
         &self,
         id: Uuid,
@@ -186,6 +218,26 @@ impl ConversationStore for PgBackend {
         conversation_id: Uuid,
     ) -> Result<Vec<ConversationMessage>, DatabaseError> {
         self.store.list_conversation_messages(conversation_id).await
+    }
+
+    async fn list_conversation_messages_window(
+        &self,
+        conversation_id: Uuid,
+        start_row: i64,
+        limit: i64,
+    ) -> Result<Vec<ConversationMessage>, DatabaseError> {
+        self.store
+            .list_conversation_messages_window(conversation_id, start_row, limit)
+            .await
+    }
+
+    async fn count_conversation_messages(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        self.store
+            .count_conversation_messages(conversation_id)
+            .await
     }
 
     async fn search_conversation_messages(
@@ -520,6 +572,25 @@ impl ConversationStore for PgBackend {
     ) -> Result<bool, DatabaseError> {
         self.store
             .conversation_belongs_to_actor(conversation_id, principal_id, actor_id)
+            .await
+    }
+
+    async fn conversation_belongs_to_identity(
+        &self,
+        conversation_id: Uuid,
+        principal_id: &str,
+        actor_id: &str,
+        conversation_scope_id: Uuid,
+        conversation_kind: thinclaw_history::ConversationKind,
+    ) -> Result<bool, DatabaseError> {
+        self.store
+            .conversation_belongs_to_identity(
+                conversation_id,
+                principal_id,
+                actor_id,
+                conversation_scope_id,
+                conversation_kind,
+            )
             .await
     }
 

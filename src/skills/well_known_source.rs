@@ -52,20 +52,13 @@ struct WellKnownIndexEntry {
 }
 
 pub struct WellKnownSkillSource {
-    client: reqwest::Client,
     registries: Vec<WellKnownRegistry>,
     cache: RwLock<Option<CachedRemoteSkills>>,
 }
 
 impl WellKnownSkillSource {
     pub fn new(registries: Vec<WellKnownSkillRegistryConfig>) -> anyhow::Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .user_agent(concat!("thinclaw/", env!("CARGO_PKG_VERSION")))
-            .build()?;
-
         Ok(Self {
-            client,
             registries: registries.into_iter().map(Into::into).collect(),
             cache: RwLock::new(None),
         })
@@ -106,24 +99,31 @@ impl WellKnownSkillSource {
         registry: &WellKnownRegistry,
     ) -> anyhow::Result<Vec<RemoteSkill>> {
         let index_url = Self::resolve_index_url(&registry.url)?;
-        let response = self.client.get(index_url.clone()).send().await?;
-        let response = response.error_for_status()?;
-        let index: WellKnownIndex = response.json().await?;
+        let response =
+            super::remote_http::get_public_https(index_url.as_str(), Duration::from_secs(20))
+                .await?;
+        const MAX_INDEX_BYTES: usize = 4 * 1024 * 1024;
+        const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
+        const MAX_SKILLS_PER_INDEX: usize = 512;
+        let index: WellKnownIndex =
+            crate::http_response::bounded_json(response, MAX_INDEX_BYTES).await?;
 
         let mut discovered = Vec::new();
-        for entry in index.skills {
+        for entry in index.skills.into_iter().take(MAX_SKILLS_PER_INDEX) {
             let Some(path) = Self::manifest_path(&entry).map(str::to_string) else {
                 continue;
             };
             let manifest_url = index_url.join(&path)?;
-            let raw = self
-                .client
-                .get(manifest_url.clone())
-                .send()
-                .await?
-                .error_for_status()?
-                .text()
-                .await?;
+            anyhow::ensure!(
+                super::remote_http::same_origin(&index_url, &manifest_url),
+                "well-known skill manifest must use the registry origin"
+            );
+            let response = super::remote_http::get_public_https(
+                manifest_url.as_str(),
+                Duration::from_secs(20),
+            )
+            .await?;
+            let raw = crate::http_response::bounded_text(response, MAX_MANIFEST_BYTES).await?;
             let normalized = crate::skills::normalize_line_endings(&raw);
             let parsed = crate::skills::parser::parse_skill_md(&normalized)?;
             let digest = hex::encode(Sha256::digest(normalized.as_bytes()));
@@ -221,14 +221,9 @@ impl RemoteSkillSource for WellKnownSkillSource {
             .manifest_url
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Well-known skill is missing manifest_url"))?;
-        let raw_content = self
-            .client
-            .get(manifest_url)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+        let response =
+            super::remote_http::get_public_https(manifest_url, Duration::from_secs(20)).await?;
+        let raw_content = crate::http_response::bounded_text(response, 2 * 1024 * 1024).await?;
 
         Ok(SkillContent {
             raw_content,

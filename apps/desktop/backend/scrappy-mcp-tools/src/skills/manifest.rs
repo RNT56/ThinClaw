@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SkillParameter {
     pub name: String,
     pub description: String,
@@ -10,6 +11,7 @@ pub struct SkillParameter {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SkillManifest {
     pub name: String,
     pub description: String,

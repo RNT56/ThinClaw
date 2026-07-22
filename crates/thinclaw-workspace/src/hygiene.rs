@@ -170,8 +170,8 @@ fn state_path_dir(state_file: &std::path::Path) -> Option<&std::path::Path> {
 }
 
 fn load_state(path: &std::path::Path) -> Option<HygieneState> {
-    let data = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
+    let data = thinclaw_platform::read_regular_file_bounded(path, 64 * 1024).ok()?;
+    serde_json::from_slice(&data).ok()
 }
 
 fn save_state(path: &std::path::Path) {
@@ -181,8 +181,8 @@ fn save_state(path: &std::path::Path) {
     if let Some(dir) = state_path_dir(path) {
         std::fs::create_dir_all(dir).ok();
     }
-    if let Ok(json) = serde_json::to_string_pretty(&state)
-        && let Err(e) = std::fs::write(path, json)
+    if let Ok(json) = serde_json::to_vec_pretty(&state)
+        && let Err(e) = thinclaw_platform::write_private_file_atomic(path, &json, true)
     {
         tracing::warn!("memory hygiene: failed to save state: {e}");
     }

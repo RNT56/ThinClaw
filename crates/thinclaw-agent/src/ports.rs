@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thinclaw_channels_core::{IncomingMessage, OutgoingResponse, StatusUpdate};
+use thinclaw_identity::ResolvedIdentity;
 use thinclaw_llm_core::{ChatMessage, ToolCall};
 use thinclaw_tools_core::{ToolDescriptor, ToolExecutionLane, ToolOutput, ToolProfile};
 use thinclaw_types::error::{ChannelError, DatabaseError, RoutineError, ToolError, WorkspaceError};
@@ -123,6 +124,10 @@ pub enum PortablePendingAuthMode {
 pub struct PortablePendingAuth {
     pub extension_name: String,
     pub auth_mode: PortablePendingAuthMode,
+    /// Identity that initiated the credential flow. `None` only occurs for
+    /// legacy runtime snapshots and must never authorize a new credential.
+    #[serde(default)]
+    pub requesting_identity: Option<ResolvedIdentity>,
 }
 
 /// Portable tool approval request stored in thread runtime metadata.
@@ -136,6 +141,15 @@ pub struct PortablePendingApproval {
     pub context_messages: Vec<ChatMessage>,
     #[serde(default)]
     pub deferred_tool_calls: Vec<ToolCall>,
+    /// Identity and ingress context that requested execution.  Approval is
+    /// actor-bound and execution resumes under this context, never under the
+    /// identity of an arbitrary participant who replies to the prompt.
+    #[serde(default)]
+    pub requesting_identity: Option<ResolvedIdentity>,
+    #[serde(default)]
+    pub request_channel: String,
+    #[serde(default)]
+    pub request_metadata: serde_json::Value,
 }
 
 /// Agent-selected LLM override scoped to a thread, conversation, or identity.
@@ -197,13 +211,23 @@ pub struct ThreadRuntimeSnapshot {
     pub prompt_segment_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_context_refs: Vec<String>,
-    /// Watermark of how many oldest-first conversation rows in the DB are
-    /// still "active" for this thread. `/clear` sets this to `Some(0)`;
-    /// `/undo` and `/redo` set it to the restored turn count so hydration
-    /// truncates resurrected history instead of rebuilding every DB row.
-    /// `None` means the full persisted history is active (the common case).
+    /// Zero-based offset of the first active row in the append-only durable
+    /// conversation log. Compaction and `/clear` advance this value instead
+    /// of deleting audit history. `None` is the legacy equivalent of zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_message_start_row: Option<i64>,
+    /// Number of durable rows in the active window beginning at
+    /// [`Self::active_message_start_row`]. `/undo` and `/redo` change only
+    /// this length; compaction advances the start and reduces the length.
+    /// `None` means legacy/full history and is hydrated through a bounded
+    /// tail query.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_message_row_count: Option<i64>,
+    /// Bounded, secret-minimized audit trace for a turn that has not yet
+    /// produced its durable assistant row. Cleared automatically once the
+    /// turn completes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inflight_tool_trace: Vec<crate::session::TurnToolCall>,
     /// Capped snapshot of the undo stack (newest checkpoints only), so
     /// `/undo` keeps working across a process restart instead of silently
     /// losing all undo history.
@@ -473,6 +497,7 @@ pub struct SkillContext {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorkspacePromptMaterials {
     pub workspace_prompt: Option<String>,
+    pub workspace_evidence_context: Option<String>,
     pub provider_system_prompt: Option<String>,
     pub provider_recall_block: Option<String>,
     pub provider_context_refs: Vec<String>,

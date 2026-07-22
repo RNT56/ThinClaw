@@ -44,13 +44,85 @@ pub(super) struct TelegramWebhookInfo {
 }
 
 const TELEGRAM_POLLING_OVERRIDE: &str = "polling";
+const MAX_TELEGRAM_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_TELEGRAM_TOKEN_BYTES: usize = 256;
+const MAX_TELEGRAM_ATTACHMENTS: usize = 10;
+const MAX_TELEGRAM_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+const MAX_TELEGRAM_TOTAL_ATTACHMENT_BYTES: usize = 40 * 1024 * 1024;
+const MAX_TELEGRAM_FILENAME_BYTES: usize = 255;
+const MAX_RUNTIME_STATE_BYTES: usize = 64 * 1024;
+const MAX_RUNTIME_WEBHOOK_URL_BYTES: usize = 2048;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+fn valid_telegram_bot_token(token: &str) -> bool {
+    let mut segments = token.split(':');
+    let bot_id = segments.next().unwrap_or_default();
+    let secret = segments.next().unwrap_or_default();
+    !token.is_empty()
+        && token.len() <= MAX_TELEGRAM_TOKEN_BYTES
+        && segments.next().is_none()
+        && !bot_id.is_empty()
+        && bot_id.bytes().all(|byte| byte.is_ascii_digit())
+        && !secret.is_empty()
+        && secret
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+async fn telegram_http_client(timeout: Duration) -> Result<reqwest::Client, ChannelError> {
+    const TELEGRAM_API_ORIGIN: &str = "https://api.telegram.org/";
+    let guarded = thinclaw_tools_core::validate_outbound_url_pinned_async(
+        TELEGRAM_API_ORIGIN,
+        &thinclaw_tools_core::OutboundUrlGuardOptions {
+            require_https: true,
+            upgrade_http_to_https: false,
+            allowlist: vec!["api.telegram.org".to_string()],
+        },
+    )
+    .await
+    .map_err(|_| ChannelError::SendFailed {
+        name: "telegram".to_string(),
+        reason: "Telegram API endpoint failed validation".to_string(),
+    })?;
+    let host = guarded
+        .url
+        .host_str()
+        .ok_or_else(|| ChannelError::SendFailed {
+            name: "telegram".to_string(),
+            reason: "Telegram API endpoint has no host".to_string(),
+        })?;
+    let mut builder = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if !guarded.pinned_addrs.is_empty() {
+        builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+    }
+    builder.build().map_err(|_| ChannelError::SendFailed {
+        name: "telegram".to_string(),
+        reason: "Failed to build Telegram HTTP client".to_string(),
+    })
+}
+
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) struct PersistedChannelRuntimeState {
     #[serde(default)]
     transport_override: Option<String>,
     #[serde(default)]
     fallback_from_webhook_url: Option<String>,
+}
+
+impl std::fmt::Debug for PersistedChannelRuntimeState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PersistedChannelRuntimeState")
+            .field("transport_override", &self.transport_override)
+            .field(
+                "has_fallback_from_webhook_url",
+                &self.fallback_from_webhook_url.is_some(),
+            )
+            .finish()
+    }
 }
 
 /// Channel-specific outbound transport behavior layered over the generic
@@ -92,7 +164,7 @@ pub(super) trait WasmChannelTransport {
         chat_id: i64,
         message_thread_id: Option<i64>,
         attachments: &[thinclaw_media::MediaContent],
-    );
+    ) -> Result<(), ChannelError>;
 
     /// Attempt a channel-specialized broadcast; returns `Ok(true)` when the
     /// transport fully handled the broadcast (e.g. WhatsApp routed delivery),
@@ -106,32 +178,138 @@ pub(super) trait WasmChannelTransport {
 
 impl WasmChannel {
     pub(super) fn runtime_state_path(&self) -> std::path::PathBuf {
+        let storage_key = crate::wasm::capabilities::channel_storage_key(&self.name);
         thinclaw_platform::state_paths()
             .channels_dir
-            .join(format!("{}.runtime.json", self.name))
+            .join(format!("{storage_key}.runtime.json"))
     }
 
     pub(super) fn load_runtime_state(&self) -> PersistedChannelRuntimeState {
+        let _guard = match self.runtime_state_lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::warn!(channel = %self.name, "Runtime-state lock is poisoned");
+                return PersistedChannelRuntimeState::default();
+            }
+        };
+        self.load_runtime_state_unlocked()
+    }
+
+    fn load_runtime_state_unlocked(&self) -> PersistedChannelRuntimeState {
+        use std::io::Read as _;
+
         let path = self.runtime_state_path();
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() <= MAX_RUNTIME_STATE_BYTES as u64 =>
+            {
+                metadata
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return PersistedChannelRuntimeState::default();
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    channel = %self.name,
+                    path = %path.display(),
+                    "Rejected invalid or oversized channel runtime-state file"
+                );
+                return PersistedChannelRuntimeState::default();
+            }
+            Err(error) => {
+                tracing::warn!(
+                    channel = %self.name,
+                    path = %path.display(),
+                    error = %error,
+                    "Failed to inspect channel runtime-state file"
+                );
+                return PersistedChannelRuntimeState::default();
+            }
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let Ok(mut file) = options.open(&path) else {
             return PersistedChannelRuntimeState::default();
         };
-
-        serde_json::from_str(&content).unwrap_or_else(|error| {
+        let mut content = Vec::with_capacity(
+            usize::try_from(metadata.len())
+                .unwrap_or(MAX_RUNTIME_STATE_BYTES)
+                .min(MAX_RUNTIME_STATE_BYTES),
+        );
+        if file
+            .by_ref()
+            .take((MAX_RUNTIME_STATE_BYTES + 1) as u64)
+            .read_to_end(&mut content)
+            .is_err()
+            || content.len() > MAX_RUNTIME_STATE_BYTES
+        {
             tracing::warn!(
                 channel = %self.name,
                 path = %path.display(),
-                error = %error,
-                "Failed to parse persisted channel runtime state, ignoring"
+                "Rejected unreadable or oversized channel runtime-state file"
             );
-            PersistedChannelRuntimeState::default()
-        })
+            return PersistedChannelRuntimeState::default();
+        }
+
+        serde_json::from_slice(&content)
+            .ok()
+            .filter(Self::valid_runtime_state)
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    channel = %self.name,
+                    path = %path.display(),
+                    "Rejected malformed channel runtime state"
+                );
+                PersistedChannelRuntimeState::default()
+            })
     }
 
-    fn save_runtime_state(
+    fn valid_runtime_webhook_url(value: &str) -> bool {
+        if value.len() > MAX_RUNTIME_WEBHOOK_URL_BYTES {
+            return false;
+        }
+        let Ok(url) = url::Url::parse(value) else {
+            return false;
+        };
+        url.scheme() == "https"
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.path() == "/webhook/telegram"
+    }
+
+    fn valid_runtime_state(state: &PersistedChannelRuntimeState) -> bool {
+        state
+            .transport_override
+            .as_deref()
+            .is_none_or(|value| value == TELEGRAM_POLLING_OVERRIDE)
+            && state
+                .fallback_from_webhook_url
+                .as_deref()
+                .is_none_or(Self::valid_runtime_webhook_url)
+    }
+
+    fn save_runtime_state_unlocked(
         &self,
         state: &PersistedChannelRuntimeState,
     ) -> Result<(), std::io::Error> {
+        use std::io::Write as _;
+
+        if !Self::valid_runtime_state(state) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid channel runtime state",
+            ));
+        }
         let path = self.runtime_state_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -139,13 +317,52 @@ impl WasmChannel {
 
         let serialized = serde_json::to_vec_pretty(state)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let tmp_path = path.with_extension("runtime.json.tmp");
-        std::fs::write(&tmp_path, serialized)?;
-        std::fs::rename(&tmp_path, &path)?;
-        Ok(())
+        if serialized.len() > MAX_RUNTIME_STATE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "channel runtime state is oversized",
+            ));
+        }
+        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| std::io::Error::other("invalid runtime-state filename"))?;
+        let tmp_path = parent.join(format!(
+            ".{file_name}.{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let result = (|| -> Result<(), std::io::Error> {
+            let mut file = options.open(&tmp_path)?;
+            file.write_all(&serialized)?;
+            file.sync_all()?;
+            std::fs::rename(&tmp_path, &path)?;
+            if let Ok(directory) = std::fs::File::open(parent) {
+                let _ = directory.sync_all();
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+        result
     }
 
     pub(super) fn clear_runtime_state(&self) {
+        let _guard = match self.runtime_state_lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::warn!(channel = %self.name, "Runtime-state lock is poisoned");
+                return;
+            }
+        };
         let path = self.runtime_state_path();
         if let Err(error) = std::fs::remove_file(&path)
             && error.kind() != std::io::ErrorKind::NotFound
@@ -193,8 +410,8 @@ impl WasmChannel {
         {
             tracing::info!(
                 channel = %self.name,
-                previous = %expected_previous,
-                current = %current,
+                previous_url_bytes = expected_previous.len(),
+                current_url_bytes = current.len(),
                 "Telegram webhook URL changed, clearing persisted polling fallback"
             );
             self.clear_runtime_state();
@@ -251,13 +468,12 @@ impl WasmChannel {
             .await
             .get("TELEGRAM_BOT_TOKEN")
             .cloned()
-            .filter(|value| !value.trim().is_empty())
+            .filter(|value| valid_telegram_bot_token(value))
             .ok_or_else(|| "Missing TELEGRAM_BOT_TOKEN".to_string())?;
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .map_err(|error| format!("Failed to build Telegram client: {}", error))?;
+        let client = telegram_http_client(Duration::from_secs(5))
+            .await
+            .map_err(|_| "Failed to build Telegram client".to_string())?;
         let response = client
             .get(format!(
                 "https://api.telegram.org/bot{}/getWebhookInfo",
@@ -265,22 +481,31 @@ impl WasmChannel {
             ))
             .send()
             .await
-            .map_err(|error| format!("getWebhookInfo request failed: {}", error))?;
+            .map_err(|error| format!("getWebhookInfo request failed: {}", error.without_url()))?;
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|error| format!("Failed to read getWebhookInfo response: {}", error))?;
         if !status.is_success() {
-            return Err(format!("getWebhookInfo returned {}: {}", status, body));
+            return Err(format!("getWebhookInfo returned {status}"));
         }
-
-        let envelope: TelegramWebhookInfoEnvelope = serde_json::from_str(&body)
-            .map_err(|error| format!("Failed to parse getWebhookInfo: {}", error))?;
+        let envelope: TelegramWebhookInfoEnvelope =
+            crate::response::bounded_json(response, MAX_TELEGRAM_RESPONSE_BYTES)
+                .await
+                .map_err(|error| format!("Failed to parse getWebhookInfo: {error}"))?;
         if !envelope.ok {
-            return Err(envelope
-                .description
-                .unwrap_or_else(|| "Telegram webhook lookup failed".to_string()));
+            return Err("Telegram webhook lookup failed".to_string());
+        }
+        if envelope
+            .description
+            .as_ref()
+            .is_some_and(|value| value.len() > 4096 || value.chars().any(char::is_control))
+            || envelope.result.as_ref().is_some_and(|result| {
+                result.url.len() > 16 * 1024
+                    || result.url.chars().any(char::is_control)
+                    || result.last_error_message.as_ref().is_some_and(|value| {
+                        value.len() > 4096 || value.chars().any(char::is_control)
+                    })
+            })
+        {
+            return Err("Telegram returned malformed webhook diagnostics".to_string());
         }
         Ok(envelope.result)
     }
@@ -541,7 +766,14 @@ impl WasmChannel {
             return;
         }
 
-        let mut state = self.load_runtime_state();
+        let _guard = match self.runtime_state_lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::warn!(channel = %self.name, "Runtime-state lock is poisoned");
+                return;
+            }
+        };
+        let mut state = self.load_runtime_state_unlocked();
         if state.transport_override.as_deref() == Some(TELEGRAM_POLLING_OVERRIDE) {
             return;
         }
@@ -552,14 +784,15 @@ impl WasmChannel {
             .and_then(|value| value.as_str())
             .map(str::trim)
             .filter(|value| !value.is_empty())
+            .filter(|value| Self::valid_runtime_webhook_url(value))
             .map(str::to_string);
 
-        match self.save_runtime_state(&state) {
+        match self.save_runtime_state_unlocked(&state) {
             Ok(()) => {
                 tracing::warn!(
                     channel = %self.name,
                     reason = %unhealthy_reason.unwrap_or("unknown"),
-                    expected_webhook_url = ?state.fallback_from_webhook_url,
+                    has_expected_webhook_url = state.fallback_from_webhook_url.is_some(),
                     "Telegram webhook unhealthy; forcing polling fallback on next restart"
                 );
             }
@@ -583,29 +816,52 @@ impl WasmChannel {
     /// type: `sendPhoto` for images, `sendAudio` for audio, `sendVideo`
     /// for video, and `sendDocument` for everything else.
     ///
-    /// Failures are logged but do not abort the response (best-effort).
+    /// Failures are surfaced so callers do not report a partially delivered response.
     pub(super) async fn send_telegram_attachments(
         &self,
         chat_id: i64,
         message_thread_id: Option<i64>,
         attachments: &[thinclaw_media::MediaContent],
-    ) {
+    ) -> Result<(), ChannelError> {
         if self.name != "telegram" || attachments.is_empty() {
-            return;
+            return Ok(());
+        }
+        if attachments.len() > MAX_TELEGRAM_ATTACHMENTS {
+            return Err(ChannelError::SendFailed {
+                name: self.name.clone(),
+                reason: "Telegram response contains too many attachments".to_string(),
+            });
+        }
+        let total_bytes = attachments
+            .iter()
+            .try_fold(0usize, |total, attachment| {
+                total.checked_add(attachment.data.len())
+            })
+            .ok_or_else(|| ChannelError::SendFailed {
+                name: self.name.clone(),
+                reason: "Telegram attachment size overflow".to_string(),
+            })?;
+        if total_bytes > MAX_TELEGRAM_TOTAL_ATTACHMENT_BYTES {
+            return Err(ChannelError::SendFailed {
+                name: self.name.clone(),
+                reason: "Telegram response attachments exceed the total size limit".to_string(),
+            });
         }
 
         // Get bot token from credentials
         let creds = self.credentials.read().await;
         let token = match creds.get("TELEGRAM_BOT_TOKEN").cloned() {
-            Some(t) => t,
-            None => {
-                tracing::debug!("send_telegram_attachments: no TELEGRAM_BOT_TOKEN, skipping");
-                return;
+            Some(token) if valid_telegram_bot_token(&token) => token,
+            _ => {
+                return Err(ChannelError::SendFailed {
+                    name: self.name.clone(),
+                    reason: "Telegram bot token is missing or malformed".to_string(),
+                });
             }
         };
         drop(creds);
 
-        let client = reqwest::Client::new();
+        let client = telegram_http_client(Duration::from_secs(120)).await?;
 
         for attachment in attachments {
             use thinclaw_media::MediaType;
@@ -626,6 +882,20 @@ impl WasmChannel {
                 .as_deref()
                 .unwrap_or("attachment")
                 .to_string();
+            if attachment.data.len() > MAX_TELEGRAM_ATTACHMENT_BYTES
+                || filename.is_empty()
+                || filename.len() > MAX_TELEGRAM_FILENAME_BYTES
+                || filename.chars().any(char::is_control)
+                || filename.contains(['/', '\\'])
+                || attachment.mime_type.is_empty()
+                || attachment.mime_type.len() > 256
+                || attachment.mime_type.chars().any(char::is_control)
+            {
+                return Err(ChannelError::SendFailed {
+                    name: self.name.clone(),
+                    reason: "Telegram attachment is malformed or oversized".to_string(),
+                });
+            }
 
             let file_part = match reqwest::multipart::Part::bytes(attachment.data.clone())
                 .file_name(filename.clone())
@@ -633,13 +903,10 @@ impl WasmChannel {
             {
                 Ok(part) => part,
                 Err(e) => {
-                    tracing::warn!(
-                        channel = %self.name,
-                        error = %e,
-                        mime = %attachment.mime_type,
-                        "Telegram: invalid MIME for attachment, skipping"
-                    );
-                    continue;
+                    return Err(ChannelError::SendFailed {
+                        name: self.name.clone(),
+                        reason: format!("Telegram attachment MIME is invalid: {e}"),
+                    });
                 }
             };
 
@@ -670,15 +937,17 @@ impl WasmChannel {
                         );
                     } else {
                         let status = resp.status();
-                        let body = resp.text().await.unwrap_or_default();
                         tracing::warn!(
                             channel = %self.name,
                             chat_id = chat_id,
                             method = api_method,
                             status = %status,
-                            body = %body,
                             "Telegram: attachment send returned error"
                         );
+                        return Err(ChannelError::SendFailed {
+                            name: self.name.clone(),
+                            reason: format!("Telegram attachment API returned {status}"),
+                        });
                     }
                 }
                 Err(e) => {
@@ -686,12 +955,17 @@ impl WasmChannel {
                         channel = %self.name,
                         chat_id = chat_id,
                         method = api_method,
-                        error = %e,
+                        error = %e.without_url(),
                         "Telegram: attachment HTTP request failed"
                     );
+                    return Err(ChannelError::SendFailed {
+                        name: self.name.clone(),
+                        reason: "Telegram attachment request failed".to_string(),
+                    });
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -718,7 +992,10 @@ impl WasmChannelTransport for WasmChannel {
 
         // Get bot token from credentials
         let creds = self.credentials.read().await;
-        let token = creds.get("TELEGRAM_BOT_TOKEN").cloned();
+        let token = creds
+            .get("TELEGRAM_BOT_TOKEN")
+            .cloned()
+            .filter(|value| valid_telegram_bot_token(value));
         drop(creds);
 
         let Some(token) = token else {
@@ -726,14 +1003,30 @@ impl WasmChannelTransport for WasmChannel {
             return Ok(None);
         };
 
-        let client = reqwest::Client::new();
+        let client = telegram_http_client(Duration::from_secs(10)).await?;
+
+        const TELEGRAM_MAX_SAFE_EDIT_LENGTH: usize = 3800;
+        if draft.accumulated.len() > TELEGRAM_MAX_SAFE_EDIT_LENGTH {
+            return Err(ChannelError::MessageTooLong {
+                channel: self.name.clone(),
+                length: draft.accumulated.len(),
+                max: TELEGRAM_MAX_SAFE_EDIT_LENGTH,
+            });
+        }
+        let html = crate::wasm::telegram_html::markdown_to_telegram_html(&draft.accumulated);
+        if html.len() > TELEGRAM_MAX_SAFE_EDIT_LENGTH {
+            return Err(ChannelError::MessageTooLong {
+                channel: self.name.clone(),
+                length: html.len(),
+                max: TELEGRAM_MAX_SAFE_EDIT_LENGTH,
+            });
+        }
 
         // Strategy: sendMessage (first call) → editMessageText (subsequent)
         // This is the standard, reliable approach for streaming in Telegram.
         // sendMessageDraft is unreliable (RANDOM_ID_INVALID errors).
         if !draft.posted {
             // ── First chunk: send a new message ──────────────────────────
-            let html = crate::wasm::telegram_html::markdown_to_telegram_html(&draft.accumulated);
             let mut payload = serde_json::json!({
                 "chat_id": chat_id,
                 "text": html,
@@ -756,19 +1049,21 @@ impl WasmChannelTransport for WasmChannel {
             {
                 Ok(resp) => {
                     let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
                     if !status.is_success() {
                         tracing::warn!(
                             channel = %self.name,
                             status = %status,
-                            body = %body,
                             "send_draft: initial sendMessage failed"
                         );
                         return Ok(None);
                     }
 
                     // Extract message_id from the Telegram response
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body)
+                    if let Ok(parsed) = crate::response::bounded_json::<serde_json::Value>(
+                        resp,
+                        MAX_TELEGRAM_RESPONSE_BYTES,
+                    )
+                    .await
                         && let Some(msg_id) = parsed
                             .get("result")
                             .and_then(|r| r.get("message_id"))
@@ -794,7 +1089,7 @@ impl WasmChannelTransport for WasmChannel {
                 Err(e) => {
                     tracing::debug!(
                         channel = %self.name,
-                        error = %e,
+                        error = %e.without_url(),
                         "send_draft: sendMessage HTTP request failed (non-fatal)"
                     );
                     Ok(None)
@@ -811,26 +1106,6 @@ impl WasmChannelTransport for WasmChannel {
                 Ok(id) => id,
                 Err(_) => return Ok(None),
             };
-
-            let html = crate::wasm::telegram_html::markdown_to_telegram_html(&draft.accumulated);
-
-            // Telegram's max message length is 4096 chars. Use a lower
-            // threshold (3800) to account for HTML tag expansion and
-            // avoid edge-case truncation. When exceeded, signal overflow
-            // so the dispatcher falls back to on_respond() which splits.
-            const TELEGRAM_MAX_SAFE_EDIT_LENGTH: usize = 3800;
-            if html.len() > TELEGRAM_MAX_SAFE_EDIT_LENGTH {
-                tracing::info!(
-                    channel = %self.name,
-                    html_len = html.len(),
-                    "send_draft: response exceeds Telegram limit, signaling overflow"
-                );
-                return Err(ChannelError::MessageTooLong {
-                    channel: self.name.clone(),
-                    length: html.len(),
-                    max: TELEGRAM_MAX_SAFE_EDIT_LENGTH,
-                });
-            }
 
             let payload = serde_json::json!({
                 "chat_id": chat_id,
@@ -852,16 +1127,9 @@ impl WasmChannelTransport for WasmChannel {
                 Ok(resp) => {
                     let status = resp.status();
                     if !status.is_success() {
-                        let body = resp.text().await.unwrap_or_default();
-                        // 400 "message is not modified" is expected when text hasn't
-                        // changed enough — treat as non-fatal
-                        if body.contains("message is not modified") {
-                            return Ok(Some(msg_id_str.clone()));
-                        }
                         tracing::debug!(
                             channel = %self.name,
                             status = %status,
-                            body = %body,
                             "send_draft: editMessageText failed (non-fatal)"
                         );
                         return Ok(Some(msg_id_str.clone()));
@@ -878,7 +1146,7 @@ impl WasmChannelTransport for WasmChannel {
                 Err(e) => {
                     tracing::debug!(
                         channel = %self.name,
-                        error = %e,
+                        error = %e.without_url(),
                         "send_draft: editMessageText HTTP request failed (non-fatal)"
                     );
                     Ok(Some(msg_id_str.clone()))
@@ -899,7 +1167,10 @@ impl WasmChannelTransport for WasmChannel {
 
         // Get bot token from credentials (same pattern as send_draft)
         let creds = self.credentials.read().await;
-        let token = creds.get("TELEGRAM_BOT_TOKEN").cloned();
+        let token = creds
+            .get("TELEGRAM_BOT_TOKEN")
+            .cloned()
+            .filter(|value| valid_telegram_bot_token(value));
         drop(creds);
 
         let Some(token) = token else {
@@ -922,7 +1193,7 @@ impl WasmChannelTransport for WasmChannel {
             Err(_) => return Ok(()),
         };
 
-        let client = reqwest::Client::new();
+        let client = telegram_http_client(Duration::from_secs(10)).await?;
         let url = format!("https://api.telegram.org/bot{}/deleteMessage", token);
         let payload = serde_json::json!({
             "chat_id": chat_id,
@@ -945,11 +1216,10 @@ impl WasmChannelTransport for WasmChannel {
                         "delete_message: message deleted successfully"
                     );
                 } else {
-                    let body = resp.text().await.unwrap_or_default();
                     tracing::debug!(
                         channel = %self.name,
                         message_id = msg_id,
-                        body = %body,
+                        status = %resp.status(),
                         "delete_message: deleteMessage API failed (non-fatal)"
                     );
                 }
@@ -957,7 +1227,7 @@ impl WasmChannelTransport for WasmChannel {
             Err(e) => {
                 tracing::debug!(
                     channel = %self.name,
-                    error = %e,
+                    error = %e.without_url(),
                     "delete_message: HTTP request failed (non-fatal)"
                 );
             }
@@ -1013,9 +1283,9 @@ impl WasmChannelTransport for WasmChannel {
         chat_id: i64,
         message_thread_id: Option<i64>,
         attachments: &[thinclaw_media::MediaContent],
-    ) {
+    ) -> Result<(), ChannelError> {
         self.send_telegram_attachments(chat_id, message_thread_id, attachments)
-            .await;
+            .await
     }
 
     async fn transport_try_broadcast(

@@ -6,12 +6,148 @@ use tauri::{ipc::Channel, State};
 use thinclaw_runtime_contracts::{
     ApiStyle, DirectAttachedDocument, DirectChatMessage, DirectChatPayload, DirectTokenUsage,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 pub type AttachedDoc = DirectAttachedDocument;
 pub type Message = DirectChatMessage;
 pub type ChatPayload = DirectChatPayload;
 pub type TokenUsage = DirectTokenUsage;
+
+const MAX_CHAT_MESSAGES: usize = 512;
+const MAX_CHAT_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CHAT_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENTS_PER_MESSAGE: usize = 32;
+const MAX_CHAT_ORIGINAL_DEPTH: usize = 8;
+const MAX_CHAT_FIELD_BYTES: usize = 1_024;
+const MAX_CURRENT_TURN_IMAGES: usize = 4;
+const MAX_MULTIMODAL_BASE64_BYTES: usize = 24 * 1024 * 1024;
+const MAX_KNOWLEDGE_CONTEXT_BYTES: usize = 128 * 1024;
+
+fn enabled_knowledge_context(config: &crate::config::UserConfig) -> String {
+    let mut context = String::new();
+    for bit in config.knowledge_bits.iter().filter(|bit| bit.enabled) {
+        let separator = usize::from(!context.is_empty());
+        let entry = format!("- [{}] {}", bit.label, bit.content);
+        let remaining = MAX_KNOWLEDGE_CONTEXT_BYTES.saturating_sub(context.len() + separator);
+        if remaining == 0 {
+            break;
+        }
+        if separator == 1 {
+            context.push('\n');
+        }
+        if entry.len() <= remaining {
+            context.push_str(&entry);
+            continue;
+        }
+        let mut end = remaining;
+        while !entry.is_char_boundary(end) {
+            end -= 1;
+        }
+        context.push_str(&entry[..end]);
+        break;
+    }
+    context
+}
+
+fn valid_chat_field(value: &str, allow_empty: bool) -> bool {
+    (allow_empty || !value.is_empty())
+        && value.len() <= MAX_CHAT_FIELD_BYTES
+        && !value.chars().any(char::is_control)
+}
+
+fn validate_chat_messages(messages: &[Message]) -> Result<(), String> {
+    if messages.is_empty() || messages.len() > MAX_CHAT_MESSAGES {
+        return Err(format!(
+            "Chat must contain between 1 and {MAX_CHAT_MESSAGES} messages"
+        ));
+    }
+    let mut stack = vec![(messages, 0_usize)];
+    let mut message_count = 0_usize;
+    let mut total_bytes = 0_usize;
+    while let Some((messages, depth)) = stack.pop() {
+        if depth > MAX_CHAT_ORIGINAL_DEPTH {
+            return Err("Chat summary history is nested too deeply".to_string());
+        }
+        for message in messages {
+            message_count = message_count.saturating_add(1);
+            if message_count > MAX_CHAT_MESSAGES {
+                return Err(format!(
+                    "Chat contains more than {MAX_CHAT_MESSAGES} total messages"
+                ));
+            }
+            if !matches!(
+                message.role.as_str(),
+                "system" | "user" | "assistant" | "tool"
+            ) {
+                return Err("Chat message role is invalid".to_string());
+            }
+            if message.content.len() > MAX_CHAT_MESSAGE_BYTES {
+                return Err(format!(
+                    "Chat message exceeds the {MAX_CHAT_MESSAGE_BYTES}-byte limit"
+                ));
+            }
+            total_bytes = total_bytes
+                .checked_add(message.content.len())
+                .ok_or_else(|| "Chat content size overflow".to_string())?;
+            if total_bytes > MAX_CHAT_TOTAL_BYTES {
+                return Err(format!(
+                    "Chat content exceeds the {MAX_CHAT_TOTAL_BYTES}-byte limit"
+                ));
+            }
+            if message.images.as_ref().is_some_and(|images| {
+                images.len() > MAX_CHAT_ATTACHMENTS_PER_MESSAGE
+                    || images.iter().any(|id| !valid_chat_field(id, false))
+            }) || message.assets.as_ref().is_some_and(|assets| {
+                assets.len() > MAX_CHAT_ATTACHMENTS_PER_MESSAGE
+                    || assets
+                        .iter()
+                        .any(|asset| !valid_chat_field(&asset.id, false))
+            }) || message.attached_docs.as_ref().is_some_and(|documents| {
+                documents.len() > MAX_CHAT_ATTACHMENTS_PER_MESSAGE
+                    || documents.iter().any(|document| {
+                        !valid_chat_field(&document.id, false)
+                            || !valid_chat_field(&document.name, false)
+                            || document
+                                .asset_ref
+                                .as_ref()
+                                .is_some_and(|asset| !valid_chat_field(&asset.id, false))
+                    })
+            }) {
+                return Err("Chat attachment metadata is invalid or oversized".to_string());
+            }
+            if let Some(originals) = message.original_messages.as_deref() {
+                if originals.len() > MAX_CHAT_MESSAGES {
+                    return Err("Chat summary history contains too many messages".to_string());
+                }
+                stack.push((originals, depth + 1));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_chat_payload(payload: &ChatPayload) -> Result<(), String> {
+    if !valid_chat_field(&payload.model, false)
+        || payload
+            .project_id
+            .as_deref()
+            .is_some_and(|value| !valid_chat_field(value, false))
+        || payload
+            .conversation_id
+            .as_deref()
+            .is_some_and(|value| !valid_chat_field(value, false))
+    {
+        return Err("Chat model, project, or conversation identifier is invalid".to_string());
+    }
+    if !payload.temperature.is_finite()
+        || !(0.0..=2.0).contains(&payload.temperature)
+        || !payload.top_p.is_finite()
+        || !(0.0..=1.0).contains(&payload.top_p)
+    {
+        return Err("Chat sampling parameters are outside the supported range".to_string());
+    }
+    validate_chat_messages(&payload.messages)
+}
 
 #[derive(Debug, Clone, Serialize, Type)]
 pub struct StreamChunk {
@@ -22,7 +158,20 @@ pub struct StreamChunk {
     pub context_update: Option<Vec<Message>>,
 }
 
-#[derive(Debug, Clone)]
+fn send_stream_chunk(
+    on_event: &Channel<StreamChunk>,
+    cancellation_token: &std::sync::atomic::AtomicBool,
+    chunk: StreamChunk,
+) -> bool {
+    if on_event.send(chunk).is_ok() {
+        true
+    } else {
+        cancellation_token.store(true, std::sync::atomic::Ordering::SeqCst);
+        false
+    }
+}
+
+#[derive(Clone)]
 pub struct ProviderConfig {
     pub kind: crate::rig_lib::unified_provider::ProviderKind,
     pub base_url: String,
@@ -31,6 +180,21 @@ pub struct ProviderConfig {
     pub token: String,
     pub context_size: u32,
     pub model_family: Option<String>,
+}
+
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderConfig")
+            .field("kind", &self.kind)
+            .field("base_url", &self.base_url)
+            .field("model_name", &self.model_name)
+            .field("port", &self.port)
+            .field("token", &crate::debug_redaction::Redacted)
+            .field("context_size", &self.context_size)
+            .field("model_family", &self.model_family)
+            .finish()
+    }
 }
 
 fn provider_kind_from_api_style(
@@ -50,7 +214,7 @@ pub async fn resolve_provider(
     secret_store: &crate::secret_store::SecretStore,
     sidecar_manager: &State<'_, SidecarManager>,
     engine_manager: &State<'_, crate::engine::EngineManager>,
-) -> Result<ProviderConfig, crate::thinclaw::bridge::BridgeError> {
+) -> Result<ProviderConfig, String> {
     // Determine provider: prefer new `chat_backend`, fall back to legacy `selected_chat_provider`
     let provider_id = user_config
         .chat_backend
@@ -145,9 +309,9 @@ pub async fn resolve_provider(
         });
     }
 
-    Err((snapshot.unavailable_reason.unwrap_or_else(|| {
+    Err(snapshot.unavailable_reason.unwrap_or_else(|| {
         "No local inference server is running. Select a model in the chat tab — the engine will start automatically.".to_string()
-    })).into())
+    }))
 }
 
 #[tauri::command]
@@ -165,6 +329,7 @@ pub async fn direct_chat_stream(
     payload: ChatPayload,
     on_event: Channel<StreamChunk>,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    validate_chat_payload(&payload)?;
     info!("[direct_chat_stream] Starting direct_chat_stream command...");
 
     // Acquisition of Global Generation Lock (Queuing)
@@ -194,13 +359,7 @@ pub async fn direct_chat_stream(
     let model_family = provider_cfg.model_family;
 
     // Collect enabled knowledge bits
-    let gk_content = user_config
-        .knowledge_bits
-        .iter()
-        .filter(|bit| bit.enabled)
-        .map(|bit| format!("- [{}] {}", bit.label, bit.content))
-        .collect::<Vec<String>>()
-        .join("\n");
+    let gk_content = enabled_knowledge_context(&user_config);
 
     // Manual injection removed - passed to Agent Preamble instead
 
@@ -228,6 +387,10 @@ pub async fn direct_chat_stream(
     // context bloat — a single 1024×1024 JPEG is ~100KB base64 = ~25K tokens,
     // which would fill a 32K context window on the second turn.
     let last_user_idx = processing_messages.iter().rposition(|m| m.role == "user");
+    let latest_user_text = last_user_idx
+        .and_then(|index| processing_messages.get(index))
+        .map(|message| message.content.clone())
+        .unwrap_or_default();
 
     for (idx, msg) in processing_messages.iter_mut().enumerate() {
         if msg.role != "user" {
@@ -235,6 +398,8 @@ pub async fn direct_chat_stream(
         }
 
         let mut image_ids = msg.images.clone().unwrap_or_default();
+        let mut seen_image_ids = std::collections::HashSet::new();
+        image_ids.retain(|id| seen_image_ids.insert(id.clone()));
         if let Some(asset_refs) = msg.assets.clone() {
             for asset_ref in asset_refs {
                 if let Ok(record) =
@@ -244,7 +409,7 @@ pub async fn direct_chat_stream(
                         record.kind,
                         thinclaw_runtime_contracts::AssetKind::Image
                             | thinclaw_runtime_contracts::AssetKind::GeneratedImage
-                    ) && !image_ids.iter().any(|id| id == &record.reference.id)
+                    ) && seen_image_ids.insert(record.reference.id.clone())
                     {
                         image_ids.push(record.reference.id);
                     }
@@ -256,6 +421,12 @@ pub async fn direct_chat_stream(
             let is_current_turn = Some(idx) == last_user_idx;
 
             if is_current_turn {
+                if image_ids.len() > MAX_CURRENT_TURN_IMAGES {
+                    return Err(format!(
+                        "A chat turn supports at most {MAX_CURRENT_TURN_IMAGES} distinct images"
+                    )
+                    .into());
+                }
                 // Current turn: embed full base64 image data
                 info!(
                     "[chat] Building multimodal parts for {} image(s) (current turn)",
@@ -267,12 +438,21 @@ pub async fn direct_chat_stream(
                     "text": msg.content
                 }));
 
+                let mut total_base64_bytes = 0usize;
                 for id in &image_ids {
                     match crate::images::load_image_as_base64_with_mime(&app, id).await {
                         Ok((b64, mime)) => {
+                            total_base64_bytes = total_base64_bytes
+                                .checked_add(b64.len())
+                                .ok_or_else(|| "Image payload size overflowed".to_string())?;
+                            if total_base64_bytes > MAX_MULTIMODAL_BASE64_BYTES {
+                                return Err(format!(
+                                    "Current-turn images exceed the {MAX_MULTIMODAL_BASE64_BYTES}-byte encoded limit"
+                                )
+                                .into());
+                            }
                             info!(
-                                "[chat] Image {} loaded as {}, base64 length: {}",
-                                id,
+                                "[chat] Image loaded as {}, base64 length: {}",
                                 mime,
                                 b64.len()
                             );
@@ -283,7 +463,9 @@ pub async fn direct_chat_stream(
                                 }
                             }));
                         }
-                        Err(e) => eprintln!("Failed to load image {}: {}", id, e),
+                        Err(error) => {
+                            return Err(format!("Failed to load a chat image: {error}").into());
+                        }
                     }
                 }
 
@@ -292,9 +474,8 @@ pub async fn direct_chat_stream(
                     parts.len(),
                     parts.len() - 1
                 );
-                if let Ok(json_str) = serde_json::to_string(&parts) {
-                    msg.content = json_str;
-                }
+                msg.content = serde_json::to_string(&parts)
+                    .map_err(|_| "Failed to encode multimodal chat content".to_string())?;
             } else {
                 // Older turn: replace with text placeholder to save context
                 let n = image_ids.len();
@@ -314,10 +495,7 @@ pub async fn direct_chat_stream(
     // --- Image History Filtering (User Requested) ---
     // If the user is NOT explicitly talking about images/pictures in their latest prompt,
     // we strip previous image generation turns to keep the LLM focused on chat and save context.
-    let last_prompt_lower = processing_messages
-        .last()
-        .map(|m| m.content.to_lowercase())
-        .unwrap_or_default();
+    let last_prompt_lower = latest_user_text.to_lowercase();
     let has_assistant_images = processing_messages
         .iter()
         .any(|m| m.role == "assistant" && m.images.as_ref().is_some_and(|i| !i.is_empty()));
@@ -486,10 +664,7 @@ pub async fn direct_chat_stream(
         sandbox_enabled: user_config.mcp_sandbox_enabled && user_config.mcp_base_url.is_some(),
     };
     if mcp_config.sandbox_enabled {
-        info!(
-            "[direct_chat_stream] Sandbox mode ENABLED — MCP server: {}",
-            mcp_config.mcp_base_url.as_deref().unwrap_or("(none)")
-        );
+        info!("[direct_chat_stream] Sandbox mode enabled with a configured MCP server");
     } else {
         info!("[direct_chat_stream] Sandbox mode (local-only, no remote MCP)");
     }
@@ -553,20 +728,30 @@ pub async fn direct_chat_stream(
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
                     // Flush any buffered content before sending stop
-                    if !content_buffer.is_empty() {
-                        let _ = on_event.send(StreamChunk {
-                            content: std::mem::take(&mut content_buffer),
-                            done: false,
+                    if !content_buffer.is_empty()
+                        && !send_stream_chunk(
+                            &on_event,
+                            &state.cancellation_token,
+                            StreamChunk {
+                                content: std::mem::take(&mut content_buffer),
+                                done: false,
+                                usage: None,
+                                context_update: None,
+                            },
+                        )
+                    {
+                        return Ok(());
+                    }
+                    send_stream_chunk(
+                        &on_event,
+                        &state.cancellation_token,
+                        StreamChunk {
+                            content: "\n[Stopped]".into(),
+                            done: true,
                             usage: None,
                             context_update: None,
-                        });
-                    }
-                    let _ = on_event.send(StreamChunk {
-                        content: "\n[Stopped]".into(),
-                        done: true,
-                        usage: None,
-                        context_update: None,
-                    });
+                        },
+                    );
                     return Ok(());
                 }
 
@@ -580,99 +765,155 @@ pub async fn direct_chat_stream(
                                 if content_buffer.len() >= FLUSH_CHAR_THRESHOLD
                                     || elapsed >= FLUSH_INTERVAL
                                 {
-                                    let _ = on_event.send(StreamChunk {
-                                        content: std::mem::take(&mut content_buffer),
-                                        done: false,
-                                        usage: None,
-                                        context_update: None,
-                                    });
+                                    if !send_stream_chunk(
+                                        &on_event,
+                                        &state.cancellation_token,
+                                        StreamChunk {
+                                            content: std::mem::take(&mut content_buffer),
+                                            done: false,
+                                            usage: None,
+                                            context_update: None,
+                                        },
+                                    ) {
+                                        return Ok(());
+                                    }
                                     last_flush = std::time::Instant::now();
                                 }
                             }
                             ProviderEvent::Usage(u) => {
                                 // Flush any buffered text before sending metadata
                                 if !content_buffer.is_empty() {
-                                    let _ = on_event.send(StreamChunk {
-                                        content: std::mem::take(&mut content_buffer),
-                                        done: false,
-                                        usage: None,
-                                        context_update: None,
-                                    });
+                                    if !send_stream_chunk(
+                                        &on_event,
+                                        &state.cancellation_token,
+                                        StreamChunk {
+                                            content: std::mem::take(&mut content_buffer),
+                                            done: false,
+                                            usage: None,
+                                            context_update: None,
+                                        },
+                                    ) {
+                                        return Ok(());
+                                    }
                                     last_flush = std::time::Instant::now();
                                 }
-                                let _ = on_event.send(StreamChunk {
-                                    content: "".into(),
-                                    done: false,
-                                    usage: Some(u),
-                                    context_update: None,
-                                });
+                                if !send_stream_chunk(
+                                    &on_event,
+                                    &state.cancellation_token,
+                                    StreamChunk {
+                                        content: String::new(),
+                                        done: false,
+                                        usage: Some(u),
+                                        context_update: None,
+                                    },
+                                ) {
+                                    return Ok(());
+                                }
                             }
                             ProviderEvent::ContextUpdate(c) => {
                                 // Flush any buffered text before sending metadata
                                 if !content_buffer.is_empty() {
-                                    let _ = on_event.send(StreamChunk {
-                                        content: std::mem::take(&mut content_buffer),
-                                        done: false,
-                                        usage: None,
-                                        context_update: None,
-                                    });
+                                    if !send_stream_chunk(
+                                        &on_event,
+                                        &state.cancellation_token,
+                                        StreamChunk {
+                                            content: std::mem::take(&mut content_buffer),
+                                            done: false,
+                                            usage: None,
+                                            context_update: None,
+                                        },
+                                    ) {
+                                        return Ok(());
+                                    }
                                     last_flush = std::time::Instant::now();
                                 }
-                                let _ = on_event.send(StreamChunk {
-                                    content: "".into(),
-                                    done: false,
-                                    usage: None,
-                                    context_update: Some(c),
-                                });
+                                if !send_stream_chunk(
+                                    &on_event,
+                                    &state.cancellation_token,
+                                    StreamChunk {
+                                        content: String::new(),
+                                        done: false,
+                                        usage: None,
+                                        context_update: Some(c),
+                                    },
+                                ) {
+                                    return Ok(());
+                                }
                             }
                         }
                     }
-                    Err(e) => {
+                    Err(_) => {
                         // Flush buffer before error
-                        if !content_buffer.is_empty() {
-                            let _ = on_event.send(StreamChunk {
-                                content: std::mem::take(&mut content_buffer),
-                                done: false,
+                        if !content_buffer.is_empty()
+                            && !send_stream_chunk(
+                                &on_event,
+                                &state.cancellation_token,
+                                StreamChunk {
+                                    content: std::mem::take(&mut content_buffer),
+                                    done: false,
+                                    usage: None,
+                                    context_update: None,
+                                },
+                            )
+                        {
+                            return Ok(());
+                        }
+                        warn!("[direct_chat_stream] Provider stream terminated with an error");
+                        send_stream_chunk(
+                            &on_event,
+                            &state.cancellation_token,
+                            StreamChunk {
+                                content: "\n[Generation failed. Please retry.]".into(),
+                                done: true,
                                 usage: None,
                                 context_update: None,
-                            });
-                        }
-                        eprintln!("Error in stream: {}", e);
-                        let _ = on_event.send(StreamChunk {
-                            content: format!("\n[Error: {}]", e),
-                            done: true,
-                            usage: None,
-                            context_update: None,
-                        });
+                            },
+                        );
+                        return Ok(());
                     }
                 }
             }
 
             // Flush any remaining buffered content before sending done
-            if !content_buffer.is_empty() {
-                let _ = on_event.send(StreamChunk {
-                    content: content_buffer,
-                    done: false,
-                    usage: None,
-                    context_update: None,
-                });
+            if !content_buffer.is_empty()
+                && !send_stream_chunk(
+                    &on_event,
+                    &state.cancellation_token,
+                    StreamChunk {
+                        content: content_buffer,
+                        done: false,
+                        usage: None,
+                        context_update: None,
+                    },
+                )
+            {
+                return Ok(());
             }
 
-            let _ = on_event.send(StreamChunk {
-                content: "".into(),
-                done: true,
-                usage: None,
-                context_update: None,
-            });
+            send_stream_chunk(
+                &on_event,
+                &state.cancellation_token,
+                StreamChunk {
+                    content: String::new(),
+                    done: true,
+                    usage: None,
+                    context_update: None,
+                },
+            );
             Ok(())
         }
-        Err(e) => {
-            let _ = on_event.send(StreamChunk {
-                content: format!("⚠️ Orchestrator Error: {}", e),
-                done: true,
-                usage: None,
-                context_update: None,
-            });
+        Err(_) => {
+            warn!("[direct_chat_stream] Orchestrator failed to start");
+            send_stream_chunk(
+                &on_event,
+                &state.cancellation_token,
+                StreamChunk {
+                    content: "⚠️ Generation could not be started. Please retry.".into(),
+                    done: true,
+                    usage: None,
+                    context_update: None,
+                },
+            );
             Ok(())
         }
     }
@@ -681,20 +922,67 @@ pub async fn direct_chat_stream(
 #[tauri::command]
 #[specta::specta]
 pub async fn direct_chat_count_tokens(
+    app: tauri::AppHandle,
     state: State<'_, SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
-    history: State<'_, crate::history::SharedHistoryStore>,
     conversation_id: String,
 ) -> Result<TokenUsage, crate::thinclaw::bridge::BridgeError> {
-    // 1. Fetch messages from the shared conversation store.
-    let messages = history.message_texts(&conversation_id).await?;
+    use tauri::Manager;
+
+    if !valid_chat_field(&conversation_id, false) {
+        return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Conversation identifier is invalid".to_string(),
+        });
+    }
+
+    // 1. Fetch Messages from DB
+    let pool = app.state::<sqlx::SqlitePool>();
+
+    #[derive(sqlx::FromRow)]
+    struct DbMessage {
+        role: String,
+        content: String,
+    }
+
+    let messages = sqlx::query_as::<_, DbMessage>(
+        "SELECT role, substr(content, 1, 2097153) AS content \
+         FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT 513",
+    )
+    .bind(conversation_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| format!("DB Error: {}", e))?;
+    if messages.len() > MAX_CHAT_MESSAGES {
+        return Err(format!("Conversation contains more than {MAX_CHAT_MESSAGES} messages").into());
+    }
+    let mut total_bytes = 0_usize;
+    for message in &messages {
+        if !matches!(
+            message.role.as_str(),
+            "system" | "user" | "assistant" | "tool"
+        ) || message.content.len() > MAX_CHAT_MESSAGE_BYTES
+        {
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "Conversation contains invalid or oversized messages".to_string(),
+            });
+        }
+        total_bytes = total_bytes
+            .checked_add(message.content.len())
+            .ok_or_else(|| "Conversation content size overflow".to_string())?;
+        if total_bytes > MAX_CHAT_TOTAL_BYTES {
+            return Err(format!(
+                "Conversation content exceeds the {MAX_CHAT_TOTAL_BYTES}-byte limit"
+            )
+            .into());
+        }
+    }
 
     // 2. Try precise count via the shared local runtime snapshot when available.
     let snapshot = crate::engine::local_runtime_snapshot(&state, &engine_manager).await;
     if let Some(endpoint) = snapshot.endpoint {
         let mut check_history: Vec<serde_json::Value> = Vec::new();
-        for (role, content) in &messages {
-            check_history.push(serde_json::json!({ "role": role, "content": content }));
+        for msg in &messages {
+            check_history.push(serde_json::json!({ "role": msg.role, "content": msg.content }));
         }
 
         let base_url = endpoint.base_url.trim_end_matches('/').to_string();
@@ -719,11 +1007,8 @@ pub async fn direct_chat_count_tokens(
     }
 
     // 3. Fallback: heuristic estimate (chars / 4) for MLX, Ollama, cloud
-    let total_chars: u32 = messages
-        .iter()
-        .map(|(_, content)| content.len() as u32)
-        .sum();
-    let estimate = total_chars / 4;
+    let total_chars = u32::try_from(total_bytes).unwrap_or(u32::MAX);
+    let estimate = total_chars.saturating_add(3) / 4;
     tracing::debug!(
         "[direct_chat_count_tokens] Using heuristic estimate (chars/4): {} chars → ~{} tokens",
         total_chars,
@@ -746,6 +1031,7 @@ pub async fn direct_chat_completion(
     engine_manager: State<'_, crate::engine::EngineManager>,
     payload: ChatPayload,
 ) -> Result<String, crate::thinclaw::bridge::BridgeError> {
+    validate_chat_payload(&payload)?;
     info!("[direct_chat_completion] Starting direct_chat_completion...");
 
     let user_config = config.get_config();

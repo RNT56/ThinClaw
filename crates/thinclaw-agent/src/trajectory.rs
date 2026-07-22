@@ -7,6 +7,13 @@ use uuid::Uuid;
 
 use crate::session::{Session, Thread, Turn, TurnState, TurnToolCall};
 
+const MAX_TRAJECTORY_RECORD_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TRAJECTORY_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TRAJECTORY_TOTAL_READ_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_TRAJECTORY_FILES: usize = 4096;
+const MAX_TRAJECTORY_ENTRIES: usize = 8192;
+const MAX_TRAJECTORY_DEPTH: usize = 4;
+
 /// Outcome classification for a terminal turn trajectory record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -313,19 +320,21 @@ impl TrajectoryLogger {
         let effective_ts = record.completed_at.unwrap_or(record.started_at);
         let day = effective_ts.format("%Y-%m-%d").to_string();
         let dir = self.log_root.join(day);
-        tokio::fs::create_dir_all(&dir).await?;
+        ensure_real_directory(&self.log_root).await?;
+        ensure_real_directory(&dir).await?;
 
         let path = dir.join(format!("{}.jsonl", record.session_id));
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await?;
-
-        use tokio::io::AsyncWriteExt;
-        let line = serde_json::to_string(record)?;
-        file.write_all(line.as_bytes()).await?;
-        file.write_all(b"\n").await?;
+        let mut line = serde_json::to_vec(record)?;
+        line.push(b'\n');
+        if line.len() > MAX_TRAJECTORY_RECORD_BYTES {
+            anyhow::bail!("trajectory record exceeds the archive limit");
+        }
+        thinclaw_platform::append_private_file_locked_async(
+            path.clone(),
+            line,
+            MAX_TRAJECTORY_FILE_BYTES,
+        )
+        .await?;
 
         Ok(path)
     }
@@ -337,8 +346,18 @@ impl TrajectoryLogger {
         }
 
         let mut records = Vec::new();
+        let mut total_bytes = 0_u64;
         for path in collect_jsonl_files(&self.log_root)? {
-            let content = std::fs::read_to_string(&path)?;
+            let metadata = std::fs::symlink_metadata(&path)?;
+            total_bytes = total_bytes
+                .checked_add(metadata.len())
+                .ok_or_else(|| anyhow::anyhow!("trajectory archive size overflow"))?;
+            if total_bytes > MAX_TRAJECTORY_TOTAL_READ_BYTES {
+                anyhow::bail!("trajectory archive exceeds the total read limit");
+            }
+            let bytes =
+                thinclaw_platform::read_regular_file_bounded(&path, MAX_TRAJECTORY_FILE_BYTES)?;
+            let content = String::from_utf8(bytes)?;
             for line in content
                 .lines()
                 .map(str::trim)
@@ -397,24 +416,58 @@ fn default_trajectory_root() -> PathBuf {
 }
 
 fn collect_jsonl_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    fn visit(dir: &Path, output: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    fn visit(
+        dir: &Path,
+        depth: usize,
+        output: &mut Vec<PathBuf>,
+        entries_seen: &mut usize,
+    ) -> anyhow::Result<()> {
+        if depth > MAX_TRAJECTORY_DEPTH {
+            return Ok(());
+        }
+        let metadata = std::fs::symlink_metadata(dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!("trajectory archive path is not a real directory");
+        }
         for entry in std::fs::read_dir(dir)? {
+            *entries_seen = entries_seen.saturating_add(1);
+            if *entries_seen > MAX_TRAJECTORY_ENTRIES {
+                anyhow::bail!("trajectory archive contains too many entries");
+            }
             let entry = entry?;
             let path = entry.path();
             let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
             if file_type.is_dir() {
-                visit(&path, output)?;
-            } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+                visit(&path, depth + 1, output, entries_seen)?;
+            } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
                 output.push(path);
+                if output.len() > MAX_TRAJECTORY_FILES {
+                    anyhow::bail!("trajectory archive contains too many files");
+                }
             }
         }
         Ok(())
     }
 
     let mut files = Vec::new();
-    if root.exists() {
-        visit(root, &mut files)?;
+    let mut entries_seen = 0_usize;
+    match std::fs::symlink_metadata(root) {
+        Ok(_) => visit(root, 0, &mut files, &mut entries_seen)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+        Err(error) => return Err(error.into()),
     }
     files.sort();
     Ok(files)
+}
+
+async fn ensure_real_directory(path: &Path) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(path).await?;
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!("trajectory archive path is not a real directory");
+    }
+    Ok(())
 }

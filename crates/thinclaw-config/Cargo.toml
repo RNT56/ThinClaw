@@ -27,6 +27,7 @@ thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
 thinclaw-workspace = { version = "0.1.0", path = "../thinclaw-workspace" }
 tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 tracing = { workspace = true }
+url = "2"
 
 [features]
 default = []

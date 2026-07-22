@@ -386,7 +386,12 @@ impl Tool for RoutineCreateTool {
             next_fire_at: None,
             run_count: 0,
             consecutive_failures: 0,
-            state: serde_json::json!({}),
+            state: ctx
+                .metadata
+                .get("user_timezone")
+                .and_then(|value| value.as_str())
+                .map(|timezone| serde_json::json!({"user_timezone": timezone}))
+                .unwrap_or_else(|| serde_json::json!({})),
             config_version: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),

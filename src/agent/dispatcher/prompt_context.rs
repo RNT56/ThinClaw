@@ -17,6 +17,27 @@ pub(super) struct PreparedPromptContext {
     pub(super) provider_tool_extensions: Vec<String>,
     pub(super) reasoning: Reasoning,
     pub(super) prompt_context_documents: Vec<String>,
+    pub(super) context_budget: PreparedContextBudget,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PreparedContextBudget {
+    prompt_tokens: usize,
+    tool_schema_tokens: usize,
+    output_reserve_tokens: usize,
+    safety_margin_percent: u8,
+}
+
+impl PreparedContextBudget {
+    pub(super) fn history_token_limit(self, context_window_tokens: usize) -> usize {
+        let safety_margin =
+            context_window_tokens.saturating_mul(self.safety_margin_percent as usize) / 100;
+        context_window_tokens
+            .saturating_sub(self.prompt_tokens)
+            .saturating_sub(self.tool_schema_tokens)
+            .saturating_sub(self.output_reserve_tokens)
+            .saturating_sub(safety_margin)
+    }
 }
 
 impl Agent {
@@ -25,15 +46,12 @@ impl Agent {
         message: &IncomingMessage,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
-    ) -> PreparedPromptContext {
+    ) -> Result<PreparedPromptContext, Error> {
         let identity = message.resolved_identity();
 
-        // Detect group chat from channel metadata (needed before loading system prompt)
-        let is_group_chat = message
-            .metadata
-            .get("chat_type")
-            .and_then(|v| v.as_str())
-            .is_some_and(|t| t == "group" || t == "channel" || t == "supergroup");
+        // Identity is canonicalized once at ingress. Never re-derive group
+        // privacy policy from transport-specific metadata here.
+        let is_group_chat = identity.conversation_kind == crate::identity::ConversationKind::Group;
 
         let routed_agent =
             if let Some(owner_id) = self.agent_router.get_thread_owner(thread_id).await {
@@ -48,19 +66,48 @@ impl Agent {
         let routed_allowed_skills = routed_agent
             .as_ref()
             .and_then(|agent| agent.allowed_skills.clone());
-        let effective_workspace = if let (Some(base_workspace), Some(workspace_id)) =
-            (self.workspace(), routed_agent_workspace_id)
-        {
-            Some(Arc::new(
-                base_workspace.as_ref().clone().with_agent(workspace_id),
+        let effective_workspace = self.workspace().map(|base_workspace| {
+            Arc::new(base_workspace.scoped_clone(
+                identity.principal_id.clone(),
+                routed_agent_workspace_id.or(base_workspace.agent_id()),
             ))
-        } else {
-            self.workspace().map(Arc::clone)
-        };
+        });
+        if let Some(workspace) = effective_workspace.as_ref()
+            && let Err(error) = workspace.seed_if_empty(None, None).await
+        {
+            tracing::warn!(
+                principal_id = %identity.principal_id,
+                error = %error,
+                "Failed to seed the principal workspace before prompt assembly"
+            );
+        }
+        if identity.conversation_kind == crate::identity::ConversationKind::Direct
+            && identity.actor_id == identity.principal_id
+            && let Some(workspace) = effective_workspace.as_ref()
+        {
+            match workspace
+                .migrate_legacy_owner_knowledge(&identity.actor_id)
+                .await
+            {
+                Ok(migrated) if migrated > 0 => tracing::info!(
+                    principal_id = %identity.principal_id,
+                    actor_id = %identity.actor_id,
+                    migrated,
+                    "Migrated legacy root knowledge into the canonical actor namespace"
+                ),
+                Err(error) => tracing::warn!(
+                    principal_id = %identity.principal_id,
+                    actor_id = %identity.actor_id,
+                    error = %error,
+                    "Could not migrate legacy root knowledge; legacy prompt fallback remains available"
+                ),
+                _ => {}
+            }
+        }
         // Independent store reads on the hot path of every message — fetch
         // them concurrently instead of paying their summed latency.
         let store_handle = self.store().map(Arc::clone);
-        let (prompt_settings, existing_runtime) = tokio::join!(
+        let (mut prompt_settings, existing_runtime) = tokio::join!(
             async {
                 if let Some(store) = store_handle.as_ref() {
                     match store.get_all_settings(&identity.principal_id).await {
@@ -89,18 +136,23 @@ impl Agent {
                 }
             },
         );
+        prompt_settings.normalize_runtime_bounds();
 
         // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
         // In group chats, MEMORY.md is excluded to prevent leaking personal context.
-        let mut workspace_prompt = if prompt_settings.session_freeze_enabled {
+        let frozen_workspace_prompt = if prompt_settings.session_freeze_enabled {
             existing_runtime
                 .as_ref()
                 .and_then(|runtime| runtime.frozen_workspace_prompt.clone())
         } else {
             None
         };
-        if workspace_prompt.is_none() {
-            workspace_prompt = if let Some(ws) = effective_workspace.as_ref() {
+        // Workspace/provider knowledge is mutable state, not a rollout
+        // contract. Read it every turn so memory edits, policy changes, and day
+        // rollovers become visible immediately. The persisted workspace block
+        // is only a last-known-good fallback for a transient storage failure.
+        let (mut workspace_prompt, workspace_loaded_live) =
+            if let Some(ws) = effective_workspace.as_ref() {
                 match ws
                     .system_prompt_for_identity(
                         Some(&identity),
@@ -109,20 +161,26 @@ impl Agent {
                     )
                     .await
                 {
-                    Ok(prompt) if !prompt.is_empty() => Some(prompt),
-                    Ok(_) => None,
+                    Ok(prompt) if !prompt.is_empty() => (Some(prompt), true),
+                    Ok(_) => (None, true),
                     Err(e) => {
-                        tracing::debug!("Could not load workspace system prompt: {}", e);
-                        None
+                        tracing::warn!(
+                            thread = %thread_id,
+                            error = %e,
+                            "Could not refresh workspace system prompt; using last-known-good block"
+                        );
+                        (frozen_workspace_prompt, false)
                     }
                 }
             } else {
-                None
+                (frozen_workspace_prompt, false)
             };
-        }
         if let Some(agent_prompt) = routed_agent
             .as_ref()
             .and_then(|agent| agent.system_prompt.as_ref())
+            // A fallback snapshot already contains the routed override from
+            // the successful turn that produced it. Do not append it again.
+            && (workspace_loaded_live || workspace_prompt.is_none())
         {
             workspace_prompt = Some(match workspace_prompt.take() {
                 Some(prompt) if !prompt.is_empty() => {
@@ -278,26 +336,11 @@ impl Agent {
             let Some(orchestrator) = self.learning_orchestrator() else {
                 return (None, Vec::new(), None);
             };
-            let frozen_block = if prompt_settings.session_freeze_enabled {
-                existing_runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.frozen_provider_system_prompt.clone())
-            } else {
-                None
-            };
-            let system_prompt_fut = async {
-                if let Some(block) = frozen_block {
-                    Some(block)
-                } else {
-                    orchestrator
-                        .provider_system_prompt_block(&identity.principal_id)
-                        .await
-                }
-            };
+            let provider_access = identity.access_context(message.channel.clone());
             let (provider_context, provider_tool_extensions, provider_system_prompt) = tokio::join!(
-                orchestrator.prefetch_provider_context(&identity.principal_id, &message.content, 6),
-                orchestrator.provider_tool_extensions(&identity.principal_id),
-                system_prompt_fut,
+                orchestrator.prefetch_provider_context(&provider_access, &message.content, 6),
+                orchestrator.provider_tool_extensions(&provider_access),
+                orchestrator.provider_system_prompt_block(&provider_access),
             );
             (
                 provider_context,
@@ -401,6 +444,31 @@ impl Agent {
             .map(|overlay| sanitize_prompt_segment("personality_overlay", overlay.clone()));
         let post_compaction_fragment = post_compaction_fragment
             .map(|fragment| sanitize_prompt_segment("post_compaction_fragment", fragment));
+        let workspace_evidence_context = if let Some(workspace) = effective_workspace.as_ref() {
+            match workspace
+                .untrusted_context_for_identity(
+                    &identity,
+                    &message.channel,
+                    self.deps.safety.redact_pii_in_prompts(),
+                )
+                .await
+            {
+                Ok(Some(context)) if !context.trim().is_empty() => {
+                    Some(sanitize_prompt_segment("workspace_evidence", context))
+                }
+                Ok(_) => None,
+                Err(error) => {
+                    tracing::warn!(
+                        thread = %thread_id,
+                        %error,
+                        "Failed to load actor/group workspace evidence"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let runtime_capability_hint = {
             let has_execute_code = self.tools().has("execute_code").await;
             let has_shell = self.tools().has("shell").await;
@@ -461,8 +529,12 @@ impl Agent {
                 .div_ceil(4)
             })
             .sum();
+        let routed_context_window_tokens = self
+            .context_monitor_for_model(&routed_llm.active_model_name())
+            .limit();
+        prompt_settings.normalize_for_context_window(routed_context_window_tokens);
         let prompt_budget = thinclaw_llm_core::PromptBudget {
-            context_window_tokens: prompt_settings.context_window_tokens,
+            context_window_tokens: routed_context_window_tokens,
             tool_schema_tokens,
             history_tokens,
             output_reserve_tokens: prompt_settings.output_reserve_tokens,
@@ -471,6 +543,7 @@ impl Agent {
         };
         let prompt_materials = DispatcherPromptMaterials {
             workspace_prompt: workspace_prompt.clone(),
+            workspace_evidence_context: workspace_evidence_context.clone(),
             provider_system_prompt: provider_system_prompt.clone(),
             skill_index_context,
             provider_recall_context,
@@ -487,25 +560,37 @@ impl Agent {
         };
         let prompt_source_segments =
             dispatcher_prompt_assembly(&prompt_materials).into_prompt_segments();
-        let prompt_assembly = assemble_dispatcher_prompt_materials_with_budget(
+        let prompt_assembly = match assemble_dispatcher_prompt_materials_with_budget(
             &prompt_materials,
             prompt_budget,
-        ).unwrap_or_else(|error| {
-            tracing::error!(thread = %thread_id, %error, "Prompt V2 compilation failed; using the bounded default compiler budget");
-            assemble_dispatcher_prompt_materials(&DispatcherPromptMaterials {
-                workspace_prompt: workspace_prompt.clone(),
-                provider_system_prompt: provider_system_prompt.clone(),
-                skill_index_context: None,
-                provider_recall_context: None,
-                linked_recall_context: None,
-                channel_formatting_context: None,
-                personality_overlay_context: None,
-                runtime_capability_hint: None,
-                active_skill_context: None,
-                post_compaction_fragment: None,
-                provider_context_refs: Vec::new(),
-            })
-        });
+        ) {
+            Ok(assembly) => assembly,
+            Err(error) => {
+                tracing::error!(thread = %thread_id, %error, "Prompt V2 compilation failed; using a minimal bounded fallback");
+                // Do not carry the oversized segment that caused the primary
+                // compile to fail into the fallback. The immutable transcript
+                // policy remains, while all mutable material is omitted for
+                // this turn. A second failure is returned through the agent
+                // error path rather than panicking the process.
+                let fallback = DispatcherPromptMaterials::default();
+                assemble_dispatcher_prompt_materials_with_budget(
+                    &fallback,
+                    thinclaw_llm_core::PromptBudget::default(),
+                )
+                .map_err(|fallback_error| crate::error::JobError::ContextError {
+                    id: thread_id,
+                    reason: format!(
+                        "prompt compilation failed ({error}); minimal fallback also failed ({fallback_error})"
+                    ),
+                })?
+            }
+        };
+        let context_budget = PreparedContextBudget {
+            prompt_tokens: prompt_assembly.estimated_tokens,
+            tool_schema_tokens,
+            output_reserve_tokens: prompt_settings.output_reserve_tokens,
+            safety_margin_percent: prompt_settings.safety_margin_percent,
+        };
         let frozen_contract_version = existing_runtime.as_ref().and_then(|runtime| {
             frozen_prompt_contract_version(
                 runtime.prompt_contract_version.as_deref(),
@@ -553,14 +638,11 @@ impl Agent {
             let frozen_provider_system_prompt = provider_system_prompt.clone();
             let _ = crate::agent::mutate_thread_runtime(&store, thread_id, |runtime| {
                 if prompt_settings.session_freeze_enabled {
-                    runtime.frozen_workspace_prompt = runtime
-                        .frozen_workspace_prompt
-                        .clone()
-                        .or(frozen_workspace_prompt.clone());
-                    runtime.frozen_provider_system_prompt = runtime
-                        .frozen_provider_system_prompt
-                        .clone()
-                        .or(frozen_provider_system_prompt.clone());
+                    runtime.frozen_workspace_prompt = frozen_workspace_prompt.clone();
+                    runtime.frozen_provider_system_prompt = frozen_provider_system_prompt.clone();
+                } else {
+                    runtime.frozen_workspace_prompt = None;
+                    runtime.frozen_provider_system_prompt = None;
                 }
                 runtime.prompt_contract_version = Some(active_contract_version.clone());
                 if !exact_v2_telemetry_is_deferred {
@@ -631,7 +713,7 @@ impl Agent {
             }
         };
 
-        PreparedPromptContext {
+        Ok(PreparedPromptContext {
             identity,
             routed_agent,
             routed_agent_workspace_id,
@@ -641,18 +723,32 @@ impl Agent {
             provider_tool_extensions,
             reasoning,
             prompt_context_documents,
-        }
+            context_budget,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::frozen_prompt_contract_version;
+    use super::{PreparedContextBudget, frozen_prompt_contract_version};
 
     #[test]
     fn pre_v2_frozen_session_stays_legacy_until_session_boundary() {
         assert_eq!(frozen_prompt_contract_version(None, true), Some("legacy"));
         assert_eq!(frozen_prompt_contract_version(None, false), None);
         assert_eq!(frozen_prompt_contract_version(Some("v2"), true), Some("v2"));
+    }
+
+    #[test]
+    fn history_budget_reserves_prompt_tools_output_and_margin() {
+        let budget = PreparedContextBudget {
+            prompt_tokens: 1_000,
+            tool_schema_tokens: 2_000,
+            output_reserve_tokens: 4_000,
+            safety_margin_percent: 10,
+        };
+
+        assert_eq!(budget.history_token_limit(32_000), 21_800);
+        assert_eq!(budget.history_token_limit(4_000), 0);
     }
 }

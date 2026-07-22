@@ -196,7 +196,11 @@ impl TestHarness {
         wasm_path: &Path,
         suite: &TestSuite,
     ) -> Result<Vec<TestResult>, TestError> {
-        let bytes = tokio::fs::read(wasm_path).await?;
+        let bytes = thinclaw_platform::read_regular_file_bounded_async(
+            wasm_path.to_path_buf(),
+            64 * 1024 * 1024,
+        )
+        .await?;
         self.run_suite_bytes(&bytes, suite).await
     }
 

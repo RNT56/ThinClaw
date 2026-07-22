@@ -17,24 +17,19 @@ use crate::tools::wasm::{
 
 use super::AuthRequestContext;
 use super::ExtensionManager;
-use super::core::PendingAuth;
+use super::core::{PendingAuth, lock_wasm_package};
 
 impl ExtensionManager {
     pub(super) async fn check_wasm_tool_auth_status(
         &self,
         name: &str,
     ) -> Result<WasmToolAuthCheck, ExtensionError> {
-        let cap_path = self
-            .wasm_tools_dir
-            .join(format!("{}.capabilities.json", name));
-        if !cap_path.exists() {
+        let package = lock_wasm_package(&self.wasm_tools_dir, name).await?;
+        let Some(cap_bytes) = package.capabilities_bytes.as_deref() else {
             return Ok(WasmToolAuthCheck::no_auth_required());
-        }
+        };
 
-        let cap_bytes = tokio::fs::read(&cap_path)
-            .await
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
-        let cap_file = crate::tools::wasm::CapabilitiesFile::from_bytes(&cap_bytes)
+        let cap_file = crate::tools::wasm::CapabilitiesFile::from_bytes(cap_bytes)
             .map_err(|e| ExtensionError::Other(e.to_string()))?;
         let Some(auth) = cap_file.auth else {
             return Ok(WasmToolAuthCheck::no_auth_required());
@@ -51,17 +46,12 @@ impl ExtensionManager {
         &self,
         name: &str,
     ) -> Result<Option<crate::tools::wasm::AuthCapabilitySchema>, ExtensionError> {
-        let cap_path = self
-            .wasm_tools_dir
-            .join(format!("{}.capabilities.json", name));
-        if !cap_path.exists() {
+        let package = lock_wasm_package(&self.wasm_tools_dir, name).await?;
+        let Some(cap_bytes) = package.capabilities_bytes.as_deref() else {
             return Ok(None);
-        }
+        };
 
-        let cap_bytes = tokio::fs::read(&cap_path)
-            .await
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
-        let cap_file = crate::tools::wasm::CapabilitiesFile::from_bytes(&cap_bytes)
+        let cap_file = crate::tools::wasm::CapabilitiesFile::from_bytes(cap_bytes)
             .map_err(|e| ExtensionError::Other(e.to_string()))?;
         Ok(cap_file.auth)
     }
@@ -145,17 +135,19 @@ impl ExtensionManager {
                         .await
                         .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
 
-                    self.pending_auth.write().await.insert(
+                    self.insert_pending_auth(
                         state_nonce.clone(),
                         PendingAuth {
                             name: name.to_string(),
                             kind: ExtensionKind::WasmTool,
                             code_verifier: auth_request.code_verifier.clone(),
+                            mcp_authorization: None,
                             redirect_uri: Some(redirect_uri),
                             thread_id: context.thread_id.clone(),
                             created_at: std::time::Instant::now(),
                         },
-                    );
+                    )
+                    .await;
 
                     result.auth_url = Some(auth_request.auth_url);
                     result.callback_type = Some(auth_request.callback_type);
@@ -194,23 +186,31 @@ impl ExtensionManager {
 
     /// Check whether a WASM channel has all required secrets stored.
     /// Returns `(authenticated, needs_setup)`.
-    pub(super) async fn check_channel_auth_status(&self, name: &str) -> (bool, bool) {
-        let cap_path = self
-            .wasm_channels_dir
-            .join(format!("{}.capabilities.json", name));
-        if !cap_path.exists() {
-            return (true, false);
-        }
-        let Ok(cap_bytes) = tokio::fs::read(&cap_path).await else {
-            return (true, false);
-        };
-        let Ok(cap_file) = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
-        else {
-            return (true, false);
+    pub(super) async fn check_channel_auth_status(
+        &self,
+        name: &str,
+    ) -> Result<(bool, bool), ExtensionError> {
+        let package = lock_wasm_package(&self.wasm_channels_dir, name).await?;
+        let capabilities = package
+            .capabilities_bytes
+            .as_deref()
+            .map(crate::channels::wasm::ChannelCapabilitiesFile::from_bytes)
+            .transpose()
+            .map_err(|error| ExtensionError::Other(error.to_string()))?;
+        self.check_channel_manifest_auth_status(capabilities.as_ref())
+            .await
+    }
+
+    pub(super) async fn check_channel_manifest_auth_status(
+        &self,
+        cap_file: Option<&crate::channels::wasm::ChannelCapabilitiesFile>,
+    ) -> Result<(bool, bool), ExtensionError> {
+        let Some(cap_file) = cap_file else {
+            return Ok((true, false));
         };
         let required = &cap_file.setup.required_secrets;
         if required.is_empty() {
-            return (true, false);
+            return Ok((true, false));
         }
         let mut all_provided = true;
         for secret in required {
@@ -221,13 +221,108 @@ impl ExtensionManager {
                 .secrets
                 .exists(&self.user_id, &secret.name)
                 .await
-                .unwrap_or(false)
+                .map_err(|error| ExtensionError::AuthFailed(error.to_string()))?
             {
                 all_provided = false;
                 break;
             }
         }
-        (all_provided, true)
+        Ok((all_provided, true))
+    }
+
+    async fn load_channel_manifest_secret(
+        &self,
+        cap_file: &crate::channels::wasm::ChannelCapabilitiesFile,
+        secret_name: &str,
+        purpose: &'static str,
+    ) -> Result<Option<String>, ExtensionError> {
+        let definition = cap_file
+            .setup
+            .required_secrets
+            .iter()
+            .find(|secret| secret.name == secret_name)
+            .ok_or_else(|| {
+                ExtensionError::ActivationFailed(format!(
+                    "Channel manifest references undeclared secret '{}'",
+                    secret_name
+                ))
+            })?;
+        if definition.optional
+            && !self
+                .secrets
+                .exists(&self.user_id, secret_name)
+                .await
+                .map_err(|error| ExtensionError::ActivationFailed(error.to_string()))?
+        {
+            return Ok(None);
+        }
+        let secret = self
+            .secrets
+            .get_for_injection(
+                &self.user_id,
+                secret_name,
+                crate::secrets::SecretAccessContext::new("extensions.manager", purpose),
+            )
+            .await
+            .map_err(|error| {
+                ExtensionError::ActivationFailed(format!(
+                    "failed to load channel secret '{}': {error}",
+                    secret_name
+                ))
+            })?;
+        Ok(Some(secret.expose().to_string()))
+    }
+
+    async fn load_channel_webhook_auth(
+        &self,
+        cap_file: Option<&crate::channels::wasm::ChannelCapabilitiesFile>,
+    ) -> Result<(RegisteredWebhookAuth, Option<String>), ExtensionError> {
+        let Some(cap_file) = cap_file else {
+            return Ok((RegisteredWebhookAuth::default(), None));
+        };
+        let Some(webhook) = cap_file
+            .capabilities
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.webhook.as_ref())
+        else {
+            return Ok((RegisteredWebhookAuth::default(), None));
+        };
+
+        let signature_secret_name = cap_file.webhook_secret_name();
+        let signature_secret = self
+            .load_channel_manifest_secret(
+                cap_file,
+                &signature_secret_name,
+                "webhook_signature_validation",
+            )
+            .await?;
+        let verify_token_secret = if webhook.verify_token_param.is_some() {
+            let verify_name = cap_file.webhook_verify_token_secret_name().ok_or_else(|| {
+                ExtensionError::ActivationFailed(
+                    "Channel verify-token configuration is incomplete".to_string(),
+                )
+            })?;
+            if verify_name == signature_secret_name {
+                signature_secret.clone()
+            } else {
+                self.load_channel_manifest_secret(cap_file, &verify_name, "webhook_verify_token")
+                    .await?
+            }
+        } else {
+            None
+        };
+
+        Ok((
+            RegisteredWebhookAuth {
+                secret_header: webhook.secret_header.clone(),
+                secret_validation: webhook.secret_validation,
+                signature_secret: signature_secret.clone(),
+                verify_token_param: webhook.verify_token_param.clone(),
+                verify_token_secret,
+            },
+            signature_secret,
+        ))
     }
 
     pub(super) async fn auth_wasm_channel(
@@ -235,24 +330,17 @@ impl ExtensionManager {
         name: &str,
         token: Option<&str>,
     ) -> Result<AuthResult, ExtensionError> {
-        let cap_path = self
-            .wasm_channels_dir
-            .join(format!("{}.capabilities.json", name));
-
-        if !cap_path.exists() {
+        let package = lock_wasm_package(&self.wasm_channels_dir, name).await?;
+        let Some(cap_bytes) = package.capabilities_bytes.as_deref() else {
             return Ok(self.auth_result(
                 name,
                 ExtensionKind::WasmChannel,
                 "none",
                 "no_auth_required",
             ));
-        }
+        };
 
-        let cap_bytes = tokio::fs::read(&cap_path)
-            .await
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
-
-        let cap_file = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
+        let cap_file = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(cap_bytes)
             .map_err(|e| ExtensionError::Other(e.to_string()))?;
 
         // Get required secrets from the setup section
@@ -276,7 +364,7 @@ impl ExtensionManager {
                 .secrets
                 .exists(&self.user_id, &secret.name)
                 .await
-                .unwrap_or(false)
+                .map_err(|error| ExtensionError::AuthFailed(error.to_string()))?
             {
                 missing.push(secret);
             }
@@ -320,7 +408,11 @@ impl ExtensionManager {
                 "awaiting_token",
             );
             result.instructions = Some(next.prompt.clone());
-            result.setup_url = cap_file.setup.validation_endpoint.clone();
+            result.setup_url = cap_file
+                .setup
+                .validation_endpoint
+                .as_ref()
+                .map(|endpoint| endpoint.url().to_string());
             result.awaiting_token = true;
             return Ok(result);
         }
@@ -334,7 +426,11 @@ impl ExtensionManager {
             "awaiting_token",
         );
         result.instructions = Some(secret.prompt.clone());
-        result.setup_url = cap_file.setup.validation_endpoint.clone();
+        result.setup_url = cap_file
+            .setup
+            .validation_endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.url().to_string());
         result.awaiting_token = true;
         Ok(result)
     }
@@ -343,6 +439,7 @@ impl ExtensionManager {
         &self,
         name: &str,
     ) -> Result<ActivateResult, ExtensionError> {
+        let _operation = self.wasm_operation_lock.lock().await;
         // Check if already active
         if self.tool_registry.has(name).await {
             return Ok(ActivateResult {
@@ -358,41 +455,60 @@ impl ExtensionManager {
         })?;
 
         let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
-        if !wasm_path.exists() {
-            return Err(ExtensionError::NotInstalled(format!(
-                "WASM tool '{}' not found at {}",
-                name,
-                wasm_path.display()
-            )));
+        let package = lock_wasm_package(&self.wasm_tools_dir, name).await?;
+        let capabilities_file = package
+            .capabilities_bytes
+            .as_deref()
+            .map(crate::tools::wasm::CapabilitiesFile::from_bytes)
+            .transpose()
+            .map_err(|error| ExtensionError::ActivationFailed(error.to_string()))?;
+        if let Some(auth) = capabilities_file
+            .as_ref()
+            .and_then(|capabilities| capabilities.auth.as_ref())
+        {
+            let flow =
+                WasmToolOAuthFlow::new(self.secrets.as_ref(), &self.user_id, &self.wasm_tools_dir);
+            let auth_check = flow
+                .check_auth_status(auth)
+                .await
+                .map_err(|error| ExtensionError::ActivationFailed(error.to_string()))?;
+            if !matches!(
+                auth_check.auth_status,
+                WasmToolAuthStatus::Authenticated | WasmToolAuthStatus::NoAuthRequired
+            ) {
+                return Err(ExtensionError::ActivationFailed(format!(
+                    "WASM tool '{}' is not authenticated (status: {})",
+                    name,
+                    auth_check.auth_status.as_str()
+                )));
+            }
         }
 
-        let cap_path = self
-            .wasm_tools_dir
-            .join(format!("{}.capabilities.json", name));
-        let cap_path_option = if cap_path.exists() {
-            Some(cap_path.as_path())
-        } else {
-            None
-        };
-
-        let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry));
+        let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry))
+            .with_secrets_store(Arc::clone(&self.secrets));
         if let Some(invoker) = &self.wasm_tool_invoker {
             loader = loader.with_tool_invoker(Arc::clone(invoker));
         }
-        loader
-            .load_from_files(name, &wasm_path, cap_path_option)
+        let loaded = loader
+            .load_from_files_with_metadata(
+                name,
+                &wasm_path,
+                Some(package.capabilities_path.as_path()),
+            )
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+        drop(package);
 
-        if let Some(ref hooks) = self.hooks
-            && let Some(cap_path) = cap_path_option
-        {
+        if let Some(ref hooks) = self.hooks {
             let source = format!("plugin.tool:{}", name);
-            let registration =
-                crate::hooks::bootstrap::register_plugin_bundle_from_capabilities_file(
-                    hooks, &source, cap_path,
-                )
-                .await;
+            let registration = crate::hooks::bootstrap::register_plugin_bundle_from_hooks_value(
+                hooks,
+                &source,
+                loaded
+                    .capabilities_file
+                    .and_then(|capabilities| capabilities.hooks),
+            )
+            .await;
 
             if registration.total_registered() > 0 {
                 tracing::info!(
@@ -431,16 +547,7 @@ impl ExtensionManager {
         &self,
         name: &str,
     ) -> Result<ActivateResult, ExtensionError> {
-        // If already active, re-inject credentials and refresh webhook secret.
-        // Handles the case where a channel was loaded at startup before the
-        // user saved secrets via the web UI.
-        {
-            let active = self.active_channel_names.read().await;
-            if active.contains(name) {
-                return self.refresh_active_channel(name).await;
-            }
-        }
-
+        let _operation = self.wasm_operation_lock.lock().await;
         // Verify runtime infrastructure is available and clone Arcs so we don't
         // hold the RwLock guard across awaits.
         let (channel_runtime, channel_manager, pairing_store, wasm_channel_router, host_config) = {
@@ -460,83 +567,33 @@ impl ExtensionManager {
             )
         };
 
-        // Check auth status first
-        let (authenticated, _needs_setup) = self.check_channel_auth_status(name).await;
+        // Hold the package snapshot lock across both the auth decision and the
+        // loader read so neither can observe a different published generation.
+        let package = lock_wasm_package(&self.wasm_channels_dir, name).await?;
+        let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
+
+        let loader =
+            WasmChannelLoader::new(Arc::clone(&channel_runtime), Arc::clone(&pairing_store));
+        let loaded = loader
+            .load_from_files(name, &wasm_path, Some(package.capabilities_path.as_path()))
+            .await
+            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+
+        let (authenticated, _needs_setup) = self
+            .check_channel_manifest_auth_status(loaded.capabilities_file())
+            .await?;
         if !authenticated {
             return Err(ExtensionError::ActivationFailed(format!(
                 "Channel '{}' requires configuration. Use the setup form to provide credentials.",
                 name
             )));
         }
-
-        // Load the channel from files
-        let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
-        let cap_path = self
-            .wasm_channels_dir
-            .join(format!("{}.capabilities.json", name));
-        let cap_path_option = if cap_path.exists() {
-            Some(cap_path.as_path())
-        } else {
-            None
-        };
-
-        let loader =
-            WasmChannelLoader::new(Arc::clone(&channel_runtime), Arc::clone(&pairing_store));
-        let loaded = loader
-            .load_from_files(name, &wasm_path, cap_path_option)
-            .await
-            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+        drop(package);
 
         let channel_name = loaded.name().to_string();
-        let signature_secret_name = loaded.webhook_secret_name();
-        let verify_token_secret_name = loaded.webhook_verify_token_secret_name();
-        let secret_header = loaded.webhook_secret_header().map(str::to_string);
-        let secret_validation = loaded.webhook_secret_validation();
-        let verify_token_param = loaded.webhook_verify_token_param().map(str::to_string);
-
-        // Get webhook secrets from secrets store
-        let signature_secret = self
-            .secrets
-            .get_for_injection(
-                &self.user_id,
-                &signature_secret_name,
-                crate::secrets::SecretAccessContext::new(
-                    "extensions.manager",
-                    "webhook_signature_validation",
-                ),
-            )
-            .await
-            .ok()
-            .map(|s| s.expose().to_string());
-
-        let verify_token_secret = if let Some(secret_name) = verify_token_secret_name.as_ref() {
-            if *secret_name == signature_secret_name {
-                signature_secret.clone()
-            } else {
-                self.secrets
-                    .get_for_injection(
-                        &self.user_id,
-                        secret_name,
-                        crate::secrets::SecretAccessContext::new(
-                            "extensions.manager",
-                            "webhook_verify_token",
-                        ),
-                    )
-                    .await
-                    .ok()
-                    .map(|s| s.expose().to_string())
-            }
-        } else {
-            None
-        };
-
-        let webhook_auth = RegisteredWebhookAuth {
-            secret_header: secret_header.clone(),
-            secret_validation,
-            signature_secret: signature_secret.clone(),
-            verify_token_param,
-            verify_token_secret,
-        };
+        let (webhook_auth, signature_secret) = self
+            .load_channel_webhook_auth(loaded.capabilities_file())
+            .await?;
 
         let channel_arc = Arc::new(loaded.channel);
 
@@ -574,36 +631,35 @@ impl ExtensionManager {
                 }
             }
             Err(e) => {
-                tracing::error!(
-                    channel = %channel_name,
-                    error = %e,
-                    "Failed to inject credentials into hot-activated channel"
-                );
+                return Err(ExtensionError::ActivationFailed(format!(
+                    "credential injection failed: {e}"
+                )));
             }
         }
 
-        if let Err(error) = channel_arc.prime_on_start_config().await {
-            tracing::warn!(
-                channel = %channel_name,
-                error = %error,
-                "Failed to prime hot-activated channel on_start config before router registration"
-            );
-        }
+        channel_arc
+            .prime_on_start_config()
+            .await
+            .map_err(|error| ExtensionError::ActivationFailed(error.to_string()))?;
 
+        let endpoints = channel_arc.endpoints().await;
         wasm_channel_router
-            .register(
-                Arc::clone(&channel_arc),
-                channel_arc.endpoints().await,
-                webhook_auth,
-            )
-            .await;
-        tracing::info!(channel = %channel_name, "Registered hot-activated channel with webhook router");
+            .validate_registration(&channel_name, &endpoints, &webhook_auth)
+            .await
+            .map_err(ExtensionError::ActivationFailed)?;
 
-        // Hot-add the channel to the running agent
+        // Start the replacement before publishing its webhook routes. hot_add
+        // starts successfully before it swaps and drains any previous channel.
         channel_manager
-            .hot_add(Box::new(SharedWasmChannel::new(channel_arc)))
+            .hot_add(Box::new(SharedWasmChannel::new(Arc::clone(&channel_arc))))
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+
+        wasm_channel_router
+            .register(Arc::clone(&channel_arc), endpoints, webhook_auth)
+            .await
+            .map_err(ExtensionError::ActivationFailed)?;
+        tracing::info!(channel = %channel_name, "Registered hot-activated channel with webhook router");
 
         // Mark as active and persist
         self.active_channel_names
@@ -619,182 +675,6 @@ impl ExtensionManager {
             kind: ExtensionKind::WasmChannel,
             tools_loaded: Vec::new(),
             message: format!("Channel '{}' activated and running", name),
-        })
-    }
-
-    /// Refresh credentials and webhook secret on an already-active channel.
-    ///
-    /// Called when the user saves new secrets via the setup form for a channel
-    /// that was loaded at startup (possibly without credentials).
-    async fn refresh_active_channel(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
-        let (router, host_config) = {
-            let rt_guard = self.channel_runtime.read().await;
-            match rt_guard.as_ref() {
-                Some(rt) => (Arc::clone(&rt.wasm_channel_router), rt.host_config.clone()),
-                None => {
-                    return Ok(ActivateResult {
-                        name: name.to_string(),
-                        kind: ExtensionKind::WasmChannel,
-                        tools_loaded: Vec::new(),
-                        message: format!("Channel '{}' is already active", name),
-                    });
-                }
-            }
-        };
-
-        let webhook_path = format!("/webhook/{}", name);
-        let existing_channel = match router.get_channel_for_path(&webhook_path).await {
-            Some(ch) => ch,
-            None => {
-                return Ok(ActivateResult {
-                    name: name.to_string(),
-                    kind: ExtensionKind::WasmChannel,
-                    tools_loaded: Vec::new(),
-                    message: format!("Channel '{}' is already active", name),
-                });
-            }
-        };
-
-        // Re-inject credentials from secrets store into the running channel
-        let cred_count = match inject_channel_credentials_from_secrets(
-            &existing_channel,
-            self.secrets.as_ref(),
-            name,
-            &self.user_id,
-        )
-        .await
-        {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!(
-                    channel = %name,
-                    error = %e,
-                    "Failed to refresh credentials on already-active channel"
-                );
-                0
-            }
-        };
-
-        // Refresh the full webhook auth state in the router.
-        let capabilities_file = {
-            let cap_path = self
-                .wasm_channels_dir
-                .join(format!("{}.capabilities.json", name));
-            match tokio::fs::read(&cap_path).await {
-                Ok(bytes) => {
-                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes).ok()
-                }
-                Err(_) => None,
-            }
-        };
-
-        let signature_secret_name = capabilities_file
-            .as_ref()
-            .map(|file| file.webhook_secret_name())
-            .unwrap_or_else(|| format!("{}_webhook_secret", name));
-        let verify_token_secret_name = capabilities_file
-            .as_ref()
-            .and_then(|file| file.webhook_verify_token_secret_name());
-
-        let signature_secret = self
-            .secrets
-            .get_for_injection(
-                &self.user_id,
-                &signature_secret_name,
-                crate::secrets::SecretAccessContext::new(
-                    "extensions.manager",
-                    "webhook_signature_validation",
-                ),
-            )
-            .await
-            .ok()
-            .map(|secret| secret.expose().to_string());
-
-        let verify_token_secret = if let Some(secret_name) = verify_token_secret_name.as_ref() {
-            if *secret_name == signature_secret_name {
-                signature_secret.clone()
-            } else {
-                self.secrets
-                    .get_for_injection(
-                        &self.user_id,
-                        secret_name,
-                        crate::secrets::SecretAccessContext::new(
-                            "extensions.manager",
-                            "webhook_verify_token",
-                        ),
-                    )
-                    .await
-                    .ok()
-                    .map(|secret| secret.expose().to_string())
-            }
-        } else {
-            None
-        };
-
-        let webhook_auth = RegisteredWebhookAuth {
-            secret_header: capabilities_file
-                .as_ref()
-                .and_then(|file| file.webhook_secret_header())
-                .map(str::to_string),
-            secret_validation: capabilities_file
-                .as_ref()
-                .map(|file| file.webhook_secret_validation())
-                .unwrap_or_default(),
-            signature_secret: signature_secret.clone(),
-            verify_token_param: capabilities_file
-                .as_ref()
-                .and_then(|file| file.webhook_verify_token_param())
-                .map(str::to_string),
-            verify_token_secret,
-        };
-        router.update_webhook_auth(name, webhook_auth.clone()).await;
-
-        let runtime_update_count = apply_channel_host_config(
-            &existing_channel,
-            name,
-            &host_config,
-            signature_secret.as_deref(),
-        )
-        .await;
-
-        match existing_channel.refresh_on_start_config().await {
-            Ok(_config) => {
-                router
-                    .register(
-                        Arc::clone(&existing_channel),
-                        existing_channel.endpoints().await,
-                        webhook_auth,
-                    )
-                    .await;
-                tracing::info!(
-                    channel = %name,
-                    "Re-ran on_start after credential refresh and updated router registration"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    channel = %name,
-                    error = %e,
-                    "on_start failed after credential refresh"
-                );
-            }
-        }
-
-        tracing::info!(
-            channel = %name,
-            credentials_refreshed = cred_count,
-            runtime_updates = runtime_update_count,
-            "Refreshed credentials and config on already-active channel"
-        );
-
-        Ok(ActivateResult {
-            name: name.to_string(),
-            kind: ExtensionKind::WasmChannel,
-            tools_loaded: Vec::new(),
-            message: format!(
-                "Channel '{}' is already active; refreshed {} credential(s)",
-                name, cred_count
-            ),
         })
     }
 }

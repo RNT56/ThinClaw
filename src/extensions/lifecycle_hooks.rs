@@ -98,7 +98,11 @@ impl LifecycleHookRegistry {
     /// Fire an event to all hooks.
     pub fn fire(&self, event: &LifecycleEvent) {
         for hook in &self.hooks {
-            hook.on_event(event);
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.on_event(event)))
+                .is_err()
+            {
+                tracing::error!(hook = hook.name(), "plugin lifecycle hook panicked");
+            }
         }
     }
 
@@ -135,21 +139,21 @@ impl AuditLogHook {
     pub fn events(&self) -> Vec<(String, LifecycleEvent)> {
         self.events
             .lock()
-            .expect("lifecycle events mutex poisoned")
+            .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
 
     pub fn len(&self) -> usize {
         self.events
             .lock()
-            .expect("lifecycle events mutex poisoned")
+            .unwrap_or_else(|error| error.into_inner())
             .len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.events
             .lock()
-            .expect("lifecycle events mutex poisoned")
+            .unwrap_or_else(|error| error.into_inner())
             .is_empty()
     }
 
@@ -160,7 +164,7 @@ impl AuditLogHook {
     pub fn events_serialized(&self) -> Vec<SerializedLifecycleEvent> {
         self.events
             .lock()
-            .expect("lifecycle events mutex poisoned")
+            .unwrap_or_else(|error| error.into_inner())
             .iter()
             .map(|(ts, event)| SerializedLifecycleEvent {
                 timestamp: ts.clone(),
@@ -186,7 +190,7 @@ impl LifecycleHook for AuditLogHook {
         let timestamp = chrono::Utc::now().to_rfc3339();
         self.events
             .lock()
-            .expect("lifecycle events mutex poisoned")
+            .unwrap_or_else(|error| error.into_inner())
             .push((timestamp, event.clone()));
     }
 
@@ -323,6 +327,53 @@ mod tests {
         });
         assert_eq!(audit.len(), 1);
         assert_eq!(metrics.installs.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn panicking_hook_does_not_block_following_hooks() {
+        struct PanicHook;
+        impl LifecycleHook for PanicHook {
+            fn on_event(&self, _event: &LifecycleEvent) {
+                panic!("hook failure");
+            }
+
+            fn name(&self) -> &str {
+                "panic"
+            }
+        }
+
+        let metrics = Arc::new(MetricsHook::new());
+        struct MetricsWrap(Arc<MetricsHook>);
+        impl LifecycleHook for MetricsWrap {
+            fn on_event(&self, event: &LifecycleEvent) {
+                self.0.on_event(event);
+            }
+
+            fn name(&self) -> &str {
+                "metrics"
+            }
+        }
+
+        let mut registry = LifecycleHookRegistry::new();
+        registry.register(Box::new(PanicHook));
+        registry.register(Box::new(MetricsWrap(Arc::clone(&metrics))));
+        registry.fire(&LifecycleEvent::Installed { name: "x".into() });
+
+        assert_eq!(metrics.installs.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn audit_log_recovers_from_poisoned_mutex() {
+        let hook = AuditLogHook::new();
+        let shared = Arc::clone(&hook.events);
+        let _ = std::thread::spawn(move || {
+            let _guard = shared.lock().unwrap();
+            panic!("poison audit mutex");
+        })
+        .join();
+
+        hook.on_event(&LifecycleEvent::Installed { name: "x".into() });
+        assert_eq!(hook.len(), 1);
     }
 
     #[test]

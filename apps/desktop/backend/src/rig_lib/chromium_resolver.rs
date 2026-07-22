@@ -64,12 +64,10 @@ pub async fn ensure_chromium(app: Option<&tauri::AppHandle>) -> Result<PathBuf, 
         }
     }
 
-    Err(
-        format!(
-            "Could not find Chromium binary for {}. Run 'npm run setup:chromium' from apps/desktop.",
-            std::env::consts::OS
-        ),
-    )
+    Err(format!(
+        "Could not find Chromium binary for {}. Run 'npm run setup:chromium' from apps/desktop.",
+        std::env::consts::OS
+    ))
 }
 
 #[cfg(test)]

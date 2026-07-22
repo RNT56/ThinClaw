@@ -6,6 +6,13 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::Duration;
+use thinclaw_platform::{bounded_command_output, executable_available};
+use tokio::process::Command;
+
+const MAX_CONFIGURED_STICKER_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_FFMPEG_STDERR_BYTES: usize = 64 * 1024;
 
 /// Sticker format detection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,15 +120,32 @@ impl StickerConfig {
         }
         if let Ok(max) = std::env::var("STICKER_MAX_SIZE_MB")
             && let Ok(m) = max.parse::<u64>()
+            && (1..=50).contains(&m)
+            && let Some(bytes) = m.checked_mul(1024 * 1024)
         {
-            config.max_size = m * 1024 * 1024;
+            config.max_size = bytes;
         }
         if let Ok(dim) = std::env::var("STICKER_MAX_DIMENSION")
             && let Ok(d) = dim.parse()
+            && (16..=4096).contains(&d)
         {
             config.max_dimension = d;
         }
         config
+    }
+
+    fn validate(&self) -> Result<(), StickerError> {
+        if !(1..=MAX_CONFIGURED_STICKER_BYTES).contains(&self.max_size) {
+            return Err(StickerError::InvalidConfiguration(format!(
+                "max_size must be between 1 and {MAX_CONFIGURED_STICKER_BYTES}"
+            )));
+        }
+        if !(16..=4096).contains(&self.max_dimension) {
+            return Err(StickerError::InvalidConfiguration(
+                "max_dimension must be between 16 and 4096".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -153,11 +177,17 @@ pub async fn convert_sticker(
         return Err(StickerError::Disabled);
     }
 
+    config.validate()?;
+
     if data.len() as u64 > config.max_size {
         return Err(StickerError::TooLarge {
             size: data.len() as u64,
             limit: config.max_size,
         });
+    }
+
+    if StickerFormat::from_magic(data) != format {
+        return Err(StickerError::FormatMismatch);
     }
 
     match format {
@@ -176,54 +206,20 @@ async fn convert_webp_via_ffmpeg(
     data: &[u8],
     config: &StickerConfig,
 ) -> Result<ConvertedSticker, StickerError> {
-    let _ = tokio::fs::create_dir_all(&config.temp_dir).await;
-
-    let input_path = config.temp_dir.join("input.webp");
-    let output_path = config.temp_dir.join("output.png");
-
-    tokio::fs::write(&input_path, data)
-        .await
-        .map_err(|e| StickerError::IoError(e.to_string()))?;
-
-    let status = tokio::process::Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-i",
-            input_path.to_str().unwrap_or("input.webp"),
-            "-vf",
-            &format!(
-                "scale='min({0},iw)':'min({0},ih)':force_original_aspect_ratio=decrease",
-                config.max_dimension
-            ),
-            output_path.to_str().unwrap_or("output.png"),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .map_err(|e| StickerError::ConversionFailed(format!("ffmpeg not found: {}", e)))?;
-
-    if !status.success() {
-        let _ = tokio::fs::remove_file(&input_path).await;
-        return Err(StickerError::ConversionFailed(
-            "ffmpeg conversion failed".to_string(),
-        ));
-    }
-
-    let output_data = tokio::fs::read(&output_path)
-        .await
-        .map_err(|e| StickerError::IoError(e.to_string()))?;
-
-    // Clean up
-    let _ = tokio::fs::remove_file(&input_path).await;
-    let _ = tokio::fs::remove_file(&output_path).await;
-
-    Ok(ConvertedSticker {
-        data: output_data,
-        format: "png".to_string(),
-        mime_type: "image/png".to_string(),
-        original_format: StickerFormat::WebP,
-    })
+    convert_via_ffmpeg(
+        data,
+        config,
+        "webp",
+        "png",
+        format!(
+            "scale='min({0},iw)':'min({0},ih)':force_original_aspect_ratio=decrease",
+            config.max_dimension
+        ),
+        true,
+        StickerFormat::WebP,
+        "image/png",
+    )
+    .await
 }
 
 /// Convert WebM to GIF using ffmpeg.
@@ -231,64 +227,122 @@ async fn convert_webm_via_ffmpeg(
     data: &[u8],
     config: &StickerConfig,
 ) -> Result<ConvertedSticker, StickerError> {
-    let _ = tokio::fs::create_dir_all(&config.temp_dir).await;
+    convert_via_ffmpeg(
+        data,
+        config,
+        "webm",
+        "gif",
+        format!(
+            "scale='min({0},iw)':'min({0},ih)':force_original_aspect_ratio=decrease,fps=15",
+            config.max_dimension
+        ),
+        false,
+        StickerFormat::WebM,
+        "image/gif",
+    )
+    .await
+}
 
-    let input_path = config.temp_dir.join("input.webm");
-    let output_path = config.temp_dir.join("output.gif");
-
-    tokio::fs::write(&input_path, data)
+#[allow(clippy::too_many_arguments)]
+async fn convert_via_ffmpeg(
+    data: &[u8],
+    config: &StickerConfig,
+    input_extension: &str,
+    output_extension: &str,
+    video_filter: String,
+    single_frame: bool,
+    original_format: StickerFormat,
+    output_mime: &str,
+) -> Result<ConvertedSticker, StickerError> {
+    tokio::fs::create_dir_all(&config.temp_dir)
         .await
-        .map_err(|e| StickerError::IoError(e.to_string()))?;
-
-    let status = tokio::process::Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-i",
-            input_path.to_str().unwrap_or("input.webm"),
-            "-vf",
-            &format!(
-                "scale='min({0},iw)':'min({0},ih)':force_original_aspect_ratio=decrease,fps=15",
-                config.max_dimension
-            ),
-            output_path.to_str().unwrap_or("output.gif"),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+        .map_err(|error| StickerError::IoError(error.to_string()))?;
+    let root_metadata = tokio::fs::symlink_metadata(&config.temp_dir)
         .await
-        .map_err(|e| StickerError::ConversionFailed(format!("ffmpeg not found: {}", e)))?;
-
-    if !status.success() {
-        let _ = tokio::fs::remove_file(&input_path).await;
-        return Err(StickerError::ConversionFailed(
-            "ffmpeg conversion failed".to_string(),
+        .map_err(|error| StickerError::IoError(error.to_string()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(StickerError::InvalidConfiguration(
+            "temp_dir must be a directory, never a symlink".to_string(),
         ));
     }
-
-    let output_data = tokio::fs::read(&output_path)
+    let temp_root = tokio::fs::canonicalize(&config.temp_dir)
         .await
-        .map_err(|e| StickerError::IoError(e.to_string()))?;
+        .map_err(|error| StickerError::IoError(error.to_string()))?;
+    let work_dir = tempfile::Builder::new()
+        .prefix("conversion-")
+        .tempdir_in(&temp_root)
+        .map_err(|error| StickerError::IoError(error.to_string()))?;
+    let input_path = work_dir.path().join(format!("input.{input_extension}"));
+    let output_path = work_dir.path().join(format!("output.{output_extension}"));
 
-    let _ = tokio::fs::remove_file(&input_path).await;
-    let _ = tokio::fs::remove_file(&output_path).await;
+    thinclaw_platform::write_private_file_atomic_async(input_path.clone(), data.to_vec(), false)
+        .await
+        .map_err(|error| StickerError::IoError(error.to_string()))?;
 
+    let mut command = Command::new("ffmpeg");
+    command
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-y",
+            "-i",
+        ])
+        .arg(&input_path)
+        .args(["-t", "30", "-vf", &video_filter]);
+    if single_frame {
+        command.args(["-frames:v", "1"]);
+    }
+    command.arg(&output_path);
+
+    let output = bounded_command_output(
+        &mut command,
+        Duration::from_secs(60),
+        0,
+        MAX_FFMPEG_STDERR_BYTES,
+    )
+    .await
+    .map_err(|error| StickerError::ConversionFailed(format!("ffmpeg: {error}")))?;
+    if !output.status.success() {
+        return Err(StickerError::ConversionFailed(format!(
+            "ffmpeg exited with {}: {}",
+            output.status,
+            sanitize_process_text(&output.stderr)
+        )));
+    }
+
+    let max_output = config.max_size.saturating_mul(8).clamp(1, MAX_OUTPUT_BYTES);
+    let output_data =
+        thinclaw_platform::read_regular_file_bounded_single_link_async(output_path, max_output)
+            .await
+            .map_err(|error| StickerError::IoError(error.to_string()))?;
+    if output_data.is_empty() {
+        return Err(StickerError::ConversionFailed(
+            "ffmpeg produced an invalid or oversized artifact".to_string(),
+        ));
+    }
     Ok(ConvertedSticker {
         data: output_data,
-        format: "gif".to_string(),
-        mime_type: "image/gif".to_string(),
-        original_format: StickerFormat::WebM,
+        format: output_extension.to_string(),
+        mime_type: output_mime.to_string(),
+        original_format,
     })
+}
+
+fn sanitize_process_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .take(1024)
+        .collect()
 }
 
 /// Check if ffmpeg is available.
 pub fn is_ffmpeg_available() -> bool {
-    std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    executable_available("ffmpeg")
 }
 
 /// Sticker conversion errors.
@@ -297,6 +351,8 @@ pub enum StickerError {
     Disabled,
     TooLarge { size: u64, limit: u64 },
     UnsupportedFormat,
+    FormatMismatch,
+    InvalidConfiguration(String),
     ConversionFailed(String),
     IoError(String),
     ExternalToolRequired(&'static str),
@@ -310,6 +366,10 @@ impl std::fmt::Display for StickerError {
                 write!(f, "Sticker too large: {} bytes (limit: {})", size, limit)
             }
             Self::UnsupportedFormat => write!(f, "Unsupported sticker format"),
+            Self::FormatMismatch => write!(f, "Sticker bytes do not match the declared format"),
+            Self::InvalidConfiguration(error) => {
+                write!(f, "Invalid sticker configuration: {error}")
+            }
             Self::ConversionFailed(e) => write!(f, "Conversion failed: {}", e),
             Self::IoError(e) => write!(f, "IO error: {}", e),
             Self::ExternalToolRequired(tool) => {
@@ -350,6 +410,33 @@ mod tests {
     fn test_format_from_magic_webp() {
         let data = b"RIFF\x00\x00\x00\x00WEBP";
         assert_eq!(StickerFormat::from_magic(data), StickerFormat::WebP);
+    }
+
+    #[tokio::test]
+    async fn declared_format_must_match_magic_before_ffmpeg_runs() {
+        let error = convert_sticker(
+            b"not a webp",
+            StickerFormat::WebP,
+            &StickerConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, StickerError::FormatMismatch));
+    }
+
+    #[tokio::test]
+    async fn invalid_limits_are_rejected_before_files_are_written() {
+        let config = StickerConfig {
+            max_dimension: 0,
+            ..StickerConfig::default()
+        };
+        let mut webp = vec![0_u8; 12];
+        webp[..4].copy_from_slice(b"RIFF");
+        webp[8..].copy_from_slice(b"WEBP");
+        let error = convert_sticker(&webp, StickerFormat::WebP, &config)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StickerError::InvalidConfiguration(_)));
     }
 
     #[test]

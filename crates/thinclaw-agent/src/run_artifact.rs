@@ -6,6 +6,13 @@ use uuid::Uuid;
 
 use crate::session::{Session, Turn, TurnToolCall};
 
+const MAX_RUN_ARTIFACT_RECORD_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RUN_ARTIFACT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RUN_ARTIFACT_TOTAL_READ_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_RUN_ARTIFACT_FILES: usize = 4096;
+const MAX_RUN_ARTIFACT_ENTRIES: usize = 8192;
+const MAX_RUN_ARTIFACT_DEPTH: usize = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunStatus {
@@ -213,7 +220,11 @@ impl AgentRunArtifact {
         let identity = incoming.resolved_identity();
         self.session_id = Some(session.id);
         self.thread_id = Some(thread_id);
-        self.user_id = Some(incoming.user_id.clone());
+        // `IncomingMessage::user_id` is the raw channel sender. Persist the
+        // canonical principal from the scoped session so audit, learning, and
+        // external-memory settings never key themselves by an untrusted/raw
+        // endpoint identifier.
+        self.user_id = Some(session.principal_id.clone());
         self.actor_id = Some(identity.actor_id);
         self.channel = Some(incoming.channel.clone());
         self.conversation_scope_id = Some(session.conversation_scope_id);
@@ -282,23 +293,25 @@ impl AgentRunArtifactLogger {
         let effective_ts = artifact.completed_at.unwrap_or(artifact.started_at);
         let day = effective_ts.format("%Y-%m-%d").to_string();
         let dir = self.log_root.join(day);
-        tokio::fs::create_dir_all(&dir).await?;
+        ensure_real_directory(&self.log_root).await?;
+        ensure_real_directory(&dir).await?;
 
         let file_stem = artifact
             .session_id
             .map(|value| value.to_string())
-            .unwrap_or_else(|| artifact.run_id.clone());
+            .unwrap_or_else(|| safe_artifact_file_stem(&artifact.run_id));
         let path = dir.join(format!("{file_stem}.jsonl"));
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await?;
-
-        use tokio::io::AsyncWriteExt;
-        let line = serde_json::to_string(artifact)?;
-        file.write_all(line.as_bytes()).await?;
-        file.write_all(b"\n").await?;
+        let mut line = serde_json::to_vec(artifact)?;
+        line.push(b'\n');
+        if line.len() > MAX_RUN_ARTIFACT_RECORD_BYTES {
+            anyhow::bail!("run artifact record exceeds the archive limit");
+        }
+        thinclaw_platform::append_private_file_locked_async(
+            path.clone(),
+            line,
+            MAX_RUN_ARTIFACT_FILE_BYTES,
+        )
+        .await?;
         Ok(path)
     }
 
@@ -308,8 +321,18 @@ impl AgentRunArtifactLogger {
         }
 
         let mut artifacts = Vec::new();
+        let mut total_bytes = 0_u64;
         for path in collect_jsonl_files(&self.log_root)? {
-            let content = std::fs::read_to_string(&path)?;
+            let metadata = std::fs::symlink_metadata(&path)?;
+            total_bytes = total_bytes
+                .checked_add(metadata.len())
+                .ok_or_else(|| anyhow::anyhow!("run artifact archive size overflow"))?;
+            if total_bytes > MAX_RUN_ARTIFACT_TOTAL_READ_BYTES {
+                anyhow::bail!("run artifact archive exceeds the total read limit");
+            }
+            let bytes =
+                thinclaw_platform::read_regular_file_bounded(&path, MAX_RUN_ARTIFACT_FILE_BYTES)?;
+            let content = String::from_utf8(bytes)?;
             for line in content
                 .lines()
                 .map(str::trim)
@@ -344,20 +367,68 @@ pub fn digest_json(value: &serde_json::Value) -> Option<String> {
 
 fn collect_jsonl_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    if !root.exists() {
-        return Ok(files);
-    }
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            files.extend(collect_jsonl_files(&path)?);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            files.push(path);
+    let mut entries_seen = 0_usize;
+
+    fn visit(
+        dir: &Path,
+        depth: usize,
+        files: &mut Vec<PathBuf>,
+        entries_seen: &mut usize,
+    ) -> anyhow::Result<()> {
+        if depth > MAX_RUN_ARTIFACT_DEPTH {
+            return Ok(());
         }
+        let metadata = std::fs::symlink_metadata(dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!("run artifact archive path is not a real directory");
+        }
+        for entry in std::fs::read_dir(dir)? {
+            *entries_seen = entries_seen.saturating_add(1);
+            if *entries_seen > MAX_RUN_ARTIFACT_ENTRIES {
+                anyhow::bail!("run artifact archive contains too many entries");
+            }
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                visit(&path, depth + 1, files, entries_seen)?;
+            } else if file_type.is_file()
+                && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+            {
+                files.push(path);
+                if files.len() > MAX_RUN_ARTIFACT_FILES {
+                    anyhow::bail!("run artifact archive contains too many files");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    match std::fs::symlink_metadata(root) {
+        Ok(_) => visit(root, 0, &mut files, &mut entries_seen)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+        Err(error) => return Err(error.into()),
     }
     files.sort();
     Ok(files)
+}
+
+fn safe_artifact_file_stem(run_id: &str) -> String {
+    Uuid::parse_str(run_id)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| format!("run-{}", blake3::hash(run_id.as_bytes()).to_hex()))
+}
+
+async fn ensure_real_directory(path: &Path) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(path).await?;
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!("run artifact archive path is not a real directory");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -500,5 +571,47 @@ mod tests {
         .with_chat_turn_snapshot(&session, Uuid::new_v4(), &incoming, &turn);
 
         assert_eq!(artifact.actor_id.as_deref(), Some("desktop"));
+    }
+
+    #[tokio::test]
+    async fn run_id_cannot_escape_archive_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let logger = AgentRunArtifactLogger::with_root(root.path().join("archive"));
+        let mut artifact = AgentRunArtifact::new(
+            "test",
+            AgentRunStatus::Completed,
+            Utc::now(),
+            Some(Utc::now()),
+        );
+        artifact.run_id = "../../escaped".to_string();
+
+        let path = logger.append_artifact(&artifact).await.unwrap();
+
+        assert!(path.starts_with(logger.log_root()));
+        assert!(!root.path().join("escaped.jsonl").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn append_artifact_rejects_planted_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("archive");
+        let now = Utc::now();
+        let day = now.format("%Y-%m-%d").to_string();
+        std::fs::create_dir_all(archive.join(&day)).unwrap();
+        let artifact = AgentRunArtifact::new("test", AgentRunStatus::Completed, now, Some(now));
+        let target = root.path().join("target");
+        std::fs::write(&target, "unchanged").unwrap();
+        let link = archive.join(day).join(format!("{}.jsonl", artifact.run_id));
+        symlink(&target, &link).unwrap();
+
+        let result = AgentRunArtifactLogger::with_root(&archive)
+            .append_artifact(&artifact)
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "unchanged");
     }
 }

@@ -523,15 +523,41 @@ async fn generation_output(
     generation: thinclaw_media::ComfyGeneration,
     duration: Duration,
 ) -> Result<ToolOutput, ToolError> {
+    const MAX_INLINE_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+    const MAX_INLINE_IMAGE_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+    const MAX_INLINE_IMAGES: usize = 32;
     let mut image_bytes = Vec::new();
+    let mut total_bytes = 0_u64;
     for output in &generation.outputs {
         if output.media_type == "image" {
-            let bytes = tokio::fs::read(&output.file_path).await.map_err(|e| {
+            if image_bytes.len() >= MAX_INLINE_IMAGES
+                || output.size_bytes > MAX_INLINE_IMAGE_BYTES
+                || total_bytes
+                    .checked_add(output.size_bytes)
+                    .is_none_or(|total| total > MAX_INLINE_IMAGE_TOTAL_BYTES)
+            {
+                return Err(ToolError::ExecutionFailed(
+                    "generated image artifacts exceed the inline output limits".to_string(),
+                ));
+            }
+            let bytes = thinclaw_platform::read_regular_file_bounded_async(
+                output.file_path.clone(),
+                MAX_INLINE_IMAGE_BYTES,
+            )
+            .await
+            .map_err(|e| {
                 ToolError::ExecutionFailed(format!(
                     "failed to read generated image {}: {e}",
                     output.file_path.display()
                 ))
             })?;
+            if u64::try_from(bytes.len()).ok() != Some(output.size_bytes) {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "generated image {} changed after publication",
+                    output.file_path.display()
+                )));
+            }
+            total_bytes += output.size_bytes;
             image_bytes.push(ComfyGenerationImageBytes {
                 file_path: output.file_path.clone(),
                 bytes,
@@ -543,13 +569,23 @@ async fn generation_output(
 }
 
 async fn load_workflow(name_or_path: &str, allow_untrusted: bool) -> Result<Value, ToolError> {
+    const MAX_WORKFLOW_BYTES: u64 = 8 * 1024 * 1024;
     match resolve_workflow_json_source(name_or_path, allow_untrusted)? {
         ComfyWorkflowJsonSource::Bundled(workflow) => return Ok(workflow),
         ComfyWorkflowJsonSource::ApprovedPath => {}
     }
     let path = Path::new(name_or_path);
-    let content = tokio::fs::read_to_string(path).await.map_err(|e| {
-        ToolError::InvalidParameters(format!("failed to read workflow {}: {e}", path.display()))
+    let bytes =
+        thinclaw_platform::read_regular_file_bounded_async(path.to_path_buf(), MAX_WORKFLOW_BYTES)
+            .await
+            .map_err(|e| {
+                ToolError::InvalidParameters(format!(
+                    "failed to read workflow {}: {e}",
+                    path.display()
+                ))
+            })?;
+    let content = String::from_utf8(bytes).map_err(|_| {
+        ToolError::InvalidParameters(format!("workflow {} is not valid UTF-8", path.display()))
     })?;
     parse_workflow_json(&path.display().to_string(), &content)
 }
@@ -566,7 +602,14 @@ async fn run_command(program: &str, args: &[&str], cwd: Option<&Path>) -> Result
         })?;
         command.current_dir(cwd);
     }
-    let output = command.output().await.map_err(|e| {
+    let output = thinclaw_platform::bounded_command_output(
+        &mut command,
+        Duration::from_secs(10 * 60),
+        1024 * 1024,
+        1024 * 1024,
+    )
+    .await
+    .map_err(|e| {
         ToolError::ExecutionFailed(format!("failed to run {program} {}: {e}", args.join(" ")))
     })?;
     Ok(json!({

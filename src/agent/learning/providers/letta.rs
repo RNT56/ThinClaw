@@ -45,22 +45,20 @@ impl MemoryProvider for LettaProvider {
             "search_path",
             "/v1/agents/{agent_id}/archival-memory/search",
         );
-        let url = provider_join_url(&base_url, &path);
+        let url = provider_join_url(&base_url, &path)?;
         let request = apply_provider_auth(
-            shared_http_client()
+            shared_http_client()?
                 .get(&url)
                 .timeout(std::time::Duration::from_secs(15))
                 .query(&[("query", query.to_string()), ("topK", limit.to_string())]),
             &provider.config,
             "bearer",
         );
-        let response = request.send().await.map_err(|error| error.to_string())?;
-        let status = response.status();
-        let text = response.text().await.map_err(|error| error.to_string())?;
-        if !status.is_success() {
-            return Err(format!("HTTP {status}: {text}"));
-        }
-        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| error.without_url().to_string())?;
+        let value = provider_json_response(response).await?;
         Ok(parse_provider_hits(value, self.name()))
     }
 
@@ -82,7 +80,7 @@ impl MemoryProvider for LettaProvider {
             "sync_path",
             "/v1/agents/{agent_id}/archival-memory",
         );
-        let url = provider_join_url(&base_url, &path);
+        let url = provider_join_url(&base_url, &path)?;
         let tags = provider_config_value(&provider.config, "tags")
             .map(|value| {
                 value

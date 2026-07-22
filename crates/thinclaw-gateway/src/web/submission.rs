@@ -19,18 +19,27 @@ pub fn build_gateway_message(
     let mut message = IncomingMessage::new(channel, &user_id, content)
         .with_identity(identity.resolved_identity(thread_id));
 
+    let mut metadata = serde_json::json!({
+        "actor_id": actor_id,
+        "conversation_kind": "direct",
+        "gateway_role": identity.role.as_str(),
+        "principal_admin": identity.role == crate::web::rbac::GatewayRole::Admin,
+    });
+    if let Some(object) = metadata.as_object_mut() {
+        if let Some(thread_id) = thread_id {
+            object.insert("thread_id".to_string(), serde_json::json!(thread_id));
+        }
+        if let Some(browser_origin) = browser_origin {
+            object.insert(
+                "browser_origin".to_string(),
+                serde_json::json!(browser_origin),
+            );
+        }
+    }
+    message = message.with_metadata(metadata);
+
     if let Some(thread_id) = thread_id {
         message = message.with_thread(thread_id);
-        message = message.with_metadata(serde_json::json!({
-            "thread_id": thread_id,
-            "actor_id": actor_id,
-            "browser_origin": browser_origin,
-        }));
-    } else if browser_origin.is_some() {
-        message = message.with_metadata(serde_json::json!({
-            "actor_id": actor_id,
-            "browser_origin": browser_origin,
-        }));
     }
 
     message

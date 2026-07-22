@@ -412,6 +412,7 @@ export interface GmailStatusResponse {
     status: string;
     project_id: string;
     subscription_id: string;
+    topic_id: string;
     label_filters: string[];
     allowed_senders: string[];
     missing_fields: string[];

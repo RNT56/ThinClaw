@@ -20,7 +20,8 @@ use serde_json::Value;
 use thinclaw_types::error::ChannelError;
 
 use crate::native_lifecycle_clients::{
-    ApnsNativeConfig, NativeHttpClient, NativeHttpRequest, apns_provider_token, ensure_success,
+    ApnsNativeConfig, NativeHttpClient, NativeHttpDestinationPolicy, NativeHttpRequest,
+    apns_provider_token, ensure_success,
 };
 
 /// APNs delivery category, mapped to the `apns-push-type` header.
@@ -232,6 +233,7 @@ impl ApnsPusher {
                 url: format!("{}/3/device/{device_token}", self.host()),
                 headers,
                 body: serde_json::to_vec(&spec.payload).unwrap_or_default(),
+                destination_policy: NativeHttpDestinationPolicy::PublicHttps,
             })
             .await?;
 
@@ -264,7 +266,7 @@ fn unregistered_reason(body: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_lifecycle_clients::{NativeHttpResponse, test_support::EC_PRIVATE_KEY};
+    use crate::native_lifecycle_clients::{NativeHttpResponse, test_support::ec_private_key};
     use async_trait::async_trait;
     use tokio::sync::Mutex;
 
@@ -311,7 +313,7 @@ mod tests {
             team_id: "TEAMID1234".to_string(),
             key_id: "KEYID1234".to_string(),
             bundle_id: "com.example.thinclaw".to_string(),
-            private_key_pem: EC_PRIVATE_KEY.to_string(),
+            private_key_pem: ec_private_key(),
             sandbox: true,
         }
     }

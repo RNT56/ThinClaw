@@ -13,6 +13,44 @@ pub(in crate::agent::learning) use thinclaw_agent::learning_policy::GeneratedSki
 pub(in crate::agent::learning) const PROPOSAL_SUPPRESSION_WINDOW_HOURS: i64 = 24 * 7;
 
 impl MemoryProviderManager {
+    fn subject_for_provider(
+        provider: &Arc<dyn MemoryProvider>,
+        access: &thinclaw_identity::AccessContext,
+    ) -> Result<String, String> {
+        if access.principal_id.trim().is_empty() || access.actor_id.trim().is_empty() {
+            return Err("external memory requires a resolved principal and actor".to_string());
+        }
+        if !provider.supports_strict_subject_scoping() {
+            return Err(format!(
+                "external memory provider '{}' cannot enforce actor/conversation isolation",
+                provider.name()
+            ));
+        }
+        Ok(access.provider_subject_id())
+    }
+
+    fn scoped_payload(
+        access: &thinclaw_identity::AccessContext,
+        payload: &serde_json::Value,
+    ) -> serde_json::Value {
+        let scope = serde_json::json!({
+            "version": 1,
+            "subject_id": access.provider_subject_id(),
+            "conversation_kind": access.conversation_kind.as_str(),
+        });
+        match payload {
+            serde_json::Value::Object(fields) => {
+                let mut fields = fields.clone();
+                fields.insert("_thinclaw_scope".to_string(), scope);
+                serde_json::Value::Object(fields)
+            }
+            value => serde_json::json!({
+                "content": value,
+                "_thinclaw_scope": scope,
+            }),
+        }
+    }
+
     pub fn new(store: Arc<dyn Database>) -> Self {
         let providers: Vec<Arc<dyn MemoryProvider>> = vec![
             Arc::new(HonchoProvider),
@@ -219,17 +257,26 @@ impl MemoryProviderManager {
 
     pub async fn prefetch_provider_context(
         &self,
-        user_id: &str,
+        access: &thinclaw_identity::AccessContext,
         query: &str,
         limit: usize,
     ) -> Option<ProviderPrefetchContext> {
-        let (settings, provider, _) = self.ready_active_provider(user_id).await?;
-        let hits = match provider.prefetch(&settings, user_id, query, limit).await {
+        let (settings, provider, _) = self.ready_active_provider(&access.principal_id).await?;
+        let subject_id = match Self::subject_for_provider(&provider, access) {
+            Ok(subject_id) => subject_id,
+            Err(err) => {
+                tracing::warn!(provider = provider.name(), error = %err, "external memory prefetch denied");
+                return None;
+            }
+        };
+        let hits = match provider
+            .prefetch(&settings, &subject_id, query, limit)
+            .await
+        {
             Ok(hits) => hits,
             Err(err) => {
                 tracing::debug!(
                     provider = provider.name(),
-                    user_id = %user_id,
                     error = %err,
                     "learning provider prefetch failed"
                 );
@@ -245,39 +292,58 @@ impl MemoryProviderManager {
         })
     }
 
-    pub async fn provider_system_prompt_block(&self, user_id: &str) -> Option<String> {
-        let (settings, provider, _) = self.ready_active_provider(user_id).await?;
-        provider.prefetch_session_context(&settings, user_id).await
+    pub async fn provider_system_prompt_block(
+        &self,
+        access: &thinclaw_identity::AccessContext,
+    ) -> Option<String> {
+        let (settings, provider, _) = self.ready_active_provider(&access.principal_id).await?;
+        let subject_id = Self::subject_for_provider(&provider, access).ok()?;
+        provider
+            .prefetch_session_context(&settings, &subject_id)
+            .await
     }
 
     pub async fn provider_recall(
         &self,
-        user_id: &str,
+        access: &thinclaw_identity::AccessContext,
         query: &str,
         limit: usize,
-    ) -> Vec<ProviderMemoryHit> {
-        let Some((settings, provider, _)) = self.ready_active_provider(user_id).await else {
-            return Vec::new();
+    ) -> Result<Vec<ProviderMemoryHit>, String> {
+        let Some((settings, provider, _)) = self.ready_active_provider(&access.principal_id).await
+        else {
+            return Err("no ready external memory provider is active".to_string());
         };
-        match provider.recall(&settings, user_id, query, limit).await {
-            Ok(hits) => hits,
+        let subject_id = Self::subject_for_provider(&provider, access)?;
+        match provider.recall(&settings, &subject_id, query, limit).await {
+            Ok(hits) => Ok(hits),
             Err(err) => {
                 tracing::debug!(
                     provider = provider.name(),
                     error = %err,
                     "learning provider recall skipped"
                 );
-                Vec::new()
+                Err(err)
             }
         }
     }
 
-    pub async fn after_turn_sync(&self, user_id: &str, artifact: &crate::agent::AgentRunArtifact) {
-        let Some((settings, provider, _)) = self.ready_active_provider(user_id).await else {
+    pub async fn after_turn_sync(
+        &self,
+        access: &thinclaw_identity::AccessContext,
+        artifact: &crate::agent::AgentRunArtifact,
+    ) {
+        let Some((settings, provider, _)) = self.ready_active_provider(&access.principal_id).await
+        else {
             return;
         };
-        let payload = artifact.provider_payload();
-        if let Err(err) = provider.after_turn_sync(&settings, user_id, &payload).await {
+        let Ok(subject_id) = Self::subject_for_provider(&provider, access) else {
+            return;
+        };
+        let payload = Self::scoped_payload(access, &artifact.provider_payload());
+        if let Err(err) = provider
+            .after_turn_sync(&settings, &subject_id, &payload)
+            .await
+        {
             tracing::debug!(
                 provider = provider.name(),
                 error = %err,
@@ -288,27 +354,36 @@ impl MemoryProviderManager {
 
     pub async fn export_payload(
         &self,
-        user_id: &str,
+        access: &thinclaw_identity::AccessContext,
         payload: &serde_json::Value,
     ) -> Result<String, String> {
-        let Some((settings, provider, _)) = self.ready_active_provider(user_id).await else {
+        let Some((settings, provider, _)) = self.ready_active_provider(&access.principal_id).await
+        else {
             return Err("no ready external memory provider is active".to_string());
         };
-        provider.export_turn(&settings, user_id, payload).await?;
+        let subject_id = Self::subject_for_provider(&provider, access)?;
+        let payload = Self::scoped_payload(access, payload);
+        provider
+            .export_turn(&settings, &subject_id, &payload)
+            .await?;
         Ok(provider.name().to_string())
     }
 
     pub async fn session_end_extract(
         &self,
-        user_id: &str,
+        access: &thinclaw_identity::AccessContext,
         artifact: &crate::agent::AgentRunArtifact,
     ) {
-        let Some((settings, provider, _)) = self.ready_active_provider(user_id).await else {
+        let Some((settings, provider, _)) = self.ready_active_provider(&access.principal_id).await
+        else {
             return;
         };
-        let payload = artifact.provider_payload();
+        let Ok(subject_id) = Self::subject_for_provider(&provider, access) else {
+            return;
+        };
+        let payload = Self::scoped_payload(access, &artifact.provider_payload());
         if let Err(err) = provider
-            .session_end_extract(&settings, user_id, &payload)
+            .session_end_extract(&settings, &subject_id, &payload)
             .await
         {
             tracing::debug!(
@@ -319,12 +394,21 @@ impl MemoryProviderManager {
         }
     }
 
-    pub async fn mirror_workspace_write(&self, user_id: &str, payload: &serde_json::Value) {
-        let Some((settings, provider, _)) = self.ready_active_provider(user_id).await else {
+    pub async fn mirror_workspace_write(
+        &self,
+        access: &thinclaw_identity::AccessContext,
+        payload: &serde_json::Value,
+    ) {
+        let Some((settings, provider, _)) = self.ready_active_provider(&access.principal_id).await
+        else {
             return;
         };
+        let Ok(subject_id) = Self::subject_for_provider(&provider, access) else {
+            return;
+        };
+        let payload = Self::scoped_payload(access, payload);
         if let Err(err) = provider
-            .mirror_workspace_write(&settings, user_id, payload)
+            .mirror_workspace_write(&settings, &subject_id, &payload)
             .await
         {
             tracing::debug!(
@@ -335,9 +419,13 @@ impl MemoryProviderManager {
         }
     }
 
-    pub async fn provider_tool_extensions(&self, user_id: &str) -> Vec<String> {
-        self.ready_active_provider(user_id)
+    pub async fn provider_tool_extensions(
+        &self,
+        access: &thinclaw_identity::AccessContext,
+    ) -> Vec<String> {
+        self.ready_active_provider(&access.principal_id)
             .await
+            .filter(|(_, provider, _)| provider.supports_strict_subject_scoping())
             .map(|(_, provider, _)| provider.tool_extensions())
             .unwrap_or_default()
     }

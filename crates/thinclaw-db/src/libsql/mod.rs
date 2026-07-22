@@ -41,7 +41,6 @@ use thinclaw_types::subagent::SubagentRunRecord;
 use thinclaw_workspace::MemoryDocument;
 
 use crate::libsql_migrations;
-
 /// Explicit column list for routines table (matches positional access in `row_to_routine_libsql`).
 pub(crate) const ROUTINE_COLUMNS: &str = "\
     id, name, description, user_id, actor_id, enabled, \
@@ -83,6 +82,15 @@ pub struct LibSqlBackend {
     db: Arc<LibSqlDatabase>,
     /// Path to the database file (None for in-memory databases).
     file_path: Option<std::path::PathBuf>,
+    /// A retained connection is required for SQLite `:memory:` databases:
+    /// opening another connection creates a different empty database. Clones
+    /// share this handle so migrations and subsequent store operations observe
+    /// the same in-memory state.
+    memory_connection: Option<Connection>,
+    /// Serializes explicit `BEGIN IMMEDIATE` transactions. This is required
+    /// for the retained in-memory connection (clones share one SQLite
+    /// connection) and also avoids avoidable busy retries for local writers.
+    pub(crate) transaction_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl LibSqlBackend {
@@ -103,6 +111,8 @@ impl LibSqlBackend {
         Ok(Self {
             db: Arc::new(db),
             file_path: Some(path.to_path_buf()),
+            memory_connection: None,
+            transaction_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -115,9 +125,15 @@ impl LibSqlBackend {
                 DatabaseError::Pool(format!("Failed to create in-memory database: {}", e))
             })?;
 
+        let memory_connection = db.connect().map_err(|e| {
+            DatabaseError::Pool(format!("Failed to connect to in-memory database: {e}"))
+        })?;
+
         Ok(Self {
             db: Arc::new(db),
             file_path: None,
+            memory_connection: Some(memory_connection),
+            transaction_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -141,6 +157,8 @@ impl LibSqlBackend {
         Ok(Self {
             db: Arc::new(db),
             file_path: Some(path.to_path_buf()),
+            memory_connection: None,
+            transaction_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -186,10 +204,13 @@ impl LibSqlBackend {
     }
 
     async fn connect_once(&self) -> Result<Connection, DatabaseError> {
-        let conn = self
-            .db
-            .connect()
-            .map_err(|e| DatabaseError::Pool(format!("Failed to create connection: {}", e)))?;
+        let conn = match &self.memory_connection {
+            Some(connection) => connection.clone(),
+            None => self
+                .db
+                .connect()
+                .map_err(|e| DatabaseError::Pool(format!("Failed to create connection: {}", e)))?,
+        };
         let mut rows = conn
             .query("PRAGMA busy_timeout = 5000", ())
             .await
@@ -321,8 +342,12 @@ pub(crate) fn row_json_to<T: serde::de::DeserializeOwned>(
     row: &libsql::Row,
     idx: i32,
 ) -> Result<T, DatabaseError> {
-    serde_json::from_value(get_json(row, idx))
-        .map_err(|e| DatabaseError::Serialization(e.to_string()))
+    let value = row
+        .get::<String>(idx)
+        .ok()
+        .map(|raw| serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw)))
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::from_value(value).map_err(|e| DatabaseError::Serialization(e.to_string()))
 }
 
 /// Parse a timestamp from a text column.
@@ -700,9 +725,9 @@ pub(crate) fn row_to_routine_trigger_libsql(
 mod tests {
     use std::sync::Arc;
 
-    use crate::Database;
     use crate::WorkspaceStore;
     use crate::libsql::LibSqlBackend;
+    use crate::{Database, ExperimentStore};
     use thinclaw_workspace::SearchConfig;
 
     #[tokio::test]
@@ -1035,7 +1060,7 @@ mod tests {
 
         let mut rows = conn
             .query(
-                "SELECT actor_id, conversation_scope_id, stable_external_conversation_key \
+                "SELECT actor_id, conversation_scope_id, stable_external_conversation_key, surface \
                  FROM conversations WHERE id = 'legacy-conv'",
                 (),
             )
@@ -1045,9 +1070,11 @@ mod tests {
         let legacy_actor_id: String = row.get(0).unwrap();
         let legacy_scope_id: String = row.get(1).unwrap();
         let legacy_key: String = row.get(2).unwrap();
+        let legacy_surface: String = row.get(3).unwrap();
         assert_eq!(legacy_actor_id, "legacy-user");
         assert_eq!(legacy_scope_id, "legacy-conv");
         assert_eq!(legacy_key, "gateway:legacy-conv");
+        assert_eq!(legacy_surface, "agent_cockpit");
 
         let mut rows = conn
             .query(
@@ -1103,6 +1130,52 @@ mod tests {
         )
         .await
         .expect("Fresh database should have all V11 columns");
+
+        let mut rows = conn
+            .query("SELECT surface FROM conversations WHERE id = 'c1'", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let surface: String = row.get(0).unwrap();
+        assert_eq!(surface, "agent_cockpit");
+    }
+
+    #[tokio::test]
+    async fn workspace_timezones_are_actor_private_but_group_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("actor_timezones.db");
+        let backend = Arc::new(LibSqlBackend::new_local(&db_path).await.unwrap());
+        backend.run_migrations().await.unwrap();
+        let workspace = thinclaw_workspace::Workspace::new_with_store("household", backend.clone());
+        workspace
+            .write("USER.md", "# User\n\n**Timezone:** Europe/Berlin")
+            .await
+            .unwrap();
+        workspace
+            .write("actors/alice/USER.md", "# User\n\n**Timezone:** Asia/Tokyo")
+            .await
+            .unwrap();
+
+        let direct = thinclaw_identity::AccessContext {
+            principal_id: "household".to_string(),
+            actor_id: "alice".to_string(),
+            conversation_scope_id: uuid::Uuid::new_v4(),
+            conversation_kind: thinclaw_identity::ConversationKind::Direct,
+            channel: "signal".to_string(),
+        };
+        assert_eq!(
+            workspace.effective_timezone_for_access(&direct).await,
+            chrono_tz::Asia::Tokyo
+        );
+
+        let group = thinclaw_identity::AccessContext {
+            conversation_kind: thinclaw_identity::ConversationKind::Group,
+            ..direct
+        };
+        assert_eq!(
+            workspace.effective_timezone_for_access(&group).await,
+            chrono_tz::Europe::Berlin
+        );
     }
 
     #[tokio::test]
@@ -1210,5 +1283,376 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].content, "indexed chunk");
+    }
+
+    #[tokio::test]
+    async fn indexed_vector_search_cannot_be_starved_by_another_principal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("vector_scope_starvation.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let mut exact = vec![0.0f32; 1536];
+        exact[0] = 1.0;
+        // More foreign exact matches than the default pre-fusion limit. A
+        // fixed global vector_top_k(50) followed by tenant filtering returns
+        // nothing for the authorized principal.
+        for index in 0..55 {
+            let document = backend
+                .get_or_create_document_by_path(
+                    "foreign-principal",
+                    None,
+                    &format!("actors/foreign/{index}.md"),
+                )
+                .await
+                .unwrap();
+            backend
+                .replace_chunks(
+                    document.id,
+                    &[(
+                        index,
+                        format!("foreign exact match {index}"),
+                        Some(exact.clone()),
+                    )],
+                )
+                .await
+                .unwrap();
+        }
+
+        let authorized = backend
+            .get_or_create_document_by_path("authorized-principal", None, "actors/alice/MEMORY.md")
+            .await
+            .unwrap();
+        let mut near = exact.clone();
+        near[0] = 0.9;
+        near[1] = 0.1;
+        backend
+            .replace_chunks(
+                authorized.id,
+                &[(0, "authorized near match".to_string(), Some(near))],
+            )
+            .await
+            .unwrap();
+
+        let results = backend
+            .hybrid_search(
+                "authorized-principal",
+                None,
+                "ignored in vector-only mode",
+                Some(&exact),
+                &SearchConfig::default()
+                    .vector_only()
+                    .with_limit(5)
+                    .with_path_prefixes(["actors/alice".to_string()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "authorized near match");
+    }
+
+    #[tokio::test]
+    async fn test_shared_workspace_append_is_atomic_and_null_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("atomic_append.db");
+        let backend = std::sync::Arc::new(LibSqlBackend::new_local(&db_path).await.unwrap());
+        backend.run_migrations().await.unwrap();
+
+        let mut tasks = Vec::new();
+        for index in 0..32 {
+            let backend = std::sync::Arc::clone(&backend);
+            tasks.push(tokio::spawn(async move {
+                backend
+                    .append_document_by_path(
+                        "append-user",
+                        None,
+                        "actors/alice/MEMORY.md",
+                        "\n",
+                        &format!("entry-{index}"),
+                    )
+                    .await
+                    .unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let document = backend
+            .get_document_by_path("append-user", None, "actors/alice/MEMORY.md")
+            .await
+            .unwrap();
+        let entries = document
+            .content
+            .lines()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(entries.len(), 32, "no concurrent append may be lost");
+
+        let conn = backend.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM memory_documents WHERE user_id = 'append-user' AND agent_id IS NULL AND path = 'actors/alice/MEMORY.md'",
+                (),
+            )
+            .await
+            .unwrap();
+        let count: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(count, 1, "NULL agent scope must still be unique");
+    }
+
+    #[tokio::test]
+    async fn test_index_compare_and_swap_rejects_stale_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("index_cas.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+        let first = backend
+            .append_document_by_path("cas-user", None, "actors/a/MEMORY.md", "\n", "first")
+            .await
+            .unwrap();
+        backend
+            .append_document_by_path("cas-user", None, "actors/a/MEMORY.md", "\n", "second")
+            .await
+            .unwrap();
+
+        assert!(
+            !backend
+                .replace_chunks_if_current(
+                    first.id,
+                    &first.content,
+                    &[(0, "stale".to_string(), None)],
+                )
+                .await
+                .unwrap()
+        );
+        let current = backend.get_document_by_id(first.id).await.unwrap();
+        assert!(
+            backend
+                .replace_chunks_if_current(
+                    first.id,
+                    &current.content,
+                    &[(0, current.content.clone(), None)],
+                )
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_document_compare_and_swap_never_overwrites_a_concurrent_change() {
+        let backend = LibSqlBackend::new_memory().await.unwrap();
+        backend.run_migrations().await.unwrap();
+        let document = backend
+            .get_or_create_document_by_path("cas-user", None, "MEMORY.md")
+            .await
+            .unwrap();
+
+        assert!(
+            backend
+                .update_document_if_current(document.id, "", "legacy")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !backend
+                .update_document_if_current(document.id, "", "stale overwrite")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            backend
+                .get_document_by_id(document.id)
+                .await
+                .unwrap()
+                .content,
+            "legacy"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_path_prefixes_are_applied_before_ranking() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("search_prefix.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+        for (path, content) in [
+            ("actors/alice/MEMORY.md", "shared keyword alice"),
+            ("actors/bob/MEMORY.md", "shared keyword bob"),
+        ] {
+            let document = backend
+                .append_document_by_path("scope-user", None, path, "\n", content)
+                .await
+                .unwrap();
+            backend
+                .replace_chunks_if_current(
+                    document.id,
+                    &document.content,
+                    &[(0, content.to_string(), None)],
+                )
+                .await
+                .unwrap();
+        }
+
+        let results = backend
+            .hybrid_search(
+                "scope-user",
+                None,
+                "shared keyword",
+                None,
+                &SearchConfig::default()
+                    .fts_only()
+                    .with_limit(10)
+                    .with_path_prefixes(["actors/alice".to_string()]),
+            )
+            .await
+            .unwrap();
+        assert!(!results.is_empty());
+        assert!(
+            results
+                .iter()
+                .all(|result| result.path.starts_with("actors/alice/"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_legacy_experiment_column_order_decodes_after_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy_experiments.db");
+        let project_id = uuid::Uuid::new_v4();
+        let runner_id = uuid::Uuid::new_v4();
+        let campaign_id = uuid::Uuid::new_v4();
+        let trial_id = uuid::Uuid::new_v4();
+
+        {
+            let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+            let conn = raw_db.connect().unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE experiment_runner_profiles (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, backend TEXT NOT NULL,
+                    backend_config TEXT NOT NULL DEFAULT '{}', image_or_runtime TEXT,
+                    gpu_requirements TEXT NOT NULL DEFAULT '{}',
+                    env_grants TEXT NOT NULL DEFAULT '{}',
+                    secret_references TEXT NOT NULL DEFAULT '[]',
+                    cache_policy TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE experiment_projects (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, workspace_path TEXT NOT NULL,
+                    git_remote_name TEXT NOT NULL, base_branch TEXT NOT NULL,
+                    preset TEXT NOT NULL, strategy_prompt TEXT NOT NULL, workdir TEXT NOT NULL,
+                    prepare_command TEXT, run_command TEXT NOT NULL,
+                    mutable_paths TEXT NOT NULL, fixed_paths TEXT NOT NULL,
+                    primary_metric TEXT NOT NULL, secondary_metrics TEXT NOT NULL,
+                    comparison_policy TEXT NOT NULL, stop_policy TEXT NOT NULL,
+                    default_runner_profile_id TEXT, promotion_mode TEXT NOT NULL,
+                    status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE experiment_campaigns (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+                    runner_profile_id TEXT NOT NULL, status TEXT NOT NULL,
+                    baseline_commit TEXT, best_commit TEXT, best_metrics TEXT NOT NULL,
+                    experiment_branch TEXT, remote_ref TEXT, worktree_path TEXT,
+                    started_at TEXT, ended_at TEXT, trial_count INTEGER NOT NULL,
+                    failure_count INTEGER NOT NULL, pause_reason TEXT,
+                    metadata TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE experiment_trials (
+                    id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+                    candidate_commit TEXT, parent_best_commit TEXT, status TEXT NOT NULL,
+                    runner_backend TEXT NOT NULL, exit_code INTEGER, metrics_json TEXT NOT NULL,
+                    summary TEXT, decision_reason TEXT, log_preview_path TEXT,
+                    artifact_manifest_json TEXT NOT NULL, started_at TEXT, completed_at TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(campaign_id, sequence)
+                );
+                "#,
+            )
+            .await
+            .unwrap();
+            let timestamp = "2025-01-02T03:04:05Z";
+            conn.execute(
+                r#"INSERT INTO experiment_runner_profiles
+                   VALUES (?1, 'legacy-runner', '"generic_remote_runner"', '{}', NULL,
+                           '{}', '{}', '[]', '{}', '"validated"', ?2, ?2)"#,
+                libsql::params![runner_id.to_string(), timestamp],
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                r#"INSERT INTO experiment_projects
+                   VALUES (?1, 'legacy-project', '/workspace', 'origin', 'main',
+                           '"autoresearch_single_file"', 'strategy', '.', NULL, 'true',
+                           '["src"]', '[]', '{"name":"score"}', '[]', '{}', '{}', ?2,
+                           'manual', '"ready"', ?3, ?3)"#,
+                libsql::params![project_id.to_string(), runner_id.to_string(), timestamp],
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                r#"INSERT INTO experiment_campaigns
+                   VALUES (?1, ?2, ?3, '"running"', 'base', NULL, '{}', NULL, NULL,
+                           NULL, ?4, NULL, 1, 0, NULL, '{}', ?4, ?4)"#,
+                libsql::params![
+                    campaign_id.to_string(),
+                    project_id.to_string(),
+                    runner_id.to_string(),
+                    timestamp
+                ],
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                r#"INSERT INTO experiment_trials
+                   VALUES (?1, ?2, 1, NULL, 'base', '"running"',
+                           '"generic_remote_runner"', NULL, '{}', NULL, NULL, NULL,
+                           '{}', ?3, NULL, ?3, ?3)"#,
+                libsql::params![trial_id.to_string(), campaign_id.to_string(), timestamp],
+            )
+            .await
+            .unwrap();
+        }
+
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let project = backend
+            .get_experiment_project(project_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(project.name, "legacy-project");
+        assert_eq!(project.owner_user_id, "default");
+        assert_eq!(project.default_runner_profile_id, Some(runner_id));
+        assert_eq!(project.workdir, ".");
+
+        let runner = backend
+            .get_experiment_runner_profile(runner_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(runner.name, "legacy-runner");
+        assert_eq!(runner.owner_user_id, "default");
+        assert!(!runner.launch_eligible);
+
+        let campaign = backend
+            .get_experiment_campaign(campaign_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(campaign.project_id, project_id);
+        assert_eq!(campaign.owner_user_id, "default");
+        assert_eq!(campaign.trial_count, 1);
+        assert_eq!(campaign.total_runtime_ms, 0);
+
+        let trial = backend
+            .get_experiment_trial(trial_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(trial.campaign_id, campaign_id);
+        assert_eq!(trial.sequence, 1);
+        assert_eq!(trial.parent_best_commit.as_deref(), Some("base"));
+        assert_eq!(trial.runtime_ms, None);
     }
 }

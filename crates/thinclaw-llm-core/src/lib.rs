@@ -20,7 +20,7 @@ pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     ProviderTokenCapture, Role, StreamChunk, StreamChunkStream, StreamPolicy, StreamSupport,
     ThinkingConfig, TokenCaptureSupport, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, ToolResult, sanitize_tool_messages,
+    ToolDefinition, ToolResult, completion_request_cache_key, sanitize_tool_messages,
 };
 pub use routing_policy::{
     LatencyTracker, ProviderCapabilitiesMetadata, RouteCandidate, RoutingContext, RoutingDecision,

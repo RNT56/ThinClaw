@@ -13,7 +13,7 @@ fn default_observability_backend() -> String {
 }
 
 /// User settings persisted to disk.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     /// Whether onboarding wizard has been completed.
     #[serde(default, alias = "setup_completed")]
@@ -242,4 +242,35 @@ pub struct Settings {
     /// Persisted per-channel / per-group tool access policy.
     #[serde(default)]
     pub tool_policies: ToolPolicyManager,
+}
+
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Settings")
+            .field("onboard_completed", &self.onboard_completed)
+            .field("database_backend", &self.database_backend)
+            .field(
+                "database_url",
+                &crate::redaction::RedactedOption(&self.database_url),
+            )
+            .field("database_pool_size", &self.database_pool_size)
+            .field("llm_backend", &self.llm_backend)
+            .field("selected_model", &self.selected_model)
+            .field("tunnel", &self.tunnel)
+            .field("channels", &self.channels)
+            .field("routines_enabled", &self.routines_enabled)
+            .field("skills_enabled", &self.skills_enabled)
+            .field("claude_code_enabled", &self.claude_code_enabled)
+            .field("codex_code_enabled", &self.codex_code_enabled)
+            .field("observability_backend", &self.observability_backend)
+            .field("agent", &self.agent)
+            .field("wasm", &self.wasm)
+            .field("sandbox", &self.sandbox)
+            .field("safety", &self.safety)
+            .field("providers", &self.providers)
+            .field("experiments", &self.experiments)
+            .field("repo_projects", &self.repo_projects)
+            .finish_non_exhaustive()
+    }
 }

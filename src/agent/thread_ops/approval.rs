@@ -23,6 +23,15 @@ use thinclaw_agent::dispatcher_helpers::{
     parse_auth_result_json as parse_auth_result_content,
 };
 
+async fn thread_is_interrupted(session: &Arc<Mutex<Session>>, thread_id: Uuid) -> bool {
+    session
+        .lock()
+        .await
+        .threads
+        .get(&thread_id)
+        .is_some_and(|thread| thread.state == crate::agent::session::ThreadState::Interrupted)
+}
+
 impl Agent {
     /// Process an approval or rejection of a pending tool execution.
     pub(in crate::agent) async fn process_approval(
@@ -34,6 +43,7 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
+        let responding_identity = message.resolved_identity();
         let pending = {
             let mut sess = session.lock().await;
             let thread = sess
@@ -41,436 +51,495 @@ impl Agent {
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-            match thinclaw_agent::thread_ops::take_pending_approval_matching(thread, request_id) {
-                PendingApprovalAdmission::Ready(pending) => pending,
+            match thinclaw_agent::thread_ops::take_pending_approval_matching(
+                thread,
+                request_id,
+                &responding_identity,
+            ) {
+                PendingApprovalAdmission::Ready(pending) => *pending,
                 PendingApprovalAdmission::Missing => {
                     return Ok(SubmissionResult::error(
                         thinclaw_agent::thread_ops::pending_approval_missing_message(),
                     ));
                 }
                 PendingApprovalAdmission::RequestIdMismatch => {
-                    drop(sess);
-                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
-                        .await;
                     return Ok(SubmissionResult::error(
                         thinclaw_agent::thread_ops::pending_approval_request_mismatch_message(),
+                    ));
+                }
+                PendingApprovalAdmission::RequesterMismatch => {
+                    return Ok(SubmissionResult::error(
+                        thinclaw_agent::thread_ops::pending_approval_requester_mismatch_message(),
                     ));
                 }
             }
         };
 
-        if approved {
-            // If always, add to auto-approved set
-            if always {
-                let mut sess = session.lock().await;
-                sess.auto_approve_tool_for_channel(&message.channel, &pending.tool_name);
-                tracing::info!(
-                    "Auto-approved tool '{}' for session {}",
-                    pending.tool_name,
-                    sess.id
-                );
-            }
+        // Resume under the original requester's identity and ingress context.
+        // The responder has already been authorized above, but their approval
+        // message must never replace the credentials/policy context attached to
+        // the requested tool execution.
+        let Some(requesting_identity) = pending.requesting_identity.clone() else {
+            tracing::error!(
+                request_id = %pending.request_id,
+                "Approval admission returned an unbound legacy request"
+            );
+            return Ok(SubmissionResult::error(
+                "This approval request has no bound requester identity and cannot be resumed safely.",
+            ));
+        };
+        let mut request_message = message.clone();
+        request_message.channel = pending.request_channel.clone();
+        request_message.user_id = requesting_identity.raw_sender_id.clone();
+        request_message.metadata = pending.request_metadata.clone();
+        request_message.identity = Some(requesting_identity.clone());
+        let message = &request_message;
 
-            // Reset thread state to processing
-            let processing_snapshot = {
-                let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thinclaw_agent::thread_ops::mark_pending_approval_approved(thread);
-                    Some(thread.clone())
+        if approved {
+            let _turn_cancellation_guard = self.begin_turn_cancellation_guard(thread_id).await;
+            async {
+                // If always, add to auto-approved set
+                if always {
+                    let mut sess = session.lock().await;
+                    sess.auto_approve_tool_for_identity(
+                        &requesting_identity.actor_id,
+                        &message.channel,
+                        &pending.tool_name,
+                    );
+                    tracing::info!(
+                        "Auto-approved tool '{}' for session {}",
+                        pending.tool_name,
+                        sess.id
+                    );
+                }
+
+                // Reset thread state to processing
+                let processing_snapshot = {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thinclaw_agent::thread_ops::mark_pending_approval_approved(thread);
+                        Some(thread.clone())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(thread_snapshot) = processing_snapshot {
+                    let _ = thread_snapshot;
+                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                        .await;
+                }
+
+                // Execute the approved tool and continue the loop
+                let identity = message.resolved_identity();
+                let mut job_ctx = JobContext::with_identity(
+                    identity.principal_id.clone(),
+                    identity.actor_id.clone(),
+                    "chat",
+                    "Interactive chat session",
+                );
+                let effective_timezone = if let Some(workspace) = self.workspace() {
+                    Some(
+                        workspace
+                            .effective_timezone_for_identity(&identity)
+                            .await
+                            .to_string(),
+                    )
                 } else {
                     None
+                };
+                job_ctx.metadata = message.metadata.clone();
+                if !job_ctx.metadata.is_object() {
+                    job_ctx.metadata = serde_json::json!({});
                 }
-            };
-            if let Some(thread_snapshot) = processing_snapshot {
-                let _ = thread_snapshot;
-                self.persist_thread_runtime_snapshot(message, &session, thread_id)
-                    .await;
-            }
-
-            // Execute the approved tool and continue the loop
-            let identity = message.resolved_identity();
-            let mut job_ctx = JobContext::with_identity(
-                identity.principal_id.clone(),
-                identity.actor_id.clone(),
-                "chat",
-                "Interactive chat session",
-            );
-            job_ctx.metadata = message.metadata.clone();
-            if !job_ctx.metadata.is_object() {
-                job_ctx.metadata = serde_json::json!({});
-            }
-            if let Some(metadata) = job_ctx.metadata.as_object_mut() {
-                metadata.insert(
-                    "channel".to_string(),
-                    serde_json::json!(message.channel.clone()),
-                );
-                metadata.insert(
-                    "thread_id".to_string(),
-                    serde_json::json!(thread_id.to_string()),
-                );
-                metadata.insert(
-                    "conversation_kind".to_string(),
-                    serde_json::json!(identity.conversation_kind.as_str()),
-                );
-                metadata.insert(
-                    "conversation_scope_id".to_string(),
-                    serde_json::json!(identity.conversation_scope_id.to_string()),
-                );
-                metadata.insert(
-                    "principal_id".to_string(),
-                    serde_json::json!(identity.principal_id.clone()),
-                );
-                metadata.insert(
-                    "actor_id".to_string(),
-                    serde_json::json!(identity.actor_id.clone()),
-                );
-                if let Some(owner) = self.agent_router.get_thread_owner(thread_id).await {
-                    metadata.insert("agent_id".to_string(), serde_json::json!(owner.clone()));
-                    if let Some(agent) = self.agent_router.get_agent(&owner).await {
-                        if let Some(workspace_id) = agent.workspace_id {
-                            metadata.insert(
-                                "agent_workspace_id".to_string(),
-                                serde_json::json!(workspace_id.to_string()),
-                            );
-                        }
-                        if let Some(allowed_tools) = agent.allowed_tools.as_ref() {
-                            metadata.insert(
-                                "allowed_tools".to_string(),
-                                serde_json::json!(allowed_tools),
-                            );
-                        }
-                        if let Some(allowed_skills) = agent.allowed_skills.as_ref() {
-                            metadata.insert(
-                                "allowed_skills".to_string(),
-                                serde_json::json!(allowed_skills),
-                            );
-                        }
-                        if let Some(tool_profile) = agent.tool_profile {
-                            metadata.insert(
-                                "tool_profile".to_string(),
-                                serde_json::json!(tool_profile.as_str()),
-                            );
+                if let Some(metadata) = job_ctx.metadata.as_object_mut() {
+                    for key in [
+                        "agent_id",
+                        "agent_workspace_id",
+                        "allowed_tools",
+                        "allowed_skills",
+                        "tool_profile",
+                    ] {
+                        metadata.remove(key);
+                    }
+                    metadata.insert(
+                        "channel".to_string(),
+                        serde_json::json!(message.channel.clone()),
+                    );
+                    metadata.insert(
+                        "thread_id".to_string(),
+                        serde_json::json!(thread_id.to_string()),
+                    );
+                    metadata.insert(
+                        "conversation_kind".to_string(),
+                        serde_json::json!(identity.conversation_kind.as_str()),
+                    );
+                    metadata.insert(
+                        "conversation_scope_id".to_string(),
+                        serde_json::json!(identity.conversation_scope_id.to_string()),
+                    );
+                    metadata.insert(
+                        "stable_external_conversation_key".to_string(),
+                        serde_json::json!(identity.stable_external_conversation_key.clone()),
+                    );
+                    metadata.insert(
+                        "principal_id".to_string(),
+                        serde_json::json!(identity.principal_id.clone()),
+                    );
+                    metadata.insert(
+                        "actor_id".to_string(),
+                        serde_json::json!(identity.actor_id.clone()),
+                    );
+                    if let Some(timezone) = effective_timezone {
+                        metadata.insert("user_timezone".to_string(), serde_json::json!(timezone));
+                    }
+                    if let Some(owner) = self.agent_router.get_thread_owner(thread_id).await {
+                        metadata.insert("agent_id".to_string(), serde_json::json!(owner.clone()));
+                        if let Some(agent) = self.agent_router.get_agent(&owner).await {
+                            if let Some(workspace_id) = agent.workspace_id {
+                                metadata.insert(
+                                    "agent_workspace_id".to_string(),
+                                    serde_json::json!(workspace_id.to_string()),
+                                );
+                            }
+                            if let Some(allowed_tools) = agent.allowed_tools.as_ref() {
+                                metadata.insert(
+                                    "allowed_tools".to_string(),
+                                    serde_json::json!(allowed_tools),
+                                );
+                            }
+                            if let Some(allowed_skills) = agent.allowed_skills.as_ref() {
+                                metadata.insert(
+                                    "allowed_skills".to_string(),
+                                    serde_json::json!(allowed_skills),
+                                );
+                            }
+                            if let Some(tool_profile) = agent.tool_profile {
+                                metadata.insert(
+                                    "tool_profile".to_string(),
+                                    serde_json::json!(tool_profile.as_str()),
+                                );
+                            }
                         }
                     }
                 }
-            }
 
-            let profile_override = job_ctx
-                .metadata
-                .get("tool_profile")
-                .and_then(|value| value.as_str())
-                .and_then(|value| value.parse::<ToolProfile>().ok());
+                let profile_override = job_ctx
+                    .metadata
+                    .get("tool_profile")
+                    .and_then(|value| value.as_str())
+                    .and_then(|value| value.parse::<ToolProfile>().ok());
 
-            let _ = self
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::ToolStarted {
-                        name: pending.tool_name.clone(),
-                        parameters: Some(pending.parameters.clone()),
-                    },
-                    &message.metadata,
-                )
-                .await;
-
-            let tool_result = match execution::prepare_tool_call(execution::ToolPrepareRequest {
-                tools: self.tools(),
-                safety: self.safety(),
-                job_ctx: &job_ctx,
-                tool_name: &pending.tool_name,
-                params: &pending.parameters,
-                lane: ToolExecutionLane::DeferredChat,
-                default_profile: self.config.main_tool_profile,
-                profile_override,
-                approval_mode: execution::ToolApprovalMode::Bypass,
-                hooks: None,
-            })
-            .await
-            {
-                Ok(execution::ToolPrepareOutcome::Ready(prepared)) => {
-                    execution::execute_tool_call(&prepared, self.safety(), &job_ctx).await
-                }
-                Ok(execution::ToolPrepareOutcome::NeedsApproval(_)) => {
-                    Err(crate::error::ToolError::AuthRequired {
-                        name: pending.tool_name.clone(),
-                    }
-                    .into())
-                }
-                Err(err) => Err(err),
-            };
-
-            let _ = self
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::ToolCompleted {
-                        name: pending.tool_name.clone(),
-                        success: tool_result.is_ok(),
-                        result_preview: tool_result.as_ref().ok().map(|output| {
-                            crate::agent::dispatcher::truncate_preview(
-                                &output.sanitized_content,
-                                500,
-                            )
-                        }),
-                    },
-                    &message.metadata,
-                )
-                .await;
-
-            if let Ok(ref output) = tool_result
-                && !output.sanitized_content.is_empty()
-            {
                 let _ = self
                     .channels
                     .send_status(
                         &message.channel,
-                        StatusUpdate::ToolResult {
+                        StatusUpdate::ToolStarted {
                             name: pending.tool_name.clone(),
-                            preview: output.sanitized_content.clone(),
-                            artifacts: output.artifacts.clone(),
+                            parameters: Some(pending.parameters.clone()),
                         },
                         &message.metadata,
                     )
                     .await;
-            }
 
-            // Build context including the tool result
-            let mut context_messages = pending.context_messages;
-            let deferred_tool_calls = pending.deferred_tool_calls;
-
-            // Sanitize the restored snapshot before appending new results.
-            // The snapshot was captured at approval time; if the hard history
-            // cap had fired in that same iteration and orphaned any Tool
-            // messages, those orphans would be frozen into the snapshot.
-            // Sanitizing here ensures the context is clean before we append
-            // the approved tool result and resume the agentic loop.
-            crate::llm::sanitize_tool_messages(&mut context_messages);
-
-            // Record result in thread
-            {
-                let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id)
-                    && let Some(turn) = thread.last_turn_mut()
-                {
-                    match &tool_result {
-                        Ok(output) => {
-                            turn.record_tool_result(serde_json::json!(output.sanitized_content));
-                        }
-                        Err(e) => {
-                            turn.record_tool_error(e.to_string());
-                        }
+                let tool_result = tokio::select! {
+                    biased;
+                    _ = self.wait_for_turn_cancellation(thread_id) => {
+                        Err(Self::turn_interrupted_error(thread_id))
                     }
-                }
-            }
+                    result = async {
+                        match execution::prepare_tool_call(execution::ToolPrepareRequest {
+                            tools: self.tools(),
+                            safety: self.safety(),
+                            job_ctx: &job_ctx,
+                            tool_name: &pending.tool_name,
+                            params: &pending.parameters,
+                            lane: ToolExecutionLane::DeferredChat,
+                            default_profile: self.config.main_tool_profile,
+                            profile_override,
+                            approval_mode: execution::ToolApprovalMode::Bypass,
+                            hooks: None,
+                        })
+                        .await
+                        {
+                            Ok(execution::ToolPrepareOutcome::Ready(prepared)) => {
+                                execution::execute_tool_call(&prepared, self.safety(), &job_ctx).await
+                            }
+                            Ok(execution::ToolPrepareOutcome::NeedsApproval(_)) => {
+                                Err(crate::error::ToolError::AuthRequired {
+                                    name: pending.tool_name.clone(),
+                                }
+                                .into())
+                            }
+                            Err(err) => Err(err),
+                        }
+                    } => result,
+                };
 
-            // If tool auth returned an auth-required state, enter auth mode when needed and
-            // return instructions directly (skip agentic loop continuation).
-            if let Some(auth_request) = check_auth_required_content(
-                &pending.tool_name,
-                tool_result
-                    .as_ref()
-                    .ok()
-                    .map(|output| output.sanitized_content.as_str()),
-            ) {
-                self.handle_auth_intercept(
-                    &session,
-                    thread_id,
-                    message,
-                    tool_result
-                        .as_ref()
-                        .ok()
-                        .map(|output| output.sanitized_content.as_str()),
-                    auth_request.extension_name,
-                    auth_request.instructions.clone(),
-                    auth_request.auth_mode,
-                )
-                .await;
-                return Ok(SubmissionResult::response(auth_request.instructions));
-            }
-
-            // Add tool result to context
-            let result_content = match tool_result {
-                Ok(output) => {
-                    let sanitized = self
-                        .safety()
-                        .sanitize_tool_output(&pending.tool_name, &output.sanitized_content);
-                    self.safety().wrap_for_llm(
-                        &pending.tool_name,
-                        &sanitized.content,
-                        sanitized.was_modified,
-                    )
-                }
-                Err(e) => format!("Error: {}", e),
-            };
-
-            context_messages.push(ChatMessage::tool_result(
-                &pending.tool_call_id,
-                &pending.tool_name,
-                result_content,
-            ));
-
-            // Replay deferred tool calls from the same assistant message so
-            // every tool_use ID gets a matching tool_result before the next
-            // LLM call.
-            if !deferred_tool_calls.is_empty() {
                 let _ = self
                     .channels
                     .send_status(
                         &message.channel,
-                        StatusUpdate::Thinking(format!(
-                            "Executing {} deferred tool(s)...",
-                            deferred_tool_calls.len()
-                        )),
+                        StatusUpdate::ToolCompleted {
+                            name: pending.tool_name.clone(),
+                            success: tool_result.is_ok(),
+                            result_preview: tool_result.as_ref().ok().map(|output| {
+                                crate::agent::dispatcher::truncate_preview(
+                                    &output.sanitized_content,
+                                    500,
+                                )
+                            }),
+                        },
                         &message.metadata,
                     )
                     .await;
-            }
 
-            // === Phase 1: Preflight (sequential) ===
-            // Walk deferred tools through the shared preparation pipeline so
-            // hooks, approval checks, validation, and rate limits stay
-            // aligned with the live dispatcher path.
-            let mut preflight_tool_calls: Vec<crate::llm::ToolCall> = Vec::new();
-            let mut immediate_results: Vec<(usize, Result<execution::ToolExecutionOutput, Error>)> =
-                Vec::new();
-            let mut runnable: Vec<(usize, crate::llm::ToolCall, execution::PreparedToolCall)> =
-                Vec::new();
-            let mut approval_needed: Option<(
-                usize,
-                crate::llm::ToolCall,
-                execution::PendingToolApproval,
-            )> = None;
+                if thread_is_interrupted(&session, thread_id).await {
+                    return Ok(SubmissionResult::Interrupted);
+                }
 
-            for (idx, original_tc) in deferred_tool_calls.iter().enumerate() {
-                let session_auto_approved = {
-                    let sess = session.lock().await;
-                    sess.is_tool_auto_approved_for_channel(&message.channel, &original_tc.name)
+                if let Ok(ref output) = tool_result
+                    && !output.sanitized_content.is_empty()
+                {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ToolResult {
+                                name: pending.tool_name.clone(),
+                                preview: output.sanitized_content.clone(),
+                                artifacts: output.artifacts.clone(),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+
+                // Build context including the tool result
+                let mut context_messages = pending.context_messages;
+                let deferred_tool_calls = pending.deferred_tool_calls;
+
+                // Sanitize the restored snapshot before appending new results.
+                // The snapshot was captured at approval time; if the hard history
+                // cap had fired in that same iteration and orphaned any Tool
+                // messages, those orphans would be frozen into the snapshot.
+                // Sanitizing here ensures the context is clean before we append
+                // the approved tool result and resume the agentic loop.
+                crate::llm::sanitize_tool_messages(&mut context_messages);
+
+                // Record result in thread
+                {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id)
+                        && let Some(turn) = thread.last_turn_mut()
+                    {
+                        match &tool_result {
+                            Ok(output) => {
+                                turn.record_tool_result_for_id(
+                                    &pending.tool_call_id,
+                                    serde_json::json!(output.sanitized_content),
+                                );
+                            }
+                            Err(e) => {
+                                let safe_error = self
+                                    .safety()
+                                    .sanitize_tool_output(&pending.tool_name, &e.to_string())
+                                    .content;
+                                turn.record_tool_error_for_id(
+                                    &pending.tool_call_id,
+                                    safe_error,
+                                );
+                            }
+                        }
+                    }
+                }
+                self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                    .await;
+
+                // If tool auth returned an auth-required state, enter auth mode when needed and
+                // return instructions directly (skip agentic loop continuation).
+                if let Some(auth_request) = check_auth_required_content(
+                    &pending.tool_name,
+                    tool_result
+                        .as_ref()
+                        .ok()
+                        .map(|output| output.sanitized_content.as_str()),
+                ) {
+                    if !self
+                        .handle_auth_intercept(
+                        &session,
+                        thread_id,
+                        message,
+                        tool_result
+                            .as_ref()
+                            .ok()
+                            .map(|output| output.sanitized_content.as_str()),
+                        auth_request.extension_name,
+                        auth_request.instructions.clone(),
+                        auth_request.auth_mode,
+                    )
+                    .await
+                    {
+                        return Ok(SubmissionResult::Interrupted);
+                    }
+                    return Ok(SubmissionResult::response(auth_request.instructions));
+                }
+
+                // Add tool result to context
+                let result_content = match tool_result {
+                    Ok(output) => {
+                        let sanitized = self
+                            .safety()
+                            .sanitize_tool_output(&pending.tool_name, &output.sanitized_content);
+                        self.safety().wrap_for_llm(
+                            &pending.tool_name,
+                            &sanitized.content,
+                            sanitized.was_modified,
+                        )
+                    }
+                    Err(e) => {
+                        let safe_error = self
+                            .safety()
+                            .sanitize_tool_output(&pending.tool_name, &e.to_string())
+                            .content;
+                        format!("Error: {safe_error}")
+                    }
                 };
 
-                match execution::prepare_tool_call(execution::ToolPrepareRequest {
-                    tools: self.tools(),
-                    safety: self.safety(),
-                    job_ctx: &job_ctx,
-                    tool_name: &original_tc.name,
-                    params: &original_tc.arguments,
-                    lane: ToolExecutionLane::DeferredChat,
-                    default_profile: self.config.main_tool_profile,
-                    profile_override,
-                    approval_mode: execution::ToolApprovalMode::Interactive {
-                        auto_approve_tools: self.config.auto_approve_tools,
-                        session_auto_approved,
-                    },
-                    hooks: Some(execution::ToolHookConfig {
-                        registry: self.hooks().as_ref(),
-                        user_id: &message.user_id,
-                        context: "chat",
-                    }),
-                })
-                .await
-                {
-                    Ok(execution::ToolPrepareOutcome::Ready(prepared)) => {
-                        let mut tc = original_tc.clone();
-                        tc.arguments = prepared.params.clone();
-                        let preflight_idx = preflight_tool_calls.len();
-                        preflight_tool_calls.push(tc.clone());
-                        runnable.push((preflight_idx, tc, prepared));
-                    }
-                    Ok(execution::ToolPrepareOutcome::NeedsApproval(pending_approval)) => {
-                        let mut tc = original_tc.clone();
-                        tc.arguments = pending_approval.params.clone();
-                        approval_needed = Some((idx, tc, pending_approval));
-                        break;
-                    }
-                    Err(err) => {
-                        let preflight_idx = preflight_tool_calls.len();
-                        preflight_tool_calls.push(original_tc.clone());
-                        immediate_results.push((preflight_idx, Err(err)));
-                    }
-                }
-            }
+                context_messages.push(ChatMessage::tool_result(
+                    &pending.tool_call_id,
+                    &pending.tool_name,
+                    result_content,
+                ));
 
-            // === Phase 2: Parallel execution ===
-            let mut exec_results: Vec<Option<Result<execution::ToolExecutionOutput, Error>>> =
-                (0..preflight_tool_calls.len()).map(|_| None).collect();
-            for (idx, result) in immediate_results {
-                exec_results[idx] = Some(result);
-            }
-
-            let parallel_safe = runnable.len() > 1
-                && runnable
-                    .iter()
-                    .all(|(_, _, prepared)| prepared.descriptor.metadata.parallel_safe);
-
-            if !parallel_safe {
-                for (pf_idx, tc, prepared) in runnable {
+                // Replay deferred tool calls from the same assistant message so
+                // every tool_use ID gets a matching tool_result before the next
+                // LLM call.
+                if !deferred_tool_calls.is_empty() {
                     let _ = self
                         .channels
                         .send_status(
                             &message.channel,
-                            StatusUpdate::ToolStarted {
-                                name: tc.name.clone(),
-                                parameters: Some(tc.arguments.clone()),
-                            },
+                            StatusUpdate::Thinking(format!(
+                                "Executing {} deferred tool(s)...",
+                                deferred_tool_calls.len()
+                            )),
                             &message.metadata,
                         )
                         .await;
-
-                    let result =
-                        execution::execute_tool_call(&prepared, self.safety(), &job_ctx).await;
-
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::ToolCompleted {
-                                name: tc.name.clone(),
-                                success: result.is_ok(),
-                                result_preview: result.as_ref().ok().map(|output| {
-                                    crate::agent::dispatcher::truncate_preview(
-                                        &output.sanitized_content,
-                                        500,
-                                    )
-                                }),
-                            },
-                            &message.metadata,
-                        )
-                        .await;
-
-                    exec_results[pf_idx] = Some(result);
                 }
-            } else {
-                let mut join_set = JoinSet::new();
-                let runnable_slots = runnable
-                    .iter()
-                    .map(|(pf_idx, tc, _)| (*pf_idx, tc.clone()))
-                    .collect::<Vec<_>>();
-                let runnable_count = runnable.len();
 
-                for (spawn_idx, (pf_idx, tc, prepared)) in runnable.into_iter().enumerate() {
-                    let safety = self.safety().clone();
-                    let channels = self.channels.clone();
-                    let job_ctx = job_ctx.clone();
-                    let channel = message.channel.clone();
-                    let metadata = message.metadata.clone();
+                // === Phase 1: Preflight (sequential) ===
+                // Walk deferred tools through the shared preparation pipeline so
+                // hooks, approval checks, validation, and rate limits stay
+                // aligned with the live dispatcher path.
+                let mut preflight_tool_calls: Vec<crate::llm::ToolCall> = Vec::new();
+                let mut immediate_results: Vec<(
+                    usize,
+                    Result<execution::ToolExecutionOutput, Error>,
+                )> = Vec::new();
+                let mut runnable: Vec<(usize, crate::llm::ToolCall, execution::PreparedToolCall)> =
+                    Vec::new();
+                let mut approval_needed: Option<(
+                    usize,
+                    crate::llm::ToolCall,
+                    execution::PendingToolApproval,
+                )> = None;
 
-                    join_set.spawn(async move {
-                        let _ = channels
+                for (idx, original_tc) in deferred_tool_calls.iter().enumerate() {
+                    let session_auto_approved = {
+                        let sess = session.lock().await;
+                        sess.is_tool_auto_approved_for_identity(
+                            &requesting_identity.actor_id,
+                            &message.channel,
+                            &original_tc.name,
+                        )
+                    };
+
+                    let preparation = tokio::select! {
+                        biased;
+                        _ = self.wait_for_turn_cancellation(thread_id) => {
+                            return Ok(SubmissionResult::Interrupted);
+                        }
+                        result = execution::prepare_tool_call(execution::ToolPrepareRequest {
+                            tools: self.tools(),
+                            safety: self.safety(),
+                            job_ctx: &job_ctx,
+                            tool_name: &original_tc.name,
+                            params: &original_tc.arguments,
+                            lane: ToolExecutionLane::DeferredChat,
+                            default_profile: self.config.main_tool_profile,
+                            profile_override,
+                            approval_mode: execution::ToolApprovalMode::Interactive {
+                                auto_approve_tools: self.config.auto_approve_tools,
+                                session_auto_approved,
+                            },
+                            hooks: Some(execution::ToolHookConfig {
+                                registry: self.hooks().as_ref(),
+                                user_id: &message.user_id,
+                                context: "chat",
+                            }),
+                        }) => result,
+                    };
+                    match preparation {
+                        Ok(execution::ToolPrepareOutcome::Ready(prepared)) => {
+                            let mut tc = original_tc.clone();
+                            tc.arguments = prepared.params.clone();
+                            let preflight_idx = preflight_tool_calls.len();
+                            preflight_tool_calls.push(tc.clone());
+                            runnable.push((preflight_idx, tc, prepared));
+                        }
+                        Ok(execution::ToolPrepareOutcome::NeedsApproval(pending_approval)) => {
+                            let mut tc = original_tc.clone();
+                            tc.arguments = pending_approval.params.clone();
+                            approval_needed = Some((idx, tc, pending_approval));
+                            break;
+                        }
+                        Err(err) => {
+                            let preflight_idx = preflight_tool_calls.len();
+                            preflight_tool_calls.push(original_tc.clone());
+                            immediate_results.push((preflight_idx, Err(err)));
+                        }
+                    }
+                }
+
+                // === Phase 2: Parallel execution ===
+                let mut exec_results: Vec<Option<Result<execution::ToolExecutionOutput, Error>>> =
+                    (0..preflight_tool_calls.len()).map(|_| None).collect();
+                for (idx, result) in immediate_results {
+                    exec_results[idx] = Some(result);
+                }
+
+                let parallel_safe = runnable.len() > 1
+                    && runnable
+                        .iter()
+                        .all(|(_, _, prepared)| prepared.descriptor.metadata.parallel_safe);
+
+                if !parallel_safe {
+                    for (pf_idx, tc, prepared) in runnable {
+                        let _ = self
+                            .channels
                             .send_status(
-                                &channel,
+                                &message.channel,
                                 StatusUpdate::ToolStarted {
                                     name: tc.name.clone(),
                                     parameters: Some(tc.arguments.clone()),
                                 },
-                                &metadata,
+                                &message.metadata,
                             )
                             .await;
 
-                        let result =
-                            execution::execute_tool_call(&prepared, &safety, &job_ctx).await;
+                        let result = tokio::select! {
+                            biased;
+                            _ = self.wait_for_turn_cancellation(thread_id) => {
+                                return Ok(SubmissionResult::Interrupted);
+                            }
+                            result = execution::execute_tool_call(&prepared, self.safety(), &job_ctx) => result,
+                        };
 
-                        let _ = channels
+                        let _ = self
+                            .channels
                             .send_status(
-                                &channel,
+                                &message.channel,
                                 StatusUpdate::ToolCompleted {
                                     name: tc.name.clone(),
                                     success: result.is_ok(),
@@ -481,249 +550,263 @@ impl Agent {
                                         )
                                     }),
                                 },
-                                &metadata,
+                                &message.metadata,
                             )
                             .await;
 
-                        (spawn_idx, pf_idx, result)
-                    });
-                }
+                        exec_results[pf_idx] = Some(result);
+                    }
+                } else {
+                    let mut join_set = JoinSet::new();
+                    let runnable_slots = runnable
+                        .iter()
+                        .map(|(pf_idx, tc, _)| (*pf_idx, tc.clone()))
+                        .collect::<Vec<_>>();
+                    let runnable_count = runnable.len();
 
-                let mut ordered: Vec<
-                    Option<(usize, Result<execution::ToolExecutionOutput, Error>)>,
-                > = (0..runnable_count).map(|_| None).collect();
-                while let Some(join_result) = join_set.join_next().await {
-                    match join_result {
-                        Ok((spawn_idx, pf_idx, result)) => {
-                            ordered[spawn_idx] = Some((pf_idx, result));
-                        }
-                        Err(e) => {
-                            if e.is_panic() {
-                                tracing::error!("Deferred tool execution task panicked: {}", e);
-                            } else {
-                                tracing::error!("Deferred tool execution task cancelled: {}", e);
+                    for (spawn_idx, (pf_idx, tc, prepared)) in runnable.into_iter().enumerate() {
+                        let safety = self.safety().clone();
+                        let channels = self.channels.clone();
+                        let job_ctx = job_ctx.clone();
+                        let channel = message.channel.clone();
+                        let metadata = message.metadata.clone();
+
+                        join_set.spawn(async move {
+                            let _ = channels
+                                .send_status(
+                                    &channel,
+                                    StatusUpdate::ToolStarted {
+                                        name: tc.name.clone(),
+                                        parameters: Some(tc.arguments.clone()),
+                                    },
+                                    &metadata,
+                                )
+                                .await;
+
+                            let result =
+                                execution::execute_tool_call(&prepared, &safety, &job_ctx).await;
+
+                            let _ = channels
+                                .send_status(
+                                    &channel,
+                                    StatusUpdate::ToolCompleted {
+                                        name: tc.name.clone(),
+                                        success: result.is_ok(),
+                                        result_preview: result.as_ref().ok().map(|output| {
+                                            crate::agent::dispatcher::truncate_preview(
+                                                &output.sanitized_content,
+                                                500,
+                                            )
+                                        }),
+                                    },
+                                    &metadata,
+                                )
+                                .await;
+
+                            (spawn_idx, pf_idx, result)
+                        });
+                    }
+
+                    let mut ordered: Vec<
+                        Option<(usize, Result<execution::ToolExecutionOutput, Error>)>,
+                    > = (0..runnable_count).map(|_| None).collect();
+                    loop {
+                        let join_result = tokio::select! {
+                            biased;
+                            _ = self.wait_for_turn_cancellation(thread_id) => {
+                                join_set.abort_all();
+                                while join_set.join_next().await.is_some() {}
+                                return Ok(SubmissionResult::Interrupted);
+                            }
+                            result = join_set.join_next() => result,
+                        };
+                        let Some(join_result) = join_result else {
+                            break;
+                        };
+                        match join_result {
+                            Ok((spawn_idx, pf_idx, result)) => {
+                                ordered[spawn_idx] = Some((pf_idx, result));
+                            }
+                            Err(e) => {
+                                if e.is_panic() {
+                                    tracing::error!("Deferred tool execution task panicked: {}", e);
+                                } else {
+                                    tracing::error!(
+                                        "Deferred tool execution task cancelled: {}",
+                                        e
+                                    );
+                                }
                             }
                         }
                     }
-                }
 
-                for (idx, opt) in ordered.into_iter().enumerate() {
-                    let (pf_idx, result) = opt.unwrap_or_else(|| {
-                        let (pf_idx, tc) = &runnable_slots[idx];
-                        let err: Error = crate::error::ToolError::ExecutionFailed {
-                            name: tc.name.clone(),
-                            reason: "Task failed during execution".to_string(),
-                        }
-                        .into();
-                        (*pf_idx, Err(err))
-                    });
-                    exec_results[pf_idx] = Some(result);
-                }
-            }
-
-            // === Phase 3: Post-flight (sequential, in original order) ===
-            // Process all results before any conditional return so every
-            // tool result is recorded in the session audit trail.
-            let mut deferred_auth: Option<String> = None;
-
-            for (tc, deferred_result) in preflight_tool_calls
-                .into_iter()
-                .zip(exec_results.into_iter())
-                .map(|(tc, result)| {
-                    let result = result.unwrap_or_else(|| {
-                        Err(crate::error::ToolError::ExecutionFailed {
-                            name: tc.name.clone(),
-                            reason: "Deferred tool result missing after execution".to_string(),
-                        }
-                        .into())
-                    });
-                    (tc, result)
-                })
-            {
-                if let Ok(ref output) = deferred_result
-                    && !output.sanitized_content.is_empty()
-                {
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::ToolResult {
+                    for (idx, opt) in ordered.into_iter().enumerate() {
+                        let (pf_idx, result) = opt.unwrap_or_else(|| {
+                            let (pf_idx, tc) = &runnable_slots[idx];
+                            let err: Error = crate::error::ToolError::ExecutionFailed {
                                 name: tc.name.clone(),
-                                preview: output.sanitized_content.clone(),
-                                artifacts: output.artifacts.clone(),
-                            },
-                            &message.metadata,
-                        )
-                        .await;
+                                reason: "Task failed during execution".to_string(),
+                            }
+                            .into();
+                            (*pf_idx, Err(err))
+                        });
+                        exec_results[pf_idx] = Some(result);
+                    }
                 }
 
-                // Record in thread
-                {
-                    let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id)
-                        && let Some(turn) = thread.last_turn_mut()
-                    {
-                        match &deferred_result {
-                            Ok(output) => {
-                                turn.record_tool_result(serde_json::json!(output.sanitized_content))
+                // === Phase 3: Post-flight (sequential, in original order) ===
+                // Process all results before any conditional return so every
+                // tool result is recorded in the session audit trail.
+                let mut deferred_auth: Option<String> = None;
+
+                for (tc, deferred_result) in preflight_tool_calls
+                    .into_iter()
+                    .zip(exec_results.into_iter())
+                    .map(|(tc, result)| {
+                        let result = result.unwrap_or_else(|| {
+                            Err(crate::error::ToolError::ExecutionFailed {
+                                name: tc.name.clone(),
+                                reason: "Deferred tool result missing after execution".to_string(),
                             }
-                            Err(e) => turn.record_tool_error(e.to_string()),
+                            .into())
+                        });
+                        (tc, result)
+                    })
+                {
+                    if let Ok(ref output) = deferred_result
+                        && !output.sanitized_content.is_empty()
+                    {
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ToolResult {
+                                    name: tc.name.clone(),
+                                    preview: output.sanitized_content.clone(),
+                                    artifacts: output.artifacts.clone(),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
+
+                    // Record in thread
+                    {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id)
+                            && let Some(turn) = thread.last_turn_mut()
+                        {
+                            match &deferred_result {
+                                Ok(output) => {
+                                    turn.record_tool_result_for_id(
+                                        &tc.id,
+                                        serde_json::json!(output.sanitized_content),
+                                    );
+                                }
+                                Err(e) => {
+                                    let safe_error = self
+                                        .safety()
+                                        .sanitize_tool_output(&tc.name, &e.to_string())
+                                        .content;
+                                    turn.record_tool_error_for_id(&tc.id, safe_error);
+                                }
+                            };
                         }
                     }
-                }
-
-                // Auth detection — defer return until all results are recorded
-                if deferred_auth.is_none()
-                    && let Some(auth_request) = check_auth_required_content(
-                        &tc.name,
-                        deferred_result
-                            .as_ref()
-                            .ok()
-                            .map(|output| output.sanitized_content.as_str()),
-                    )
-                {
-                    self.handle_auth_intercept(
-                        &session,
-                        thread_id,
-                        message,
-                        deferred_result
-                            .as_ref()
-                            .ok()
-                            .map(|output| output.sanitized_content.as_str()),
-                        auth_request.extension_name,
-                        auth_request.instructions.clone(),
-                        auth_request.auth_mode,
-                    )
-                    .await;
-                    deferred_auth = Some(auth_request.instructions);
-                }
-
-                let deferred_content = match deferred_result {
-                    Ok(output) => {
-                        let sanitized = self
-                            .safety()
-                            .sanitize_tool_output(&tc.name, &output.sanitized_content);
-                        self.safety().wrap_for_llm(
-                            &tc.name,
-                            &sanitized.content,
-                            sanitized.was_modified,
-                        )
-                    }
-                    Err(e) => format!("Error: {}", e),
-                };
-
-                context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, deferred_content));
-            }
-
-            // Return auth response after all results are recorded
-            if let Some(instructions) = deferred_auth {
-                return Ok(SubmissionResult::response(instructions));
-            }
-
-            // Handle approval if a tool needed it
-            if let Some((approval_idx, tc, pending_approval)) = approval_needed {
-                let new_pending = PendingApproval {
-                    request_id: Uuid::new_v4(),
-                    tool_name: tc.name.clone(),
-                    parameters: pending_approval.params.clone(),
-                    description: pending_approval.descriptor.description.clone(),
-                    tool_call_id: tc.id.clone(),
-                    context_messages: context_messages.clone(),
-                    deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
-                };
-
-                let request_id = new_pending.request_id;
-                let tool_name = new_pending.tool_name.clone();
-                let description = new_pending.description.clone();
-                let parameters = new_pending.parameters.clone();
-
-                {
-                    let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thinclaw_agent::thread_ops::await_thread_approval(thread, new_pending);
-                    }
-                }
-                self.persist_thread_runtime_snapshot(message, &session, thread_id)
-                    .await;
-
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Status("Awaiting approval".into()),
-                        &message.metadata,
-                    )
-                    .await;
-
-                return Ok(SubmissionResult::NeedApproval {
-                    request_id,
-                    tool_name,
-                    description,
-                    parameters,
-                });
-            }
-
-            // Continue the agentic loop (a tool was already executed this turn)
-            let result = self
-                .run_agentic_loop(message, session.clone(), thread_id, context_messages)
-                .await;
-
-            // Handle the result
-            let mut sess = session.lock().await;
-            let session_id = sess.id;
-            let thread = sess
-                .threads
-                .get_mut(&thread_id)
-                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-
-            let was_streamed = matches!(&result, Ok(AgenticLoopResult::Streamed(_)));
-            match result {
-                Ok(AgenticLoopResult::Response(payload))
-                | Ok(AgenticLoopResult::Streamed(payload)) => {
-                    let (turn_number, messages) =
-                        thinclaw_agent::thread_ops::complete_thread_response(
-                            thread,
-                            &payload.content,
-                        );
-                    let usage_percent = self.context_monitor.usage_percent(&messages);
-                    // User message already persisted at turn start; save assistant response
-                    self.persist_assistant_response(
-                        thread_id,
-                        message,
-                        &payload.content,
-                        session_id,
-                        turn_number,
-                    )
-                    .await;
-                    drop(sess);
-                    self.sync_context_pressure_warning(message, thread_id, usage_percent)
-                        .await;
                     self.persist_thread_runtime_snapshot(message, &session, thread_id)
                         .await;
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::Status("Done".into()),
-                            &message.metadata,
+
+                    // Auth detection — defer return until all results are recorded
+                    if deferred_auth.is_none()
+                        && let Some(auth_request) = check_auth_required_content(
+                            &tc.name,
+                            deferred_result
+                                .as_ref()
+                                .ok()
+                                .map(|output| output.sanitized_content.as_str()),
                         )
-                        .await;
-                    if was_streamed {
-                        Ok(SubmissionResult::Streamed(payload))
-                    } else {
-                        Ok(SubmissionResult::Response { payload })
+                    {
+                        if !self
+                            .handle_auth_intercept(
+                            &session,
+                            thread_id,
+                            message,
+                            deferred_result
+                                .as_ref()
+                                .ok()
+                                .map(|output| output.sanitized_content.as_str()),
+                            auth_request.extension_name,
+                            auth_request.instructions.clone(),
+                            auth_request.auth_mode,
+                        )
+                        .await
+                        {
+                            return Ok(SubmissionResult::Interrupted);
+                        }
+                        deferred_auth = Some(auth_request.instructions);
                     }
+
+                    let deferred_content = match deferred_result {
+                        Ok(output) => {
+                            let sanitized = self
+                                .safety()
+                                .sanitize_tool_output(&tc.name, &output.sanitized_content);
+                            self.safety().wrap_for_llm(
+                                &tc.name,
+                                &sanitized.content,
+                                sanitized.was_modified,
+                            )
+                        }
+                        Err(e) => {
+                            let safe_error = self
+                                .safety()
+                                .sanitize_tool_output(&tc.name, &e.to_string())
+                                .content;
+                            format!("Error: {safe_error}")
+                        }
+                    };
+
+                    context_messages.push(ChatMessage::tool_result(
+                        &tc.id,
+                        &tc.name,
+                        deferred_content,
+                    ));
                 }
-                Ok(AgenticLoopResult::NeedApproval {
-                    pending: new_pending,
-                }) => {
+
+                // Return auth response after all results are recorded
+                if let Some(instructions) = deferred_auth {
+                    return Ok(SubmissionResult::response(instructions));
+                }
+
+                // Handle approval if a tool needed it
+                if let Some((approval_idx, tc, pending_approval)) = approval_needed {
+                    let new_pending = PendingApproval {
+                        request_id: Uuid::new_v4(),
+                        tool_name: tc.name.clone(),
+                        parameters: pending_approval.params.clone(),
+                        description: pending_approval.descriptor.description.clone(),
+                        tool_call_id: tc.id.clone(),
+                        context_messages: context_messages.clone(),
+                        deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
+                        requesting_identity: Some(requesting_identity.clone()),
+                        request_channel: message.channel.clone(),
+                        request_metadata: message.metadata.clone(),
+                    };
+
                     let request_id = new_pending.request_id;
                     let tool_name = new_pending.tool_name.clone();
                     let description = new_pending.description.clone();
                     let parameters = new_pending.parameters.clone();
-                    let messages =
-                        thinclaw_agent::thread_ops::await_thread_approval(thread, new_pending);
-                    let usage_percent = self.context_monitor.usage_percent(&messages);
+
+                    {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thinclaw_agent::thread_ops::await_thread_approval(thread, new_pending);
+                        }
+                    }
+                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                        .await;
+
                     let _ = self
                         .channels
                         .send_status(
@@ -732,31 +815,161 @@ impl Agent {
                             &message.metadata,
                         )
                         .await;
-                    drop(sess);
-                    self.sync_context_pressure_warning(message, thread_id, usage_percent)
-                        .await;
-                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
-                        .await;
-                    Ok(SubmissionResult::NeedApproval {
+
+                    return Ok(SubmissionResult::NeedApproval {
                         request_id,
                         tool_name,
                         description,
                         parameters,
-                    })
+                    });
                 }
-                Err(e) => {
-                    let messages =
-                        thinclaw_agent::thread_ops::fail_thread_turn(thread, &e.to_string());
-                    let usage_percent = self.context_monitor.usage_percent(&messages);
-                    // User message already persisted at turn start
-                    drop(sess);
-                    self.sync_context_pressure_warning(message, thread_id, usage_percent)
-                        .await;
-                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
-                        .await;
-                    Ok(SubmissionResult::error(e.to_string()))
+
+                // Continue the agentic loop (a tool was already executed this turn)
+                let result = self
+                    .run_agentic_loop(message, session.clone(), thread_id, context_messages)
+                    .await;
+
+                // Response transforms can execute hooks and must not hold the
+                // session mutex. Final state admission remains atomic below so
+                // an interrupt either wins before completion or observes the
+                // already-terminal turn.
+                let was_streamed = matches!(&result, Ok(AgenticLoopResult::Streamed(_)));
+                let result = match result {
+                    Ok(AgenticLoopResult::Response(mut payload)) => {
+                        self.transform_response_payload(message, thread_id, &mut payload)
+                            .await;
+                        Ok(AgenticLoopResult::Response(payload))
+                    }
+                    Ok(AgenticLoopResult::Streamed(mut payload)) => {
+                        self.transform_response_payload(message, thread_id, &mut payload)
+                            .await;
+                        Ok(AgenticLoopResult::Streamed(payload))
+                    }
+                    other => other,
+                };
+
+                match result {
+                    Ok(AgenticLoopResult::Response(payload))
+                    | Ok(AgenticLoopResult::Streamed(payload)) => {
+                        let (session_id, turn_number, tool_calls, usage_percent) = {
+                            let mut sess = session.lock().await;
+                            let session_id = sess.id;
+                            let thread = sess.threads.get_mut(&thread_id).ok_or_else(|| {
+                                Error::from(crate::error::JobError::NotFound { id: thread_id })
+                            })?;
+                            if thread.state == crate::agent::session::ThreadState::Interrupted {
+                                return Ok(SubmissionResult::Interrupted);
+                            }
+                            let (turn_number, messages) =
+                                thinclaw_agent::thread_ops::complete_thread_response(
+                                    thread,
+                                    &payload.content,
+                                );
+                            let tool_calls = thread
+                                .last_turn()
+                                .map(|turn| turn.tool_calls.clone())
+                                .unwrap_or_default();
+                            let usage_percent = self.context_monitor.usage_percent(&messages);
+                            (session_id, turn_number, tool_calls, usage_percent)
+                        };
+                        // User message already persisted at turn start; save assistant response
+                        if let Err(error) = self
+                            .persist_assistant_response(
+                                thread_id,
+                                message,
+                                &payload.content,
+                                &tool_calls,
+                                session_id,
+                                turn_number,
+                            )
+                            .await
+                        {
+                            self.report_response_persistence_failure(message, thread_id, &error)
+                                .await;
+                        }
+                        self.sync_context_pressure_warning(message, thread_id, usage_percent)
+                            .await;
+                        self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                            .await;
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::Status("Done".into()),
+                                &message.metadata,
+                            )
+                            .await;
+                        if was_streamed {
+                            Ok(SubmissionResult::Streamed(payload))
+                        } else {
+                            Ok(SubmissionResult::Response { payload })
+                        }
+                    }
+                    Ok(AgenticLoopResult::NeedApproval {
+                        pending: new_pending,
+                    }) => {
+                        let request_id = new_pending.request_id;
+                        let tool_name = new_pending.tool_name.clone();
+                        let description = new_pending.description.clone();
+                        let parameters = new_pending.parameters.clone();
+                        let usage_percent = {
+                            let mut sess = session.lock().await;
+                            let thread = sess.threads.get_mut(&thread_id).ok_or_else(|| {
+                                Error::from(crate::error::JobError::NotFound { id: thread_id })
+                            })?;
+                            if thread.state == crate::agent::session::ThreadState::Interrupted {
+                                return Ok(SubmissionResult::Interrupted);
+                            }
+                            let messages = thinclaw_agent::thread_ops::await_thread_approval(
+                                thread,
+                                new_pending,
+                            );
+                            self.context_monitor.usage_percent(&messages)
+                        };
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::Status("Awaiting approval".into()),
+                                &message.metadata,
+                            )
+                            .await;
+                        self.sync_context_pressure_warning(message, thread_id, usage_percent)
+                            .await;
+                        self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                            .await;
+                        Ok(SubmissionResult::NeedApproval {
+                            request_id,
+                            tool_name,
+                            description,
+                            parameters,
+                        })
+                    }
+                    Err(e) => {
+                        let usage_percent = {
+                            let mut sess = session.lock().await;
+                            let thread = sess.threads.get_mut(&thread_id).ok_or_else(|| {
+                                Error::from(crate::error::JobError::NotFound { id: thread_id })
+                            })?;
+                            if thread.state == crate::agent::session::ThreadState::Interrupted {
+                                return Ok(SubmissionResult::Interrupted);
+                            }
+                            let messages = thinclaw_agent::thread_ops::fail_thread_turn(
+                                thread,
+                                &e.to_string(),
+                            );
+                            self.context_monitor.usage_percent(&messages)
+                        };
+                        // User message already persisted at turn start
+                        self.sync_context_pressure_warning(message, thread_id, usage_percent)
+                            .await;
+                        self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                            .await;
+                        Ok(SubmissionResult::error(e.to_string()))
+                    }
                 }
             }
+            .await
         } else {
             // Rejected - complete the turn with a rejection message and persist
             let rejection = format!(
@@ -764,28 +977,47 @@ impl Agent {
                  You can continue the conversation or try a different approach.",
                 pending.tool_name
             );
-            {
+            let rejection_persistence = {
                 let mut sess = session.lock().await;
                 let session_id = sess.id;
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    if thread.state == crate::agent::session::ThreadState::Interrupted {
+                        return Ok(SubmissionResult::Interrupted);
+                    }
                     let (turn_number, messages) =
                         thinclaw_agent::thread_ops::reject_pending_approval(thread, &rejection);
+                    let tool_calls = thread
+                        .last_turn()
+                        .map(|turn| turn.tool_calls.clone())
+                        .unwrap_or_default();
                     let usage_percent = self.context_monitor.usage_percent(&messages);
-                    // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(
+                    Some((session_id, turn_number, tool_calls, usage_percent))
+                } else {
+                    None
+                }
+            };
+            if let Some((session_id, turn_number, tool_calls, usage_percent)) =
+                rejection_persistence
+            {
+                // User message already persisted at turn start; save rejection response.
+                if let Err(error) = self
+                    .persist_assistant_response(
                         thread_id,
                         message,
                         &rejection,
+                        &tool_calls,
                         session_id,
                         turn_number,
                     )
-                    .await;
-                    drop(sess);
-                    self.sync_context_pressure_warning(message, thread_id, usage_percent)
-                        .await;
-                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                    .await
+                {
+                    self.report_response_persistence_failure(message, thread_id, &error)
                         .await;
                 }
+                self.sync_context_pressure_warning(message, thread_id, usage_percent)
+                    .await;
+                self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                    .await;
             }
 
             let _ = self
@@ -815,38 +1047,52 @@ impl Agent {
         ext_name: String,
         instructions: String,
         auth_mode: PendingAuthMode,
-    ) {
+    ) -> bool {
         let auth_data = parse_auth_result_content(tool_result_content);
-        let thread_snapshot = {
-            let mut sess = session.lock().await;
-            let session_id = sess.id;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                let (turn_number, _) =
-                    thinclaw_agent::thread_ops::enter_auth_mode_and_complete_turn(
-                        thread,
-                        ext_name.clone(),
-                        auth_mode,
-                        &instructions,
-                    );
-                // User message already persisted at turn start; save auth instructions
-                self.persist_assistant_response(
-                    thread_id,
-                    message,
-                    &instructions,
-                    session_id,
-                    turn_number,
-                )
-                .await;
-                Some(thread.clone())
-            } else {
-                None
-            }
+        let completed_turn =
+            {
+                let mut sess = session.lock().await;
+                let session_id = sess.id;
+                if let Some(thread) = sess.threads.get_mut(&thread_id).filter(|thread| {
+                    thread.state != crate::agent::session::ThreadState::Interrupted
+                }) {
+                    let (turn_number, _) =
+                        thinclaw_agent::thread_ops::enter_auth_mode_and_complete_turn(
+                            thread,
+                            ext_name.clone(),
+                            auth_mode,
+                            message.resolved_identity(),
+                            &instructions,
+                        );
+                    let tool_calls = thread
+                        .last_turn()
+                        .map(|turn| turn.tool_calls.clone())
+                        .unwrap_or_default();
+                    Some((session_id, turn_number, tool_calls))
+                } else {
+                    None
+                }
+            };
+        let Some((session_id, turn_number, tool_calls)) = completed_turn else {
+            return false;
         };
-        if let Some(thread_snapshot) = thread_snapshot {
-            let _ = thread_snapshot;
-            self.persist_thread_runtime_snapshot(message, session, thread_id)
+        // User message already persisted at turn start; save auth instructions.
+        if let Err(error) = self
+            .persist_assistant_response(
+                thread_id,
+                message,
+                &instructions,
+                &tool_calls,
+                session_id,
+                turn_number,
+            )
+            .await
+        {
+            self.report_response_persistence_failure(message, thread_id, &error)
                 .await;
         }
+        self.persist_thread_runtime_snapshot(message, session, thread_id)
+            .await;
         let _ = self
             .channels
             .send_status(
@@ -870,6 +1116,7 @@ impl Agent {
                 &message.metadata,
             )
             .await;
+        true
     }
 
     /// Handle an auth token submitted while the thread is in auth mode.
@@ -884,6 +1131,12 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<Option<String>, Error> {
+        if !pending.accepts_identity(&message.resolved_identity()) {
+            return Ok(Some(
+                "This authentication request belongs to a different actor.".to_string(),
+            ));
+        }
+
         let token = token.trim();
 
         // Clear auth mode regardless of outcome

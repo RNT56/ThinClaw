@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Gemini adapter configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GeminiConfig {
     /// API key for Google AI Studio.
     pub api_key: Option<String>,
@@ -21,6 +21,18 @@ pub struct GeminiConfig {
     pub base_url: String,
     /// Maximum output tokens.
     pub max_output_tokens: u32,
+}
+
+impl std::fmt::Debug for GeminiConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GeminiConfig")
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("model", &self.model)
+            .field("base_url", &"[REDACTED URL]")
+            .field("max_output_tokens", &self.max_output_tokens)
+            .finish()
+    }
 }
 
 impl Default for GeminiConfig {

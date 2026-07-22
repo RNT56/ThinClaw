@@ -20,10 +20,7 @@ use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use uuid::Uuid;
 
-use crate::wasm::capabilities::{
-    Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
-    ToolInvokeCapability,
-};
+use crate::wasm::capabilities::{Capabilities, EndpointPattern};
 
 /// Trust level for a WASM tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,48 +132,62 @@ pub struct StoredCapabilities {
 
 impl StoredCapabilities {
     /// Convert to runtime Capabilities struct.
-    pub fn to_capabilities(&self) -> Capabilities {
-        let mut caps = Capabilities::default();
+    pub fn to_capabilities(&self) -> Result<Capabilities, WasmStorageError> {
+        use crate::wasm::capabilities_schema::{
+            CapabilitiesFile, EndpointPatternSchema, HttpCapabilitySchema, RateLimitSchema,
+            SecretsCapabilitySchema, ToolInvokeCapabilitySchema, WorkspaceCapabilitySchema,
+        };
 
-        // Workspace read
-        if !self.workspace_read_prefixes.is_empty() {
-            caps = caps.with_workspace_read(self.workspace_read_prefixes.clone());
-        }
-
-        // HTTP capability
-        if !self.http_allowlist.is_empty() {
-            caps.http = Some(HttpCapability {
-                allowlist: self.http_allowlist.clone(),
-                credentials: HashMap::new(), // Loaded separately
-                rate_limit: RateLimitConfig {
-                    requests_per_minute: self.requests_per_minute,
-                    requests_per_hour: self.requests_per_hour,
-                },
-                max_request_bytes: self.max_request_body_bytes as usize,
-                max_response_bytes: self.max_response_body_bytes as usize,
-                timeout: std::time::Duration::from_secs(self.http_timeout_secs as u64),
-            });
-        }
-
-        // Tool invoke capability
-        if !self.tool_aliases.is_empty() {
-            caps.tool_invoke = Some(ToolInvokeCapability {
-                aliases: self.tool_aliases.clone(),
-                rate_limit: RateLimitConfig {
-                    requests_per_minute: self.requests_per_minute,
-                    requests_per_hour: self.requests_per_hour,
-                },
-            });
-        }
-
-        // Secrets capability
-        if !self.allowed_secrets.is_empty() {
-            caps.secrets = Some(SecretsCapability {
+        let max_request_bytes = usize::try_from(self.max_request_body_bytes).map_err(|_| {
+            WasmStorageError::InvalidData(
+                "stored maximum request size is negative or unsupported".to_string(),
+            )
+        })?;
+        let max_response_bytes = usize::try_from(self.max_response_body_bytes).map_err(|_| {
+            WasmStorageError::InvalidData(
+                "stored maximum response size is negative or unsupported".to_string(),
+            )
+        })?;
+        let timeout_secs = u64::try_from(self.http_timeout_secs).map_err(|_| {
+            WasmStorageError::InvalidData("stored HTTP timeout is negative".to_string())
+        })?;
+        let rate_limit = RateLimitSchema {
+            requests_per_minute: self.requests_per_minute,
+            requests_per_hour: self.requests_per_hour,
+        };
+        let schema = CapabilitiesFile {
+            http: (!self.http_allowlist.is_empty()).then(|| HttpCapabilitySchema {
+                allowlist: self
+                    .http_allowlist
+                    .iter()
+                    .map(|endpoint| EndpointPatternSchema {
+                        host: endpoint.host.clone(),
+                        path_prefix: endpoint.path_prefix.clone(),
+                        methods: endpoint.methods.clone(),
+                    })
+                    .collect(),
+                credentials: HashMap::new(),
+                rate_limit: Some(rate_limit.clone()),
+                max_request_bytes: Some(max_request_bytes),
+                max_response_bytes: Some(max_response_bytes),
+                timeout_secs: Some(timeout_secs),
+            }),
+            secrets: (!self.allowed_secrets.is_empty()).then(|| SecretsCapabilitySchema {
                 allowed_names: self.allowed_secrets.clone(),
-            });
-        }
-
-        caps
+            }),
+            tool_invoke: (!self.tool_aliases.is_empty()).then(|| ToolInvokeCapabilitySchema {
+                aliases: self.tool_aliases.clone(),
+                rate_limit: Some(rate_limit),
+            }),
+            workspace: (!self.workspace_read_prefixes.is_empty()).then(|| {
+                WorkspaceCapabilitySchema {
+                    allowed_prefixes: self.workspace_read_prefixes.clone(),
+                }
+            }),
+            ..Default::default()
+        };
+        schema.validate().map_err(WasmStorageError::InvalidData)?;
+        Ok(schema.to_capabilities())
     }
 }
 
@@ -221,6 +232,7 @@ pub trait WasmToolStore: Send + Sync {
     /// Get tool capabilities.
     async fn get_capabilities(
         &self,
+        user_id: &str,
         tool_id: Uuid,
     ) -> Result<Option<StoredCapabilities>, WasmStorageError>;
 
@@ -249,6 +261,59 @@ pub struct StoreToolParams {
     pub parameters_schema: serde_json::Value,
     pub source_url: Option<String>,
     pub trust_level: TrustLevel,
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql", test))]
+fn validate_store_tool_params(params: &StoreToolParams) -> Result<(), WasmStorageError> {
+    let valid_name = !params.name.is_empty()
+        && params.name.len() <= 128
+        && params
+            .name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    let valid_version = !params.version.is_empty()
+        && params.version.len() <= 64
+        && params
+            .version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'));
+    let valid_description = params.description.len() <= 64 * 1024
+        && !params
+            .description
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'));
+    let valid_user = !params.user_id.trim().is_empty()
+        && params.user_id.len() <= 256
+        && !params.user_id.chars().any(char::is_control);
+    let valid_wasm = (8..=64 * 1024 * 1024).contains(&params.wasm_binary.len())
+        && params.wasm_binary.starts_with(b"\0asm");
+    let valid_schema = serde_json::to_vec(&params.parameters_schema)
+        .map(|bytes| bytes.len() <= 1024 * 1024)
+        .unwrap_or(false);
+    let valid_source = params.source_url.as_deref().is_none_or(|source| {
+        source.len() <= 4096
+            && url::Url::parse(source).is_ok_and(|url| {
+                url.scheme() == "https"
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.fragment().is_none()
+            })
+    });
+    if !valid_name
+        || !valid_version
+        || !valid_description
+        || !valid_user
+        || !valid_wasm
+        || !valid_schema
+        || !valid_source
+    {
+        return Err(WasmStorageError::InvalidData(
+            "WASM tool metadata, binary, schema, or source URL is malformed or oversized"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Compute BLAKE3 hash of WASM binary.
@@ -280,6 +345,7 @@ impl PostgresWasmToolStore {
 #[async_trait]
 impl WasmToolStore for PostgresWasmToolStore {
     async fn store(&self, params: StoreToolParams) -> Result<StoredWasmTool, WasmStorageError> {
+        validate_store_tool_params(&params)?;
         let client = self
             .pool
             .get()
@@ -342,7 +408,8 @@ impl WasmToolStore for PostgresWasmToolStore {
                        source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = $1 AND name = $2 AND status = 'active'
-                ORDER BY version DESC
+                  AND octet_length(wasm_binary) BETWEEN 8 AND 67108864
+                ORDER BY updated_at DESC, created_at DESC, id DESC
                 LIMIT 1
                 "#,
                 &[&user_id, &name],
@@ -381,7 +448,8 @@ impl WasmToolStore for PostgresWasmToolStore {
                        parameters_schema, source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = $1 AND name = $2 AND status = 'active'
-                ORDER BY version DESC
+                  AND octet_length(wasm_binary) BETWEEN 8 AND 67108864
+                ORDER BY updated_at DESC, created_at DESC, id DESC
                 LIMIT 1
                 "#,
                 &[&user_id, &name],
@@ -391,8 +459,22 @@ impl WasmToolStore for PostgresWasmToolStore {
 
         match row {
             Some(r) => {
-                let wasm_binary: Vec<u8> = r.get("wasm_binary");
-                let binary_hash: Vec<u8> = r.get("binary_hash");
+                let wasm_binary: Vec<u8> = r
+                    .try_get("wasm_binary")
+                    .map_err(|error| WasmStorageError::Database(error.to_string()))?;
+                let binary_hash: Vec<u8> = r
+                    .try_get("binary_hash")
+                    .map_err(|error| WasmStorageError::Database(error.to_string()))?;
+
+                if wasm_binary.len() < 8
+                    || wasm_binary.len() > 64 * 1024 * 1024
+                    || !wasm_binary.starts_with(b"\0asm")
+                    || binary_hash.len() != 32
+                {
+                    return Err(WasmStorageError::InvalidData(
+                        "stored WASM binary or integrity hash is malformed".to_string(),
+                    ));
+                }
 
                 // Verify integrity
                 if !verify_binary_integrity(&wasm_binary, &binary_hash) {
@@ -422,6 +504,7 @@ impl WasmToolStore for PostgresWasmToolStore {
 
     async fn get_capabilities(
         &self,
+        user_id: &str,
         tool_id: Uuid,
     ) -> Result<Option<StoredCapabilities>, WasmStorageError> {
         let client = self
@@ -433,39 +516,79 @@ impl WasmToolStore for PostgresWasmToolStore {
         let row = client
             .query_opt(
                 r#"
-                SELECT id, wasm_tool_id, http_allowlist, allowed_secrets, tool_aliases,
-                       requests_per_minute, requests_per_hour, max_request_body_bytes,
-                       max_response_body_bytes, workspace_read_prefixes, http_timeout_secs
-                FROM tool_capabilities
-                WHERE wasm_tool_id = $1
+                SELECT capabilities.id, capabilities.wasm_tool_id,
+                       capabilities.http_allowlist, capabilities.allowed_secrets,
+                       capabilities.tool_aliases, capabilities.requests_per_minute,
+                       capabilities.requests_per_hour, capabilities.max_request_body_bytes,
+                       capabilities.max_response_body_bytes,
+                       capabilities.workspace_read_prefixes, capabilities.http_timeout_secs
+                FROM tool_capabilities AS capabilities
+                INNER JOIN wasm_tools AS tool ON tool.id = capabilities.wasm_tool_id
+                WHERE capabilities.wasm_tool_id = $1 AND tool.user_id = $2
                 "#,
-                &[&tool_id],
+                &[&tool_id, &user_id],
             )
             .await
             .map_err(|e| WasmStorageError::Database(e.to_string()))?;
 
         match row {
             Some(r) => {
-                let http_allowlist_json: serde_json::Value = r.get("http_allowlist");
-                let tool_aliases_json: serde_json::Value = r.get("tool_aliases");
+                let database_error =
+                    |error: tokio_postgres::Error| WasmStorageError::Database(error.to_string());
+                let http_allowlist_json: serde_json::Value =
+                    r.try_get("http_allowlist").map_err(database_error)?;
+                let tool_aliases_json: serde_json::Value =
+                    r.try_get("tool_aliases").map_err(database_error)?;
 
                 let http_allowlist: Vec<EndpointPattern> =
-                    serde_json::from_value(http_allowlist_json).unwrap_or_default();
+                    serde_json::from_value(http_allowlist_json).map_err(|error| {
+                        WasmStorageError::InvalidData(format!(
+                            "stored HTTP allowlist is invalid: {error}"
+                        ))
+                    })?;
                 let tool_aliases: HashMap<String, String> =
-                    serde_json::from_value(tool_aliases_json).unwrap_or_default();
+                    serde_json::from_value(tool_aliases_json).map_err(|error| {
+                        WasmStorageError::InvalidData(format!(
+                            "stored tool aliases are invalid: {error}"
+                        ))
+                    })?;
+                let requests_per_minute = u32::try_from(
+                    r.try_get::<_, i32>("requests_per_minute")
+                        .map_err(database_error)?,
+                )
+                .map_err(|_| {
+                    WasmStorageError::InvalidData(
+                        "stored requests-per-minute value is negative".to_string(),
+                    )
+                })?;
+                let requests_per_hour = u32::try_from(
+                    r.try_get::<_, i32>("requests_per_hour")
+                        .map_err(database_error)?,
+                )
+                .map_err(|_| {
+                    WasmStorageError::InvalidData(
+                        "stored requests-per-hour value is negative".to_string(),
+                    )
+                })?;
 
                 Ok(Some(StoredCapabilities {
-                    id: r.get("id"),
-                    wasm_tool_id: r.get("wasm_tool_id"),
+                    id: r.try_get("id").map_err(database_error)?,
+                    wasm_tool_id: r.try_get("wasm_tool_id").map_err(database_error)?,
                     http_allowlist,
-                    allowed_secrets: r.get("allowed_secrets"),
+                    allowed_secrets: r.try_get("allowed_secrets").map_err(database_error)?,
                     tool_aliases,
-                    requests_per_minute: r.get::<_, i32>("requests_per_minute") as u32,
-                    requests_per_hour: r.get::<_, i32>("requests_per_hour") as u32,
-                    max_request_body_bytes: r.get("max_request_body_bytes"),
-                    max_response_body_bytes: r.get("max_response_body_bytes"),
-                    workspace_read_prefixes: r.get("workspace_read_prefixes"),
-                    http_timeout_secs: r.get("http_timeout_secs"),
+                    requests_per_minute,
+                    requests_per_hour,
+                    max_request_body_bytes: r
+                        .try_get("max_request_body_bytes")
+                        .map_err(database_error)?,
+                    max_response_body_bytes: r
+                        .try_get("max_response_body_bytes")
+                        .map_err(database_error)?,
+                    workspace_read_prefixes: r
+                        .try_get("workspace_read_prefixes")
+                        .map_err(database_error)?,
+                    http_timeout_secs: r.try_get("http_timeout_secs").map_err(database_error)?,
                 }))
             }
             None => Ok(None),
@@ -486,7 +609,8 @@ impl WasmToolStore for PostgresWasmToolStore {
                        parameters_schema, source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = $1
-                ORDER BY name, version DESC
+                ORDER BY name, updated_at DESC, created_at DESC, id DESC
+                LIMIT 257
                 "#,
                 &[&user_id],
             )
@@ -544,23 +668,25 @@ impl WasmToolStore for PostgresWasmToolStore {
 
 #[cfg(feature = "postgres")]
 fn row_to_tool(row: &tokio_postgres::Row) -> Result<StoredWasmTool, WasmStorageError> {
-    let trust_level_str: String = row.get("trust_level");
-    let status_str: String = row.get("status");
+    let database_error =
+        |error: tokio_postgres::Error| WasmStorageError::Database(error.to_string());
+    let trust_level_str: String = row.try_get("trust_level").map_err(database_error)?;
+    let status_str: String = row.try_get("status").map_err(database_error)?;
 
     Ok(StoredWasmTool {
-        id: row.get("id"),
-        user_id: row.get("user_id"),
-        name: row.get("name"),
-        version: row.get("version"),
-        description: row.get("description"),
-        parameters_schema: row.get("parameters_schema"),
-        source_url: row.get("source_url"),
+        id: row.try_get("id").map_err(database_error)?,
+        user_id: row.try_get("user_id").map_err(database_error)?,
+        name: row.try_get("name").map_err(database_error)?,
+        version: row.try_get("version").map_err(database_error)?,
+        description: row.try_get("description").map_err(database_error)?,
+        parameters_schema: row.try_get("parameters_schema").map_err(database_error)?,
+        source_url: row.try_get("source_url").map_err(database_error)?,
         trust_level: trust_level_str
             .parse()
             .map_err(WasmStorageError::InvalidData)?,
         status: status_str.parse().map_err(WasmStorageError::InvalidData)?,
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
+        created_at: row.try_get("created_at").map_err(database_error)?,
+        updated_at: row.try_get("updated_at").map_err(database_error)?,
     })
 }
 
@@ -603,6 +729,7 @@ impl LibSqlWasmToolStore {
 #[async_trait]
 impl WasmToolStore for LibSqlWasmToolStore {
     async fn store(&self, params: StoreToolParams) -> Result<StoredWasmTool, WasmStorageError> {
+        validate_store_tool_params(&params)?;
         let binary_hash = compute_binary_hash(&params.wasm_binary);
         let id = Uuid::new_v4();
         let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -656,7 +783,7 @@ impl WasmToolStore for LibSqlWasmToolStore {
                        source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = ?1 AND name = ?2
-                ORDER BY version DESC
+                ORDER BY updated_at DESC, created_at DESC, rowid DESC
                 LIMIT 1
                 "#,
                 libsql::params![params.user_id.as_str(), params.name.as_str()],
@@ -690,7 +817,8 @@ impl WasmToolStore for LibSqlWasmToolStore {
                        source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = ?1 AND name = ?2 AND status = 'active'
-                ORDER BY version DESC
+                  AND length(wasm_binary) BETWEEN 8 AND 67108864
+                ORDER BY updated_at DESC, created_at DESC, rowid DESC
                 LIMIT 1
                 "#,
                 libsql::params![user_id, name],
@@ -728,7 +856,8 @@ impl WasmToolStore for LibSqlWasmToolStore {
                        parameters_schema, source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = ?1 AND name = ?2 AND status = 'active'
-                ORDER BY version DESC
+                  AND length(wasm_binary) BETWEEN 8 AND 67108864
+                ORDER BY updated_at DESC, created_at DESC, rowid DESC
                 LIMIT 1
                 "#,
                 libsql::params![user_id, name],
@@ -748,6 +877,16 @@ impl WasmToolStore for LibSqlWasmToolStore {
                 let binary_hash: Vec<u8> = row
                     .get(6)
                     .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+                if wasm_binary.len() < 8
+                    || wasm_binary.len() > 64 * 1024 * 1024
+                    || !wasm_binary.starts_with(b"\0asm")
+                    || binary_hash.len() != 32
+                {
+                    return Err(WasmStorageError::InvalidData(
+                        "stored WASM binary or integrity hash is malformed".to_string(),
+                    ));
+                }
 
                 if !verify_binary_integrity(&wasm_binary, &binary_hash) {
                     tracing::error!(
@@ -777,19 +916,24 @@ impl WasmToolStore for LibSqlWasmToolStore {
 
     async fn get_capabilities(
         &self,
+        user_id: &str,
         tool_id: Uuid,
     ) -> Result<Option<StoredCapabilities>, WasmStorageError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, wasm_tool_id, http_allowlist, allowed_secrets, tool_aliases,
-                       requests_per_minute, requests_per_hour, max_request_body_bytes,
-                       max_response_body_bytes, workspace_read_prefixes, http_timeout_secs
-                FROM tool_capabilities
-                WHERE wasm_tool_id = ?1
+                SELECT capabilities.id, capabilities.wasm_tool_id,
+                       capabilities.http_allowlist, capabilities.allowed_secrets,
+                       capabilities.tool_aliases, capabilities.requests_per_minute,
+                       capabilities.requests_per_hour, capabilities.max_request_body_bytes,
+                       capabilities.max_response_body_bytes,
+                       capabilities.workspace_read_prefixes, capabilities.http_timeout_secs
+                FROM tool_capabilities AS capabilities
+                INNER JOIN wasm_tools AS tool ON tool.id = capabilities.wasm_tool_id
+                WHERE capabilities.wasm_tool_id = ?1 AND tool.user_id = ?2
                 "#,
-                libsql::params![tool_id.to_string()],
+                libsql::params![tool_id.to_string(), user_id],
             )
             .await
             .map_err(|e| WasmStorageError::Database(e.to_string()))?;
@@ -806,24 +950,73 @@ impl WasmToolStore for LibSqlWasmToolStore {
                 let tool_id_str: String = row
                     .get(1)
                     .map_err(|e| WasmStorageError::Database(e.to_string()))?;
-                let http_allowlist_str: String = row.get::<String>(2).unwrap_or_default();
-                let allowed_secrets_str: String = row.get::<String>(3).unwrap_or_default();
-                let tool_aliases_str: String = row.get::<String>(4).unwrap_or_default();
-                let rpm: i64 = row.get::<i64>(5).unwrap_or(60);
-                let rph: i64 = row.get::<i64>(6).unwrap_or(1000);
-                let max_req: i64 = row.get::<i64>(7).unwrap_or(1048576);
-                let max_resp: i64 = row.get::<i64>(8).unwrap_or(10485760);
-                let ws_prefixes_str: String = row.get::<String>(9).unwrap_or_default();
-                let timeout: i64 = row.get::<i64>(10).unwrap_or(30);
+                let http_allowlist_str: String = row
+                    .get(2)
+                    .map_err(|error| WasmStorageError::Database(error.to_string()))?;
+                let allowed_secrets_str: String = row
+                    .get(3)
+                    .map_err(|error| WasmStorageError::Database(error.to_string()))?;
+                let tool_aliases_str: String = row
+                    .get(4)
+                    .map_err(|error| WasmStorageError::Database(error.to_string()))?;
+                let rpm: i64 = row
+                    .get(5)
+                    .map_err(|error| WasmStorageError::Database(error.to_string()))?;
+                let rph: i64 = row
+                    .get(6)
+                    .map_err(|error| WasmStorageError::Database(error.to_string()))?;
+                let max_req: i64 = row
+                    .get(7)
+                    .map_err(|error| WasmStorageError::Database(error.to_string()))?;
+                let max_resp: i64 = row
+                    .get(8)
+                    .map_err(|error| WasmStorageError::Database(error.to_string()))?;
+                let ws_prefixes_str: String = row
+                    .get(9)
+                    .map_err(|error| WasmStorageError::Database(error.to_string()))?;
+                let timeout: i64 = row
+                    .get(10)
+                    .map_err(|error| WasmStorageError::Database(error.to_string()))?;
 
                 let http_allowlist: Vec<EndpointPattern> =
-                    serde_json::from_str(&http_allowlist_str).unwrap_or_default();
-                let allowed_secrets: Vec<String> =
-                    serde_json::from_str(&allowed_secrets_str).unwrap_or_default();
-                let tool_aliases: HashMap<String, String> =
-                    serde_json::from_str(&tool_aliases_str).unwrap_or_default();
-                let workspace_read_prefixes: Vec<String> =
-                    serde_json::from_str(&ws_prefixes_str).unwrap_or_default();
+                    serde_json::from_str(&http_allowlist_str).map_err(|error| {
+                        WasmStorageError::InvalidData(format!(
+                            "stored HTTP allowlist is invalid: {error}"
+                        ))
+                    })?;
+                let allowed_secrets: Vec<String> = serde_json::from_str(&allowed_secrets_str)
+                    .map_err(|error| {
+                        WasmStorageError::InvalidData(format!(
+                            "stored secret allowlist is invalid: {error}"
+                        ))
+                    })?;
+                let tool_aliases: HashMap<String, String> = serde_json::from_str(&tool_aliases_str)
+                    .map_err(|error| {
+                        WasmStorageError::InvalidData(format!(
+                            "stored tool aliases are invalid: {error}"
+                        ))
+                    })?;
+                let workspace_read_prefixes: Vec<String> = serde_json::from_str(&ws_prefixes_str)
+                    .map_err(|error| {
+                    WasmStorageError::InvalidData(format!(
+                        "stored workspace prefixes are invalid: {error}"
+                    ))
+                })?;
+                let requests_per_minute = u32::try_from(rpm).map_err(|_| {
+                    WasmStorageError::InvalidData(
+                        "stored requests-per-minute value is negative".to_string(),
+                    )
+                })?;
+                let requests_per_hour = u32::try_from(rph).map_err(|_| {
+                    WasmStorageError::InvalidData(
+                        "stored requests-per-hour value is negative".to_string(),
+                    )
+                })?;
+                let http_timeout_secs = i32::try_from(timeout).map_err(|_| {
+                    WasmStorageError::InvalidData(
+                        "stored HTTP timeout exceeds the supported range".to_string(),
+                    )
+                })?;
 
                 Ok(Some(StoredCapabilities {
                     id: id_str
@@ -835,12 +1028,12 @@ impl WasmToolStore for LibSqlWasmToolStore {
                     http_allowlist,
                     allowed_secrets,
                     tool_aliases,
-                    requests_per_minute: rpm as u32,
-                    requests_per_hour: rph as u32,
+                    requests_per_minute,
+                    requests_per_hour,
                     max_request_body_bytes: max_req,
                     max_response_body_bytes: max_resp,
                     workspace_read_prefixes,
-                    http_timeout_secs: timeout as i32,
+                    http_timeout_secs,
                 }))
             }
             None => Ok(None),
@@ -848,7 +1041,8 @@ impl WasmToolStore for LibSqlWasmToolStore {
     }
 
     async fn list(&self, user_id: &str) -> Result<Vec<StoredWasmTool>, WasmStorageError> {
-        // SQLite doesn't have DISTINCT ON, so we use a subquery to get latest version per name
+        // SQLite doesn't have DISTINCT ON, so use row insertion order to get
+        // the most recently stored generation for each name.
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -857,13 +1051,16 @@ impl WasmToolStore for LibSqlWasmToolStore {
                        source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = ?1
-                  AND rowid IN (
-                      SELECT MAX(rowid)
-                      FROM wasm_tools
-                      WHERE user_id = ?1
-                      GROUP BY name
+                  AND rowid = (
+                      SELECT newer.rowid
+                      FROM wasm_tools AS newer
+                      WHERE newer.user_id = wasm_tools.user_id
+                        AND newer.name = wasm_tools.name
+                      ORDER BY newer.updated_at DESC, newer.created_at DESC, newer.rowid DESC
+                      LIMIT 1
                   )
                 ORDER BY name
+                LIMIT 257
                 "#,
                 libsql::params![user_id],
             )
@@ -1014,11 +1211,13 @@ fn libsql_row_to_tool_at(
         description: row
             .get(description_idx)
             .map_err(|e| WasmStorageError::Database(e.to_string()))?,
-        parameters_schema: serde_json::from_str(&schema_str).unwrap_or_default(),
+        parameters_schema: serde_json::from_str(&schema_str).map_err(|error| {
+            WasmStorageError::InvalidData(format!("stored parameter schema is invalid: {error}"))
+        })?,
         source_url: row
-            .get::<String>(source_url_idx)
-            .ok()
-            .filter(|s| !s.is_empty()),
+            .get::<Option<String>>(source_url_idx)
+            .map_err(|error| WasmStorageError::Database(error.to_string()))?
+            .filter(|source| !source.is_empty()),
         trust_level: trust_level_str
             .parse()
             .map_err(WasmStorageError::InvalidData)?,
@@ -1031,7 +1230,8 @@ fn libsql_row_to_tool_at(
 #[cfg(test)]
 mod tests {
     use crate::wasm::storage::{
-        ToolStatus, TrustLevel, compute_binary_hash, verify_binary_integrity,
+        StoreToolParams, StoredCapabilities, ToolStatus, TrustLevel, compute_binary_hash,
+        validate_store_tool_params, verify_binary_integrity,
     };
 
     #[test]
@@ -1079,5 +1279,42 @@ mod tests {
             ToolStatus::Quarantined
         );
         assert!("invalid".parse::<ToolStatus>().is_err());
+    }
+
+    #[test]
+    fn stored_capabilities_reject_negative_numeric_values() {
+        let stored = StoredCapabilities {
+            id: uuid::Uuid::new_v4(),
+            wasm_tool_id: uuid::Uuid::new_v4(),
+            http_allowlist: vec![crate::wasm::EndpointPattern::host("api.example.com")],
+            allowed_secrets: Vec::new(),
+            tool_aliases: std::collections::HashMap::new(),
+            requests_per_minute: 60,
+            requests_per_hour: 1000,
+            max_request_body_bytes: -1,
+            max_response_body_bytes: 1024,
+            workspace_read_prefixes: Vec::new(),
+            http_timeout_secs: 30,
+        };
+
+        assert!(stored.to_capabilities().is_err());
+    }
+
+    #[test]
+    fn store_params_require_bounded_valid_wasm() {
+        let mut params = StoreToolParams {
+            user_id: "user".to_string(),
+            name: "example".to_string(),
+            version: "1.0.0".to_string(),
+            description: "Example".to_string(),
+            wasm_binary: b"\0asm\x01\0\0\0".to_vec(),
+            parameters_schema: serde_json::json!({"type": "object"}),
+            source_url: Some("https://example.com/tool.wasm".to_string()),
+            trust_level: TrustLevel::User,
+        };
+        assert!(validate_store_tool_params(&params).is_ok());
+
+        params.name = "../escape".to_string();
+        assert!(validate_store_tool_params(&params).is_err());
     }
 }

@@ -238,7 +238,7 @@ rm -rf "$tmp"
 Linux notes:
 
 - The default `light` profile includes the local gateway and does not need any extra system packages beyond the normal Rust build toolchain.
-- `full` needs Docker for Docker sandbox jobs and Docker Chromium fallback. The default `CHROMIUM_IMAGE=chromedp/headless-shell:latest` is multi-arch; use a local Chrome/Chromium/Brave/Edge browser if you set `BROWSER_DOCKER=never`.
+- `full` needs Docker for Docker sandbox jobs and Docker Chromium fallback. The default `CHROMIUM_IMAGE=chromedp/headless-shell:150.0.7871.125@sha256:7f8ec4782f1b138c30900e65ae53795d5966fbf52168b8fc062843db3e6d5be5` is a pinned multi-arch OCI index; custom browser images must also use an `@sha256` digest. The isolated fallback additionally requires a trusted local `BROWSER_RELAY_IMAGE` (normally `thinclaw-worker:latest`, built from `Dockerfile.worker`) or a digest-pinned remote relay image. Use a local Chrome/Chromium/Brave/Edge browser if you set `BROWSER_DOCKER=never`.
 - Raspberry Pi OS Lite 64-bit should use the edge `aarch64-unknown-linux-gnu` release artifact for native installs unless it specifically needs Postgres, local WASM runtime, Docker, browser automation, Nostr, or tunnel features.
 - `--features light,voice` or `--all-features` requires `libasound2-dev`.
 - `--features bedrock` or `--all-features` requires AWS credentials (`AWS_PROFILE` or AWS access keys).

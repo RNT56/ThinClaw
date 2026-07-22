@@ -5,6 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
+const MAX_INIT_DIRECTORY_BYTES: usize = 4_096;
+const MAX_INIT_DIRECTORY_ENTRIES: usize = 1_024;
+const MAX_INIT_SCRIPTS: usize = 128;
+const MAX_INIT_SCRIPT_BYTES: u64 = 1024 * 1024;
+const MAX_INIT_TIMEOUT_SECONDS: u64 = 3_600;
+
 /// Configuration for Docker init scripts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DockerInitConfig {
@@ -36,13 +42,18 @@ impl DockerInitConfig {
     /// Create from environment.
     pub fn from_env() -> Self {
         let mut config = Self::default();
-        if let Ok(dir) = std::env::var("INIT_SCRIPTS_DIR") {
+        if let Ok(dir) = std::env::var("INIT_SCRIPTS_DIR")
+            && !dir.is_empty()
+            && dir.len() <= MAX_INIT_DIRECTORY_BYTES
+            && !dir.contains('\0')
+            && std::path::Path::new(&dir).is_absolute()
+        {
             config.init_dir = dir;
         }
         if let Ok(timeout) = std::env::var("INIT_TIMEOUT")
-            && let Ok(t) = timeout.parse()
+            && let Ok(t) = timeout.parse::<u64>()
         {
-            config.timeout_secs = t;
+            config.timeout_secs = t.clamp(1, MAX_INIT_TIMEOUT_SECONDS);
         }
         if std::env::var("INIT_CONTINUE_ON_ERROR").is_ok() {
             config.fail_fast = false;
@@ -53,16 +64,32 @@ impl DockerInitConfig {
     /// Discover init scripts in the init directory (sorted).
     pub fn discover_scripts(&self) -> Vec<InitScript> {
         let path = std::path::Path::new(&self.init_dir);
-        if !path.is_dir() {
+        if self.init_dir.len() > MAX_INIT_DIRECTORY_BYTES
+            || !path.is_absolute()
+            || !std::fs::symlink_metadata(path)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        {
             return Vec::new();
         }
 
         let mut scripts = Vec::new();
 
         if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
+            for (index, entry) in entries.enumerate() {
+                if index >= MAX_INIT_DIRECTORY_ENTRIES {
+                    return Vec::new();
+                }
+                let Ok(entry) = entry else {
+                    return Vec::new();
+                };
                 let file_path = entry.path();
-                if !file_path.is_file() {
+                let Ok(metadata) = std::fs::symlink_metadata(&file_path) else {
+                    continue;
+                };
+                if !metadata.is_file()
+                    || metadata.file_type().is_symlink()
+                    || metadata.len() > MAX_INIT_SCRIPT_BYTES
+                {
                     continue;
                 }
 
@@ -78,14 +105,21 @@ impl DockerInitConfig {
                     .unwrap_or("")
                     .to_string();
 
-                let executable = is_executable(&file_path);
+                if name.is_empty() || name.len() > 255 || name.chars().any(char::is_control) {
+                    continue;
+                }
+                if scripts.len() >= MAX_INIT_SCRIPTS {
+                    return Vec::new();
+                }
+
+                let executable = is_executable(&metadata);
 
                 scripts.push(InitScript {
                     name,
                     path: file_path.to_string_lossy().to_string(),
                     extension: extension.to_string(),
                     executable,
-                    size_bytes: entry.metadata().map(|m| m.len()).unwrap_or(0),
+                    size_bytes: metadata.len(),
                 });
             }
         }
@@ -133,15 +167,13 @@ impl InitScript {
 
 /// Check if a file is executable (Unix).
 #[cfg(unix)]
-fn is_executable(path: &std::path::Path) -> bool {
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    metadata.permissions().mode() & 0o111 != 0
 }
 
 #[cfg(not(unix))]
-fn is_executable(_path: &std::path::Path) -> bool {
+fn is_executable(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 

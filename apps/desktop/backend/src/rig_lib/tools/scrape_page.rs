@@ -1,4 +1,3 @@
-use chromiumoxide::{Browser, BrowserConfig};
 use futures::StreamExt;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -9,21 +8,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ScrapeError {
-    #[error("Chromium error: {0}")]
-    Chromium(String), // map chromiumoxide error to string deeply if needed, or implement From
-    #[error("Request failed: {0}")]
-    Request(#[from] reqwest::Error),
     #[error("Serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("Other: {0}")]
     Other(String),
-}
-
-// Implement From for chromiumoxide::CdpError
-impl From<chromiumoxide::error::CdpError> for ScrapeError {
-    fn from(e: chromiumoxide::error::CdpError) -> Self {
-        ScrapeError::Chromium(e.to_string())
-    }
 }
 
 #[derive(Deserialize)]
@@ -46,7 +34,7 @@ impl Tool for ScrapePageTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "scrape_page".to_string(),
-            description: "A tool to scrape the content of a web page. Use this when you need detailed information from a specific URL.".to_string(),
+            description: "Fetch and extract readable text from a public web page. Use this when you need detailed information from a specific URL.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -56,7 +44,7 @@ impl Tool for ScrapePageTool {
                     },
                     "javascript_enabled": {
                         "type": "boolean",
-                        "description": "Whether to use a headless browser to render JavaScript (default: true). Set to false for simple static pages for faster speed."
+                        "description": "Retained for compatibility. Fetching is isolated and does not execute page JavaScript."
                     }
                 },
                 "required": ["url"]
@@ -65,7 +53,8 @@ impl Tool for ScrapePageTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let use_js = args.javascript_enabled.unwrap_or(true);
+        let _javascript_requested = args.javascript_enabled.unwrap_or(true);
+        let display_url = Self::display_url(&args.url);
 
         if let Ok(app_guard) = self.app.lock() {
             if let Some(app) = app_guard.as_ref() {
@@ -79,23 +68,36 @@ impl Tool for ScrapePageTool {
                     "web_search_status",
                     WebSearchStatus {
                         step: "browsing".into(),
-                        message: format!("Visiting page: {}", args.url),
+                        message: format!("Visiting page: {display_url}"),
                     },
                 );
             }
         }
 
-        if use_js {
-            // scrape_with_browser already returns clean text via scrape_url
-            self.scrape_with_browser(&args.url).await
-        } else {
-            let html = reqwest::get(&args.url).await?.text().await?;
-            Self::extract_smart_text(&html)
-        }
+        let html = Self::fetch_public_page(&args.url).await?;
+        Self::extract_smart_text(&html)
     }
 }
 
 impl ScrapePageTool {
+    const MAX_PAGE_BYTES: u64 = 4 * 1024 * 1024;
+    const MAX_EXTRACTED_BYTES: usize = 2 * 1024 * 1024;
+    const MAX_REDIRECTS: usize = 5;
+
+    fn display_url(raw: &str) -> String {
+        reqwest::Url::parse(raw)
+            .ok()
+            .and_then(|mut url| {
+                url.set_query(None);
+                url.set_fragment(None);
+                if !url.username().is_empty() || url.password().is_some() {
+                    return None;
+                }
+                Some(url.to_string())
+            })
+            .unwrap_or_else(|| "invalid URL".to_string())
+    }
+
     pub fn extract_smart_text(html: &str) -> Result<String, ScrapeError> {
         let document = Html::parse_document(html);
         let selectors = vec!["main", "article", "#content", "#main", ".main-content"];
@@ -113,129 +115,119 @@ impl ScrapePageTool {
             }
         }
 
-        html2text::from_read(target_html.as_bytes(), 120)
-            .map_err(|e| ScrapeError::Other(e.to_string()))
-    }
-
-    pub async fn launch_browser(
-        &self,
-    ) -> Result<(Browser, tokio::task::JoinHandle<()>), ScrapeError> {
-        let app_handle = self.app.lock().map(|g| g.clone()).unwrap_or(None);
-
-        use crate::rig_lib::chromium_resolver::ensure_chromium;
-        // Ensure proper browser binary is available
-        let exec_path = ensure_chromium(app_handle.as_ref())
-            .await
-            .map_err(ScrapeError::Other)?;
-
-        // Config with unique user data dir implicitly handled by chromiumoxide usually,
-        // but we can trust a single instance to be fine.
-        let config = BrowserConfig::builder()
-            .chrome_executable(exec_path)
-            .arg("--disable-dev-shm-usage")
-            .arg("--disable-extensions")
-            .arg("--no-sandbox")
-            .arg("--disable-gpu")
-            .arg("--disable-setuid-sandbox")
-            .arg("--password-store=basic")
-            .viewport(None)
-            .build()
-            .map_err(ScrapeError::Other)?;
-
-        let (browser, mut handler) = Browser::launch(config).await.map_err(ScrapeError::from)?;
-
-        let handler_handle = tokio::task::spawn(async move {
-            while let Some(h) = handler.next().await {
-                if let Err(e) = h {
-                    // Filter out common protocol noise
-                    let err_str = e.to_string();
-                    if !err_str.contains("untagged enum Message")
-                        && !err_str.contains("Channel closed")
-                    {
-                        eprintln!("Chromium handler error: {}", err_str);
-                    }
-                }
+        let mut text = html2text::from_read(target_html.as_bytes(), 120)
+            .map_err(|_| ScrapeError::Other("Could not extract page text".to_string()))?;
+        if text.len() > Self::MAX_EXTRACTED_BYTES {
+            let mut end = Self::MAX_EXTRACTED_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
             }
-        });
-
-        Ok((browser, handler_handle))
+            text.truncate(end);
+        }
+        Ok(text)
     }
 
-    pub async fn scrape_url(&self, browser: &Browser, url: &str) -> Result<String, ScrapeError> {
-        let scrape_logic = async {
-            let page = browser.new_page(url).await.map_err(ScrapeError::from)?;
-
-            page.wait_for_navigation()
-                .await
-                .map_err(ScrapeError::from)?;
-
-            let content = page.content().await.map_err(ScrapeError::from)?;
-            page.close().await.map_err(ScrapeError::from)?;
-
-            Self::extract_smart_text(&content)
+    pub async fn fetch_public_page(raw_url: &str) -> Result<String, ScrapeError> {
+        let options = thinclaw_tools_core::OutboundUrlGuardOptions {
+            require_https: true,
+            upgrade_http_to_https: true,
+            allowlist: Vec::new(),
         };
-
-        match tokio::time::timeout(std::time::Duration::from_secs(8), scrape_logic).await {
-            Ok(res) => res,
-            Err(_) => {
-                println!("[scrape] Timeout for url: {}", url);
-                Err(ScrapeError::Other("Timeout".to_string()))
+        let mut current = raw_url.to_string();
+        for redirect_count in 0..=Self::MAX_REDIRECTS {
+            let guarded =
+                thinclaw_tools_core::validate_outbound_url_pinned_async(&current, &options)
+                    .await
+                    .map_err(|_| {
+                        ScrapeError::Other("Page URL is not a public HTTPS destination".into())
+                    })?;
+            let host = guarded
+                .url
+                .host_str()
+                .ok_or_else(|| ScrapeError::Other("Page URL has no host".into()))?
+                .to_string();
+            let mut builder = reqwest::Client::builder()
+                .no_proxy()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .read_timeout(std::time::Duration::from_secs(15))
+                .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent("ThinClawDesktop/0.14");
+            if !guarded.pinned_addrs.is_empty() {
+                builder = builder.resolve_to_addrs(&host, &guarded.pinned_addrs);
             }
-        }
-    }
-
-    pub async fn scrape_with_browser(&self, url: &str) -> Result<String, ScrapeError> {
-        // Hybrid Fetching: Try simple GET first
-        if let Ok(resp) = reqwest::get(url).await {
-            if let Ok(text) = resp.text().await {
-                // Heuristic: If text is substantial and doesn't look like a JS loader
-                if text.len() > 500
-                    && !text.contains("You need to enable JavaScript")
-                    && !text.contains("Please enable JS")
-                {
-                    if let Ok(clean) = Self::extract_smart_text(&text) {
-                        if clean.len() > 200 {
-                            println!("[scrape] Fast path success for: {}", url);
-                            return Ok(clean);
-                        }
-                    }
-                }
-            }
-        }
-
-        println!(
-            "[scrape] Fast path failed/insufficient, using browser for: {}",
-            url
-        );
-
-        let app_handle = self.app.lock().map(|g| g.clone()).unwrap_or(None);
-        let url = url.to_string();
-
-        let result = tokio::task::spawn_blocking(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
+            let client = builder
                 .build()
-                .map_err(|e| ScrapeError::Other(e.to_string()))?;
-
-            rt.block_on(async {
-                let scraper = ScrapePageTool {
-                    app: std::sync::Mutex::new(app_handle),
-                };
-                let (mut browser, handler) = scraper.launch_browser().await?;
-                let res = scraper.scrape_url(&browser, &url).await;
-
-                // Systematic Cleanup
-                let _ = browser.close().await;
-                let _ = handler.await;
-                // Small sleep to ensure the OS handles the socket cleanup before dropping the runtime
-                tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-
-                res
-            })
-        })
-        .await
-        .map_err(|e| ScrapeError::Other(e.to_string()))??;
-
-        Ok(result)
+                .map_err(|_| ScrapeError::Other("Could not create page client".into()))?;
+            let response = client
+                .get(guarded.url.clone())
+                .send()
+                .await
+                .map_err(|error| {
+                    ScrapeError::Other(crate::rig_lib::http::transport_error(
+                        "Page request failed",
+                        error,
+                    ))
+                })?;
+            if response.status().is_redirection() {
+                if redirect_count == Self::MAX_REDIRECTS {
+                    return Err(ScrapeError::Other("Page redirected too many times".into()));
+                }
+                let location = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| ScrapeError::Other("Page redirect was malformed".into()))?;
+                current = guarded
+                    .url
+                    .join(location)
+                    .map_err(|_| ScrapeError::Other("Page redirect URL was invalid".into()))?
+                    .to_string();
+                continue;
+            }
+            if !response.status().is_success() {
+                return Err(ScrapeError::Other(format!(
+                    "Page request failed with HTTP {}",
+                    response.status()
+                )));
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > Self::MAX_PAGE_BYTES)
+            {
+                return Err(ScrapeError::Other("Page exceeds the download limit".into()));
+            }
+            if response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| {
+                    let mime = value.split(';').next().unwrap_or_default().trim();
+                    !matches!(mime, "text/html" | "application/xhtml+xml" | "text/plain")
+                })
+            {
+                return Err(ScrapeError::Other(
+                    "Page response is not readable text or HTML".into(),
+                ));
+            }
+            let mut bytes = Vec::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|error| {
+                    ScrapeError::Other(crate::rig_lib::http::transport_error(
+                        "Page response failed",
+                        error,
+                    ))
+                })?;
+                if bytes.len().saturating_add(chunk.len())
+                    > usize::try_from(Self::MAX_PAGE_BYTES).unwrap_or(usize::MAX)
+                {
+                    return Err(ScrapeError::Other("Page exceeds the download limit".into()));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        Err(ScrapeError::Other("Page fetch did not complete".into()))
     }
 }

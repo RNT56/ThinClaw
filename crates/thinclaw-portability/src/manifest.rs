@@ -26,6 +26,7 @@ pub enum SectionKind {
 
 /// One logical unit of exported state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BundleSection {
     /// Stable section name (unique within a bundle), e.g. `settings`,
     /// `workspace`, `database`.
@@ -51,6 +52,7 @@ pub struct BundleSection {
 
 /// The bundle manifest, serialized to `manifest.json` at the archive root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BundleManifest {
     /// Manifest schema version.
     pub manifest_version: u16,

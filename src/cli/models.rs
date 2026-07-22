@@ -15,6 +15,9 @@ use clap::Subcommand;
 
 use crate::terminal_branding::TerminalBranding;
 
+const MAX_MODEL_IDENTIFIER_BYTES: usize = 1024;
+const MAX_MODEL_AUTH_HEADER_BYTES: usize = 64 * 1024;
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum ModelCommand {
     /// List all configured and discovered models
@@ -115,7 +118,7 @@ struct VerificationRequest {
     transport: VerificationTransport,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum VerificationTransport {
     Anthropic {
         api_key: String,
@@ -123,7 +126,29 @@ enum VerificationTransport {
     OpenAiCompatible {
         base_url: String,
         auth_header: Option<String>,
+        public_only: bool,
     },
+}
+
+impl std::fmt::Debug for VerificationTransport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anthropic { .. } => formatter
+                .debug_struct("Anthropic")
+                .field("api_key", &"[REDACTED]")
+                .finish(),
+            Self::OpenAiCompatible {
+                auth_header,
+                public_only,
+                ..
+            } => formatter
+                .debug_struct("OpenAiCompatible")
+                .field("base_url", &"[REDACTED URL]")
+                .field("auth_header", &auth_header.as_ref().map(|_| "[REDACTED]"))
+                .field("public_only", public_only)
+                .finish(),
+        }
+    }
 }
 
 /// Get the list of known models (built-in knowledge).
@@ -261,10 +286,13 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
         }
 
         ModelCommand::Test { model } => {
+            validate_probe_value(&model, MAX_MODEL_IDENTIFIER_BYTES, "model identifier")
+                .map_err(anyhow::Error::msg)?;
             branding.print_banner("Model Connectivity Test", Some(&model));
 
             let backend =
                 std::env::var("LLM_BACKEND").unwrap_or_else(|_| "openai_compatible".to_string());
+            validate_probe_value(&backend, 64, "LLM backend").map_err(anyhow::Error::msg)?;
             let base_url = match backend.as_str() {
                 "openai" => std::env::var("OPENAI_BASE_URL")
                     .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
@@ -277,44 +305,28 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
             };
 
             println!("{}", branding.key_value("Backend", &backend));
-            println!("{}", branding.key_value("Base URL", &base_url));
+            println!(
+                "{}",
+                branding.key_value("Base URL", safe_endpoint_display(&base_url))
+            );
 
-            let client = reqwest::Client::new();
             let api_key = std::env::var("OPENAI_API_KEY")
                 .or_else(|_| std::env::var("LLM_API_KEY"))
                 .unwrap_or_default();
+            let auth_header = if api_key.trim().is_empty() {
+                None
+            } else {
+                Some(format!("Bearer {}", api_key.trim()))
+            };
+            let transport = VerificationTransport::OpenAiCompatible {
+                base_url,
+                auth_header,
+                public_only: false,
+            };
 
-            let response = client
-                .post(format!("{}/chat/completions", base_url))
-                .header("Authorization", format!("Bearer {}", api_key))
-                .json(&serde_json::json!({
-                    "model": model,
-                    "messages": [{"role": "user", "content": "Say 'OK'"}],
-                    "max_tokens": 5,
-                }))
-                .send()
-                .await;
-
-            match response {
-                Ok(resp) => {
-                    if resp.status().is_success() {
-                        println!("  {}", branding.good("Connection successful."));
-                        if let Ok(body) = resp.json::<serde_json::Value>().await
-                            && let Some(content) = body["choices"][0]["message"]["content"].as_str()
-                        {
-                            println!("{}", branding.key_value("Response", content.trim()));
-                        }
-                    } else {
-                        println!("  {}", branding.bad(format!("HTTP {}", resp.status())));
-                        if let Ok(body) = resp.text().await {
-                            let preview: String = body.chars().take(200).collect();
-                            println!("{}", branding.key_value("Error", preview));
-                        }
-                    }
-                }
-                Err(e) => {
-                    println!("  {}", branding.bad(format!("Connection failed: {}", e)));
-                }
+            match verify_chat_probe(&transport, &model, Duration::from_secs(12)).await {
+                Ok(()) => println!("  {}", branding.good("Connection successful.")),
+                Err(error) => println!("  {}", branding.bad(error)),
             }
         }
 
@@ -403,41 +415,25 @@ async fn discover_ollama_models() -> anyhow::Result<Vec<ModelInfo>> {
         .or_else(|_| std::env::var("OLLAMA_HOST"))
         .unwrap_or_else(|_| "http://localhost:11434".to_string());
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()?;
-
-    let response = client
-        .get(format!("{}/api/tags", ollama_url))
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        return Ok(Vec::new());
+    let result = crate::llm::discovery::ModelDiscovery::with_timeout(Duration::from_secs(2))
+        .discover_ollama(&ollama_url)
+        .await;
+    if let Some(error) = result.error {
+        return Err(anyhow::anyhow!(error));
     }
-
-    let body: serde_json::Value = response.json().await?;
-    let models = body["models"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .map(|m| ModelInfo {
-                    name: m["name"].as_str().unwrap_or("unknown").to_string(),
-                    provider: "ollama".to_string(),
-                    context_window: m["details"]["context_length"].as_u64().map(|c| c as u32),
-                    max_output: None,
-                    supports_vision: m["details"]["families"]
-                        .as_array()
-                        .map(|f| f.iter().any(|fam| fam.as_str() == Some("clip")))
-                        .unwrap_or(false),
-                    supports_tools: true,
-                    supports_streaming: true,
-                })
-                .collect()
+    Ok(result
+        .models
+        .into_iter()
+        .map(|model| ModelInfo {
+            name: model.id,
+            provider: "ollama".to_string(),
+            context_window: model.context_length,
+            max_output: None,
+            supports_vision: false,
+            supports_tools: true,
+            supports_streaming: true,
         })
-        .unwrap_or_default();
-
-    Ok(models)
+        .collect())
 }
 
 async fn load_verification_context() -> anyhow::Result<VerificationContext> {
@@ -551,6 +547,7 @@ async fn verify_provider(
         VerificationTransport::OpenAiCompatible {
             base_url,
             auth_header,
+            public_only,
         } => {
             if slug == "cohere" {
                 let api_key = auth_header
@@ -572,6 +569,10 @@ async fn verify_provider(
                         };
                     }
                 }
+            } else if *public_only {
+                discovery
+                    .discover_public_openai_compatible(base_url, auth_header.as_deref())
+                    .await
             } else {
                 discovery
                     .discover_openai_compatible(base_url, auth_header.as_deref())
@@ -693,6 +694,7 @@ async fn build_verification_request(
                     transport: VerificationTransport::OpenAiCompatible {
                         base_url: endpoint.base_url.to_string(),
                         auth_header: Some(format!("Bearer {api_key}")),
+                        public_only: true,
                     },
                 }))
             }
@@ -719,12 +721,14 @@ async fn build_verification_request(
         .await
         {
             let region = bedrock_region(&context.settings);
+            let base_url = crate::llm::discovery::bedrock_mantle_base_url(&region)?;
             return Ok(Some(VerificationRequest {
                 configured_model,
                 default_model: "anthropic.claude-opus-4-8".to_string(),
                 transport: VerificationTransport::OpenAiCompatible {
-                    base_url: crate::llm::discovery::bedrock_mantle_base_url(&region),
+                    base_url,
                     auth_header: Some(format!("Bearer {api_key}")),
+                    public_only: true,
                 },
             }));
         }
@@ -749,6 +753,7 @@ async fn build_verification_request(
                 transport: VerificationTransport::OpenAiCompatible {
                     base_url: proxy_url,
                     auth_header,
+                    public_only: false,
                 },
             }));
         }
@@ -910,15 +915,19 @@ async fn verify_chat_probe(
     model: &str,
     timeout: Duration,
 ) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    validate_probe_value(model, MAX_MODEL_IDENTIFIER_BYTES, "model identifier")?;
+    let timeout = timeout
+        .max(Duration::from_millis(1))
+        .min(Duration::from_secs(5 * 60));
 
     match transport {
         VerificationTransport::Anthropic { api_key } => {
+            validate_probe_value(api_key, MAX_MODEL_AUTH_HEADER_BYTES, "Anthropic API key")?;
+            let endpoint = "https://api.anthropic.com/v1/messages";
+            let (client, endpoint) =
+                crate::llm::discovery::client_for_endpoint(endpoint, timeout, true).await?;
             let resp = client
-                .post("https://api.anthropic.com/v1/messages")
+                .post(endpoint)
                 .header("x-api-key", api_key)
                 .header("anthropic-version", "2023-06-01")
                 .json(&serde_json::json!({
@@ -929,67 +938,119 @@ async fn verify_chat_probe(
                 }))
                 .send()
                 .await
-                .map_err(|e| format!("Anthropic chat probe failed: {}", e))?;
+                .map_err(|e| format!("Anthropic chat probe failed: {}", e.without_url()))?;
 
             if resp.status().is_success() {
                 Ok(())
             } else {
-                Err(http_error_with_preview("Anthropic chat probe", resp).await)
+                Err(format!(
+                    "Anthropic chat probe returned HTTP {}",
+                    resp.status()
+                ))
             }
         }
         VerificationTransport::OpenAiCompatible {
             base_url,
             auth_header,
+            public_only,
         } => {
-            let mut req = client
-                .post(join_openai_path(base_url, "/chat/completions"))
-                .json(&serde_json::json!({
-                    "model": model,
-                    "messages": [{"role": "user", "content": "Reply with exactly OK."}],
-                    "max_tokens": 4,
-                    "temperature": 0.0,
-                }));
+            if let Some(auth_header) = auth_header {
+                validate_probe_value(
+                    auth_header,
+                    MAX_MODEL_AUTH_HEADER_BYTES,
+                    "authorization header",
+                )?;
+            }
+            let endpoint = openai_chat_endpoint(base_url)?;
+            let (client, endpoint) = crate::llm::discovery::client_for_endpoint(
+                endpoint.as_str(),
+                timeout,
+                *public_only,
+            )
+            .await?;
+            let mut req = client.post(endpoint).json(&serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "Reply with exactly OK."}],
+                "max_tokens": 4,
+                "temperature": 0.0,
+            }));
             if let Some(auth_header) = auth_header {
                 req = req.header("Authorization", auth_header);
             }
             let resp = req
                 .send()
                 .await
-                .map_err(|e| format!("Chat probe failed: {}", e))?;
+                .map_err(|e| format!("Chat probe failed: {}", e.without_url()))?;
 
             if resp.status().is_success() {
                 Ok(())
             } else {
-                Err(http_error_with_preview("Chat probe", resp).await)
+                Err(format!("Chat probe returned HTTP {}", resp.status()))
             }
         }
     }
 }
 
-fn join_openai_path(base_url: &str, suffix: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with(suffix.trim_start_matches('/')) {
-        trimmed.to_string()
-    } else if trimmed.ends_with("/v1") || trimmed.ends_with("/v2") || trimmed.ends_with("/openai") {
-        format!("{trimmed}{suffix}")
+fn validate_probe_value(value: &str, max_bytes: usize, label: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
+        Err(format!("{label} is empty, oversized, or malformed"))
     } else {
-        format!("{trimmed}/v1{suffix}")
+        Ok(())
     }
 }
 
-async fn http_error_with_preview(prefix: &str, response: reqwest::Response) -> String {
-    let status = response.status();
-    let preview = response
-        .text()
-        .await
-        .unwrap_or_default()
-        .chars()
-        .take(200)
-        .collect::<String>();
-    if preview.is_empty() {
-        format!("{prefix} returned HTTP {status}")
+fn openai_chat_endpoint(base_url: &str) -> Result<reqwest::Url, String> {
+    if base_url.is_empty() || base_url.len() > 16 * 1024 {
+        return Err("model endpoint is empty or oversized".to_string());
+    }
+    let mut endpoint = reqwest::Url::parse(base_url)
+        .map_err(|error| format!("invalid model endpoint: {error}"))?;
+    if !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err(
+            "model endpoint cannot contain credentials, a query, or a fragment".to_string(),
+        );
+    }
+    let trimmed = endpoint.path().trim_end_matches('/');
+    let path = if trimmed.ends_with("/chat/completions") {
+        trimmed.to_string()
+    } else if trimmed.ends_with("/v1") || trimmed.ends_with("/v2") || trimmed.ends_with("/openai") {
+        format!("{trimmed}/chat/completions")
     } else {
-        format!("{prefix} returned HTTP {status}: {preview}")
+        format!("{trimmed}/v1/chat/completions")
+    };
+    endpoint.set_path(&path);
+    Ok(endpoint)
+}
+
+fn safe_endpoint_display(value: &str) -> String {
+    let Ok(mut endpoint) = reqwest::Url::parse(value) else {
+        return "<invalid endpoint>".to_string();
+    };
+    let _ = endpoint.set_password(None);
+    let _ = endpoint.set_username("");
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+    endpoint.to_string()
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn chat_endpoint_joining_is_structural_and_rejects_secrets() {
+        assert_eq!(
+            openai_chat_endpoint("https://example.com/v1")
+                .expect("valid endpoint")
+                .as_str(),
+            "https://example.com/v1/chat/completions"
+        );
+        assert!(openai_chat_endpoint("https://user:pass@example.com/v1").is_err());
+        assert!(openai_chat_endpoint("https://example.com/v1?token=secret").is_err());
     }
 }
 
@@ -1205,16 +1266,18 @@ mod tests {
     #[test]
     fn test_join_openai_path_handles_versioned_base_urls() {
         assert_eq!(
-            join_openai_path("https://api.openai.com/v1", "/chat/completions"),
+            openai_chat_endpoint("https://api.openai.com/v1")
+                .unwrap()
+                .as_str(),
             "https://api.openai.com/v1/chat/completions"
         );
         assert_eq!(
-            join_openai_path(
-                "https://generativelanguage.googleapis.com/v1beta/openai",
-                "/chat/completions"
-            ),
+            openai_chat_endpoint("https://generativelanguage.googleapis.com/v1beta/openai")
+                .unwrap()
+                .as_str(),
             "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
         );
+        assert!(openai_chat_endpoint("https://user:secret@example.com/v1").is_err());
     }
 
     #[test]

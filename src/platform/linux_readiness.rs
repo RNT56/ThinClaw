@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinuxReadinessProfile {
@@ -395,6 +395,8 @@ async fn probe_remote_gateway_health() -> LinuxProbe {
 
     let Ok(client) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()
     else {
         return LinuxProbe::fail(
@@ -954,22 +956,27 @@ fn probe_command_required(
 }
 
 fn command_success(program: &str, args: &[&str]) -> bool {
-    Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    let mut command = Command::new(program);
+    command.args(args);
+    thinclaw_platform::bounded_std_command_output(
+        &mut command,
+        std::time::Duration::from_secs(5),
+        64 * 1024,
+        64 * 1024,
+    )
+    .is_ok_and(|output| output.status.success())
 }
 
 fn command_output_trimmed(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let mut command = Command::new(program);
+    command.args(args);
+    let output = thinclaw_platform::bounded_std_command_output(
+        &mut command,
+        std::time::Duration::from_secs(5),
+        1024 * 1024,
+        64 * 1024,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1584,12 +1591,14 @@ fn python_module_available(module: &str) -> bool {
 }
 
 fn rustup_has_wasm32_wasip2() -> bool {
-    let Ok(output) = Command::new("rustup")
-        .args(["target", "list", "--installed"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-    else {
+    let mut command = Command::new("rustup");
+    command.args(["target", "list", "--installed"]);
+    let Ok(output) = thinclaw_platform::bounded_std_command_output(
+        &mut command,
+        std::time::Duration::from_secs(10),
+        1024 * 1024,
+        64 * 1024,
+    ) else {
         return false;
     };
     output.status.success()

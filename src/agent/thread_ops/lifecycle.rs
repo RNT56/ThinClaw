@@ -56,6 +56,8 @@ impl Agent {
             .threads
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+        let original_thread = thread.clone();
+        let original_undo = mgr.clone();
 
         let outcome = match action {
             UndoRedoAction::Undo => {
@@ -74,15 +76,31 @@ impl Agent {
                 // the mutation above, so hydration truncates DB history to
                 // match what was just restored in memory.
                 let active_message_row_count = thread.persisted_message_count() as i64;
+                let persisted_undo = mgr.clone();
                 drop(sess);
-                self.clear_thread_runtime_transients(thread_id).await;
-                self.persist_active_watermark_and_undo_stack(
-                    thread_id,
-                    active_message_row_count,
-                    &mgr,
-                )
-                .await;
                 drop(mgr);
+                if let Err(error) = self
+                    .persist_active_watermark_and_undo_stack(
+                        thread_id,
+                        active_message_row_count,
+                        &persisted_undo,
+                    )
+                    .await
+                {
+                    let mut sess = session.lock().await;
+                    let mut mgr = undo_mgr.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thinclaw_agent::thread_ops::restore_thread_after_failed_persistence(
+                            thread,
+                            original_thread,
+                        );
+                    }
+                    *mgr = original_undo;
+                    tracing::error!(thread = %thread_id, %error, "Undo/redo durability commit failed");
+                    return Ok(SubmissionResult::error(
+                        "Conversation history could not be saved; no undo/redo change was applied.",
+                    ));
+                }
                 self.record_context_pressure_state(thread_id, usage_percent)
                     .await;
             }
@@ -129,6 +147,12 @@ impl Agent {
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut sess = session.lock().await;
         let mut mgr = undo_mgr.lock().await;
+        let original_thread = sess
+            .threads
+            .get(&thread_id)
+            .cloned()
+            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+        let original_undo = mgr.clone();
         let restored = {
             let thread = sess
                 .threads
@@ -148,22 +172,38 @@ impl Agent {
         };
         // Release the session lock before the async persistence tail.
         drop(sess);
+        let persisted_undo = mgr.clone();
+        drop(mgr);
         let restored = match restored {
             Some((info, usage_percent, active_message_row_count)) => {
-                self.clear_thread_runtime_transients(thread_id).await;
-                self.persist_active_watermark_and_undo_stack(
-                    thread_id,
-                    active_message_row_count,
-                    &mgr,
-                )
-                .await;
+                if let Err(error) = self
+                    .persist_active_watermark_and_undo_stack(
+                        thread_id,
+                        active_message_row_count,
+                        &persisted_undo,
+                    )
+                    .await
+                {
+                    let mut sess = session.lock().await;
+                    let mut mgr = undo_mgr.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thinclaw_agent::thread_ops::restore_thread_after_failed_persistence(
+                            thread,
+                            original_thread,
+                        );
+                    }
+                    *mgr = original_undo;
+                    tracing::error!(thread = %thread_id, %error, "Rewind durability commit failed");
+                    return Ok(SubmissionResult::error(
+                        "Conversation history could not be saved; no rewind was applied.",
+                    ));
+                }
                 self.record_context_pressure_state(thread_id, usage_percent)
                     .await;
                 Some(info)
             }
             None => None,
         };
-        drop(mgr);
 
         let Some((turn, _description)) = restored else {
             return Ok(SubmissionResult::error(format!(
@@ -277,15 +317,19 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
-        let mut sess = session.lock().await;
-        let thread = sess
-            .threads
-            .get_mut(&thread_id)
-            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+        let interrupted = {
+            let mut sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            thinclaw_agent::thread_ops::interrupt_thread(thread)
+        };
 
-        if thinclaw_agent::thread_ops::interrupt_thread(thread) {
+        if interrupted {
+            // Tool/LLM continuations may need this session mutex while they
+            // observe cancellation and unwind. Never hold it across an await.
             self.signal_turn_cancellation(thread_id).await;
-            drop(sess);
             self.persist_thread_runtime_snapshot(message, &session, thread_id)
                 .await;
             Ok(SubmissionResult::ok_with_message("Interrupted."))
@@ -296,39 +340,87 @@ impl Agent {
 
     pub(in crate::agent) async fn process_compact(
         &self,
+        message: &IncomingMessage,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
-        let mut sess = session.lock().await;
-        let session_user_id = sess.user_id.clone();
-        let session_id = sess.id;
-        let principal_id = sess.principal_id.clone();
-        let actor_id = sess.actor_id.clone();
-        let conversation_scope_id = sess.conversation_scope_id;
-        let conversation_kind = sess.conversation_kind;
-        let thread = sess
-            .threads
-            .get_mut(&thread_id)
-            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-
-        let messages = thread.messages();
-        let monitor = self.effective_context_monitor();
-        let usage = monitor.usage_percent(&messages);
-        let strategy = monitor.suggest_compaction(&messages).unwrap_or(
-            crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
-        );
+        let request_identity = message.resolved_identity();
+        let (
+            session_user_id,
+            session_id,
+            principal_id,
+            actor_id,
+            conversation_scope_id,
+            conversation_kind,
+            mut compacted_thread,
+            original_thread,
+            snapshot_updated_at,
+            persisted_rows_before,
+            messages,
+            usage,
+            strategy,
+        ) = {
+            let sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            match thinclaw_agent::thread_ops::thread_input_admission(thread) {
+                thinclaw_agent::thread_ops::ThreadInputAdmission::Accept => {}
+                thinclaw_agent::thread_ops::ThreadInputAdmission::Reject(reason) => {
+                    return Ok(SubmissionResult::error(reason));
+                }
+            }
+            let messages = thread.messages();
+            let monitor = self.effective_context_monitor();
+            let usage = monitor.usage_percent(&messages);
+            let strategy = monitor.suggest_compaction(&messages).unwrap_or(
+                crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
+            );
+            let original_thread = thread.clone();
+            (
+                sess.user_id.clone(),
+                sess.id,
+                request_identity.principal_id.clone(),
+                request_identity.actor_id.clone(),
+                request_identity.conversation_scope_id,
+                request_identity.conversation_kind,
+                original_thread.clone(),
+                original_thread,
+                thread.updated_at,
+                thread.persisted_message_count() as i64,
+                messages,
+                usage,
+                strategy,
+            )
+        };
 
         let mut compactor = ContextCompactor::new(self.llm().clone());
         if let Some(ref tracker) = self.deps.cost_tracker {
             compactor = compactor.with_cost_tracker(std::sync::Arc::clone(tracker));
         }
-        match compactor
-            .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
-            .await
+        let compaction_workspace = self
+            .authorized_compaction_workspace(thread_id, &request_identity, &message.channel)
+            .await;
+        match tokio::time::timeout(
+            self.config.job_timeout,
+            compactor.compact(
+                &mut compacted_thread,
+                strategy,
+                compaction_workspace.as_ref(),
+            ),
+        )
+        .await
         {
-            Ok(result) => {
+            Err(_) => Ok(SubmissionResult::error(format!(
+                "Compaction timed out after {} seconds",
+                self.config.job_timeout.as_secs()
+            ))),
+            Ok(Err(e)) => Ok(SubmissionResult::error(format!("Compaction failed: {}", e))),
+            Ok(Ok(result)) => {
                 let compaction_summary = result.summary.clone();
-                let usage_after = monitor.usage_percent(&thread.messages());
+                let monitor = self.effective_context_monitor();
+                let usage_after = monitor.usage_percent(&compacted_thread.messages());
                 let session_extract_artifact = crate::agent::AgentRunArtifact::new(
                     "thread_compaction",
                     crate::agent::AgentRunStatus::Completed,
@@ -341,7 +433,7 @@ impl Agent {
                 .with_metadata(serde_json::json!({
                     "event": "thread_compaction",
                     "thread_id": thread_id,
-                    "turn_count": thread.turns.len(),
+                    "turn_count": compacted_thread.turns.len(),
                     "strategy": format!("{strategy:?}"),
                     "tokens_before": result.tokens_before,
                     "tokens_after": result.tokens_after,
@@ -353,31 +445,11 @@ impl Agent {
                 if result.summary_written {
                     msg.push_str(", summary saved to workspace");
                 }
-                drop(sess);
-                if let Some(store) = self.store().map(Arc::clone) {
-                    let mut artifact = session_extract_artifact.clone();
-                    artifact.session_id = Some(session_id);
-                    artifact.thread_id = Some(thread_id);
-                    artifact.user_id = Some(session_user_id.clone());
-                    artifact.actor_id = Some(actor_id.clone());
-                    artifact.conversation_scope_id = Some(conversation_scope_id);
-                    artifact.conversation_kind = Some(conversation_kind.as_str().to_string());
-                    let manager = crate::agent::learning::MemoryProviderManager::new(store);
-                    let extract_principal_id = principal_id.clone();
-                    tokio::spawn(async move {
-                        let harness = crate::agent::AgentRunHarness::new(None);
-                        if let Err(err) = harness.append_artifact(&artifact).await {
-                            tracing::debug!(error = %err, "Failed to append thread compaction artifact");
-                        }
-                        manager
-                            .session_end_extract(&extract_principal_id, &artifact)
-                            .await;
-                    });
-                }
+                let persisted_rows_after = compacted_thread.persisted_message_count() as i64;
                 let last_user_query = messages
                     .iter()
                     .rev()
-                    .find(|message| message.role == crate::llm::Role::User)
+                    .find(|message| message.is_user_instruction())
                     .map(|message| message.content.as_str());
                 let compaction_identity = ResolvedIdentity {
                     principal_id: principal_id.clone(),
@@ -395,39 +467,108 @@ impl Agent {
                     .await;
                 let fragment =
                     super::input::merge_summary_into_fragment(compaction_summary, base_fragment);
-                self.update_post_compaction_context(thread_id, fragment)
+                let applied = {
+                    let mut sess = session.lock().await;
+                    let current = sess.threads.get_mut(&thread_id).ok_or_else(|| {
+                        Error::from(crate::error::JobError::NotFound { id: thread_id })
+                    })?;
+                    if current.updated_at != snapshot_updated_at {
+                        false
+                    } else {
+                        *current = compacted_thread;
+                        true
+                    }
+                };
+                if !applied {
+                    return Ok(SubmissionResult::error(
+                        "Conversation changed while compacting; the stale result was discarded.",
+                    ));
+                }
+
+                if let Err(error) = self
+                    .advance_active_history_window(
+                        thread_id,
+                        persisted_rows_before.saturating_sub(persisted_rows_after),
+                        persisted_rows_after,
+                        fragment,
+                    )
+                    .await
+                {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thinclaw_agent::thread_ops::restore_thread_after_failed_persistence(
+                            thread,
+                            original_thread,
+                        );
+                    }
+                    tracing::error!(thread = %thread_id, %error, "Compaction durability commit failed");
+                    return Ok(SubmissionResult::error(
+                        "Compaction could not be saved; the conversation was left unchanged.",
+                    ));
+                }
+                self.session_manager
+                    .get_undo_manager(thread_id)
+                    .await
+                    .lock()
+                    .await
+                    .clear();
+
+                if let Some(store) = self.store().map(Arc::clone) {
+                    let mut artifact = session_extract_artifact.clone();
+                    artifact.session_id = Some(session_id);
+                    artifact.thread_id = Some(thread_id);
+                    artifact.user_id = Some(session_user_id.clone());
+                    artifact.actor_id = Some(actor_id.clone());
+                    artifact.conversation_scope_id = Some(conversation_scope_id);
+                    artifact.conversation_kind = Some(conversation_kind.as_str().to_string());
+                    let manager = crate::agent::learning::MemoryProviderManager::new(store);
+                    self.spawn_tail_task(async move {
+                        let harness = crate::agent::AgentRunHarness::new(None);
+                        if let Err(err) = harness.append_artifact(&artifact).await {
+                            tracing::debug!(error = %err, "Failed to append thread compaction artifact");
+                        }
+                        if let Some(access) = crate::agent::learning::provider_access_context_from_artifact(&artifact) {
+                            manager.session_end_extract(&access, &artifact).await;
+                        }
+                    })
                     .await;
+                }
                 self.record_context_pressure_state(thread_id, usage_after)
+                    .await;
+                self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
                 Ok(SubmissionResult::ok_with_message(msg))
             }
-            Err(e) => Ok(SubmissionResult::error(format!("Compaction failed: {}", e))),
         }
     }
 
     pub(in crate::agent) async fn process_clear(
         &self,
+        message: &IncomingMessage,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
+        let request_identity = message.resolved_identity();
+        let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut sess = session.lock().await;
+        let mut mgr = undo_mgr.lock().await;
         let session_user_id = sess.user_id.clone();
         let session_id = sess.id;
-        let principal_id = sess.principal_id.clone();
-        let actor_id = sess.actor_id.clone();
-        let conversation_scope_id = sess.conversation_scope_id;
-        let conversation_kind = sess.conversation_kind.as_str().to_string();
+        let actor_id = request_identity.actor_id.clone();
+        let conversation_scope_id = request_identity.conversation_scope_id;
+        let conversation_kind = request_identity.conversation_kind.as_str().to_string();
         let thread = sess
             .threads
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+        let original_thread = thread.clone();
+        let original_undo = mgr.clone();
+        let removed_row_count = thread.persisted_message_count() as i64;
         thinclaw_agent::thread_ops::clear_thread(thread);
+        mgr.clear();
         let usage_percent = self
             .effective_context_monitor()
             .usage_percent(&thread.messages());
-        // /clear empties the in-memory thread, so the watermark drops to 0:
-        // hydration must not resurrect the cleared DB rows after a restart.
-        let active_message_row_count = thread.persisted_message_count() as i64;
         let mut session_extract_artifact = crate::agent::AgentRunArtifact::new(
             "thread_clear",
             crate::agent::AgentRunStatus::Completed,
@@ -448,28 +589,46 @@ impl Agent {
         session_extract_artifact.conversation_scope_id = Some(conversation_scope_id);
         session_extract_artifact.conversation_kind = Some(conversation_kind);
 
-        // Clear undo history too
-        let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
-        {
-            let mut mgr = undo_mgr.lock().await;
-            mgr.clear();
-            self.persist_active_watermark_and_undo_stack(thread_id, active_message_row_count, &mgr)
-                .await;
-        }
         drop(sess);
+        drop(mgr);
+
+        // The replay-window advance, undo clear, and transient reset are one
+        // durable RMW. Restore both live structures if that commit fails.
+        if let Err(error) = self
+            .clear_active_history_window(thread_id, removed_row_count)
+            .await
+        {
+            let mut sess = session.lock().await;
+            let mut mgr = undo_mgr.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                thinclaw_agent::thread_ops::restore_thread_after_failed_persistence(
+                    thread,
+                    original_thread,
+                );
+            }
+            *mgr = original_undo;
+            tracing::error!(thread = %thread_id, %error, "Clear durability commit failed");
+            return Ok(SubmissionResult::error(
+                "The thread could not be cleared durably; no history was removed.",
+            ));
+        }
         if let Some(store) = self.store().map(Arc::clone) {
             let manager = crate::agent::learning::MemoryProviderManager::new(store);
-            tokio::spawn(async move {
+            self.spawn_tail_task(async move {
                 let harness = crate::agent::AgentRunHarness::new(None);
                 if let Err(err) = harness.append_artifact(&session_extract_artifact).await {
                     tracing::debug!(error = %err, "Failed to append thread clear artifact");
                 }
-                manager
-                    .session_end_extract(&principal_id, &session_extract_artifact)
-                    .await;
-            });
+                if let Some(access) = crate::agent::learning::provider_access_context_from_artifact(
+                    &session_extract_artifact,
+                ) {
+                    manager
+                        .session_end_extract(&access, &session_extract_artifact)
+                        .await;
+                }
+            })
+            .await;
         }
-        self.clear_thread_runtime_transients(thread_id).await;
         self.record_context_pressure_state(thread_id, usage_percent)
             .await;
 
@@ -479,15 +638,57 @@ impl Agent {
     pub(in crate::agent) async fn process_new_thread(
         &self,
         message: &IncomingMessage,
+        previous_thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let identity = message.resolved_identity();
         let session = self
             .session_manager
             .get_or_create_session_for_identity(&identity)
             .await;
-        let mut sess = session.lock().await;
-        let thread = sess.create_thread();
-        let thread_id = thread.id;
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread().id
+        };
+
+        // Persist an empty thread now, rather than waiting for its first user
+        // turn, so the UUID returned by `/new` remains valid after restart.
+        // The ingress alias (which may be a desktop key rather than a UUID) is
+        // updated independently below.
+        if self.store().is_some() {
+            let mut persistence_message = message.clone();
+            persistence_message.thread_id = Some(thread_id.to_string());
+            if let Err(error) = self
+                .ensure_persisted_conversation(thread_id, &persistence_message, &identity)
+                .await
+            {
+                let mut sess = session.lock().await;
+                sess.threads.remove(&thread_id);
+                sess.active_thread = sess
+                    .threads
+                    .contains_key(&previous_thread_id)
+                    .then_some(previous_thread_id);
+                return Ok(SubmissionResult::error(format!(
+                    "Failed to create the new thread durably: {error}"
+                )));
+            }
+        }
+
+        if let Err(error) = self
+            .promote_direct_thread(previous_thread_id, thread_id, &identity)
+            .await
+        {
+            let mut sess = session.lock().await;
+            sess.threads.remove(&thread_id);
+            sess.active_thread = sess
+                .threads
+                .contains_key(&previous_thread_id)
+                .then_some(previous_thread_id);
+            return Ok(SubmissionResult::error(format!(
+                "Failed to activate the new thread durably: {error}"
+            )));
+        }
+        self.activate_thread_ingress_mapping(message, &identity, thread_id, Arc::clone(&session))
+            .await;
         Ok(SubmissionResult::ok_with_message(format!(
             "New thread: {}",
             thread_id
@@ -497,6 +698,7 @@ impl Agent {
     pub(in crate::agent) async fn process_switch_thread(
         &self,
         message: &IncomingMessage,
+        previous_thread_id: Uuid,
         target_thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let identity = message.resolved_identity();
@@ -504,16 +706,107 @@ impl Agent {
             .session_manager
             .get_or_create_session_for_identity(&identity)
             .await;
-        let mut sess = session.lock().await;
-
-        if sess.switch_thread(target_thread_id) {
-            Ok(SubmissionResult::ok_with_message(format!(
-                "Switched to thread {}",
-                target_thread_id
-            )))
-        } else {
-            Ok(SubmissionResult::error("Thread not found."))
+        let target_is_loaded = session.lock().await.threads.contains_key(&target_thread_id);
+        if !target_is_loaded && self.store().is_some() {
+            self.maybe_hydrate_thread(message, &target_thread_id.to_string())
+                .await?;
         }
+        if !session.lock().await.threads.contains_key(&target_thread_id) {
+            return Ok(SubmissionResult::error("Thread not found."));
+        }
+        if let Err(error) = self
+            .promote_direct_thread(previous_thread_id, target_thread_id, &identity)
+            .await
+        {
+            return Ok(SubmissionResult::error(format!(
+                "Failed to switch threads durably: {error}"
+            )));
+        }
+
+        let switched = session.lock().await.switch_thread(target_thread_id);
+        if !switched {
+            return Ok(SubmissionResult::error("Thread not found."));
+        }
+        self.activate_thread_ingress_mapping(
+            message,
+            &identity,
+            target_thread_id,
+            Arc::clone(&session),
+        )
+        .await;
+        Ok(SubmissionResult::ok_with_message(format!(
+            "Switched to thread {}",
+            target_thread_id
+        )))
+    }
+
+    /// Keep the session's active pointer and the ingress resolver's alias in
+    /// sync. Without this, `/new` and `/thread` report success while the next
+    /// ordinary message is silently routed back to the old thread-map entry.
+    async fn activate_thread_ingress_mapping(
+        &self,
+        message: &IncomingMessage,
+        identity: &ResolvedIdentity,
+        thread_id: Uuid,
+        session: Arc<Mutex<Session>>,
+    ) {
+        let scope_id =
+            crate::agent::session_manager::SessionManager::session_scope_for_identity(identity);
+        self.session_manager
+            .register_thread_alias_for_scope(
+                scope_id,
+                identity.conversation_kind,
+                &message.channel,
+                message.thread_id.as_deref(),
+                thread_id,
+                Arc::clone(&session),
+            )
+            .await;
+        if identity.conversation_kind == crate::identity::ConversationKind::Direct {
+            self.session_manager
+                .register_direct_main_thread_for_scope(scope_id, thread_id, session)
+                .await;
+        }
+    }
+
+    /// Maintain a single durable primary direct thread, matching the live
+    /// direct-main mapping changed by `/new` or `/thread`.
+    async fn promote_direct_thread(
+        &self,
+        previous_thread_id: Uuid,
+        target_thread_id: Uuid,
+        identity: &ResolvedIdentity,
+    ) -> Result<(), Error> {
+        if identity.conversation_kind != crate::identity::ConversationKind::Direct {
+            return Ok(());
+        }
+        let Some(store) = self.store() else {
+            return Ok(());
+        };
+        use thinclaw_agent::thread_ops::{DIRECT_THREAD_ROLE_KEY, DIRECT_THREAD_ROLE_MAIN};
+        // Promote first. If this authoritative write fails, callers keep the
+        // old live mapping and can report the failure honestly. A later failure
+        // to demote the previous row can leave two historical `main` markers,
+        // but primary lookup orders by activity and selects this newer target.
+        store
+            .update_conversation_metadata_field(
+                target_thread_id,
+                DIRECT_THREAD_ROLE_KEY,
+                &serde_json::json!(DIRECT_THREAD_ROLE_MAIN),
+            )
+            .await?;
+        if previous_thread_id != target_thread_id
+            && let Err(error) = store
+                .update_conversation_metadata_field(
+                    previous_thread_id,
+                    DIRECT_THREAD_ROLE_KEY,
+                    &serde_json::json!("side"),
+                )
+                .await
+        {
+            tracing::debug!(thread = %previous_thread_id, %error, "Failed to demote prior direct thread");
+        }
+        Ok(())
     }
 
     pub(in crate::agent) async fn process_resume(
@@ -526,6 +819,12 @@ impl Agent {
         // Lock ordering: session before undo manager (see process_undo_or_redo).
         let mut sess = session.lock().await;
         let mut mgr = undo_mgr.lock().await;
+        let original_thread = sess
+            .threads
+            .get(&thread_id)
+            .cloned()
+            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+        let original_undo = mgr.clone();
 
         let outcome = {
             let thread = sess
@@ -544,12 +843,32 @@ impl Agent {
         };
         // Release the session lock before the async persistence tail.
         drop(sess);
+        let persisted_undo = mgr.clone();
+        drop(mgr);
 
         if let Some((description, active_message_row_count)) = outcome {
-            self.clear_thread_runtime_transients(thread_id).await;
-            self.persist_active_watermark_and_undo_stack(thread_id, active_message_row_count, &mgr)
-                .await;
-            drop(mgr);
+            if let Err(error) = self
+                .persist_active_watermark_and_undo_stack(
+                    thread_id,
+                    active_message_row_count,
+                    &persisted_undo,
+                )
+                .await
+            {
+                let mut sess = session.lock().await;
+                let mut mgr = undo_mgr.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    thinclaw_agent::thread_ops::restore_thread_after_failed_persistence(
+                        thread,
+                        original_thread,
+                    );
+                }
+                *mgr = original_undo;
+                tracing::error!(thread = %thread_id, %error, "Checkpoint resume durability commit failed");
+                return Ok(SubmissionResult::error(
+                    "Conversation history could not be saved; the checkpoint was not resumed.",
+                ));
+            }
             Ok(SubmissionResult::ok_with_message(format!(
                 "Resumed from checkpoint: {}",
                 description

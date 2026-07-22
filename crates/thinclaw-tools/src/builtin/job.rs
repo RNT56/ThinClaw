@@ -30,16 +30,41 @@ pub const DANGEROUS_ENV_VARS: &[&str] = &[
     "HOME",
     // Language runtime library path hijacking
     "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONINSPECT",
+    "PYTHONSTARTUP",
     "NODE_PATH",
+    "NODE_OPTIONS",
     "PERL5LIB",
+    "PERL5OPT",
     "RUBYLIB",
+    "RUBYOPT",
     "CLASSPATH",
+    "CARGO_HOME",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
     // JVM injection and ambient identity/config
     "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
     "MAVEN_OPTS",
     "USER",
     "SHELL",
     "RUST_LOG",
+    // Network/control-plane redirection
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "DOCKER_HOST",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_EXEC_PATH",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_TEMPLATE_DIR",
+    "SSH_AUTH_SOCK",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
 ];
 
 /// Validate that an env var name is safe for container injection.
@@ -261,6 +286,15 @@ pub fn parse_job_prompt_params(params: &serde_json::Value) -> Result<JobPromptPa
         return Err(ToolError::InvalidParameters(
             "missing 'content' parameter".into(),
         ));
+    }
+    if content
+        .as_ref()
+        .is_some_and(|content| content.len() > thinclaw_types::sandbox::MAX_SANDBOX_PROMPT_BYTES)
+    {
+        return Err(ToolError::InvalidParameters(format!(
+            "prompt exceeds the {} byte limit",
+            thinclaw_types::sandbox::MAX_SANDBOX_PROMPT_BYTES
+        )));
     }
 
     Ok(JobPromptParams { content, done })
@@ -765,6 +799,7 @@ pub fn job_prompt_parameters_schema() -> serde_json::Value {
             },
             "content": {
                 "type": "string",
+                "maxLength": thinclaw_types::sandbox::MAX_SANDBOX_PROMPT_BYTES,
                 "description": "The follow-up prompt text to send"
             },
             "done": {

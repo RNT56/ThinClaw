@@ -7,6 +7,97 @@ use tracing::{info, warn};
 
 use super::types::*;
 
+const MAX_ENGINE_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SESSIONS_INDEX_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_SESSION_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SESSION_FILES: usize = 10_000;
+const MAX_SESSION_DIRECTORY_ENTRIES: usize = 50_000;
+const MAX_SESSION_INDEX_ENTRIES: usize = 100_000;
+
+fn modified_millis(path: &std::path::Path) -> u128 {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn session_path_field(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "path"
+            | "cwd"
+            | "workspace"
+            | "workspacedir"
+            | "workingdirectory"
+            | "sessionfile"
+            | "filepath"
+            | "root"
+            | "homedir"
+    )
+}
+
+fn migrate_session_path_values(value: &mut serde_json::Value, is_path: bool) -> bool {
+    match value {
+        serde_json::Value::String(text) if is_path => {
+            let updated = text
+                .replace("Clawdbot", "ThinClaw")
+                .replace("moltbot", "thinclaw");
+            if updated == *text {
+                false
+            } else {
+                *text = updated;
+                true
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().fold(false, |changed, item| {
+            migrate_session_path_values(item, is_path) || changed
+        }),
+        serde_json::Value::Object(object) => {
+            object.iter_mut().fold(false, |changed, (key, value)| {
+                migrate_session_path_values(value, session_path_field(key)) || changed
+            })
+        }
+        _ => false,
+    }
+}
+
+fn migrate_session_jsonl_paths(content: &str) -> std::io::Result<Option<String>> {
+    let mut output = String::with_capacity(content.len());
+    let mut changed = false;
+    for segment in content.split_inclusive('\n') {
+        let (line_with_optional_cr, newline) = segment
+            .strip_suffix('\n')
+            .map_or((segment, ""), |line| (line, "\n"));
+        let (line, carriage_return) = line_with_optional_cr
+            .strip_suffix('\r')
+            .map_or((line_with_optional_cr, ""), |line| (line, "\r"));
+        let replacement = serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|mut value| {
+                migrate_session_path_values(&mut value, false)
+                    .then(|| serde_json::to_string(&value))
+            })
+            .transpose()
+            .map_err(std::io::Error::other)?;
+        if let Some(replacement) = replacement {
+            changed = true;
+            output.push_str(&replacement);
+        } else {
+            output.push_str(line);
+        }
+        output.push_str(carriage_return);
+        output.push_str(newline);
+        if output.len() > MAX_SESSION_FILE_BYTES as usize {
+            return Err(std::io::Error::other(
+                "migrated session file exceeds its size limit",
+            ));
+        }
+    }
+    Ok(changed.then_some(output))
+}
+
 impl ThinClawConfig {
     /// Generate the default ThinClawEngine configuration
     pub fn generate_config(
@@ -234,10 +325,9 @@ impl ThinClawConfig {
 
         // Embed the API key so the engine can authenticate against llama-server
         if !local_token.is_empty() {
-            local_provider
-                .as_object_mut()
-                .unwrap()
-                .insert("apiKey".into(), serde_json::Value::String(local_token));
+            if let Some(provider) = local_provider.as_object_mut() {
+                provider.insert("apiKey".into(), serde_json::Value::String(local_token));
+            }
         }
 
         // NOTE: Layer 2 stop token injection was removed because the ThinClaw engine's
@@ -357,7 +447,12 @@ impl ThinClawConfig {
     ) -> std::io::Result<()> {
         self.ensure_dirs()?;
         let json = serde_json::to_string_pretty(config).map_err(std::io::Error::other)?;
-        std::fs::write(self.config_path(), json)?;
+        if json.len() > MAX_ENGINE_CONFIG_BYTES as usize {
+            return Err(std::io::Error::other(
+                "generated engine config exceeds its size limit",
+            ));
+        }
+        thinclaw_platform::write_private_file_atomic(&self.config_path(), json.as_bytes(), true)?;
 
         // NOTE: auth-profiles.json, agent.json, and models.json were consumed
         // by the Node.js ThinClaw engine gateway (replaced by ThinClaw in-process).
@@ -374,23 +469,62 @@ impl ThinClawConfig {
     /// Deep migration for sessions and other data that might contain absolute paths
     pub fn deep_migrate(&self) -> std::io::Result<()> {
         let sessions_dir = self.base_dir.join("agents").join("main").join("sessions");
-        if !sessions_dir.exists() {
-            return Ok(());
+        match std::fs::symlink_metadata(&sessions_dir) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(std::io::Error::other(
+                    "sessions path is not a real directory",
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
         }
+        let canonical_sessions_dir = sessions_dir.canonicalize()?;
 
         // Skip if migration has already run successfully
         let marker = sessions_dir.join(".migration_v1_complete");
-        if marker.exists() {
-            return Ok(());
+        match std::fs::symlink_metadata(&marker) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                return Ok(())
+            }
+            Ok(_) => {
+                return Err(std::io::Error::other(
+                    "migration marker is not a regular file",
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
 
         let sessions_index_path = sessions_dir.join("sessions.json");
-        let mut sessions_index: serde_json::Value = if sessions_index_path.exists() {
-            let content = std::fs::read_to_string(&sessions_index_path)?;
-            serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
-        } else {
-            serde_json::json!({})
-        };
+        let mut sessions_index: serde_json::Value =
+            match std::fs::symlink_metadata(&sessions_index_path) {
+                Ok(_) => {
+                    let bytes = thinclaw_platform::read_regular_file_bounded_single_link(
+                        &sessions_index_path,
+                        MAX_SESSIONS_INDEX_BYTES,
+                    )?;
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("sessions index is invalid JSON: {error}"),
+                        )
+                    })?
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+                Err(error) => return Err(error),
+            };
+        let index = sessions_index.as_object().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "sessions index root must be a JSON object",
+            )
+        })?;
+        if index.len() > MAX_SESSION_INDEX_ENTRIES {
+            return Err(std::io::Error::other(
+                "sessions index exceeds the migration entry limit",
+            ));
+        }
 
         let mut changed = false;
 
@@ -408,8 +542,20 @@ impl ThinClawConfig {
                             *file_path = serde_json::Value::String(normalized_s.clone());
                             changed = true;
                         }
-                        if std::path::Path::new(&normalized_s).exists() {
-                            path_valid = true;
+                        let supplied = std::path::Path::new(&normalized_s);
+                        let candidate = if supplied.is_absolute() {
+                            supplied.to_path_buf()
+                        } else {
+                            canonical_sessions_dir.join(supplied)
+                        };
+                        if let Ok(canonical) = candidate.canonicalize() {
+                            if canonical.starts_with(&canonical_sessions_dir) {
+                                if let Ok(metadata) = std::fs::symlink_metadata(&candidate) {
+                                    path_valid = metadata.is_file()
+                                        && !metadata.file_type().is_symlink()
+                                        && metadata.len() <= MAX_SESSION_FILE_BYTES;
+                                }
+                            }
                         }
                     }
                 }
@@ -428,13 +574,33 @@ impl ThinClawConfig {
         }
 
         // 2. Scan for and re-index orphaned .jsonl files, updating their internal paths
-        if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        {
+            let entries = std::fs::read_dir(&sessions_dir)?;
             let mut found_files = Vec::new();
-            for entry in entries.flatten() {
+            for (entry_index, entry) in entries.enumerate() {
+                if entry_index >= MAX_SESSION_DIRECTORY_ENTRIES {
+                    return Err(std::io::Error::other(
+                        "sessions directory exceeds the migration scan limit",
+                    ));
+                }
+                let entry = entry?;
                 let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                let metadata = match std::fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
+                if metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() <= MAX_SESSION_FILE_BYTES
+                    && path.extension().and_then(|s| s.to_str()) == Some("jsonl")
+                {
                     found_files.push(path);
                 }
+            }
+            if found_files.len() > MAX_SESSION_FILES {
+                return Err(std::io::Error::other(
+                    "sessions directory exceeds the migration file limit",
+                ));
             }
 
             // Sort by modification time to find most recent
@@ -451,17 +617,34 @@ impl ThinClawConfig {
             });
 
             for path in &found_files {
-                let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                let session_id = file_name.replace(".jsonl", "");
+                let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                let Some(session_id) = file_name.strip_suffix(".jsonl") else {
+                    continue;
+                };
+                if session_id.is_empty()
+                    || session_id.len() > 256
+                    || session_id.chars().any(char::is_control)
+                {
+                    warn!("[thinclaw] Skipping session file with an invalid identifier");
+                    continue;
+                }
 
-                // Update internal paths in the .jsonl file defensively
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    if content.contains("Clawdbot") || content.contains("moltbot") {
-                        let updated_content = content
-                            .replace("Clawdbot", "ThinClaw")
-                            .replace("moltbot", "thinclaw");
-                        if updated_content != content {
-                            let _ = std::fs::write(path, updated_content);
+                // Update only structured path fields. A global string replace
+                // would corrupt ordinary user/assistant content that happens to
+                // mention a legacy product name.
+                if let Ok(bytes) = thinclaw_platform::read_regular_file_bounded_single_link(
+                    path,
+                    MAX_SESSION_FILE_BYTES,
+                ) {
+                    if let Ok(content) = std::str::from_utf8(&bytes) {
+                        if let Some(updated_content) = migrate_session_jsonl_paths(content)? {
+                            thinclaw_platform::write_private_file_atomic(
+                                path,
+                                updated_content.as_bytes(),
+                                true,
+                            )?;
                         }
                     }
                 }
@@ -470,7 +653,7 @@ impl ThinClawConfig {
                 let mut found_in_index = false;
                 if let Some(obj) = sessions_index.as_object() {
                     for (_, meta) in obj {
-                        if meta.get("sessionId").and_then(|v| v.as_str()) == Some(&session_id) {
+                        if meta.get("sessionId").and_then(|v| v.as_str()) == Some(session_id) {
                             found_in_index = true;
                             break;
                         }
@@ -478,29 +661,38 @@ impl ThinClawConfig {
                 }
 
                 if !found_in_index {
-                    let key = if session_id == "4e9284c4-ffbf-4eeb-9164-3c6c148c5176"
+                    let mut key = if session_id == "4e9284c4-ffbf-4eeb-9164-3c6c148c5176"
                         || session_id.starts_with("agent-main")
                     {
                         "agent:main".to_string()
                     } else {
                         format!(
                             "agent:main:{}",
-                            &session_id[..std::cmp::min(8, session_id.len())]
+                            session_id.chars().take(8).collect::<String>()
                         )
                     };
 
                     if let Some(obj) = sessions_index.as_object_mut() {
+                        if obj.get(&key).is_some_and(|metadata| {
+                            metadata.get("sessionId").and_then(|value| value.as_str())
+                                != Some(session_id)
+                        }) {
+                            key = format!("agent:main:{session_id}");
+                        }
                         if !obj.contains_key(&key) {
                             info!(
                                 "[thinclaw] Recovering orphaned session: {} -> {}",
                                 key, session_id
                             );
-                            obj.insert(key, serde_json::json!({
-                                "sessionId": session_id,
-                                "updatedAt": path.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::now()).duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
-                                "sessionFile": path.to_string_lossy().to_string(),
-                                "chatType": "direct",
-                            }));
+                            obj.insert(
+                                key,
+                                serde_json::json!({
+                                    "sessionId": session_id,
+                                    "updatedAt": modified_millis(path),
+                                    "sessionFile": path.to_string_lossy().to_string(),
+                                    "chatType": "direct",
+                                }),
+                            );
                             changed = true;
                         }
                     }
@@ -520,12 +712,15 @@ impl ThinClawConfig {
                         "[thinclaw] Assigning most recent session to agent:main: {}",
                         best_id
                     );
-                    obj.insert("agent:main".into(), serde_json::json!({
-                        "sessionId": best_id,
-                        "updatedAt": best_path.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::now()).duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
-                        "sessionFile": best_path.to_string_lossy().to_string(),
-                        "chatType": "direct",
-                    }));
+                    obj.insert(
+                        "agent:main".into(),
+                        serde_json::json!({
+                            "sessionId": best_id,
+                            "updatedAt": modified_millis(best_path),
+                            "sessionFile": best_path.to_string_lossy().to_string(),
+                            "chatType": "direct",
+                        }),
+                    );
                     changed = true;
                 }
             }
@@ -533,23 +728,47 @@ impl ThinClawConfig {
 
         if changed {
             let json = serde_json::to_string_pretty(&sessions_index)?;
-            std::fs::write(&sessions_index_path, json)?;
+            if json.len() > MAX_SESSIONS_INDEX_BYTES as usize {
+                return Err(std::io::Error::other(
+                    "migrated sessions index exceeds its size limit",
+                ));
+            }
+            thinclaw_platform::write_private_file_atomic(
+                &sessions_index_path,
+                json.as_bytes(),
+                true,
+            )?;
             info!("[thinclaw] deep_migrate completed and index updated.");
         }
 
         // Write completion marker so we don't re-run on next start
-        let _ = std::fs::write(
+        match thinclaw_platform::write_private_file_atomic(
             &marker,
-            format!("completed: {}", chrono::Utc::now().to_rfc3339()),
-        );
+            format!("completed: {}", chrono::Utc::now().to_rfc3339()).as_bytes(),
+            false,
+        ) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(&marker)?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(std::io::Error::other(
+                        "concurrent migration published an invalid marker",
+                    ));
+                }
+            }
+            Err(error) => return Err(error),
+        }
 
         Ok(())
     }
 
     /// Load config from disk
     pub fn load_config(&self) -> std::io::Result<ThinClawEngineConfig> {
-        let json = std::fs::read_to_string(self.config_path())?;
-        serde_json::from_str(&json).map_err(std::io::Error::other)
+        let bytes = thinclaw_platform::read_regular_file_bounded_single_link(
+            &self.config_path(),
+            MAX_ENGINE_CONFIG_BYTES,
+        )?;
+        serde_json::from_slice(&bytes).map_err(std::io::Error::other)
     }
 
     /// Get environment variables to pass to ThinClawEngine process
@@ -643,5 +862,31 @@ impl ThinClawConfig {
         }
 
         vars
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migrate_session_jsonl_paths;
+
+    #[test]
+    fn session_migration_only_rewrites_structured_path_fields() {
+        let input = concat!(
+            "{\"cwd\":\"/Users/me/Clawdbot/.moltbot\",\"content\":\"Clawdbot and moltbot are ordinary user text\"}\n",
+            "not-json Clawdbot moltbot\n",
+            "{\"nested\":{\"filePath\":\"C:\\\\Clawdbot\\\\moltbot\"}}"
+        );
+        let migrated = migrate_session_jsonl_paths(input).unwrap().unwrap();
+        assert!(migrated.contains("/Users/me/ThinClaw/.thinclaw"));
+        assert!(migrated.contains("Clawdbot and moltbot are ordinary user text"));
+        assert!(migrated.contains("not-json Clawdbot moltbot"));
+        assert!(migrated.contains("ThinClaw\\\\thinclaw"));
+    }
+
+    #[test]
+    fn session_migration_returns_none_when_no_path_changed() {
+        assert!(migrate_session_jsonl_paths("{\"content\":\"moltbot\"}\n")
+            .unwrap()
+            .is_none());
     }
 }

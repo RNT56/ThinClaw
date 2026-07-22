@@ -21,6 +21,9 @@ type HmacSha256 = Hmac<Sha256>;
 const GITHUB_SIGNATURE_PREFIX: &str = "sha256=";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_USER_AGENT: &str = "ThinClaw-RepoProjectSupervisor";
+const MAX_GITHUB_ERROR_RESPONSE_BYTES: usize = 128 * 1024;
+const MAX_GITHUB_JSON_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_GITHUB_BINARY_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitHubWebhookError {
@@ -68,6 +71,12 @@ pub enum GitHubApiError {
         url: String,
         source: reqwest::Error,
     },
+    ResponseBody {
+        status: StatusCode,
+        method: String,
+        url: String,
+        source: crate::http_response::BoundedResponseError,
+    },
     Api {
         status: StatusCode,
         method: String,
@@ -105,6 +114,15 @@ impl std::fmt::Display for GitHubApiError {
                     "GitHub API HTTP request failed for {method} {url}: {source}"
                 )
             }
+            Self::ResponseBody {
+                status,
+                method,
+                url,
+                source,
+            } => write!(
+                f,
+                "failed to read GitHub API response for {method} {url} ({status}): {source}"
+            ),
             Self::Api {
                 status,
                 method,
@@ -147,6 +165,7 @@ impl std::error::Error for GitHubApiError {
         match self {
             Self::Auth(error) => Some(error),
             Self::Http { source, .. } => Some(source),
+            Self::ResponseBody { source, .. } => Some(source),
             Self::Decode { source, .. } => Some(source),
             Self::InvalidHeader(_) | Self::Api { .. } | Self::CircuitOpen { .. } => None,
         }
@@ -159,11 +178,25 @@ impl From<GitHubAppError> for GitHubApiError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GitHubAppConfig {
     pub app_id: i64,
     pub private_key_pem: String,
     pub api_base_url: String,
+}
+
+impl std::fmt::Debug for GitHubAppConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GitHubAppConfig")
+            .field("app_id", &self.app_id)
+            .field("private_key_pem", &"[REDACTED]")
+            .field(
+                "api_base_url",
+                &redacted_github_endpoint(&self.api_base_url),
+            )
+            .finish()
+    }
 }
 
 impl GitHubAppConfig {
@@ -183,11 +216,22 @@ struct GitHubAppJwtClaims {
     iss: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GitHubInstallationToken {
     pub installation_id: i64,
     pub token: String,
     pub expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for GitHubInstallationToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GitHubInstallationToken")
+            .field("installation_id", &self.installation_id)
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl GitHubInstallationToken {
@@ -202,11 +246,21 @@ struct GitHubInstallationTokenResponse {
     expires_at: DateTime<Utc>,
 }
 
-#[derive(Debug)]
 pub struct GitHubAppTokenCache {
     config: GitHubAppConfig,
     client: reqwest::Client,
     tokens: tokio::sync::Mutex<HashMap<i64, GitHubInstallationToken>>,
+}
+
+impl std::fmt::Debug for GitHubAppTokenCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GitHubAppTokenCache")
+            .field("config", &self.config)
+            .field("client", &"reqwest::Client")
+            .field("tokens", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl GitHubAppTokenCache {
@@ -255,18 +309,21 @@ impl GitHubAppTokenCache {
             .headers(github_app_headers(&jwt)?)
             .send()
             .await
-            .map_err(|error| GitHubAppError::Http(error.to_string()))?;
+            .map_err(|error| GitHubAppError::Http(error.without_url().to_string()))?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body =
+                crate::http_response::bounded_text(response, MAX_GITHUB_ERROR_RESPONSE_BYTES)
+                    .await
+                    .unwrap_or_default();
             return Err(GitHubAppError::InstallationToken(format!(
                 "GitHub returned {status}: {body}"
             )));
         }
-        let body: GitHubInstallationTokenResponse = response
-            .json()
-            .await
-            .map_err(|error| GitHubAppError::InstallationToken(error.to_string()))?;
+        let body: GitHubInstallationTokenResponse =
+            crate::http_response::bounded_json(response, 1024 * 1024)
+                .await
+                .map_err(|error| GitHubAppError::InstallationToken(error.to_string()))?;
         let token = GitHubInstallationToken {
             installation_id,
             token: body.token,
@@ -316,9 +373,30 @@ pub struct GitHubApiClient {
 impl std::fmt::Debug for GitHubApiClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitHubApiClient")
-            .field("api_base_url", &self.api_base_url)
+            .field(
+                "api_base_url",
+                &redacted_github_endpoint(&self.api_base_url),
+            )
             .field("auth", &self.auth)
             .finish_non_exhaustive()
+    }
+}
+
+fn redacted_github_endpoint(raw: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return "<invalid-url>".to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return "<invalid-url>".to_string();
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
     }
 }
 
@@ -830,7 +908,9 @@ impl GitHubApiClient {
             return Ok(());
         }
         let request_id = github_request_id(response.headers());
-        let body = response.text().await.unwrap_or_default();
+        let body = crate::http_response::bounded_text(response, MAX_GITHUB_ERROR_RESPONSE_BYTES)
+            .await
+            .unwrap_or_default();
         Err(github_api_error_from_body(
             status,
             method.as_str(),
@@ -1635,10 +1715,15 @@ where
 {
     let status = response.status();
     let request_id = github_request_id(response.headers());
-    let body = response
-        .text()
+    let body_limit = if status.is_success() {
+        MAX_GITHUB_JSON_RESPONSE_BYTES
+    } else {
+        MAX_GITHUB_ERROR_RESPONSE_BYTES
+    };
+    let body = crate::http_response::bounded_text(response, body_limit)
         .await
-        .map_err(|source| GitHubApiError::Http {
+        .map_err(|source| GitHubApiError::ResponseBody {
+            status,
             method: method.to_string(),
             url: url.to_string(),
             source,
@@ -1671,20 +1756,21 @@ async fn decode_bytes_response(
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+        let body = crate::http_response::bounded_text(response, MAX_GITHUB_ERROR_RESPONSE_BYTES)
+            .await
+            .unwrap_or_default();
         return Err(github_api_error_from_body(
             status, method, url, request_id, body,
         ));
     }
-    let body = response
-        .bytes()
+    let body = crate::http_response::bounded_bytes(response, MAX_GITHUB_BINARY_RESPONSE_BYTES)
         .await
-        .map_err(|source| GitHubApiError::Http {
+        .map_err(|source| GitHubApiError::ResponseBody {
+            status,
             method: method.to_string(),
             url: url.to_string(),
             source,
-        })?
-        .to_vec();
+        })?;
     Ok(GitHubResponseBytes {
         status,
         content_type,
@@ -1880,10 +1966,10 @@ impl GitHubDeliveryDeduper {
             return Err(GitHubWebhookError::MissingDeliveryId);
         }
 
-        let mut seen = self
-            .seen
-            .lock()
-            .expect("GitHub delivery deduper mutex poisoned");
+        let mut seen = self.seen.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("recovering poisoned GitHub delivery deduper mutex");
+            poisoned.into_inner()
+        });
         let now = Instant::now();
         seen.retain(|(_, inserted_at)| now.duration_since(*inserted_at) <= self.ttl);
 

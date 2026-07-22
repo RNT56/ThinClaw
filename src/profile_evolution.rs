@@ -31,8 +31,11 @@ const PROFILE_EVOLUTION_ALLOWED_TOOLS: &[&str] = &[
     "external_memory_recall",
 ];
 
-fn profile_scope_is_shared(user_id: &str, actor_id: &str) -> bool {
-    actor_id.trim().is_empty() || actor_id == user_id
+fn profile_scope_is_shared(_user_id: &str, actor_id: &str) -> bool {
+    // Every resolved direct actor, including the principal/owner actor, has a
+    // canonical actors/<id> namespace. Shared root files are retained only for
+    // actorless legacy routines that cannot be attributed safely.
+    actor_id.trim().is_empty()
 }
 
 pub fn profile_evolution_profile_path(user_id: &str, actor_id: &str) -> String {
@@ -256,7 +259,9 @@ fn build_profile_evolution_routine(
         next_fire_at: None,
         run_count: 0,
         consecutive_failures: 0,
-        state: serde_json::json!({}),
+        state: user_timezone
+            .map(|timezone| serde_json::json!({"user_timezone": timezone}))
+            .unwrap_or_else(|| serde_json::json!({})),
         config_version: 1,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -276,6 +281,17 @@ pub async fn upsert_profile_evolution_routine(
     actor_id: &str,
     user_timezone: Option<&str>,
 ) -> Result<bool, crate::error::DatabaseError> {
+    let workspace = workspace.scoped_clone(user_id.to_string(), workspace.agent_id());
+    if actor_id == user_id
+        && let Err(error) = workspace.migrate_legacy_owner_knowledge(actor_id).await
+    {
+        tracing::debug!(
+            principal = %user_id,
+            actor = %actor_id,
+            %error,
+            "Could not migrate legacy owner profile material before routine refresh"
+        );
+    }
     let profile_path = profile_evolution_profile_path(user_id, actor_id);
     let user_md_path = profile_evolution_user_md_path(user_id, actor_id);
     let existing = store
@@ -324,6 +340,7 @@ pub async fn upsert_profile_evolution_routine(
                 || routine.guardrails.dedup_window != desired.guardrails.dedup_window;
             let description_changed = routine.description != desired.description;
             let next_fire_changed = routine.next_fire_at != desired.next_fire_at;
+            let state_changed = routine.state != desired.state;
 
             if trigger_changed
                 || action_changed
@@ -332,6 +349,7 @@ pub async fn upsert_profile_evolution_routine(
                 || description_changed
                 || !routine.enabled
                 || next_fire_changed
+                || state_changed
             {
                 routine.description = desired.description;
                 routine.trigger = desired.trigger;
@@ -340,6 +358,7 @@ pub async fn upsert_profile_evolution_routine(
                 routine.notify = desired.notify;
                 routine.enabled = true;
                 routine.next_fire_at = desired.next_fire_at;
+                routine.state = desired.state;
                 routine.updated_at = Utc::now();
                 store.update_routine(&routine).await?;
                 Ok(true)
@@ -396,11 +415,11 @@ mod tests {
     fn test_scope_paths_and_targets() {
         assert_eq!(
             profile_evolution_profile_path("default", "default"),
-            "context/profile.json"
+            "actors/default/context/profile.json"
         );
         assert_eq!(
             profile_evolution_profile_target("default", "default"),
-            "shared:profile"
+            "actor:profile"
         );
         assert_eq!(
             profile_evolution_profile_path("default", "actor-123"),
@@ -409,6 +428,14 @@ mod tests {
         assert_eq!(
             profile_evolution_user_scope("default", "actor-123"),
             "actor"
+        );
+        assert_eq!(
+            profile_evolution_profile_path("default", ""),
+            "context/profile.json"
+        );
+        assert_eq!(
+            profile_evolution_profile_target("default", ""),
+            "shared:profile"
         );
     }
 

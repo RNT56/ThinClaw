@@ -5,6 +5,7 @@
 //! allowed to install or activate those contributions.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::extensions::signing::{
     parse_hex_public_key, parse_hex_signature, verify_manifest_signature,
@@ -13,6 +14,27 @@ use crate::settings::ExtensionsSettings;
 
 pub const PLUGIN_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 1;
+const MAX_PLUGIN_CONTRIBUTIONS: usize = 512;
+const MAX_PLUGIN_ARTIFACTS: usize = 256;
+const MAX_PLUGIN_PERMISSIONS: usize = 128;
+const MAX_TRUSTED_MANIFEST_KEYS: usize = 256;
+
+fn valid_manifest_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn valid_manifest_text(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
+    (allow_empty || !value.trim().is_empty())
+        && value.len() <= max_bytes
+        && !value.contains('\0')
+        && !value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -164,21 +186,76 @@ pub fn validate_plugin_manifest(
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
+    let contribution_count = manifest
+        .contributions
+        .tools
+        .len()
+        .saturating_add(manifest.contributions.channels.len())
+        .saturating_add(manifest.contributions.memory_providers.len())
+        .saturating_add(manifest.contributions.context_providers.len())
+        .saturating_add(manifest.contributions.native_plugins.len());
+    if contribution_count > MAX_PLUGIN_CONTRIBUTIONS
+        || manifest.artifacts.len() > MAX_PLUGIN_ARTIFACTS
+        || manifest.permissions.len() > MAX_PLUGIN_PERMISSIONS
+        || settings.trusted_manifest_keys.len() > MAX_TRUSTED_MANIFEST_KEYS
+        || settings.trusted_manifest_public_keys.len() > MAX_TRUSTED_MANIFEST_KEYS
+    {
+        errors.push(
+            "plugin manifest exceeds the contribution, artifact, or permission limit".to_string(),
+        );
+        return PluginManifestValidation {
+            valid: false,
+            errors,
+            warnings,
+        };
+    }
+
     if manifest.schema_version != PLUGIN_MANIFEST_SCHEMA_VERSION {
         errors.push(format!(
             "unsupported plugin manifest schema_version {}; expected {}",
             manifest.schema_version, PLUGIN_MANIFEST_SCHEMA_VERSION
         ));
     }
-    if manifest.id.trim().is_empty() {
-        errors.push("plugin id is required".to_string());
+    if !valid_manifest_id(&manifest.id) {
+        errors.push("plugin id is missing or invalid".to_string());
     }
-    if manifest.name.trim().is_empty() {
-        errors.push("plugin name is required".to_string());
+    if !valid_manifest_text(&manifest.name, 256, false) {
+        errors.push("plugin name is missing or invalid".to_string());
     }
-    if !is_valid_semver(&manifest.version) {
+    if manifest.version.len() > 64 || !is_valid_semver(&manifest.version) {
         errors.push(format!("invalid plugin version '{}'", manifest.version));
     }
+    let mut permissions = HashSet::new();
+    if manifest
+        .publisher
+        .as_deref()
+        .is_some_and(|value| !valid_manifest_text(value, 256, false))
+        || manifest
+            .description
+            .as_deref()
+            .is_some_and(|value| !valid_manifest_text(value, 16 * 1024, true))
+        || manifest.permissions.iter().any(|permission| {
+            !valid_manifest_id(permission) || !permissions.insert(permission.as_str())
+        })
+    {
+        errors.push("plugin metadata or permissions are malformed or oversized".to_string());
+    }
+
+    let mut artifact_ids = HashSet::new();
+    for artifact in &manifest.artifacts {
+        if !valid_manifest_id(&artifact.id)
+            || !artifact_ids.insert(artifact.id.as_str())
+            || !valid_manifest_text(&artifact.path, 4_096, false)
+            || artifact.sha256.as_deref().is_some_and(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            errors.push("plugin artifact metadata is invalid or duplicated".to_string());
+            break;
+        }
+    }
+
+    let mut contribution_ids = HashSet::new();
 
     let has_native = !manifest.contributions.native_plugins.is_empty()
         || manifest
@@ -196,6 +273,16 @@ pub fn validate_plugin_manifest(
         );
     }
     if let Some(signature) = &manifest.signature {
+        if !valid_manifest_id(&signature.key_id)
+            || signature.algorithm.len() > 32
+            || signature.signature.len() != 128
+            || !signature
+                .signature
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            errors.push("plugin signature metadata is malformed or oversized".to_string());
+        }
         if !signature.algorithm.eq_ignore_ascii_case("ed25519") {
             errors.push(format!(
                 "unsupported plugin signature algorithm '{}'",
@@ -216,10 +303,10 @@ pub fn validate_plugin_manifest(
     }
 
     for tool in &manifest.contributions.tools {
-        if tool.id.trim().is_empty() {
-            errors.push("tool contribution id is required".to_string());
+        if !valid_manifest_id(&tool.id) || !contribution_ids.insert(tool.id.as_str()) {
+            errors.push("tool contribution id is invalid or duplicated".to_string());
         }
-        if tool.name.trim().is_empty() {
+        if !valid_manifest_text(&tool.name, 256, false) {
             errors.push(format!("tool contribution '{}' name is required", tool.id));
         }
         if let Some(artifact_id) = tool.wasm_artifact.as_deref() {
@@ -235,10 +322,10 @@ pub fn validate_plugin_manifest(
     }
 
     for channel in &manifest.contributions.channels {
-        if channel.id.trim().is_empty() {
-            errors.push("channel contribution id is required".to_string());
+        if !valid_manifest_id(&channel.id) || !contribution_ids.insert(channel.id.as_str()) {
+            errors.push("channel contribution id is invalid or duplicated".to_string());
         }
-        if channel.name.trim().is_empty() {
+        if !valid_manifest_text(&channel.name, 256, false) {
             errors.push(format!(
                 "channel contribution '{}' name is required",
                 channel.id
@@ -257,10 +344,12 @@ pub fn validate_plugin_manifest(
     }
 
     for provider in &manifest.contributions.memory_providers {
-        if provider.id.trim().is_empty() {
-            errors.push("memory provider contribution id is required".to_string());
+        if !valid_manifest_id(&provider.id) || !contribution_ids.insert(provider.id.as_str()) {
+            errors.push(
+                "memory provider contribution id is required, invalid, or duplicated".to_string(),
+            );
         }
-        if provider.provider_type.trim().is_empty() {
+        if !valid_manifest_id(&provider.provider_type) {
             errors.push(format!(
                 "memory provider contribution '{}' provider_type is required",
                 provider.id
@@ -269,10 +358,12 @@ pub fn validate_plugin_manifest(
     }
 
     for provider in &manifest.contributions.context_providers {
-        if provider.id.trim().is_empty() {
-            errors.push("context provider contribution id is required".to_string());
+        if !valid_manifest_id(&provider.id) || !contribution_ids.insert(provider.id.as_str()) {
+            errors.push(
+                "context provider contribution id is required, invalid, or duplicated".to_string(),
+            );
         }
-        if provider.provider_type.trim().is_empty() {
+        if !valid_manifest_id(&provider.provider_type) {
             errors.push(format!(
                 "context provider contribution '{}' provider_type is required",
                 provider.id
@@ -281,6 +372,15 @@ pub fn validate_plugin_manifest(
     }
 
     for native in &manifest.contributions.native_plugins {
+        if !valid_manifest_id(&native.id) || !contribution_ids.insert(native.id.as_str()) {
+            errors.push("native plugin contribution id is invalid or duplicated".to_string());
+        }
+        if !valid_manifest_id(&native.artifact) {
+            errors.push(format!(
+                "native plugin '{}' has an invalid artifact reference",
+                native.id
+            ));
+        }
         if native.abi != NativePluginAbi::CAbiJsonV1 {
             errors.push(format!(
                 "native plugin '{}' uses unsupported ABI",
@@ -356,6 +456,21 @@ pub fn verify_plugin_manifest_signature(
     let Some(signature) = &manifest.signature else {
         return Err("plugin signature is missing".to_string());
     };
+    if settings.trusted_manifest_keys.len() > MAX_TRUSTED_MANIFEST_KEYS
+        || settings.trusted_manifest_public_keys.len() > MAX_TRUSTED_MANIFEST_KEYS
+    {
+        return Err("too many trusted manifest keys are configured".to_string());
+    }
+    if !valid_manifest_id(&signature.key_id)
+        || signature.algorithm.len() > 32
+        || signature.signature.len() != 128
+        || !signature
+            .signature
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("plugin signature metadata is malformed or oversized".to_string());
+    }
     if !signature.algorithm.eq_ignore_ascii_case("ed25519") {
         return Err(format!(
             "unsupported plugin signature algorithm '{}'",
@@ -619,6 +734,42 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| error.contains("not trusted"))
+        );
+    }
+
+    #[test]
+    fn manifest_validation_rejects_duplicates_and_malformed_signatures() {
+        let mut manifest = sample_manifest();
+        manifest.artifacts.push(manifest.artifacts[0].clone());
+        let validation = validate_plugin_manifest(&manifest, &signed_settings());
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.contains("artifact metadata"))
+        );
+
+        let mut manifest = sample_manifest();
+        manifest.contributions.channels.push(ChannelContribution {
+            id: manifest.contributions.tools[0].id.clone(),
+            name: "Duplicate".to_string(),
+            wasm_artifact: None,
+        });
+        manifest.signature.as_mut().unwrap().signature = "not-hex".to_string();
+        let validation = validate_plugin_manifest(&manifest, &signed_settings());
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.contains("duplicated"))
+        );
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.contains("signature metadata"))
         );
     }
 

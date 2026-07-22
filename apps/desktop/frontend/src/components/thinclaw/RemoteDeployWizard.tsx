@@ -1,9 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { commandClient } from '../../lib/command-client';
+import type { RemoteDeployResult } from '../../lib/bindings';
+import { thinclawCommands } from '../../lib/generated/thinclaw-commands';
 import { listen } from '@tauri-apps/api/event';
 import { Server, CheckCircle, AlertCircle, Loader2, Zap, Copy } from 'lucide-react';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
+import { unwrapResult } from '../../lib/guards';
 
 interface RemoteDeployWizardProps {
     isOpen: boolean;
@@ -11,11 +13,12 @@ interface RemoteDeployWizardProps {
     onClose: () => void;
 }
 
-interface DeployResult {
-    status: string;
-    url: string;
-    token: string;
-    message?: string | null;
+const MAX_DEPLOY_LOG_LINES = 2000;
+const MAX_DEPLOY_LOG_CHARS = 16_384;
+
+function appendDeployLog(previous: string[], line: string): string[] {
+    const next = [...previous, line.slice(0, MAX_DEPLOY_LOG_CHARS)];
+    return next.length > MAX_DEPLOY_LOG_LINES ? next.slice(-MAX_DEPLOY_LOG_LINES) : next;
 }
 
 /** Normalise a user-typed URL/IP into a clean http://host:port URL */
@@ -30,7 +33,7 @@ function normaliseHttpUrl(raw: string): string {
         url = `http://${url}`;
     }
 
-    // ThinClaw's HTTP gateway defaults to port 3000.
+    // If no port, add the deployment gateway default.
     const withoutProto = url.replace(/^https?:\/\//, '');
     const hostPart = withoutProto.split('/')[0];
     if (!hostPart.includes(':')) {
@@ -49,11 +52,12 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
     const [deployMode, setDeployMode] = useState<'new' | 'existing'>('new');
     const [existingUrl, setExistingUrl] = useState('');
     const [existingToken, setExistingToken] = useState('');
-    const [deployResult, setDeployResult] = useState<DeployResult | null>(null);
+    const [deployResult, setDeployResult] = useState<RemoteDeployResult | null>(null);
     const [connecting, setConnecting] = useState(false);
     const [testLoading, setTestLoading] = useState(false);
     const [tailscaleKey, setTailscaleKey] = useState('');
     const [enableSystemd, setEnableSystemd] = useState(true);
+    const [showDeployedToken, setShowDeployedToken] = useState(false);
 
     const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -63,31 +67,25 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
     }, [logs]);
 
     const startDeploy = async () => {
-        if (!ip) return;
+        if (!ip || !tailscaleKey.trim()) return;
 
         setStep('deploying');
         setLogs(['=== ThinClaw Remote Deploy ===', `Target: ${user}@${ip}`]);
         setErrorMsg('');
         setDeployResult(null);
+        setShowDeployedToken(false);
 
         try {
             const unlistenLog = await listen<string>('deploy-log', (event) => {
-                setLogs((prev) => [...prev, event.payload]);
+                setLogs((prev) => appendDeployLog(prev, event.payload));
             });
             try {
-                const result = await commandClient.thinclawDeployRemote(
-                    ip,
-                    user,
-                    tailscaleKey || null,
-                    enableSystemd,
+                const result = unwrapResult(
+                    await thinclawCommands.thinclawDeployRemote(ip, user, tailscaleKey || null, enableSystemd),
+                    'Deploy remote gateway',
                 );
                 setDeployResult(result);
-                if (result.status === 'success') {
-                    setStep('success');
-                } else {
-                    setErrorMsg(result.message || 'Deployment health check timed out');
-                    setStep('timeout');
-                }
+                setStep('success');
             } finally {
                 unlistenLog();
             }
@@ -113,10 +111,14 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
             };
 
             await thinclaw.addAgentProfile(newProfile);
-            await commandClient.thinclawSaveGatewaySettings('remote', deployResult.url, deployResult.token || '');
+            await thinclaw.saveGatewaySettings('remote', deployResult.url, deployResult.token || '');
 
-            toast.success('Remote agent saved! Connecting...');
-            onCheckStatus?.();
+            if (deployResult.reachable === false) {
+                toast.warning('Remote agent saved. Connect this desktop to the same tailnet before using it.');
+            } else {
+                toast.success('Remote agent saved! Connecting...');
+                onCheckStatus?.();
+            }
             onClose();
         } catch (e) {
             console.error('Failed to save profile:', e);
@@ -135,7 +137,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
         // Test connection first
         setTestLoading(true);
         try {
-            const ok = await commandClient.thinclawTestConnection(url, existingToken || null);
+            const ok = await thinclaw.verifyConnection(url, existingToken || null);
             if (!ok) {
                 toast.error('Cannot connect — server unreachable or auth failed');
                 setTestLoading(false);
@@ -161,7 +163,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
             };
 
             await thinclaw.addAgentProfile(newProfile);
-            await commandClient.thinclawSaveGatewaySettings('remote', url, existingToken || '');
+            await thinclaw.saveGatewaySettings('remote', url, existingToken || '');
 
             toast.success('Connected to remote agent');
             onCheckStatus?.();
@@ -231,7 +233,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                                 type="text"
                                                 id="deploy-ip"
                                                 className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
-                                                placeholder="e.g. 192.168.1.50 or your-server.com"
+                                                placeholder="e.g. 203.0.113.10"
                                                 value={ip}
                                                 onChange={(e) => setIp(e.target.value)}
                                             />
@@ -256,20 +258,19 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                         <h4 className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Security Options</h4>
 
                                         <div className="space-y-2">
-                                            <label className="text-xs font-semibold text-muted-foreground">Tailscale Auth Key <span className="text-muted-foreground/60">(optional)</span></label>
+                                            <label className="text-xs font-semibold text-muted-foreground">Tailscale Auth Key <span className="text-rose-500">(required)</span></label>
                                             <input
                                                 type="password"
                                                 id="deploy-tailscale"
-                                                autoComplete="off"
                                                 className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden transition-all font-mono placeholder:text-muted-foreground/50"
                                                 placeholder="tskey-auth-..."
                                                 value={tailscaleKey}
                                                 onChange={(e) => setTailscaleKey(e.target.value)}
                                             />
                                             <p className="text-[10px] text-muted-foreground font-medium">
-                                                If provided, Tailscale VPN will be installed for encrypted private access. Get a key from
+                                                Automated deployment requires encrypted private access and never exposes the bearer-token gateway over public HTTP. Get a key from
                                                 <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener" className="text-primary ml-1 hover:underline">Tailscale Admin</a>.
-                                                Port 3000 will be restricted to Tailscale only.
+                                                Port 3000 is bound and firewalled to Tailscale only.
                                             </p>
                                         </div>
 
@@ -300,7 +301,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                                 type="text"
                                                 id="connect-url"
                                                 className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-hidden transition-all font-mono pl-10 placeholder:text-muted-foreground/50"
-                                                placeholder="192.168.1.50 or https://your-server.com:3000"
+                                                placeholder="100.64.0.10 or https://your-server.example"
                                                 value={existingUrl}
                                                 onChange={(e) => setExistingUrl(e.target.value)}
                                             />
@@ -357,7 +358,9 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                 <div className={`rounded-xl border p-4 space-y-3 text-sm ${step === 'success' ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-amber-500/10 border-amber-500/20'}`}>
                                     <h4 className={`font-bold flex items-center gap-2 ${step === 'success' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
                                         {step === 'success' ? <CheckCircle size={16} /> : <AlertCircle size={16} />}
-                                        {step === 'success' ? 'Agent Ready' : 'Agent Starting — Connect Manually'}
+                                        {step === 'success'
+                                            ? (deployResult.reachable === false ? 'Agent Deployed — Tailnet Connection Needed' : 'Agent Ready')
+                                            : 'Agent Starting — Connect Manually'}
                                     </h4>
 
                                     <div className="space-y-2">
@@ -373,11 +376,18 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                         <div className="flex items-center justify-between bg-black/20 rounded-lg px-3 py-2">
                                             <div>
                                                 <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider">Auth Token</span>
-                                                <p className="font-mono text-xs mt-0.5 truncate max-w-[320px]">{deployResult.token}</p>
+                                                <p className="font-mono text-xs mt-0.5 truncate max-w-[320px]">
+                                                    {showDeployedToken ? deployResult.token : '••••••••••••••••••••••••'}
+                                                </p>
                                             </div>
-                                            <button onClick={() => copyToClipboard(deployResult.token, 'Token')} className="p-1.5 hover:bg-white/10 rounded-lg transition-colors">
-                                                <Copy size={12} className="text-muted-foreground" />
-                                            </button>
+                                            <div className="flex items-center gap-1">
+                                                <button onClick={() => setShowDeployedToken(value => !value)} className="px-2 py-1 text-[10px] hover:bg-white/10 rounded-lg transition-colors">
+                                                    {showDeployedToken ? 'Hide' : 'Reveal'}
+                                                </button>
+                                                <button onClick={() => copyToClipboard(deployResult.token, 'Token')} className="p-1.5 hover:bg-white/10 rounded-lg transition-colors">
+                                                    <Copy size={12} className="text-muted-foreground" />
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
@@ -399,7 +409,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                             </button>
                             <button
                                 onClick={deployMode === 'new' ? startDeploy : handleDirectConnect}
-                                disabled={deployMode === 'new' ? !ip : (!existingUrl || testLoading)}
+                                disabled={deployMode === 'new' ? (!ip || !tailscaleKey.trim()) : (!existingUrl || testLoading)}
                                 className={`px-6 py-2.5 rounded-xl text-white text-sm font-bold shadow-lg transition-all flex items-center gap-2 ${deployMode === 'new'
                                     ? 'bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 shadow-blue-500/20'
                                     : 'bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-600/50 shadow-emerald-500/20'
@@ -443,7 +453,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                                     {connecting ? (
                                         <><Loader2 className="w-4 h-4 animate-spin" /> Connecting...</>
                                     ) : (
-                                        <><CheckCircle className="w-4 h-4" /> Save & Connect</>
+                                        <><CheckCircle className="w-4 h-4" /> {deployResult.reachable === false ? 'Save Agent' : 'Save & Connect'}</>
                                     )}
                                 </button>
                             )}

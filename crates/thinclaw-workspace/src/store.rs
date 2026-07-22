@@ -24,6 +24,35 @@ pub trait WorkspaceStore: Send + Sync {
         path: &str,
     ) -> Result<MemoryDocument, WorkspaceError>;
     async fn update_document(&self, id: Uuid, content: &str) -> Result<(), WorkspaceError>;
+    /// Atomically replace a document only when its content still matches the
+    /// caller's snapshot. Production stores override this with a single
+    /// compare-and-swap statement; the default preserves compatibility for
+    /// test/dummy stores that cannot provide stronger semantics.
+    async fn update_document_if_current(
+        &self,
+        id: Uuid,
+        expected_content: &str,
+        content: &str,
+    ) -> Result<bool, WorkspaceError> {
+        let current = self.get_document_by_id(id).await?;
+        if current.content != expected_content {
+            return Ok(false);
+        }
+        self.update_document(id, content).await?;
+        Ok(true)
+    }
+    /// Atomically append to a document, creating it when absent.
+    ///
+    /// Implementations must serialize concurrent writers at the database
+    /// layer; a read/modify/write default would lose memory entries.
+    async fn append_document_by_path(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        path: &str,
+        separator: &str,
+        content: &str,
+    ) -> Result<MemoryDocument, WorkspaceError>;
     async fn delete_document_by_path(
         &self,
         user_id: &str,
@@ -68,6 +97,15 @@ pub trait WorkspaceStore: Send + Sync {
         }
         Ok(())
     }
+
+    /// Replace an index only when the document still has the content that was
+    /// chunked. Returns `false` when a concurrent writer changed it.
+    async fn replace_chunks_if_current(
+        &self,
+        document_id: Uuid,
+        expected_content: &str,
+        chunks: &[(i32, String, Option<Vec<f32>>)],
+    ) -> Result<bool, WorkspaceError>;
 
     async fn update_chunk_embedding(
         &self,
@@ -121,6 +159,30 @@ where
 
     async fn update_document(&self, id: Uuid, content: &str) -> Result<(), WorkspaceError> {
         (**self).update_document(id, content).await
+    }
+
+    async fn update_document_if_current(
+        &self,
+        id: Uuid,
+        expected_content: &str,
+        content: &str,
+    ) -> Result<bool, WorkspaceError> {
+        (**self)
+            .update_document_if_current(id, expected_content, content)
+            .await
+    }
+
+    async fn append_document_by_path(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        path: &str,
+        separator: &str,
+        content: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        (**self)
+            .append_document_by_path(user_id, agent_id, path, separator, content)
+            .await
     }
 
     async fn delete_document_by_path(
@@ -181,6 +243,17 @@ where
         chunks: &[(i32, String, Option<Vec<f32>>)],
     ) -> Result<(), WorkspaceError> {
         (**self).replace_chunks(document_id, chunks).await
+    }
+
+    async fn replace_chunks_if_current(
+        &self,
+        document_id: Uuid,
+        expected_content: &str,
+        chunks: &[(i32, String, Option<Vec<f32>>)],
+    ) -> Result<bool, WorkspaceError> {
+        (**self)
+            .replace_chunks_if_current(document_id, expected_content, chunks)
+            .await
     }
 
     async fn update_chunk_embedding(

@@ -140,8 +140,62 @@ pub struct FinishedRunPayload {
 
 /// Send a finished-run notification to the webhook URL.
 pub async fn notify_finished_run(url: &str, payload: &FinishedRunPayload) {
-    let client = reqwest::Client::new();
-    match client.post(url).json(payload).send().await {
+    const MAX_WEBHOOK_PAYLOAD_BYTES: usize = 256 * 1024;
+    if serde_json::to_vec(payload).map_or(true, |encoded| encoded.len() > MAX_WEBHOOK_PAYLOAD_BYTES)
+    {
+        tracing::warn!(
+            routine = %payload.routine_name,
+            "Skipping oversized cron finished-run webhook payload"
+        );
+        return;
+    }
+    let guarded = match thinclaw_tools_core::validate_outbound_url_pinned_async(
+        url,
+        &thinclaw_tools_core::OutboundUrlGuardOptions {
+            require_https: true,
+            upgrade_http_to_https: false,
+            allowlist: Vec::new(),
+        },
+    )
+    .await
+    {
+        Ok(guarded) => guarded,
+        Err(error) => {
+            tracing::warn!(
+                routine = %payload.routine_name,
+                %error,
+                "Cron finished-run webhook URL failed outbound validation"
+            );
+            return;
+        }
+    };
+    let Some(host) = guarded.url.host_str() else {
+        tracing::warn!(
+            routine = %payload.routine_name,
+            "Cron finished-run webhook URL has no host"
+        );
+        return;
+    };
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if !guarded.pinned_addrs.is_empty() {
+        builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+    }
+    let client = match builder.build() {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(
+                routine = %payload.routine_name,
+                %error,
+                "Failed to construct cron finished-run webhook client"
+            );
+            return;
+        }
+    };
+    match client.post(guarded.url).json(payload).send().await {
         Ok(resp) if resp.status().is_success() => {
             tracing::debug!(
                 routine = %payload.routine_name,
@@ -158,7 +212,7 @@ pub async fn notify_finished_run(url: &str, payload: &FinishedRunPayload) {
         Err(e) => {
             tracing::warn!(
                 routine = %payload.routine_name,
-                error = %e,
+                error = %e.without_url(),
                 "Failed to send cron finished-run webhook"
             );
         }

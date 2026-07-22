@@ -135,23 +135,24 @@ pub fn split_scoped_target(target: &str) -> (Option<MemoryScope>, String) {
 }
 
 pub fn actor_scoped_path(actor_id: &str, path: &str) -> String {
+    let actor_root = paths::actor_root(actor_id);
     if path.is_empty() {
-        paths::actor_root(actor_id)
+        actor_root
     } else if path.eq_ignore_ascii_case("memory") || path.eq_ignore_ascii_case(paths::MEMORY) {
         paths::actor_memory(actor_id)
     } else if path.eq_ignore_ascii_case(paths::USER) {
         paths::actor_user(actor_id)
     } else if path.eq_ignore_ascii_case("profile") || path.eq_ignore_ascii_case(paths::PROFILE) {
         paths::actor_profile(actor_id)
-    } else if path.starts_with("actors/") {
+    } else if path == actor_root || path.starts_with(&format!("{actor_root}/")) {
         path.to_string()
     } else {
-        format!("{}/{}", paths::actor_root(actor_id), path)
+        format!("{actor_root}/{path}")
     }
 }
 
 pub fn shared_root_path(path: &str) -> String {
-    if path.eq_ignore_ascii_case("memory") {
+    let path = if path.eq_ignore_ascii_case("memory") {
         paths::MEMORY.to_string()
     } else if path.eq_ignore_ascii_case("heartbeat") {
         paths::HEARTBEAT.to_string()
@@ -159,6 +160,43 @@ pub fn shared_root_path(path: &str) -> String {
         paths::PROFILE.to_string()
     } else {
         path.to_string()
+    };
+    if path.is_empty() || path == paths::SHARED_DIR {
+        paths::SHARED_DIR.to_string()
+    } else if path.starts_with(&format!("{}/", paths::SHARED_DIR)) {
+        path
+    } else {
+        format!("{}/{path}", paths::SHARED_DIR)
+    }
+}
+
+pub fn conversation_scoped_path(metadata: &serde_json::Value, path: &str) -> String {
+    let Some(scope_id) = metadata
+        .get("conversation_scope_id")
+        .and_then(|value| value.as_str())
+        .and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        // Root adapters enforce the canonical conversation namespace. Keeping
+        // a logical relative path here preserves compatibility for synthetic
+        // contexts that have not supplied their scope yet.
+        return shared_root_path(path)
+            .trim_start_matches("shared/")
+            .to_string();
+    };
+    let root = paths::conversation_root(scope_id);
+    let path = if path.eq_ignore_ascii_case("memory") {
+        paths::MEMORY
+    } else if path.eq_ignore_ascii_case("heartbeat") {
+        paths::HEARTBEAT
+    } else {
+        path
+    };
+    if path.is_empty() {
+        root
+    } else if path == root || path.starts_with(&format!("{root}/")) {
+        path.to_string()
+    } else {
+        format!("{root}/{path}")
     }
 }
 
@@ -172,7 +210,7 @@ pub fn memory_write_parameters_schema() -> serde_json::Value {
             },
             "target": {
                 "type": "string",
-                "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'shared:...' to force the household root, or a path like 'projects/alpha/notes.md'",
+                "description": "Where to write inside the current actor/group namespace: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md, or a relative path like 'projects/alpha/notes.md'. Principal-shared knowledge is read-only from conversation tools.",
                 "default": "daily_log"
             },
             "append": {
@@ -575,14 +613,19 @@ pub fn parse_memory_search_params(
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
             ToolError::InvalidParameters("missing required parameter: query".to_string())
-        })?
-        .to_string();
+        })?;
+    if query.trim().is_empty() || query.len() > 32 * 1024 || query.contains('\0') {
+        return Err(ToolError::InvalidParameters(
+            "query must be non-empty, contain no NUL byte, and not exceed 32 KiB".to_string(),
+        ));
+    }
+    let query = query.to_string();
 
     let limit = params
         .get("limit")
         .and_then(|v| v.as_u64())
         .unwrap_or(6)
-        .min(20) as usize;
+        .clamp(1, 20) as usize;
 
     let use_mmr = params.get("mmr").and_then(|v| v.as_bool()).unwrap_or(true);
     let use_temporal_decay = params
@@ -608,8 +651,13 @@ pub fn parse_session_search_params(
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
             ToolError::InvalidParameters("missing required parameter: query".to_string())
-        })?
-        .to_string();
+        })?;
+    if query.len() > 32 * 1024 || query.contains('\0') {
+        return Err(ToolError::InvalidParameters(
+            "query must contain no NUL byte and not exceed 32 KiB".to_string(),
+        ));
+    }
+    let query = query.to_string();
     let limit = params
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -684,7 +732,9 @@ pub fn memory_conversation_kind(metadata: &serde_json::Value) -> MemoryConversat
         .unwrap_or("direct")
         .to_ascii_lowercase();
     match kind.as_str() {
-        "group" | "channel" | "supergroup" => MemoryConversationKind::Group,
+        "group" | "group_chat" | "channel" | "supergroup" | "room" | "guild" => {
+            MemoryConversationKind::Group
+        }
         _ => MemoryConversationKind::Direct,
     }
 }
@@ -695,25 +745,15 @@ pub fn resolve_session_search_scope(
     context_actor_id: Option<&str>,
     context_conversation_id: Option<Uuid>,
 ) -> SessionSearchScope {
-    let principal_id = metadata
-        .get("principal_id")
-        .and_then(|v| v.as_str())
+    // Principal and actor are authoritative JobContext fields. Message/job
+    // metadata carries transport hints, but must never redirect transcript
+    // recall to a sibling identity.
+    let principal_id = context_principal_id.to_string();
+    let actor_id = context_actor_id
         .map(str::to_string)
-        .unwrap_or_else(|| context_principal_id.to_string());
-    let actor_id = metadata
-        .get("actor_id")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .or_else(|| context_actor_id.map(str::to_string))
         .unwrap_or_else(|| principal_id.clone());
     let include_group_history = memory_conversation_kind(metadata) == MemoryConversationKind::Group;
-    let conversation_id = context_conversation_id.or_else(|| {
-        metadata
-            .get("conversation_id")
-            .or_else(|| metadata.get("thread_id"))
-            .and_then(|v| v.as_str())
-            .and_then(|value| Uuid::parse_str(value).ok())
-    });
+    let conversation_id = context_conversation_id;
 
     SessionSearchScope {
         principal_id,
@@ -749,8 +789,8 @@ pub fn resolve_memory_write_path(
     target: &str,
 ) -> (String, bool) {
     let (explicit_scope, bare_target) = split_scoped_target(target);
-    let direct_actor =
-        memory_conversation_kind(metadata) == MemoryConversationKind::Direct && actor_id.is_some();
+    let conversation_kind = memory_conversation_kind(metadata);
+    let direct_actor = conversation_kind == MemoryConversationKind::Direct && actor_id.is_some();
 
     match explicit_scope {
         Some(MemoryScope::Shared) => (shared_root_path(&bare_target), false),
@@ -758,21 +798,14 @@ pub fn resolve_memory_write_path(
             let actor_id = actor_id.unwrap_or("unknown");
             (actor_scoped_path(actor_id, &bare_target), true)
         }
-        None if direct_actor
-            && (bare_target.eq_ignore_ascii_case("memory")
-                || bare_target.eq_ignore_ascii_case(paths::MEMORY)
-                || bare_target.eq_ignore_ascii_case(paths::USER)
-                || bare_target.eq_ignore_ascii_case("profile")
-                || bare_target.eq_ignore_ascii_case(paths::PROFILE)) =>
-        {
+        None if direct_actor => {
             let actor_id = actor_id.expect("checked is_some above");
             (actor_scoped_path(actor_id, &bare_target), true)
         }
-        None if direct_actor && bare_target.starts_with("actors/") => {
-            let actor_id = actor_id.expect("checked is_some above");
-            (actor_scoped_path(actor_id, &bare_target), true)
+        None if conversation_kind == MemoryConversationKind::Group => {
+            (conversation_scoped_path(metadata, &bare_target), false)
         }
-        None => (shared_root_path(&bare_target), false),
+        None => (bare_target, false),
     }
 }
 
@@ -836,23 +869,11 @@ pub fn resolve_memory_write_plan(
 }
 
 pub fn resolve_memory_write_path_for_context(ctx: &JobContext, target: &str) -> (String, bool) {
-    let actor_id = ctx
-        .metadata
-        .get("actor_id")
-        .or_else(|| ctx.metadata.get("actor"))
-        .and_then(|v| v.as_str())
-        .or(ctx.actor_id.as_deref());
-    resolve_memory_write_path(&ctx.metadata, actor_id, target)
+    resolve_memory_write_path(&ctx.metadata, Some(ctx.owner_actor_id()), target)
 }
 
 pub fn resolve_memory_write_plan_for_context(ctx: &JobContext, target: &str) -> MemoryWritePlan {
-    let actor_id = ctx
-        .metadata
-        .get("actor_id")
-        .or_else(|| ctx.metadata.get("actor"))
-        .and_then(|v| v.as_str())
-        .or(ctx.actor_id.as_deref());
-    resolve_memory_write_plan(&ctx.metadata, actor_id, target)
+    resolve_memory_write_plan(&ctx.metadata, Some(ctx.owner_actor_id()), target)
 }
 
 async fn execute_memory_action<F, Fut>(
@@ -1127,7 +1148,7 @@ mod tests {
     fn scoped_targets_route_to_shared_or_actor_paths() {
         assert_eq!(
             resolve_memory_write_path(&serde_json::json!({}), Some("actor-1"), "shared:memory"),
-            (paths::MEMORY.to_string(), false)
+            (format!("{}/{}", paths::SHARED_DIR, paths::MEMORY), false)
         );
         assert_eq!(
             resolve_memory_write_path(&serde_json::json!({}), Some("actor-1"), "actor:profile"),
@@ -1148,19 +1169,38 @@ mod tests {
     }
 
     #[test]
-    fn group_memory_targets_stay_shared_without_explicit_actor_scope() {
+    fn group_memory_targets_use_the_conversation_namespace() {
+        let scope_id = Uuid::new_v4();
         assert_eq!(
             resolve_memory_write_path(
-                &serde_json::json!({ "conversation_kind": "group" }),
+                &serde_json::json!({
+                    "conversation_kind": "group",
+                    "conversation_scope_id": scope_id.to_string(),
+                }),
                 Some("actor-1"),
                 "memory"
             ),
-            (paths::MEMORY.to_string(), false)
+            (paths::conversation_memory(scope_id), false)
         );
     }
 
     #[test]
-    fn context_memory_write_path_prefers_metadata_actor() {
+    fn arbitrary_direct_paths_are_actor_private() {
+        assert_eq!(
+            resolve_memory_write_path(
+                &serde_json::json!({ "conversation_kind": "direct" }),
+                Some("actor-1"),
+                "projects/alpha/notes.md"
+            ),
+            (
+                format!("{}/projects/alpha/notes.md", paths::actor_root("actor-1")),
+                true
+            )
+        );
+    }
+
+    #[test]
+    fn context_memory_write_path_ignores_spoofed_metadata_actor() {
         let mut ctx = JobContext::with_identity("user-1", "ctx-actor", "memory", "test");
         ctx.metadata = serde_json::json!({
             "conversation_kind": "direct",
@@ -1169,7 +1209,7 @@ mod tests {
 
         assert_eq!(
             resolve_memory_write_path_for_context(&ctx, "memory"),
-            (paths::actor_memory("metadata-actor"), true)
+            (paths::actor_memory("ctx-actor"), true)
         );
     }
 
@@ -1234,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn session_scope_for_context_allows_metadata_overrides() {
+    fn session_scope_for_context_ignores_identity_and_thread_metadata_overrides() {
         let thread_id = Uuid::new_v4();
         let mut ctx = JobContext::with_identity("principal", "actor", "session", "test");
         ctx.metadata = serde_json::json!({
@@ -1246,9 +1286,9 @@ mod tests {
 
         let scope = resolve_session_search_scope_for_context(&ctx);
 
-        assert_eq!(scope.principal_id, "metadata-principal");
-        assert_eq!(scope.actor_id, "metadata-actor");
-        assert_eq!(scope.conversation_id, Some(thread_id));
+        assert_eq!(scope.principal_id, "principal");
+        assert_eq!(scope.actor_id, "actor");
+        assert_eq!(scope.conversation_id, None);
         assert!(scope.include_group_history);
     }
 
@@ -1378,6 +1418,14 @@ mod tests {
         assert!(params.use_temporal_decay);
 
         assert!(parse_memory_search_params(&serde_json::json!({})).is_err());
+        assert!(parse_memory_search_params(&serde_json::json!({"query": ""})).is_err());
+        assert!(parse_memory_search_params(&serde_json::json!({"query": "bad\0query"})).is_err());
+        assert_eq!(
+            parse_memory_search_params(&serde_json::json!({"query": "ok", "limit": 0}))
+                .unwrap()
+                .limit,
+            1
+        );
     }
 
     #[tokio::test]
@@ -1472,24 +1520,30 @@ mod tests {
         assert!(group.include_current_thread);
         assert!(!group.all_channels);
         assert!(!group.summarize_sessions);
+        assert!(parse_session_search_params(
+            &serde_json::json!({ "query": "bad\0query" }),
+            true,
+            false,
+        )
+        .is_err());
     }
 
     #[test]
-    fn session_search_scope_uses_metadata_over_context() {
+    fn session_search_scope_uses_authoritative_context_over_metadata() {
         let conversation_id = Uuid::new_v4();
         let scope = resolve_session_search_scope(
             &serde_json::json!({
                 "principal_id": "metadata-principal",
                 "actor_id": "metadata-actor",
                 "conversation_kind": "group",
-                "thread_id": conversation_id.to_string(),
+                "thread_id": Uuid::new_v4().to_string(),
             }),
             "context-principal",
             Some("context-actor"),
-            None,
+            Some(conversation_id),
         );
-        assert_eq!(scope.principal_id, "metadata-principal");
-        assert_eq!(scope.actor_id, "metadata-actor");
+        assert_eq!(scope.principal_id, "context-principal");
+        assert_eq!(scope.actor_id, "context-actor");
         assert!(scope.include_group_history);
         assert_eq!(scope.conversation_id, Some(conversation_id));
     }

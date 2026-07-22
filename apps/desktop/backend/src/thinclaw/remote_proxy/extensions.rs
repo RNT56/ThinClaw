@@ -96,6 +96,19 @@ impl RemoteGatewayProxy {
         self.put_json(&url, &body).await.map(|_| ())
     }
 
+    /// Atomically apply a bounded settings patch on the remote gateway.
+    pub async fn patch_settings(
+        &self,
+        settings: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+        self.post_json(
+            "/api/settings/import",
+            &serde_json::json!({ "settings": settings }),
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Legacy raw-secret injection is intentionally unavailable in remote mode.
     ///
     /// Remote credentials must move through the Provider Vault save/delete

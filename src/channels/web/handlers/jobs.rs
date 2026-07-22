@@ -13,8 +13,8 @@ use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::context::{JobContext, JobState};
 use crate::history::SandboxJobRecord;
-use crate::sandbox_jobs::SandboxJobController;
-use crate::sandbox_types::{ContainerHandle, ContainerState, CredentialGrant, PendingPrompt};
+use crate::sandbox_jobs::{SandboxJobController, enqueue_sandbox_prompt};
+use crate::sandbox_types::{ContainerHandle, ContainerState, CredentialGrant};
 use thinclaw_gateway::web::jobs::{
     GatewayLocalJobDetailInput, GatewayLocalJobListInput, GatewaySandboxJobDetailInput,
     GatewaySandboxJobListInput, JobEventInfoInput, JobEventsResponse, JobPromptQueuedResponse,
@@ -32,6 +32,9 @@ use thinclaw_gateway::web::jobs::{
     sandbox_job_detail_response, sandbox_job_info, sandbox_job_metadata_unavailable_error,
     sandbox_unavailable_error,
 };
+
+const MAX_PROJECT_TEXT_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PROJECT_DIRECTORY_ENTRIES: usize = 10_000;
 
 #[derive(Debug, Clone, Default)]
 struct SandboxJobLookup {
@@ -503,10 +506,14 @@ pub(crate) async fn jobs_restart_handler(
 
     let new_job_id = Uuid::new_v4();
     let now = chrono::Utc::now();
+    let mut restarted_spec = old_job.spec.clone();
+    jm.stamp_job_spec(&mut restarted_spec);
+    jm.validate_job_spec(new_job_id, &restarted_spec)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
 
     let record = crate::history::SandboxJobRecord {
         id: new_job_id,
-        spec: old_job.spec.clone(),
+        spec: restarted_spec.clone(),
         status: "creating".to_string(),
         success: None,
         failure_reason: None,
@@ -530,14 +537,30 @@ pub(crate) async fn jobs_restart_handler(
             vec![]
         });
 
-    jm.create_job(new_job_id, old_job.spec.clone(), credential_grants)
+    if let Err(error) = jm
+        .create_job(new_job_id, restarted_spec, credential_grants)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to create container: {}", e),
+    {
+        let message = format!("Failed to create container: {error}");
+        if let Err(update_error) = store
+            .update_sandbox_job_status(
+                new_job_id,
+                "failed",
+                Some(false),
+                Some(&message),
+                None,
+                Some(chrono::Utc::now()),
             )
-        })?;
+            .await
+        {
+            tracing::warn!(
+                job_id = %new_job_id,
+                %update_error,
+                "Failed to terminalize rejected restarted sandbox job"
+            );
+        }
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+    }
 
     store
         .update_sandbox_job_status(new_job_id, "running", None, None, Some(now), None)
@@ -581,15 +604,16 @@ pub(crate) async fn jobs_prompt_handler(
     if !body.done && body.content.as_deref().unwrap_or("").trim().is_empty() {
         return Err(missing_job_prompt_content_error());
     }
-    let prompt = PendingPrompt {
-        content: body.content,
-        done: body.done,
-    };
-
-    {
-        let mut queue = prompt_queue.lock().await;
-        queue.entry(job_id).or_default().push_back(prompt);
-    }
+    enqueue_sandbox_prompt(prompt_queue, job_id, body.content, body.done)
+        .await
+        .map_err(|error| {
+            let status = if error.contains("exceeds") {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            };
+            (status, error)
+        })?;
 
     Ok(Json(job_prompt_queued_response(job_id)))
 }
@@ -672,7 +696,17 @@ pub(crate) async fn job_files_list_handler(
         .await
         .map_err(|_| project_cannot_read_directory_error())?;
 
-    while let Ok(Some(entry)) = read_dir.next_entry().await {
+    loop {
+        let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .map_err(|_| project_cannot_read_directory_error())?
+        else {
+            break;
+        };
+        if entries.len() >= MAX_PROJECT_DIRECTORY_ENTRIES {
+            return Err(project_cannot_read_directory_error());
+        }
         let name = entry.file_name().to_string_lossy().to_string();
         let is_dir = entry
             .file_type()
@@ -690,6 +724,12 @@ pub(crate) async fn job_files_list_handler(
             is_dir,
         }));
     }
+    entries.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.name.cmp(&right.name))
+    });
 
     Ok(Json(project_files_response(entries)))
 }
@@ -730,9 +770,13 @@ pub(crate) async fn job_files_read_handler(
         return Err(project_forbidden_error());
     }
 
-    let content = tokio::fs::read_to_string(&canonical)
-        .await
-        .map_err(|_| project_cannot_read_file_error())?;
+    let bytes = thinclaw_platform::read_regular_file_bounded_single_link_async(
+        canonical,
+        MAX_PROJECT_TEXT_FILE_BYTES,
+    )
+    .await
+    .map_err(|_| project_cannot_read_file_error())?;
+    let content = String::from_utf8(bytes).map_err(|_| project_cannot_read_file_error())?;
 
     Ok(Json(project_file_read_response(path, content)))
 }

@@ -31,12 +31,54 @@ impl ChannelSubmissionPort for RootChannelSubmissionPort {
         let thread_id = submission.parsed_thread_id();
         let agent = Arc::clone(&self.agent);
         let message = submission.message;
+        let channel_name = message.channel.clone();
 
-        tokio::spawn(async move {
-            if let Err(error) = agent.handle_message_external(&message).await {
-                tracing::warn!(run_id = %run_id, error = %error, "Channel submission failed");
-            }
-        });
+        let accepted = self
+            .agent
+            .spawn_external_submission(async move {
+                agent.channels().record_received(&message.channel).await;
+                match agent.handle_message_external(&message).await {
+                    Ok(Some(response)) if !response.is_empty() => {
+                        if let Err(error) = agent
+                            .channels()
+                            .respond(
+                                &message,
+                                crate::channels::OutgoingResponse::text(response.content)
+                                    .with_attachments(response.attachments),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                run_id = %run_id,
+                                %error,
+                                "Channel submission response delivery failed"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(run_id = %run_id, %error, "Channel submission failed");
+                        let _ = agent
+                            .channels()
+                            .send_status(
+                                &message.channel,
+                                crate::channels::StatusUpdate::Error {
+                                    message: error.to_string(),
+                                    code: Some("submission_failed".to_string()),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
+                }
+            })
+            .await;
+        if !accepted {
+            return Err(ChannelError::Disconnected {
+                name: channel_name,
+                reason: "agent submission queue is full or shutting down".to_string(),
+            });
+        }
 
         Ok(ChannelSubmissionAck {
             run_id,

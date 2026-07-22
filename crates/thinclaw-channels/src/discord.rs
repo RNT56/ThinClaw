@@ -29,13 +29,17 @@ use serde::Deserialize;
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+use tokio_tungstenite::{
+    connect_async_with_config,
+    tungstenite::{Message as WsMessage, protocol::WebSocketConfig},
+};
 
 use thinclaw_channels_core::{
     Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
     StreamMode,
 };
 use thinclaw_media::MediaContent;
+use thinclaw_tools_core::{OutboundUrlGuardOptions, validate_outbound_url_pinned_async};
 use thinclaw_types::error::ChannelError;
 
 use crate::util::floor_char_boundary;
@@ -59,6 +63,12 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 45_000;
 
 /// Times a rate-limited (429) Discord REST call is retried before giving up.
 const MAX_REST_RETRIES: u32 = 3;
+const MAX_DISCORD_JSON_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DISCORD_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_DISCORD_GATEWAY_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DISCORD_ATTACHMENTS: usize = 10;
+const MAX_DISCORD_IDENTIFIER_BYTES: usize = 32;
+const MAX_DISCORD_TOKEN_BYTES: usize = 64 * 1024;
 
 /// Gateway intents: GUILDS (1) + GUILD_MESSAGES (512) + MESSAGE_CONTENT (32768) + DIRECT_MESSAGES (4096)
 const GATEWAY_INTENTS: u64 = 1 | 512 | 4096 | 32768;
@@ -76,6 +86,75 @@ pub struct DiscordConfig {
     pub allow_from: Vec<String>,
     /// Stream mode for progressive message rendering.
     pub stream_mode: StreamMode,
+}
+
+fn valid_discord_snowflake(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_DISCORD_IDENTIFIER_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<u64>().is_ok_and(|value| value > 0)
+}
+
+fn validate_discord_config(config: &DiscordConfig) -> Result<(), ChannelError> {
+    let token = config.bot_token.expose_secret();
+    if token.is_empty()
+        || token.len() > MAX_DISCORD_TOKEN_BYTES
+        || token.chars().any(char::is_control)
+        || config
+            .guild_id
+            .as_deref()
+            .is_some_and(|value| !valid_discord_snowflake(value))
+        || config.allow_from.len() > 1024
+        || config
+            .allow_from
+            .iter()
+            .any(|value| value != "*" && !valid_discord_snowflake(value))
+    {
+        return Err(ChannelError::StartupFailed {
+            name: NAME.to_string(),
+            reason: "Discord configuration is malformed or oversized".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn normalize_discord_gateway_url(value: &str) -> Result<String, ChannelError> {
+    if value.is_empty() || value.len() > 4096 {
+        return Err(ChannelError::StartupFailed {
+            name: NAME.to_string(),
+            reason: "Discord returned an invalid Gateway URL".to_string(),
+        });
+    }
+    let mut url = url::Url::parse(value).map_err(|_| ChannelError::StartupFailed {
+        name: NAME.to_string(),
+        reason: "Discord returned an invalid Gateway URL".to_string(),
+    })?;
+    if url.scheme() != "wss"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str() != Some("gateway.discord.gg")
+        || url.port().is_some_and(|port| port != 443)
+        || url.fragment().is_some()
+    {
+        return Err(ChannelError::StartupFailed {
+            name: NAME.to_string(),
+            reason: "Discord returned an untrusted Gateway URL".to_string(),
+        });
+    }
+    url.set_query(None);
+    url.query_pairs_mut()
+        .append_pair("v", "10")
+        .append_pair("encoding", "json");
+    Ok(url.to_string())
+}
+
+fn discord_gateway_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .read_buffer_size(64 * 1024)
+        .write_buffer_size(64 * 1024)
+        .max_write_buffer_size(512 * 1024)
+        .max_message_size(Some(MAX_DISCORD_GATEWAY_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_DISCORD_GATEWAY_MESSAGE_BYTES))
 }
 
 // ── Discord Gateway types ───────────────────────────────────────────
@@ -133,6 +212,7 @@ struct DiscordAttachment {
 
 /// Maximum single attachment size we'll download (20 MB).
 const MAX_DISCORD_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024;
+const MAX_DISCORD_TOTAL_ATTACHMENT_SIZE: usize = 40 * 1024 * 1024;
 
 /// Message author.
 #[derive(Debug, Clone, Deserialize)]
@@ -141,6 +221,38 @@ struct MessageAuthor {
     username: String,
     #[serde(default)]
     bot: bool,
+}
+
+fn validate_discord_message(message: &MessageCreate) -> bool {
+    valid_discord_snowflake(&message.id)
+        && valid_discord_snowflake(&message.channel_id)
+        && message
+            .guild_id
+            .as_deref()
+            .is_none_or(valid_discord_snowflake)
+        && valid_discord_snowflake(&message.author.id)
+        && !message.author.username.is_empty()
+        && message.author.username.len() <= 256
+        && !message.author.username.chars().any(char::is_control)
+        && message.content.len() <= 64 * 1024
+        && message.mentions.len() <= 256
+        && message.mentions.iter().all(|author| {
+            valid_discord_snowflake(&author.id)
+                && author.username.len() <= 256
+                && !author.username.chars().any(char::is_control)
+        })
+        && message.attachments.len() <= MAX_DISCORD_ATTACHMENTS
+        && message.attachments.iter().all(|attachment| {
+            valid_discord_snowflake(&attachment.id)
+                && !attachment.filename.is_empty()
+                && attachment.filename.len() <= 255
+                && !attachment.filename.chars().any(char::is_control)
+                && !attachment.filename.contains(['/', '\\'])
+                && attachment.url.len() <= 16 * 1024
+                && attachment.content_type.as_ref().is_none_or(|value| {
+                    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+                })
+        })
 }
 
 // ── Channel implementation ──────────────────────────────────────────
@@ -157,8 +269,11 @@ pub struct DiscordChannel {
 impl DiscordChannel {
     /// Create a new Discord channel.
     pub fn new(config: DiscordConfig) -> Result<Self, ChannelError> {
+        validate_discord_config(&config)?;
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .build()
             .map_err(|e| ChannelError::StartupFailed {
                 name: NAME.to_string(),
@@ -186,11 +301,20 @@ impl DiscordChannel {
                 reason: format!("GET /gateway/bot: {e}"),
             })?;
 
-        let body: serde_json::Value =
-            resp.json().await.map_err(|e| ChannelError::StartupFailed {
+        if !resp.status().is_success() {
+            return Err(ChannelError::AuthFailed {
                 name: NAME.to_string(),
-                reason: format!("Parse /gateway/bot: {e}"),
-            })?;
+                reason: format!("Discord Gateway discovery returned {}", resp.status()),
+            });
+        }
+
+        let body: serde_json::Value =
+            crate::response::bounded_json(resp, MAX_DISCORD_JSON_RESPONSE_BYTES)
+                .await
+                .map_err(|e| ChannelError::StartupFailed {
+                    name: NAME.to_string(),
+                    reason: format!("Parse /gateway/bot: {e}"),
+                })?;
 
         let url =
             body.get("url")
@@ -200,8 +324,7 @@ impl DiscordChannel {
                     reason: "No gateway URL (invalid bot token?)".to_string(),
                 })?;
 
-        // Append version and encoding
-        Ok(format!("{url}?v=10&encoding=json"))
+        normalize_discord_gateway_url(url)
     }
 
     /// Send a message via the REST API.
@@ -211,6 +334,12 @@ impl DiscordChannel {
         channel_id: &str,
         text: &str,
     ) -> Result<(), ChannelError> {
+        if !valid_discord_snowflake(channel_id) {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "Discord channel ID is malformed".to_string(),
+            });
+        }
         let chunks = split_message(text);
 
         for chunk in chunks {
@@ -223,10 +352,10 @@ impl DiscordChannel {
             .await?;
 
             if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let status = resp.status();
                 return Err(ChannelError::SendFailed {
                     name: NAME.to_string(),
-                    reason: format!("Discord API: {body}"),
+                    reason: format!("Discord message API returned {status}"),
                 });
             }
         }
@@ -240,16 +369,68 @@ impl DiscordChannel {
         channel_id: &str,
         response: &OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        if !valid_discord_snowflake(channel_id) {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "Discord channel ID is malformed".to_string(),
+            });
+        }
         if response.attachments.is_empty() {
             return Self::send_message(client, bot_token, channel_id, &response.content).await;
         }
 
+        if response.attachments.len() > MAX_DISCORD_ATTACHMENTS {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "Discord response contains too many attachments".to_string(),
+            });
+        }
+        let total_attachment_bytes = response
+            .attachments
+            .iter()
+            .try_fold(0usize, |total, attachment| {
+                total.checked_add(attachment.data.len())
+            })
+            .ok_or_else(|| ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "Discord response attachment size overflow".to_string(),
+            })?;
+        if total_attachment_bytes > MAX_DISCORD_TOTAL_ATTACHMENT_SIZE {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "Discord response attachments exceed the configured total size limit"
+                    .to_string(),
+            });
+        }
+
+        // Keep text within Discord's 2,000-character limit and avoid repeating
+        // it once for every attachment.
+        if !response.content.trim().is_empty() {
+            Self::send_message(client, bot_token, channel_id, &response.content).await?;
+        }
+
         for attachment in &response.attachments {
+            if attachment.data.len() > MAX_DISCORD_ATTACHMENT_SIZE as usize {
+                return Err(ChannelError::SendFailed {
+                    name: NAME.to_string(),
+                    reason: "Discord attachment exceeds the configured size limit".to_string(),
+                });
+            }
             let filename = attachment
                 .filename
                 .as_deref()
                 .unwrap_or("attachment")
                 .to_string();
+            if filename.is_empty()
+                || filename.len() > 255
+                || filename.chars().any(char::is_control)
+                || filename.contains(['/', '\\'])
+            {
+                return Err(ChannelError::SendFailed {
+                    name: NAME.to_string(),
+                    reason: "Discord attachment filename is malformed".to_string(),
+                });
+            }
             let part = reqwest::multipart::Part::bytes(attachment.data.clone())
                 .file_name(filename.clone())
                 .mime_str(&attachment.mime_type)
@@ -258,7 +439,7 @@ impl DiscordChannel {
                     reason: format!("Invalid attachment MIME {}: {e}", attachment.mime_type),
                 })?;
             let payload = serde_json::json!({
-                "content": if response.content.trim().is_empty() { "" } else { response.content.as_str() },
+                "content": "",
                 "attachments": [{"id": 0, "filename": filename}],
             });
             let form = reqwest::multipart::Form::new()
@@ -275,10 +456,10 @@ impl DiscordChannel {
                     reason: format!("POST attachment message: {e}"),
                 })?;
             if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let status = resp.status();
                 return Err(ChannelError::SendFailed {
                     name: NAME.to_string(),
-                    reason: format!("Discord attachment API: {body}"),
+                    reason: format!("Discord attachment API returned {status}"),
                 });
             }
         }
@@ -292,6 +473,12 @@ impl DiscordChannel {
         channel_id: &str,
         text: &str,
     ) -> Result<String, ChannelError> {
+        if !valid_discord_snowflake(channel_id) {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "Discord channel ID is malformed".to_string(),
+            });
+        }
         let resp = send_rest(|| {
             client
                 .post(format!("{API_BASE}/channels/{channel_id}/messages"))
@@ -301,19 +488,29 @@ impl DiscordChannel {
         .await?;
 
         if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let status = resp.status();
             return Err(ChannelError::SendFailed {
                 name: NAME.to_string(),
-                reason: format!("Discord API: {body}"),
+                reason: format!("Discord message API returned {status}"),
             });
         }
 
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        Ok(body
+        let body: serde_json::Value =
+            crate::response::bounded_json(resp, MAX_DISCORD_JSON_RESPONSE_BYTES)
+                .await
+                .map_err(|error| ChannelError::SendFailed {
+                    name: NAME.to_string(),
+                    reason: format!("Invalid Discord message response: {error}"),
+                })?;
+        let id = body
             .get("id")
             .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string())
+            .filter(|id| valid_discord_snowflake(id))
+            .ok_or_else(|| ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "Discord message response did not contain a valid ID".to_string(),
+            })?;
+        Ok(id.to_string())
     }
 
     /// Edit an existing message.
@@ -324,6 +521,12 @@ impl DiscordChannel {
         message_id: &str,
         text: &str,
     ) -> Result<(), ChannelError> {
+        if !valid_discord_snowflake(channel_id) || !valid_discord_snowflake(message_id) {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "Discord message identifiers are malformed".to_string(),
+            });
+        }
         let resp = send_rest(|| {
             client
                 .patch(format!(
@@ -335,10 +538,10 @@ impl DiscordChannel {
         .await?;
 
         if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let status = resp.status();
             return Err(ChannelError::SendFailed {
                 name: NAME.to_string(),
-                reason: format!("Discord API edit: {body}"),
+                reason: format!("Discord edit API returned {status}"),
             });
         }
 
@@ -351,6 +554,12 @@ impl DiscordChannel {
         bot_token: &str,
         channel_id: &str,
     ) -> Result<(), ChannelError> {
+        if !valid_discord_snowflake(channel_id) {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "Discord channel ID is malformed".to_string(),
+            });
+        }
         let _ = client
             .post(format!("{API_BASE}/channels/{channel_id}/typing"))
             .header("Authorization", format!("Bot {bot_token}"))
@@ -457,10 +666,24 @@ impl Channel for DiscordChannel {
                 reason: format!("GET /users/@me: {e}"),
             })?;
 
-        let me: serde_json::Value = me_resp.json().await.unwrap_or_default();
+        if !me_resp.status().is_success() {
+            return Err(ChannelError::AuthFailed {
+                name: NAME.to_string(),
+                reason: format!("Discord identity API returned {}", me_resp.status()),
+            });
+        }
+
+        let me: serde_json::Value =
+            crate::response::bounded_json(me_resp, MAX_DISCORD_JSON_RESPONSE_BYTES)
+                .await
+                .map_err(|error| ChannelError::AuthFailed {
+                    name: NAME.to_string(),
+                    reason: format!("Invalid Discord identity response: {error}"),
+                })?;
         let bot_user_id = me
             .get("id")
             .and_then(|v| v.as_str())
+            .filter(|id| valid_discord_snowflake(id))
             .ok_or_else(|| ChannelError::AuthFailed {
                 name: NAME.to_string(),
                 reason: "Invalid bot token".to_string(),
@@ -470,6 +693,7 @@ impl Channel for DiscordChannel {
         let bot_name = me
             .get("username")
             .and_then(|v| v.as_str())
+            .filter(|value| value.len() <= 256 && !value.chars().any(char::is_control))
             .unwrap_or("ThinClaw");
         tracing::info!("Discord bot connected as {} ({})", bot_name, bot_user_id);
 
@@ -495,13 +719,17 @@ impl Channel for DiscordChannel {
                 // Resume uses the session's dedicated gateway URL; a fresh
                 // connect discovers one via GET /gateway/bot.
                 let ws_url = if resuming {
-                    format!(
-                        "{}?v=10&encoding=json",
-                        resume_gateway_url
-                            .as_deref()
-                            .unwrap_or_default()
-                            .trim_end_matches('/')
-                    )
+                    match normalize_discord_gateway_url(
+                        resume_gateway_url.as_deref().unwrap_or_default(),
+                    ) {
+                        Ok(url) => url,
+                        Err(error) => {
+                            tracing::warn!(%error, "Discord supplied an invalid resume Gateway URL; rediscovering");
+                            session_id = None;
+                            resume_gateway_url = None;
+                            continue;
+                        }
+                    }
                 } else {
                     match Self::get_gateway_url(&client, &bot_token).await {
                         Ok(url) => url,
@@ -518,7 +746,13 @@ impl Channel for DiscordChannel {
                 };
 
                 // Connect
-                let ws_stream = match connect_async(&ws_url).await {
+                let ws_stream = match connect_async_with_config(
+                    &ws_url,
+                    Some(discord_gateway_websocket_config()),
+                    false,
+                )
+                .await
+                {
                     Ok((stream, _)) => stream,
                     Err(e) => {
                         tracing::error!("Discord: WebSocket connect failed: {e}");
@@ -541,6 +775,13 @@ impl Channel for DiscordChannel {
                 // Wait for Hello (op 10)
                 let hello_msg = tokio::select! {
                     msg = ws_read.next() => msg,
+                    _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                        tracing::warn!("Discord: timed out waiting for Gateway Hello");
+                        if sleep_backoff(&shutdown, &shutdown_notify, &mut reconnect_backoff).await {
+                            break 'gateway;
+                        }
+                        continue;
+                    }
                     _ = shutdown_notify.notified() => {
                         if shutdown.load(Ordering::Relaxed) {
                             break 'gateway;
@@ -661,7 +902,11 @@ impl Channel for DiscordChannel {
                             let code = frame.as_ref().map(|f| u16::from(f.code)).unwrap_or(0);
                             let reason = frame
                                 .as_ref()
-                                .map(|f| f.reason.to_string())
+                                .map(|f| {
+                                    let value = f.reason.as_ref();
+                                    let end = floor_char_boundary(value, value.len().min(1024));
+                                    value[..end].to_string()
+                                })
                                 .unwrap_or_default();
                             if is_fatal_close_code(code) {
                                 tracing::error!(
@@ -701,8 +946,9 @@ impl Channel for DiscordChannel {
                         // Dispatch (events)
                         0 => {
                             let event_name = match payload.t.as_deref() {
-                                Some(t) => t.to_string(),
+                                Some(t) if t.len() <= 64 && !t.chars().any(char::is_control) => t,
                                 None => continue,
+                                Some(_) => continue,
                             };
 
                             // Capture resume state from READY so a later
@@ -712,11 +958,22 @@ impl Channel for DiscordChannel {
                                     session_id = d
                                         .get("session_id")
                                         .and_then(|v| v.as_str())
+                                        .filter(|value| {
+                                            !value.is_empty()
+                                                && value.len() <= 1024
+                                                && !value.chars().any(char::is_control)
+                                        })
                                         .map(String::from);
                                     resume_gateway_url = d
                                         .get("resume_gateway_url")
                                         .and_then(|v| v.as_str())
-                                        .map(String::from);
+                                        .and_then(|value| {
+                                            normalize_discord_gateway_url(value).ok()
+                                        });
+                                    if session_id.is_none() || resume_gateway_url.is_none() {
+                                        session_id = None;
+                                        resume_gateway_url = None;
+                                    }
                                 }
                                 continue;
                             }
@@ -736,6 +993,12 @@ impl Channel for DiscordChannel {
                                 Ok(m) => m,
                                 Err(_) => continue,
                             };
+                            if !validate_discord_message(&msg) {
+                                tracing::warn!(
+                                    "Discord: ignoring malformed or oversized message event"
+                                );
+                                continue;
+                            }
 
                             // Skip bot messages
                             if msg.author.bot {
@@ -770,8 +1033,7 @@ impl Channel for DiscordChannel {
                                 .to_string();
 
                             // Download media attachments from Discord CDN
-                            let attachments =
-                                download_discord_attachments(&client, &msg.attachments).await;
+                            let attachments = download_discord_attachments(&msg.attachments).await;
 
                             // Skip messages with no text AND no media
                             if clean.is_empty() && attachments.is_empty() {
@@ -1020,11 +1282,9 @@ async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
 }
 
 /// Download Discord CDN attachments, returning `MediaContent` for each.
-async fn download_discord_attachments(
-    client: &Client,
-    attachments: &[DiscordAttachment],
-) -> Vec<MediaContent> {
+async fn download_discord_attachments(attachments: &[DiscordAttachment]) -> Vec<MediaContent> {
     let mut result = Vec::new();
+    let mut total_bytes = 0usize;
 
     for att in attachments {
         // Skip oversized files
@@ -1038,31 +1298,78 @@ async fn download_discord_attachments(
             continue;
         }
 
-        match client.get(&att.url).send().await {
-            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                Ok(bytes) => {
-                    let mime = att
-                        .content_type
-                        .as_deref()
-                        .unwrap_or("application/octet-stream");
-                    let mc =
-                        MediaContent::new(bytes.to_vec(), mime).with_filename(att.filename.clone());
-                    tracing::debug!(
-                        filename = %att.filename,
-                        mime = %mime,
-                        size = bytes.len(),
-                        "Discord: downloaded attachment"
-                    );
-                    result.push(mc);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        filename = %att.filename,
-                        error = %e,
-                        "Discord: failed to read attachment bytes"
-                    );
-                }
+        let guarded = match validate_outbound_url_pinned_async(
+            &att.url,
+            &OutboundUrlGuardOptions {
+                require_https: true,
+                upgrade_http_to_https: false,
+                allowlist: vec![
+                    "cdn.discordapp.com".to_string(),
+                    "media.discordapp.net".to_string(),
+                ],
             },
+        )
+        .await
+        {
+            Ok(guarded) if guarded.url.port().is_none() || guarded.url.port() == Some(443) => {
+                guarded
+            }
+            _ => {
+                tracing::warn!(filename = %att.filename, "Discord: rejected untrusted attachment URL");
+                continue;
+            }
+        };
+        let mut builder = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if !guarded.pinned_addrs.is_empty()
+            && let Some(host) = guarded.url.host_str()
+        {
+            builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+        }
+        let Ok(download_client) = builder.build() else {
+            tracing::warn!(filename = %att.filename, "Discord: failed to build attachment client");
+            continue;
+        };
+
+        match download_client.get(guarded.url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match crate::response::bounded_bytes(resp, MAX_DISCORD_ATTACHMENT_SIZE as usize)
+                    .await
+                {
+                    Ok(bytes)
+                        if total_bytes.saturating_add(bytes.len())
+                            <= MAX_DISCORD_TOTAL_ATTACHMENT_SIZE =>
+                    {
+                        total_bytes += bytes.len();
+                        let mime = att
+                            .content_type
+                            .as_deref()
+                            .unwrap_or("application/octet-stream");
+                        let mc = MediaContent::new(bytes.to_vec(), mime)
+                            .with_filename(att.filename.clone());
+                        tracing::debug!(
+                            filename = %att.filename,
+                            mime = %mime,
+                            size = bytes.len(),
+                            "Discord: downloaded attachment"
+                        );
+                        result.push(mc);
+                    }
+                    Ok(_) => {
+                        tracing::warn!(filename = %att.filename, "Discord: total attachment size limit reached");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            filename = %att.filename,
+                            error = %e,
+                            "Discord: failed to read attachment bytes"
+                        );
+                    }
+                }
+            }
             Ok(resp) => {
                 tracing::warn!(
                     filename = %att.filename,
@@ -1123,7 +1430,7 @@ where
 
         if resp.status().as_u16() == 429 && attempt < MAX_REST_RETRIES {
             attempt += 1;
-            let retry_after = retry_after_secs(resp).await.clamp(0.0, 60.0);
+            let retry_after = retry_after_secs(resp).await;
             tracing::warn!(
                 attempt,
                 retry_after_secs = retry_after,
@@ -1145,13 +1452,22 @@ async fn retry_after_secs(resp: reqwest::Response) -> f64 {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<f64>().ok())
     {
-        return secs;
+        return sanitize_retry_after(secs);
     }
-    resp.json::<serde_json::Value>()
+    crate::response::bounded_json::<serde_json::Value>(resp, MAX_DISCORD_ERROR_RESPONSE_BYTES)
         .await
         .ok()
         .and_then(|b| b.get("retry_after").and_then(|v| v.as_f64()))
+        .map(sanitize_retry_after)
         .unwrap_or(1.0)
+}
+
+fn sanitize_retry_after(value: f64) -> f64 {
+    if value.is_finite() && value >= 0.0 {
+        value.min(60.0)
+    } else {
+        1.0
+    }
 }
 
 /// Split a long message into chunks for Discord's 2000-char limit.
@@ -1235,6 +1551,44 @@ mod tests {
         );
         // A normal value passes through unchanged.
         assert_eq!(sanitize_heartbeat_interval(41_250), 41_250);
+    }
+
+    #[test]
+    fn retry_after_is_finite_and_bounded() {
+        assert_eq!(sanitize_retry_after(f64::NAN), 1.0);
+        assert_eq!(sanitize_retry_after(f64::INFINITY), 1.0);
+        assert_eq!(sanitize_retry_after(-1.0), 1.0);
+        assert_eq!(sanitize_retry_after(0.25), 0.25);
+        assert_eq!(sanitize_retry_after(600.0), 60.0);
+    }
+
+    #[test]
+    fn gateway_url_is_restricted_to_discord() {
+        assert_eq!(
+            normalize_discord_gateway_url("wss://gateway.discord.gg/?v=9&encoding=etf")
+                .expect("official Gateway URL"),
+            "wss://gateway.discord.gg/?v=10&encoding=json"
+        );
+        for url in [
+            "ws://gateway.discord.gg",
+            "wss://gateway.discord.gg:444",
+            "wss://gateway.discord.gg@example.com",
+            "wss://example.com",
+        ] {
+            assert!(normalize_discord_gateway_url(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn config_debug_redacts_bot_token() {
+        let config = DiscordConfig {
+            bot_token: secrecy::SecretString::new("super-secret-token".to_string().into()),
+            guild_id: None,
+            allow_from: vec![],
+            stream_mode: StreamMode::None,
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("super-secret-token"));
     }
 
     #[test]

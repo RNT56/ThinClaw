@@ -212,14 +212,17 @@ impl SetupWizard {
             // Async process spawn so a slow `docker` call never blocks the tokio
             // runtime (a multi-minute `docker build` below would otherwise freeze
             // every other async task, including the UI runtime in the Tauri path).
-            let image_exists = tokio::process::Command::new("docker")
+            let mut inspect_command = tokio::process::Command::new("docker");
+            inspect_command
                 .args(["image", "inspect", image_name])
+                .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await
-                .map(|s| s.success())
-                .unwrap_or(false);
+                .stderr(std::process::Stdio::null());
+            let image_exists =
+                owned_command_status(&mut inspect_command, std::time::Duration::from_secs(20))
+                    .await
+                    .map(|s| s.success())
+                    .unwrap_or(false);
 
             if image_exists {
                 print_success(&format!("Worker image '{}' already exists.", image_name));
@@ -241,14 +244,18 @@ impl SetupWizard {
                     let repo_root =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-                    let status = tokio::process::Command::new("docker")
+                    let mut build_command = tokio::process::Command::new("docker");
+                    build_command
                         .args(["build", "-f", "Dockerfile.worker", "-t", image_name, "."])
                         .current_dir(&repo_root)
                         .stdin(std::process::Stdio::inherit())
                         .stdout(std::process::Stdio::inherit())
-                        .stderr(std::process::Stdio::inherit())
-                        .status()
-                        .await;
+                        .stderr(std::process::Stdio::inherit());
+                    let status = owned_command_status(
+                        &mut build_command,
+                        std::time::Duration::from_secs(30 * 60),
+                    )
+                    .await;
 
                     match status {
                         Ok(s) if s.success() => {
@@ -851,5 +858,22 @@ impl SetupWizard {
 
     pub(super) async fn step_codex_code(&mut self) -> Result<(), SetupError> {
         self.step_codex_code_inner(true).await
+    }
+}
+
+async fn owned_command_status(
+    command: &mut tokio::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut child = thinclaw_platform::OwnedChild::spawn(command)?;
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(result) => result,
+        Err(_) => {
+            let _ = child.kill().await;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("command exceeded its {timeout:?} deadline"),
+            ))
+        }
     }
 }

@@ -4,7 +4,7 @@ use super::types::*;
 use std::collections::HashMap;
 
 pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
-    let client = reqwest::Client::new();
+    let client = super::http_client(api_key)?;
 
     let response = client
         .get("https://api.elevenlabs.io/v1/models")
@@ -13,12 +13,6 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
         .await
         .map_err(|e| format!("ElevenLabs API request failed: {}", e))?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("ElevenLabs API error ({}): {}", status, body));
-    }
-
     #[derive(serde::Deserialize)]
     struct ElevenLabsModel {
         model_id: String,
@@ -26,10 +20,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
         description: Option<String>,
     }
 
-    let resp: Vec<ElevenLabsModel> = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse ElevenLabs models: {}", e))?;
+    let resp: Vec<ElevenLabsModel> = super::bounded_json(response, "ElevenLabs").await?;
 
     let models: Vec<CloudModelEntry> = resp
         .into_iter()

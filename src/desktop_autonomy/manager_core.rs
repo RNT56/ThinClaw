@@ -7,8 +7,21 @@ impl DesktopAutonomyManager {
     ) -> Self {
         let state_root = crate::platform::state_paths().home.join("autonomy");
         let bridge_spec = DesktopBridgeSpec::current();
-        let runtime_state = load_json_file::<RuntimeState>(&state_root.join("runtime_state.json"))
-            .unwrap_or_default();
+        let runtime_state_path = state_root.join("runtime_state.json");
+        let runtime_state = match load_json_file_sync::<RuntimeState>(&runtime_state_path) {
+            Ok(Some(state)) => state,
+            Ok(None) => RuntimeState::default(),
+            Err(error) => {
+                tracing::error!(%error, "desktop autonomy runtime state is unreadable");
+                RuntimeState {
+                    paused: true,
+                    pause_reason: Some(format!("runtime state is unreadable: {error}")),
+                    bootstrap_passed: false,
+                    last_bootstrap_at: None,
+                    last_error: Some(error),
+                }
+            }
+        };
         Self {
             database_config,
             store,
@@ -17,6 +30,7 @@ impl DesktopAutonomyManager {
             state_root,
             config,
             runtime_state: RwLock::new(runtime_state),
+            rollout_lock: Mutex::new(()),
         }
     }
 
@@ -200,17 +214,25 @@ impl DesktopAutonomyManager {
     }
 
     pub fn emergency_stop_active(&self) -> bool {
-        self.config.emergency_stop_path.exists()
+        match std::fs::symlink_metadata(&self.config.emergency_stop_path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    path = %self.config.emergency_stop_path.display(),
+                    "failed to inspect desktop autonomy emergency stop path"
+                );
+                true
+            }
+        }
     }
 
     pub async fn pause(&self, reason: Option<String>) {
-        let snapshot = {
-            let mut state = self.runtime_state.write().await;
-            state.paused = true;
-            state.pause_reason = reason;
-            state.clone()
-        };
-        if let Err(err) = self.persist_runtime_state(&snapshot).await {
+        let mut state = self.runtime_state.write().await;
+        state.paused = true;
+        state.pause_reason = reason;
+        if let Err(err) = self.persist_runtime_state(&state).await {
             tracing::warn!(error = %err, "failed to persist autonomy pause state");
         }
     }
@@ -222,19 +244,35 @@ impl DesktopAutonomyManager {
                 self.config.emergency_stop_path.display()
             ));
         }
-        let snapshot = {
-            let mut state = self.runtime_state.write().await;
-            state.paused = false;
-            state.pause_reason = None;
-            state.clone()
-        };
+        let mut state = self.runtime_state.write().await;
+        let mut snapshot = state.clone();
+        snapshot.paused = false;
+        snapshot.pause_reason = None;
         self.persist_runtime_state(&snapshot).await?;
+        *state = snapshot;
         Ok(())
     }
 
     pub async fn status(&self) -> AutonomyStatus {
         let state = self.runtime_state.read().await.clone();
-        let rollout = self.load_rollout_state().await.unwrap_or_default();
+        let _rollout_guard = self.rollout_lock.lock().await;
+        let rollout_result = async {
+            self.ensure_dirs().await?;
+            self.recover_pending_promotion_locked().await?;
+            self.load_rollout_state().await
+        }
+        .await;
+        let rollout = match rollout_result {
+            Ok(rollout) => rollout,
+            Err(error) => {
+                tracing::error!(%error, "desktop autonomy rollout state is unreadable");
+                RolloutState {
+                    code_auto_apply_paused: true,
+                    pause_reason: Some(format!("rollout state is unreadable: {error}")),
+                    ..RolloutState::default()
+                }
+            }
+        };
         let readiness = self.evaluate_action_readiness(false).await;
         AutonomyStatus {
             enabled: self.config.enabled,
@@ -249,7 +287,7 @@ impl DesktopAutonomyManager {
             kill_switch_hotkey: self.config.kill_switch_hotkey.clone(),
             sidecar_script_path: self.sidecar_script_path.clone(),
             launch_agent_path: self.session_launcher_path().ok(),
-            current_build_id: self.current_build_id(),
+            current_build_id: self.current_build_id_checked().ok().flatten(),
             last_bootstrap_at: state.last_bootstrap_at,
             last_error: state.last_error.clone(),
             code_auto_apply_paused: rollout.code_auto_apply_paused,

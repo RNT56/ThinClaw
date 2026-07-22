@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::json;
 use thinclaw::agent::routine::{RoutineAction, RunStatus, Trigger};
+use thinclaw::db::{RoutineRunAdmission, RoutineRunCompletion};
 use uuid::Uuid;
 
 use crate::db_contract::fixtures;
@@ -103,6 +104,13 @@ async fn routine_runs_contract() {
         .await
         .expect("complete_routine_run should succeed");
 
+    // Completion is a terminal compare-and-set. A late shutdown/error path
+    // must not overwrite the result already committed by the run owner.
+    ctx.db
+        .complete_routine_run(run.id, RunStatus::Failed, Some("late finalizer"), Some(999))
+        .await
+        .expect("repeated completion should remain idempotent");
+
     let runs = ctx
         .db
         .list_routine_runs(routine.id, 10)
@@ -110,6 +118,8 @@ async fn routine_runs_contract() {
         .expect("list_routine_runs should succeed");
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status, RunStatus::Ok);
+    assert_eq!(runs[0].result_summary.as_deref(), Some("done"));
+    assert_eq!(runs[0].tokens_used, Some(123));
 
     let running_after = ctx
         .db
@@ -124,6 +134,88 @@ async fn routine_runs_contract() {
         .await
         .expect("delete_routine should succeed");
     assert!(deleted);
+}
+
+#[tokio::test]
+async fn routine_run_admission_and_completion_are_atomic() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+    let user = fixtures::user("routine_atomic_user");
+    let actor = fixtures::actor_name("routine_atomic");
+    let mut routine = fixtures::routine(&user, &actor);
+    routine.guardrails.max_concurrent = 2;
+    ctx.db
+        .create_routine(&routine)
+        .await
+        .expect("create_routine should succeed");
+
+    let lease_expires_at = Utc::now() + ChronoDuration::minutes(5);
+    let mut attempts = Vec::new();
+    for index in 0..8 {
+        let db = Arc::clone(&ctx.db);
+        let mut run = fixtures::routine_run(routine.id, RunStatus::Running);
+        run.trigger_key = Some(format!("atomic-{index}"));
+        attempts.push((
+            run.clone(),
+            tokio::spawn(async move {
+                db.try_admit_routine_run(&run, 2, 10_000, lease_expires_at, None)
+                    .await
+            }),
+        ));
+    }
+
+    let mut admitted = Vec::new();
+    for (run, attempt) in attempts {
+        match attempt
+            .await
+            .expect("admission task should not panic")
+            .expect("admission should not fail")
+        {
+            RoutineRunAdmission::Admitted => admitted.push(run),
+            RoutineRunAdmission::RoutineCapacity | RoutineRunAdmission::GlobalCapacity => {}
+            RoutineRunAdmission::Duplicate(id) => {
+                panic!("unique trigger key unexpectedly duplicated run {id}")
+            }
+        }
+    }
+    assert_eq!(admitted.len(), 2);
+
+    let mut duplicate = fixtures::routine_run(routine.id, RunStatus::Running);
+    duplicate.trigger_key = admitted[0].trigger_key.clone();
+    assert_eq!(
+        ctx.db
+            .try_admit_routine_run(&duplicate, 2, 10_000, lease_expires_at, None)
+            .await
+            .expect("duplicate admission should succeed idempotently"),
+        RoutineRunAdmission::Duplicate(admitted[0].id)
+    );
+
+    for run in &admitted {
+        assert!(matches!(
+            ctx.db
+                .complete_routine_run(run.id, RunStatus::Failed, Some("failed"), None)
+                .await
+                .expect("completion should succeed"),
+            RoutineRunCompletion::Completed { .. }
+        ));
+    }
+    assert_eq!(
+        ctx.db
+            .complete_routine_run(admitted[0].id, RunStatus::Ok, Some("late success"), None,)
+            .await
+            .expect("late completion should be idempotent"),
+        RoutineRunCompletion::AlreadyTerminal
+    );
+
+    let stored = ctx
+        .db
+        .get_routine(routine.id)
+        .await
+        .expect("get_routine should succeed")
+        .expect("routine should exist");
+    assert_eq!(stored.run_count, 2);
+    assert_eq!(stored.consecutive_failures, 2);
 }
 
 #[tokio::test]

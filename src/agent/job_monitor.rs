@@ -16,7 +16,17 @@ pub fn spawn_job_monitor(
     event_rx: broadcast::Receiver<(Uuid, SseEvent)>,
     inject_tx: mpsc::Sender<IncomingMessage>,
 ) -> JoinHandle<()> {
-    tokio::spawn(thinclaw_agent::job_monitor::run_job_monitor(
+    tokio::spawn(run_job_monitor(job_id, event_rx, inject_tx))
+}
+
+/// Run the gateway adapter without detaching it. Runtime owners use this to
+/// place monitors in their own `JoinSet` and deterministically abort/join them.
+pub async fn run_job_monitor(
+    job_id: Uuid,
+    event_rx: broadcast::Receiver<(Uuid, SseEvent)>,
+    inject_tx: mpsc::Sender<IncomingMessage>,
+) {
+    thinclaw_agent::job_monitor::run_job_monitor(
         job_id,
         event_rx,
         inject_tx,
@@ -28,7 +38,8 @@ pub fn spawn_job_monitor(
             SseEvent::JobSessionResult { .. } => JobMonitorEvent::SessionResult,
             _ => JobMonitorEvent::Other,
         },
-    ))
+    )
+    .await;
 }
 
 #[cfg(test)]

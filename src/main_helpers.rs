@@ -20,6 +20,25 @@ use thinclaw::pairing::PairingStore;
 use thinclaw::secrets::CreateSecretParams;
 use thinclaw::secrets::SecretsStore;
 
+#[cfg(any(feature = "docker-sandbox", feature = "tunnel"))]
+fn redacted_url_for_log(raw: &str) -> String {
+    let Ok(url) = url::Url::parse(raw) else {
+        return "<invalid-url>".to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return "<invalid-url>".to_string();
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
+}
+
 #[cfg(feature = "docker-sandbox")]
 /// Initialize tracing for worker/bridge processes (info level).
 pub(crate) fn init_worker_tracing() {
@@ -71,7 +90,7 @@ pub(crate) async fn run_worker(
     tracing::info!(
         "Starting worker for job {} (orchestrator: {})",
         job_id,
-        orchestrator_url
+        redacted_url_for_log(orchestrator_url)
     );
 
     let config = thinclaw::worker::runtime::WorkerConfig {
@@ -101,7 +120,7 @@ pub(crate) async fn run_claude_bridge(
     tracing::info!(
         "Starting Claude Code bridge for job {} (orchestrator: {}, model: {})",
         job_id,
-        orchestrator_url,
+        redacted_url_for_log(orchestrator_url),
         model
     );
 
@@ -133,7 +152,7 @@ pub(crate) async fn run_codex_bridge(
     tracing::info!(
         "Starting Codex bridge for job {} (orchestrator: {}, model: {})",
         job_id,
-        orchestrator_url,
+        redacted_url_for_log(orchestrator_url),
         model
     );
 
@@ -151,6 +170,16 @@ pub(crate) async fn run_codex_bridge(
         .run()
         .await
         .map_err(|e| anyhow::anyhow!("Codex bridge failed: {}", e))
+}
+
+#[cfg(feature = "docker-sandbox")]
+/// Run the fixed-target relay used to keep sandbox containers off the Docker
+/// host gateway while preserving access to authenticated ThinClaw endpoints.
+pub(crate) async fn run_network_relay(forwards: &[String]) -> anyhow::Result<()> {
+    tracing::info!(count = forwards.len(), "Starting sandbox network relay");
+    thinclaw::sandbox::relay::run_network_relay(forwards)
+        .await
+        .map_err(|error| anyhow::anyhow!("Network relay failed: {error}"))
 }
 
 #[cfg(feature = "docker-sandbox")]
@@ -233,7 +262,7 @@ pub(crate) async fn start_tunnel(
     if config.tunnel.public_url.is_some() {
         tracing::info!(
             "Static tunnel URL in use: {}",
-            config.tunnel.public_url.as_deref().unwrap_or("?")
+            redacted_url_for_log(config.tunnel.public_url.as_deref().unwrap_or("?"))
         );
         return (config, None);
     }
@@ -265,7 +294,7 @@ pub(crate) async fn start_tunnel(
             );
             match tunnel.start(gateway_host, gateway_port).await {
                 Ok(url) => {
-                    tracing::info!("Tunnel started: {}", url);
+                    tracing::info!("Tunnel started: {}", redacted_url_for_log(&url));
                     config.tunnel.public_url = Some(url);
                     (config, Some(tunnel))
                 }
@@ -342,7 +371,6 @@ pub(crate) async fn setup_wasm_channels(
 
     for loaded in results.loaded {
         let channel_name = loaded.name().to_string();
-        channel_names.push(channel_name.clone());
         tracing::info!("Loaded WASM channel: {}", channel_name);
 
         let signature_secret_name = loaded.webhook_secret_name();
@@ -440,16 +468,30 @@ pub(crate) async fn setup_wasm_channels(
                         error = %e,
                         "Failed to inject channel credentials"
                     );
+                    continue;
                 }
             }
+        } else if channel_arc
+            .capabilities()
+            .tool_capabilities
+            .http
+            .as_ref()
+            .is_some_and(|http| !http.credentials.is_empty())
+        {
+            tracing::error!(
+                channel = %channel_name,
+                "Cannot activate channel credentials without a secrets store"
+            );
+            continue;
         }
 
         if let Err(error) = channel_arc.prime_on_start_config().await {
-            tracing::warn!(
+            tracing::error!(
                 channel = %channel_name,
                 error = %error,
                 "Failed to prime channel on_start config before router registration"
             );
+            continue;
         }
 
         tracing::info!(
@@ -460,14 +502,23 @@ pub(crate) async fn setup_wasm_channels(
             "Registering channel with router"
         );
 
-        wasm_router
+        if let Err(error) = wasm_router
             .register(
                 Arc::clone(&channel_arc),
                 channel_arc.endpoints().await,
                 webhook_auth,
             )
-            .await;
+            .await
+        {
+            tracing::error!(
+                channel = %channel_name,
+                error = %error,
+                "Failed to register WASM channel webhook routes"
+            );
+            continue;
+        }
 
+        channel_names.push(channel_name.clone());
         channels.push((channel_name, Box::new(SharedWasmChannel::new(channel_arc))));
     }
 

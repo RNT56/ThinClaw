@@ -516,6 +516,7 @@ async fn test_skill_inspect_reports_files_and_provenance() {
             scanner_version: Some(crate::skills::quarantine::SKILL_SCANNER_VERSION.to_string()),
             content_sha256: Some("sha256:test".to_string()),
             finding_summary: Some(FindingSummary::default()),
+            package_files: vec!["SKILL.md".to_string(), "notes.md".to_string()],
         })
         .unwrap(),
     )
@@ -645,6 +646,28 @@ fn test_skill_package_files_exclude_hidden_files() {
     assert!(paths.contains(&"README.md"));
     assert!(!paths.contains(&".DS_Store"));
     assert!(!paths.contains(&".secret"));
+}
+
+#[test]
+fn package_snapshot_rejects_same_size_content_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("SKILL.md"),
+        "---\nname: stable\ndescription: stable\n---\n",
+    )
+    .unwrap();
+    let payload = dir.path().join("payload.txt");
+    std::fs::write(&payload, "before").unwrap();
+    let files = collect_skill_package_files(dir.path()).unwrap();
+    let payload_file = files
+        .iter()
+        .find(|file| file.relative_path == "payload.txt")
+        .unwrap();
+
+    std::fs::write(&payload, "after!").unwrap();
+    assert!(read_skill_package_file(payload_file).is_err());
+    assert!(package_hash(&files).is_err());
+    assert!(package_scan_content(&files).is_err());
 }
 
 #[cfg(unix)]

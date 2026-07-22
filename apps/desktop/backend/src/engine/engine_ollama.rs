@@ -14,7 +14,6 @@ use std::sync::Mutex;
 use super::{EngineStartOptions, InferenceEngine};
 
 const OLLAMA_DEFAULT_PORT: u16 = 11434;
-const OLLAMA_VALIDATED_VERSION: &str = "0.31.2";
 
 /// Ollama engine — connects to an existing Ollama daemon.
 pub struct OllamaEngine {
@@ -31,8 +30,12 @@ impl OllamaEngine {
     }
 
     /// Set a custom Ollama port (default: 11434).
-    pub fn set_port(&self, port: u16) {
+    pub fn set_port(&self, port: u16) -> Result<(), String> {
+        if port == 0 {
+            return Err("Ollama port must be non-zero".to_string());
+        }
         *self.port.lock().unwrap_or_else(|e| e.into_inner()) = port;
+        Ok(())
     }
 
     fn get_port(&self) -> u16 {
@@ -47,35 +50,21 @@ impl OllamaEngine {
     /// Check if the Ollama daemon is currently running.
     pub async fn is_daemon_running(&self) -> bool {
         let port = self.get_port();
-        reqwest::Client::new()
-            .get(format!("http://127.0.0.1:{}/api/tags", port))
+        let Ok(client) = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(2))
             .timeout(std::time::Duration::from_secs(2))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+        else {
+            return false;
+        };
+        client
+            .get(format!("http://127.0.0.1:{}/api/tags", port))
             .send()
             .await
             .map(|r| r.status().is_success())
             .unwrap_or(false)
-    }
-
-    /// Query the daemon's official version endpoint. Ollama remains an
-    /// external install, so ThinClaw reports (but does not silently replace)
-    /// a user's version.
-    async fn daemon_version(&self) -> Option<String> {
-        let response = reqwest::Client::new()
-            .get(format!("http://127.0.0.1:{}/api/version", self.get_port()))
-            .timeout(std::time::Duration::from_secs(2))
-            .send()
-            .await
-            .ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        response
-            .json::<serde_json::Value>()
-            .await
-            .ok()?
-            .get("version")?
-            .as_str()
-            .map(str::to_owned)
     }
 }
 
@@ -110,9 +99,18 @@ impl InferenceEngine for OllamaEngine {
         _context_size: u32,
         _options: EngineStartOptions,
     ) -> Result<(u16, String), String> {
+        if model_path.is_empty()
+            || model_path.len() > 512
+            || !model_path.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/' | b'@')
+            })
+        {
+            return Err("The Ollama model identifier is invalid".to_string());
+        }
         if !self.is_daemon_running().await {
             return Err(
-                "Ollama daemon is not running. Start it with `ollama serve` or install from https://ollama.com/download".into()
+                "Ollama daemon is not running. Start it with `ollama serve` or install from ollama.ai".into()
             );
         }
 
@@ -121,14 +119,7 @@ impl InferenceEngine for OllamaEngine {
         // For Ollama, model_path is the model name (e.g. "llama3:8b-q4_K_M")
         *self.model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model_path.to_string());
 
-        let version = self
-            .daemon_version()
-            .await
-            .unwrap_or_else(|| "unknown".to_string());
-        println!(
-            "[ollama] Connected to daemon {} on port {} with model '{}' (validated baseline {})",
-            version, port, model_path, OLLAMA_VALIDATED_VERSION
-        );
+        tracing::info!(port, "[ollama] connected to local daemon");
 
         Ok((port, String::new())) // No auth token
     }
@@ -136,7 +127,7 @@ impl InferenceEngine for OllamaEngine {
     async fn stop(&self) -> Result<(), String> {
         // We don't manage the Ollama process — just clear model selection
         *self.model.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        println!("[ollama] Disconnected from Ollama.");
+        tracing::info!("[ollama] disconnected from local daemon");
         Ok(())
     }
 
@@ -186,8 +177,15 @@ mod tests {
     #[test]
     fn custom_port() {
         let engine = OllamaEngine::new();
-        engine.set_port(12345);
+        engine.set_port(12345).unwrap();
         assert_eq!(engine.get_port(), 12345);
         assert_eq!(engine.base_url(), Some("http://127.0.0.1:12345/v1".into()));
+    }
+
+    #[test]
+    fn zero_port_is_rejected() {
+        let engine = OllamaEngine::new();
+        assert!(engine.set_port(0).is_err());
+        assert_eq!(engine.get_port(), OLLAMA_DEFAULT_PORT);
     }
 }

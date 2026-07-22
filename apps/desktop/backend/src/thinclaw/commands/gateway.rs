@@ -14,7 +14,6 @@ use tracing::info;
 
 use super::types::*;
 use super::ThinClawManager;
-use crate::thinclaw::config::AgentProfile;
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 /// Get ThinClaw status.
@@ -37,20 +36,13 @@ pub async fn thinclaw_get_status(
             .map(|c| c.gateway_mode.clone())
             .unwrap_or_else(|| "local".to_string()),
         remote_url: config.as_ref().and_then(|c| c.remote_url.clone()),
-        // Broad status responses expose presence, never reusable credentials.
+        // Credentials are never included in periodic renderer status payloads.
         remote_token: None,
-        has_remote_token: config
-            .as_ref()
-            .and_then(|c| c.remote_token.as_ref())
-            .is_some(),
         port: config.as_ref().map(|c| c.port).unwrap_or(18789),
         device_id: config
             .as_ref()
             .map(|c| c.device_id.clone())
             .unwrap_or_default(),
-        // Broad polling status is presence/metadata only. Reveal is a separate,
-        // explicit command so a reusable bearer credential is not copied into
-        // renderer state every three seconds.
         auth_token: String::new(),
         state_dir: config
             .as_ref()
@@ -160,11 +152,12 @@ pub async fn thinclaw_get_status(
             .map(|cfg| cfg.bootstrap_completed)
             .unwrap_or(false),
         custom_llm_url: config.as_ref().and_then(|cfg| cfg.custom_llm_url.clone()),
+        has_custom_llm_key: config.as_ref().is_some_and(|cfg| {
+            cfg.custom_llm_key
+                .as_deref()
+                .is_some_and(|key| !key.is_empty())
+        }),
         custom_llm_key: None,
-        has_custom_llm_key: config
-            .as_ref()
-            .and_then(|cfg| cfg.custom_llm_key.as_ref())
-            .is_some(),
         custom_llm_model: config.as_ref().and_then(|cfg| cfg.custom_llm_model.clone()),
         custom_llm_enabled: config
             .as_ref()
@@ -180,7 +173,12 @@ pub async fn thinclaw_get_status(
             .unwrap_or_default(),
         profiles: config
             .as_ref()
-            .map(|cfg| cfg.profiles.iter().map(AgentProfile::redacted).collect())
+            .map(|cfg| {
+                cfg.profiles
+                    .iter()
+                    .map(crate::thinclaw::config::AgentProfile::without_token)
+                    .collect()
+            })
             .unwrap_or_default(),
         // Implicit cloud provider status
         has_xai_key: config
@@ -303,7 +301,6 @@ pub async fn thinclaw_sync_local_llm(
     state: State<'_, ThinClawManager>,
     sidecar: State<'_, crate::sidecar::SidecarManager>,
     engine_manager: State<'_, crate::engine::EngineManager>,
-    models: State<'_, crate::inference::ModelProviderRegistry>,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let cfg = if let Some(c) = state.get_config().await {
         c
@@ -311,18 +308,16 @@ pub async fn thinclaw_sync_local_llm(
         state.init_config().await?
     };
 
-    let snapshot = models
-        .local_runtime_snapshot(&sidecar, &engine_manager)
-        .await;
+    let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
     let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot);
     if local_llm.is_none() {
-        return Err((format!(
+        return Err(format!(
             "Local LLM runtime is not running: {}",
             snapshot
                 .unavailable_reason
                 .as_deref()
                 .unwrap_or("runtime endpoint unavailable")
-        ))
+        )
         .into());
     }
 
@@ -344,7 +339,7 @@ pub async fn thinclaw_sync_local_llm(
     );
 
     cfg.write_config(&thinclaw_engine, local_llm)
-        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+        .map_err(|e| e.to_string())?;
 
     *state.config.write().await = Some(cfg);
     Ok(())
@@ -415,16 +410,27 @@ pub async fn thinclaw_start_gateway(
         }
 
         let proxy =
-            crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&remote_url, &remote_token)?;
+            crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&remote_url, &remote_token)
+                .map_err(|error| format!("Invalid remote gateway configuration: {error}"))?;
 
         // Verify connectivity before activating
-        let authenticated = proxy.health_check().await?;
+        let authenticated = proxy
+            .health_check()
+            .await
+            .map_err(|e| format!("Cannot connect to remote gateway: {}", e))?;
         if !authenticated {
-            return Err(("Remote gateway rejected the configured token".to_string()).into());
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message:
+                    "Remote gateway rejected the configured bearer token or failed its health check"
+                        .to_string(),
+            });
         }
 
         // Start SSE subscription (forwards remote events as Tauri events)
-        proxy.start_sse_subscription(app_handle.clone()).await?;
+        proxy
+            .start_sse_subscription(app_handle.clone())
+            .await
+            .map_err(|e| format!("Failed to start SSE subscription: {}", e))?;
 
         // Activate in ThinClawRuntimeState
         ironclaw.connect_remote(proxy).await;
@@ -481,17 +487,17 @@ pub async fn thinclaw_start_gateway(
             }
 
             if !ready {
-                return Err(("Local inference engine did not start within 30 seconds. \
+                return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                    message: "Local inference engine did not start within 30 seconds. \
                      Please ensure a model is loaded and try again."
-                    .to_string())
-                .into());
+                        .to_string(),
+                });
             }
         }
     }
 
     // ── Start ThinClaw runtime ────────────────────────────────────────
-    // Refresh the Agent grant view, then share the existing app-wide
-    // keychain service with the runtime.
+    // Refresh grants and share the existing app-wide credential service.
     let cfg_for_secrets = if let Some(cfg) = state.get_config().await {
         cfg
     } else {
@@ -514,7 +520,7 @@ pub async fn thinclaw_start_gateway(
         Err(e) => {
             let msg = format!("Failed to start ThinClaw runtime: {}", e);
             tracing::error!("{}", msg);
-            Err((msg).into())
+            Err(crate::thinclaw::bridge::BridgeError::Runtime { message: msg })
         }
     }
 }
@@ -567,17 +573,17 @@ pub async fn thinclaw_reload_secrets(
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     info!("[thinclaw-runtime] Reload secrets requested");
 
-    // Refresh the grant view on the one app-wide secret service.
+    // Refresh the live grant view on the one shared credential service.
     let cfg = state
         .get_config()
         .await
         .ok_or_else(|| "ThinClaw config is not initialized".to_string())?;
     secret_store.apply_thinclaw_config(&cfg);
-    let runtime_secrets: Option<
+    let secrets_store: Option<
         std::sync::Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
     > = Some(std::sync::Arc::new((*secret_store).clone()));
 
-    ironclaw.reload_secrets(runtime_secrets).await?;
+    ironclaw.reload_secrets(secrets_store).await?;
 
     info!("[thinclaw-runtime] Secrets reloaded successfully");
     Ok(())
@@ -638,10 +644,78 @@ pub async fn thinclaw_test_connection(
     url: String,
     token: Option<String>,
 ) -> Result<bool, crate::thinclaw::bridge::BridgeError> {
+    let clean_url = url.trim_end_matches('/').to_string();
     let token_str = token.as_deref().unwrap_or("");
 
-    let proxy = crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&url, token_str)?;
+    let proxy = crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&clean_url, token_str)?;
     proxy.health_check().await
+}
+
+/// Copy the local gateway credential without including it in periodic status
+/// payloads or returning it through renderer IPC.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_copy_gateway_token(
+    state: State<'_, ThinClawManager>,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let cfg = if let Some(config) = state.get_config().await {
+        config
+    } else {
+        state.init_config().await?
+    };
+    let token = zeroize::Zeroizing::new(cfg.auth_token.clone());
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Stdio;
+        use std::time::Duration;
+        use thinclaw_tools::execution::OwnedChild;
+        use tokio::io::AsyncWriteExt;
+
+        let mut command = tokio::process::Command::new("/usr/bin/pbcopy");
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = OwnedChild::spawn(&mut command)
+            .map_err(|error| format!("failed to start the system clipboard helper: {error}"))?;
+        let mut stdin = child
+            .take_stdin()
+            .ok_or_else(|| "clipboard helper did not expose stdin".to_string())?;
+        stdin
+            .write_all(token.as_bytes())
+            .await
+            .map_err(|error| format!("failed to write gateway token to clipboard: {error}"))?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|error| format!("failed to close clipboard input: {error}"))?;
+        drop(stdin);
+
+        let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+            Ok(result) => result.map_err(|error| format!("clipboard helper failed: {error}"))?,
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                    message: "clipboard helper timed out".to_string(),
+                });
+            }
+        };
+        if !status.success() {
+            return Err(crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "system clipboard helper exited unsuccessfully".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = token;
+        Err(crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "secure native clipboard copy is not available on this platform".to_string(),
+        })
+    }
 }
 
 /// Switch the active agent to a different profile.
@@ -676,24 +750,24 @@ pub async fn thinclaw_switch_to_profile(
         .cloned()
         .ok_or_else(|| format!("Profile '{}' not found", profile_id))?;
 
-    let remote_url = if profile.mode == "remote" {
-        let token = profile
-            .token
-            .as_deref()
-            .filter(|token| !token.trim().is_empty())
-            .ok_or_else(|| format!("Profile '{}' has no stored credential", profile.name))?;
-        // Validate the saved endpoint and credential before changing the active
-        // gateway slot. This keeps a broken profile from corrupting the current
-        // working connection settings.
-        crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&profile.url, token)?;
+    let remote_url = if profile.mode == "remote" && !profile.url.is_empty() {
         Some(profile.url.clone())
     } else {
         None
     };
-    // Promote the selected profile credential into the active gateway slot so
-    // the selection survives restart without ever entering identity.json.
-    cfg.update_gateway_settings(profile.mode.clone(), remote_url, profile.token.clone())
-        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+    let remote_token = if profile.mode == "remote" {
+        Some(
+            profile
+                .token
+                .clone()
+                .filter(|token| !token.is_empty())
+                .ok_or_else(|| "Remote agent profile has no stored bearer token".to_string())?,
+        )
+    } else {
+        None
+    };
+    cfg.update_gateway_settings(profile.mode.clone(), remote_url, remote_token)
+        .map_err(|error| error.to_string())?;
     *state.config.write().await = Some(cfg);
 
     info!(

@@ -1,567 +1,601 @@
 //! MLX inference engine implementation (macOS Apple Silicon only).
 //!
-//! Uses `uv` (bundled Tauri sidecar) to bootstrap an isolated Python
-//! environment with the pinned MLX service stack, then spawns
-//! `mlx-openai-server` on a dynamic port.
-//!
-//! ## First-launch bootstrap:
-//! 1. Creates `mlx-env/` under the ThinClaw Desktop app data directory via `uv venv`
-//! 2. Installs the exact validated service-stack pins via `uv pip install`
-//! 3. Subsequent starts skip steps 1-2
-//!
-//! ## On model start:
-//! 1. Spawns `mlx-openai-server --model-path <path> --port <port>`
-//! 2. Polls `/health` until ready
-//! 3. Returns `(port, "")` — MLX server has no auth token
+//! The Python environment is assembled in a private staging directory from a
+//! pinned server release, validated, and atomically activated. The model server
+//! runs inside a descendant-owned process boundary and is protected by a
+//! per-launch bearer token injected through a small, validated `sitecustomize`
+//! shim because upstream `mlx-openai-server` does not implement authentication.
 
 use async_trait::async_trait;
-use std::path::PathBuf;
-use std::sync::Mutex;
+use rand::{rngs::OsRng, RngCore};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
+use thinclaw_platform::{
+    bounded_command_output, find_executable_in_path, rename_no_replace, OwnedChild,
+};
+use tokio::process::Command;
 
 use super::{EngineStartOptions, InferenceEngine};
 
-/// MLX engine — spawns `mlx-openai-server` as an OpenAI-compatible server.
+const MLX_SERVER_VERSION: &str = "1.8.1";
+const PYTHON_VERSION: &str = "3.12";
+const BOOTSTRAP_MARKER: &str = ".thinclaw-mlx-bootstrap";
+const SERVED_MODEL_NAME: &str = "thinclaw-local";
+const MAX_CONTEXT_SIZE: u32 = 1_048_576;
+const MAX_MODEL_CONFIG_BYTES: usize = 1024 * 1024;
+const MAX_WEIGHT_INDEX_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SAFETENSORS_HEADER_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MODEL_DIRECTORY_ENTRIES: usize = 4096;
+const UTILITY_OUTPUT_LIMIT: usize = 1024 * 1024;
+const VENV_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+const RESOLUTION_CUTOFF: &str = "2026-05-04T00:00:00Z";
+
+// `mlx-openai-server` 1.8.1 intentionally accepts any non-empty OpenAI client
+// key and has no server-side API-key option. Python imports `sitecustomize`
+// before the console entry point, so this private venv shim adds authentication
+// without editing vendor source. The exact bytes are checked before every use.
+const AUTH_SHIM: &str = r#"# ThinClaw MLX authentication shim v1
+import hmac
+import os
+
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+_thinclaw_original_fastapi_init = FastAPI.__init__
+
+
+def _thinclaw_fastapi_init(self, *args, **kwargs):
+    _thinclaw_original_fastapi_init(self, *args, **kwargs)
+    token = os.environ.get("THINCLAW_MLX_API_KEY", "")
+    if len(token) < 32:
+        raise RuntimeError("ThinClaw MLX API credential is unavailable")
+    expected = "Bearer " + token
+
+    @self.middleware("http")
+    async def _thinclaw_require_bearer(request, call_next):
+        supplied = request.headers.get("authorization", "")
+        if not hmac.compare_digest(supplied, expected):
+            return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+        return await call_next(request)
+
+
+FastAPI.__init__ = _thinclaw_fastapi_init
+"#;
+
+static BOOTSTRAP_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// MLX engine backed by the OpenAI-compatible `mlx-openai-server` process.
 pub struct MlxEngine {
+    lifecycle: tokio::sync::Mutex<()>,
     port: Mutex<Option<u16>>,
-    process: Mutex<Option<tokio::process::Child>>,
-    /// Path to the mlx virtualenv (set during bootstrap)
+    process: Mutex<Option<OwnedChild>>,
+    runtime_dir: Mutex<Option<tempfile::TempDir>>,
     venv_path: Mutex<Option<PathBuf>>,
-    /// Path to the bundled `uv` sidecar binary
     uv_path: Mutex<Option<PathBuf>>,
-    /// The model path/ID that was passed to `start()` — needed for request bodies
-    loaded_model: Mutex<Option<String>>,
-    /// Effective context window: min(user_requested, model_max_from_config)
+    served_model: Mutex<Option<String>>,
     effective_context: Mutex<Option<u32>>,
+    api_token: Mutex<Option<String>>,
 }
 
 impl MlxEngine {
     pub fn new() -> Self {
         Self {
+            lifecycle: tokio::sync::Mutex::new(()),
             port: Mutex::new(None),
             process: Mutex::new(None),
+            runtime_dir: Mutex::new(None),
             venv_path: Mutex::new(None),
             uv_path: Mutex::new(None),
-            loaded_model: Mutex::new(None),
+            served_model: Mutex::new(None),
             effective_context: Mutex::new(None),
+            api_token: Mutex::new(None),
         }
     }
 
-    /// Set the app data directory so we know where to create the venv.
     pub fn set_app_data_dir(&self, dir: PathBuf) {
-        let venv = dir.join("mlx-env");
-        *self.venv_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(venv);
+        *self
+            .venv_path
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(dir.join("mlx-env"));
     }
 
-    /// Set the path to the bundled `uv` sidecar.
-    ///
-    /// Call this from `lib.rs` during app setup, passing the path resolved
-    /// by `tauri::Manager::path().resolve("bin/uv", BaseDirectory::Resource)`.
     pub fn set_uv_path(&self, path: PathBuf) {
-        *self.uv_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
-    }
-
-    /// Get the path to the uv binary.
-    /// Falls back to checking $PATH, then the ThinClaw Desktop uv cache.
-    fn uv_bin(&self) -> Option<String> {
-        // 1. Use the explicitly set sidecar path (set by EngineManager::create_engine)
-        if let Some(p) = self
+        *self
             .uv_path
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|error| error.into_inner()) = Some(path);
+    }
+
+    fn uv_bin(&self) -> Result<PathBuf, String> {
+        if let Some(path) = self
+            .uv_path
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
             .clone()
         {
-            if p.exists() {
-                return Some(p.to_string_lossy().into_owned());
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("Configured uv binary is unavailable: {error}"))?;
+            if metadata.is_file() && !metadata.file_type().is_symlink() {
+                return path
+                    .canonicalize()
+                    .map_err(|error| format!("Could not resolve uv binary: {error}"));
             }
+            return Err("Configured uv path is not a regular file".to_string());
         }
 
-        // 2. Check system PATH
-        if let Ok(output) = std::process::Command::new("which").arg("uv").output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
-                }
-            }
-        }
-
-        // 3. Check auto-download locations. Prefer the ThinClaw Desktop cache,
-        // but keep the legacy Scrappy cache readable for rollback.
-        if let Ok(home) = std::env::var("HOME") {
-            let home = PathBuf::from(home);
-            let local_uv = home.join(".thinclaw-desktop").join("uv");
-            if local_uv.exists() {
-                return Some(local_uv.to_string_lossy().into_owned());
-            }
-
-            let legacy_uv = home.join(".scrappy").join("uv");
-            if legacy_uv.exists() {
-                return Some(legacy_uv.to_string_lossy().into_owned());
-            }
-        }
-
-        None // Caller should auto-download
+        find_executable_in_path("uv")
+            .and_then(|path| path.canonicalize().ok())
+            .filter(|path| path.is_file())
+            .ok_or_else(|| {
+                "uv is unavailable; install it or bundle the reviewed sidecar binary".to_string()
+            })
     }
 
     fn get_venv_path(&self) -> Option<PathBuf> {
         self.venv_path
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
 
+    fn python_path_for(venv: &Path) -> PathBuf {
+        venv.join("bin").join("python3")
+    }
+
+    fn server_path_for(venv: &Path) -> PathBuf {
+        venv.join("bin").join("mlx-openai-server")
+    }
+
+    fn sitecustomize_path_for(venv: &Path) -> PathBuf {
+        venv.join("lib")
+            .join(format!("python{PYTHON_VERSION}"))
+            .join("site-packages")
+            .join("sitecustomize.py")
+    }
+
+    #[cfg(test)]
     fn get_python_path(&self) -> Option<PathBuf> {
-        self.get_venv_path().map(|v| v.join("bin").join("python3"))
+        self.get_venv_path()
+            .map(|venv| Self::python_path_for(&venv))
     }
 
-    /// Check if the MLX environment is already bootstrapped.
-    ///
-    /// The marker contains the exact validated direct-dependency fingerprint.
-    /// A pin change therefore upgrades existing venvs on the next setup run.
-    pub fn is_bootstrapped(&self) -> bool {
-        let Some(venv) = self.get_venv_path() else {
-            return false;
-        };
-        venv.join("bin/python3").is_file()
-            && venv.join("bin/mlx-openai-server").is_file()
-            && std::fs::read_to_string(venv.join(".mlx-openai-server"))
-                .ok()
-                .is_some_and(|value| value.trim() == super::MLX_BOOTSTRAP_FINGERPRINT)
+    fn expected_marker() -> String {
+        format!("mlx-openai-server={MLX_SERVER_VERSION}\npython={PYTHON_VERSION}\nauth-shim=1\n")
     }
 
-    /// Check if a model directory contains a vision-capable (VLM) model.
-    ///
-    /// Reads `config.json` for vision-related keys and verifies that vision
-    /// weights actually exist in the safetensors files. Both checks must pass.
-    ///
-    /// Config conventions checked:
-    /// - `vision_config` (LLaVA, Qwen-VL, Gemma 3)
-    /// - `vision_feature_layer` + `image_token_index` (Ministral 3 / Pixtral)
-    /// - Architecture name containing "ConditionalGeneration" (HF convention for VLMs)
-    ///
-    /// Weight verification prevents crashes when an MLX conversion carries a
-    /// multimodal config.json but stripped the vision encoder during conversion.
-    fn is_vision_model(model_path: &str) -> bool {
-        let base = std::path::Path::new(model_path);
-        let config = base.join("config.json");
-
-        let config_indicates_vision = std::fs::read_to_string(&config)
+    fn regular_resolved_file(path: &Path) -> bool {
+        path.canonicalize()
             .ok()
-            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-            .map(|j| {
-                // Standard VLM config key (LLaVA, Qwen-VL, Gemma 3, etc.)
-                if j.get("vision_config").is_some() {
-                    return true;
-                }
-                // Mistral 3 / Pixtral style: vision_feature_layer + image_token_index
-                if j.get("vision_feature_layer").is_some() || j.get("image_token_index").is_some() {
-                    return true;
-                }
-                // HuggingFace architecture convention: "ForConditionalGeneration" = multimodal
-                if let Some(archs) = j.get("architectures").and_then(|a| a.as_array()) {
-                    for arch in archs {
-                        if let Some(name) = arch.as_str() {
-                            if name.contains("ConditionalGeneration")
-                                || name.contains("VisionModel")
-                                || name.contains("ForCausalImageTextToText")
-                            {
-                                return true;
-                            }
-                        }
-                    }
-                }
-                false
-            })
-            .unwrap_or(false);
-
-        if !config_indicates_vision {
-            return false;
-        }
-
-        // Config says vision — now verify that vision weights actually exist.
-        // Some MLX conversions strip the vision encoder during conversion
-        // (e.g. mlx-community text-only conversions of multimodal source models).
-        if Self::has_vision_weights(base) {
-            return true;
-        }
-
-        // Weights are missing — fall back to text-only mode.
-        println!(
-            "[mlx] config.json indicates a VLM but no vision_tower / vision_model weights \
-             found in safetensors — this MLX conversion appears text-only. \
-             Launching as type=lm instead of multimodal."
-        );
-        false
+            .and_then(|resolved| std::fs::metadata(resolved).ok())
+            .is_some_and(|metadata| metadata.is_file())
     }
 
-    /// Check whether the model directory contains vision encoder weights.
-    /// Looks at `model.safetensors.index.json` (multi-shard) first, then
-    /// falls back to scanning `*.safetensors` file names for vision-related
-    /// patterns (for single-file models that lack an index).
-    fn has_vision_weights(model_dir: &std::path::Path) -> bool {
-        // 1. Multi-shard: check the weight_map in the index file
-        let index = model_dir.join("model.safetensors.index.json");
-        if let Ok(content) = std::fs::read_to_string(&index) {
-            if let Ok(j) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(weight_map) = j.get("weight_map").and_then(|w| w.as_object()) {
-                    let has_vision = weight_map.keys().any(|k| {
-                        k.starts_with("vision_tower.")
-                            || k.starts_with("vision_model.")
-                            || k.starts_with("multi_modal_projector.")
-                    });
-                    return has_vision;
-                }
-            }
-        }
+    fn environment_is_complete(venv: &Path) -> bool {
+        let marker = venv.join(BOOTSTRAP_MARKER);
+        let shim = Self::sitecustomize_path_for(venv);
+        let marker_ok =
+            std::fs::symlink_metadata(&marker).is_ok_and(|metadata| {
+                metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 256
+            }) && thinclaw_platform::read_regular_file_bounded_single_link(&marker, 256)
+                .is_ok_and(|value| value == Self::expected_marker().as_bytes());
+        let shim_ok = std::fs::symlink_metadata(&shim).is_ok_and(|metadata| {
+            metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() == AUTH_SHIM.len() as u64
+        }) && thinclaw_platform::read_regular_file_bounded_single_link(
+            &shim,
+            AUTH_SHIM.len() as u64,
+        )
+        .is_ok_and(|value| value == AUTH_SHIM.as_bytes());
 
-        // 2. Single-file: if a file named *vision* or *mmproj* exists among safetensors
-        if let Ok(entries) = std::fs::read_dir(model_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                if name.ends_with(".safetensors")
-                    && (name.contains("vision") || name.contains("mmproj"))
-                {
-                    return true;
-                }
-            }
-        }
-
-        // 3. Fallback: if there's no index and no vision-named files,
-        //    assume text-only (we can't cheaply inspect safetensors internals)
-        false
+        marker_ok
+            && shim_ok
+            && Self::regular_resolved_file(&Self::python_path_for(venv))
+            && Self::regular_resolved_file(&Self::server_path_for(venv))
     }
 
-    /// Check if a Python binary is version 3.11+.
-    ///
-    /// Runs `python3 --version` and parses the output. Returns `false` if the
-    /// version is below 3.11 or if the check fails for any reason.
-    async fn check_python_version(python_path: &std::path::Path) -> bool {
-        let output = tokio::process::Command::new(python_path)
-            .args(["--version"])
-            .output()
-            .await;
-
-        match output {
-            Ok(out) if out.status.success() => {
-                // Output is like "Python 3.12.4"
-                let version_str = String::from_utf8_lossy(&out.stdout);
-                if let Some(ver) = version_str.strip_prefix("Python ") {
-                    let parts: Vec<&str> = ver.trim().split('.').collect();
-                    if parts.len() >= 2 {
-                        let minor: u32 = parts[1].parse().unwrap_or(0);
-                        return minor >= 11;
-                    }
-                }
-                false
-            }
-            _ => false,
-        }
+    pub fn is_bootstrapped(&self) -> bool {
+        self.get_venv_path()
+            .as_deref()
+            .is_some_and(Self::environment_is_complete)
     }
 
-    /// Bootstrap the MLX environment using `uv`.
-    ///
-    /// This is called on first launch. It:
-    /// 1. Auto-downloads `uv` if not present
-    /// 2. Creates a venv with `uv venv <path>` (skipped if venv already exists)
-    /// 3. Installs `mlx-openai-server` (unified text+vision+audio server)
-    /// 4. Writes a `.mlx-openai-server` marker file
-    /// 5. Subsequent starts skip all steps
-    pub async fn bootstrap(&self) -> Result<(), String> {
-        let venv = self
-            .get_venv_path()
-            .ok_or("MLX venv path not set — call set_app_data_dir first")?;
-
-        if self.is_bootstrapped() {
-            println!("[mlx] Environment already bootstrapped at {:?}", venv);
-            return Ok(());
+    fn hardened_uv_command(uv: &Path) -> Command {
+        let mut command = Command::new(uv);
+        for (key, _) in std::env::vars_os() {
+            let name = key.to_string_lossy().to_ascii_uppercase();
+            if name.starts_with("UV_")
+                || name.starts_with("PIP_")
+                || matches!(
+                    name.as_str(),
+                    "PYTHONPATH" | "PYTHONHOME" | "VIRTUAL_ENV" | "CONDA_PREFIX"
+                )
+            {
+                command.env_remove(key);
+            }
         }
+        command
+            .env("UV_NO_CONFIG", "1")
+            .env("PYTHONNOUSERSITE", "1")
+            .env("PYTHONDONTWRITEBYTECODE", "1");
+        command
+    }
 
-        // Resolve or auto-download uv
-        let uv_bin = match self.uv_bin() {
-            Some(path) => {
-                println!("[mlx] Using uv at: {}", path);
-                path
+    fn clean_process_detail(bytes: &[u8]) -> String {
+        let value = String::from_utf8_lossy(bytes);
+        let mut cleaned = String::new();
+        for character in value.chars() {
+            if cleaned.len() >= 2_048 {
+                break;
             }
-            None => {
-                println!("[mlx] uv not found — auto-downloading...");
-                self.auto_download_uv().await?
+            if matches!(character, '\n' | '\t') || !character.is_control() {
+                cleaned.push(character);
             }
-        };
-
-        // Step 1: Create venv with Python 3.12+
-        // mlx-openai-server requires Python >=3.11. We pin 3.12 so `uv` will
-        // auto-download it if the system Python is too old (e.g. 3.10).
-        let python = self.get_python_path().ok_or("Python path not available")?;
-
-        let needs_new_venv = if python.exists() {
-            // Check if existing venv has a compatible Python version
-            let version_ok = Self::check_python_version(&python).await;
-            if !version_ok {
-                println!("[mlx] Existing venv has Python <3.11, recreating with Python 3.12...");
-                // Remove old incompatible venv
-                let _ = std::fs::remove_dir_all(&venv);
-                true
-            } else {
-                println!(
-                    "[mlx] Reusing existing venv at {:?} (upgrading packages)",
-                    venv
-                );
-                false
-            }
+        }
+        let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+        if cleaned.is_empty() {
+            "command returned a non-zero status".to_string()
         } else {
-            true
-        };
-
-        if needs_new_venv {
-            println!("[mlx] Creating virtualenv at {:?} with Python 3.12", venv);
-            let output = tokio::process::Command::new(&uv_bin)
-                .args(["venv", "--python", "3.12", &venv.to_string_lossy()])
-                .output()
-                .await
-                .map_err(|e| format!("Failed to run uv venv: {}", e))?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("uv venv failed: {}", stderr));
-            }
+            cleaned
         }
+    }
 
-        // Step 2: Install MLX service stack (unified venv for all MLX services)
-        //   - mlx-openai-server: Chat/VLM LLM server (text + vision + audio)
-        //   - mlx-embeddings:    Embedding model support (replaces llama-server --embedding)
-        //   - mflux:             Image generation (replaces sd-server / sd.cpp)
-        //   - mlx-whisper:       Speech-to-text (replaces whisper-server / whisper.cpp)
-        // Exact direct pins keep the runtime reproducible. The versioned marker
-        // above causes this upgrade step to run whenever the validated matrix changes.
-        println!("[mlx] Installing MLX service stack (mlx-openai-server, mlx-embeddings, mflux, mlx-whisper)...");
-
-        let output = tokio::process::Command::new(&uv_bin)
-            .args([
-                "pip",
-                "install",
-                "--upgrade",
-                "--python",
-                &python.to_string_lossy(),
-                super::MLX_OPENAI_SERVER_SPEC,
-                super::MLX_EMBEDDINGS_SPEC,
-                super::MFLUX_SPEC,
-                super::MLX_WHISPER_SPEC,
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to install MLX service stack: {}", e))?;
-
+    async fn run_uv(
+        uv: &Path,
+        operation: &'static str,
+        args: &[std::ffi::OsString],
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let mut command = Self::hardened_uv_command(uv);
+        command.args(args);
+        let output = bounded_command_output(
+            &mut command,
+            timeout,
+            UTILITY_OUTPUT_LIMIT,
+            UTILITY_OUTPUT_LIMIT,
+        )
+        .await
+        .map_err(|error| format!("uv {operation} failed: {error}"))?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("MLX service stack install failed: {}", stderr));
+            return Err(format!(
+                "uv {operation} failed: {}",
+                Self::clean_process_detail(&output.stderr)
+            ));
         }
-
-        // Step 3: Write marker file so is_bootstrapped() returns true next time
-        let marker = venv.join(".mlx-openai-server");
-        std::fs::write(&marker, super::MLX_BOOTSTRAP_FINGERPRINT)
-            .map_err(|e| format!("Failed to write marker file: {}", e))?;
-
-        println!("[mlx] Bootstrap complete.");
         Ok(())
     }
 
-    /// Find a free port to use.
+    async fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+        thinclaw_platform::write_private_file_atomic_async(
+            path.to_path_buf(),
+            contents.to_vec(),
+            true,
+        )
+        .await
+        .map_err(|error| format!("Could not write {}: {error}", path.display()))
+    }
+
+    /// Build a complete environment in staging and activate it only after the
+    /// package, executable, marker, and authentication shim all validate.
+    pub async fn bootstrap(&self) -> Result<(), String> {
+        let _bootstrap_guard = BOOTSTRAP_LOCK.lock().await;
+        if self.is_bootstrapped() {
+            return Ok(());
+        }
+
+        let uv = self.uv_bin()?;
+        let final_venv = self
+            .get_venv_path()
+            .ok_or_else(|| "MLX venv path is not configured".to_string())?;
+        let parent = final_venv
+            .parent()
+            .ok_or_else(|| "MLX venv has no parent directory".to_string())?
+            .to_path_buf();
+        tokio::fs::create_dir_all(&parent)
+            .await
+            .map_err(|error| format!("Could not create MLX data directory: {error}"))?;
+        let parent_metadata = tokio::fs::symlink_metadata(&parent)
+            .await
+            .map_err(|error| format!("Could not inspect MLX data directory: {error}"))?;
+        if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+            return Err("MLX data directory must be a real directory".to_string());
+        }
+        #[cfg(unix)]
+        tokio::fs::set_permissions(&parent, {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::Permissions::from_mode(0o700)
+        })
+        .await
+        .map_err(|error| format!("Could not protect MLX data directory: {error}"))?;
+
+        let staging = tempfile::Builder::new()
+            .prefix(".mlx-bootstrap-")
+            .tempdir_in(&parent)
+            .map_err(|error| format!("Could not create MLX staging directory: {error}"))?;
+        let staged_venv = staging.path().join("venv");
+        Self::run_uv(
+            &uv,
+            "venv creation",
+            &[
+                "venv".into(),
+                "--python".into(),
+                PYTHON_VERSION.into(),
+                "--python-preference".into(),
+                "only-managed".into(),
+                staged_venv.as_os_str().to_os_string(),
+            ],
+            VENV_TIMEOUT,
+        )
+        .await?;
+
+        let staged_python = Self::python_path_for(&staged_venv);
+        Self::run_uv(
+            &uv,
+            "package installation",
+            &[
+                "pip".into(),
+                "install".into(),
+                "--no-cache".into(),
+                "--only-binary".into(),
+                ":all:".into(),
+                "--exclude-newer".into(),
+                RESOLUTION_CUTOFF.into(),
+                "--python".into(),
+                staged_python.as_os_str().to_os_string(),
+                format!("mlx-openai-server=={MLX_SERVER_VERSION}").into(),
+            ],
+            INSTALL_TIMEOUT,
+        )
+        .await?;
+
+        let shim_path = Self::sitecustomize_path_for(&staged_venv);
+        let shim_parent = shim_path
+            .parent()
+            .ok_or_else(|| "MLX authentication shim has no parent directory".to_string())?;
+        tokio::fs::create_dir_all(shim_parent)
+            .await
+            .map_err(|error| format!("Could not create MLX site-packages directory: {error}"))?;
+        Self::write_private_file(&shim_path, AUTH_SHIM.as_bytes()).await?;
+        Self::write_private_file(
+            &staged_venv.join(BOOTSTRAP_MARKER),
+            Self::expected_marker().as_bytes(),
+        )
+        .await?;
+
+        if !Self::environment_is_complete(&staged_venv) {
+            return Err("Staged MLX environment did not pass validation".to_string());
+        }
+
+        let backup = staging.path().join("previous-venv");
+        let had_previous = match tokio::fs::symlink_metadata(&final_venv).await {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err("Existing MLX environment is not a real directory".to_string());
+                }
+                rename_no_replace(&final_venv, &backup)
+                    .map_err(|error| format!("Could not stage old MLX environment: {error}"))?;
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(format!("Could not inspect MLX environment: {error}")),
+        };
+        if let Err(error) = rename_no_replace(&staged_venv, &final_venv) {
+            if had_previous {
+                let _ = rename_no_replace(&backup, &final_venv);
+            }
+            return Err(format!(
+                "Could not atomically activate MLX environment: {error}"
+            ));
+        }
+        if had_previous {
+            if let Err(error) = tokio::fs::remove_dir_all(&backup).await {
+                tracing::warn!(%error, "Could not remove previous MLX environment");
+            }
+        }
+        Ok(())
+    }
+
+    fn read_bounded_regular_file(path: &Path, limit: usize) -> Option<Vec<u8>> {
+        thinclaw_platform::read_regular_file_bounded_single_link(path, limit as u64).ok()
+    }
+
+    fn validate_model_directory(model_path: &str) -> Result<PathBuf, String> {
+        if model_path.is_empty() || model_path.len() > 4096 {
+            return Err("MLX model path is empty or too long".to_string());
+        }
+        let path = PathBuf::from(model_path);
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("Could not inspect MLX model directory: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("MLX model path must be a real local directory".to_string());
+        }
+
+        let config =
+            Self::read_bounded_regular_file(&path.join("config.json"), MAX_MODEL_CONFIG_BYTES)
+                .ok_or_else(|| "MLX config.json must be a bounded regular file".to_string())?;
+        let parsed: serde_json::Value = serde_json::from_slice(&config)
+            .map_err(|error| format!("MLX config.json is invalid: {error}"))?;
+        if !parsed.is_object() {
+            return Err("MLX config.json must contain a JSON object".to_string());
+        }
+
+        let mut entries = 0_usize;
+        let mut has_weights = false;
+        for entry in std::fs::read_dir(&path)
+            .map_err(|error| format!("Could not inspect MLX model files: {error}"))?
+        {
+            entries = entries.saturating_add(1);
+            if entries > MAX_MODEL_DIRECTORY_ENTRIES {
+                return Err(format!(
+                    "MLX model directory exceeds the {MAX_MODEL_DIRECTORY_ENTRIES}-entry limit"
+                ));
+            }
+            let entry = entry.map_err(|error| format!("Could not inspect model entry: {error}"))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("Could not inspect model entry type: {error}"))?;
+            if !file_type.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_ascii_lowercase();
+            has_weights |= name.ends_with(".safetensors") || name.ends_with(".npz");
+        }
+        if !has_weights {
+            return Err("MLX model directory does not contain regular model weights".to_string());
+        }
+
+        path.canonicalize()
+            .map_err(|error| format!("Could not resolve MLX model directory: {error}"))
+    }
+
+    fn vision_key(key: &str) -> bool {
+        key.starts_with("vision_tower.")
+            || key.starts_with("vision_model.")
+            || key.starts_with("multi_modal_projector.")
+    }
+
+    fn safetensors_contains_vision_keys(path: &Path) -> bool {
+        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+            return false;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() < 8 {
+            return false;
+        }
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return false;
+        };
+        let mut length = [0_u8; 8];
+        if file.read_exact(&mut length).is_err() {
+            return false;
+        }
+        let Ok(header_length) = usize::try_from(u64::from_le_bytes(length)) else {
+            return false;
+        };
+        if header_length == 0
+            || header_length > MAX_SAFETENSORS_HEADER_BYTES
+            || 8_u64.saturating_add(header_length as u64) > metadata.len()
+        {
+            return false;
+        }
+        let mut header = vec![0_u8; header_length];
+        if file.read_exact(&mut header).is_err() {
+            return false;
+        }
+        serde_json::from_slice::<serde_json::Value>(&header)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .is_some_and(|object| object.keys().any(|key| Self::vision_key(key)))
+    }
+
+    fn has_vision_weights(model_dir: &Path) -> bool {
+        let index_has_vision = Self::read_bounded_regular_file(
+            &model_dir.join("model.safetensors.index.json"),
+            MAX_WEIGHT_INDEX_BYTES,
+        )
+        .and_then(|index| serde_json::from_slice::<serde_json::Value>(&index).ok())
+        .and_then(|value| {
+            value
+                .get("weight_map")
+                .and_then(|map| map.as_object())
+                .cloned()
+        })
+        .is_some_and(|map| map.keys().any(|key| Self::vision_key(key)));
+        if index_has_vision {
+            return true;
+        }
+
+        let Ok(entries) = std::fs::read_dir(model_dir) else {
+            return false;
+        };
+        entries
+            .take(MAX_MODEL_DIRECTORY_ENTRIES)
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+            })
+            .any(|path| Self::safetensors_contains_vision_keys(&path))
+    }
+
+    fn is_vision_model(model_path: &str) -> bool {
+        let base = Path::new(model_path);
+        let Some(config) =
+            Self::read_bounded_regular_file(&base.join("config.json"), MAX_MODEL_CONFIG_BYTES)
+        else {
+            return false;
+        };
+        let Some(config) = serde_json::from_slice::<serde_json::Value>(&config).ok() else {
+            return false;
+        };
+        let indicates_vision = config.get("vision_config").is_some()
+            || config.get("vision_feature_layer").is_some()
+            || config.get("image_token_index").is_some()
+            || config
+                .get("architectures")
+                .and_then(|architectures| architectures.as_array())
+                .is_some_and(|architectures| {
+                    architectures
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .any(|name| {
+                            name.contains("ConditionalGeneration")
+                                || name.contains("VisionModel")
+                                || name.contains("ForCausalImageTextToText")
+                        })
+                });
+        indicates_vision && Self::has_vision_weights(base)
+    }
+
     fn find_free_port() -> Result<u16, String> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .map_err(|e| format!("Failed to bind port: {}", e))?;
-        let port = listener
+            .map_err(|error| format!("Failed to reserve an MLX loopback port: {error}"))?;
+        listener
             .local_addr()
-            .map_err(|e| format!("Failed to get local addr: {}", e))?
-            .port();
-        Ok(port)
+            .map(|address| address.port())
+            .map_err(|error| format!("Failed to inspect MLX loopback port: {error}"))
     }
 
-    /// Auto-download `uv` from GitHub releases into `~/.thinclaw-desktop/uv`.
-    ///
-    /// This is called during `bootstrap()` if no `uv` binary was found.
-    /// The download is a one-time operation — subsequent bootstraps find
-    /// the cached binary via `uv_bin()`.
-    async fn auto_download_uv(&self) -> Result<String, String> {
-        const MAX_UV_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
+    fn generate_api_token() -> String {
+        let mut bytes = [0_u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        hex::encode(bytes)
+    }
 
-        let (platform, asset, expected_sha256) =
-            if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
-                (
-                    "aarch64-apple-darwin",
-                    "uv-aarch64-apple-darwin.tar.gz",
-                    "33540eb7c883ab857eff79bd5ac2aa31fe27b595abecb4a9c003a2c998447232",
-                )
-            } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
-                (
-                    "x86_64-apple-darwin",
-                    "uv-x86_64-apple-darwin.tar.gz",
-                    "2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e",
-                )
-            } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
-                (
-                    "x86_64-unknown-linux-gnu",
-                    "uv-x86_64-unknown-linux-gnu.tar.gz",
-                    "e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224",
-                )
-            } else {
-                return Err("Unsupported platform for uv auto-download".into());
-            };
-
-        let url = format!(
-            "https://github.com/astral-sh/uv/releases/download/{}/{}",
-            super::UV_VERSION,
-            asset
-        );
-
-        let dest_dir = std::env::var("HOME")
-            .map(PathBuf::from)
-            .map_err(|_| "HOME not set")?
-            .join(".thinclaw-desktop");
-
-        std::fs::create_dir_all(&dest_dir)
-            .map_err(|e| format!("Failed to create ~/.thinclaw-desktop: {}", e))?;
-
-        let dest_path = dest_dir.join("uv");
-        let archive_path = dest_dir.join(format!("{}.download", asset));
-
-        println!(
-            "[mlx] Downloading uv {} for {}...",
-            super::UV_VERSION,
-            platform
-        );
-
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .timeout(std::time::Duration::from_secs(90))
+    fn local_client() -> Result<reqwest::Client, String> {
+        reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(3))
             .build()
-            .map_err(|e| format!("Failed to configure uv download: {}", e))?;
-        let mut response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to download uv: {}", e))?;
-
-        if !response.status().is_success() {
-            return Err(format!("Failed to download uv: HTTP {}", response.status()));
-        }
-
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_UV_ARCHIVE_BYTES as u64)
-        {
-            return Err("uv archive exceeds the 64 MiB safety limit".into());
-        }
-
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|e| format!("Failed to read uv download: {}", e))?
-        {
-            if bytes.len().saturating_add(chunk.len()) > MAX_UV_ARCHIVE_BYTES {
-                return Err("uv archive exceeds the 64 MiB safety limit".into());
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-
-        use sha2::{Digest, Sha256};
-        let actual_sha256 = hex::encode(Sha256::digest(&bytes));
-        if actual_sha256 != expected_sha256 {
-            return Err(format!(
-                "uv archive checksum mismatch: expected {}, got {}",
-                expected_sha256, actual_sha256
-            ));
-        }
-
-        std::fs::write(&archive_path, &bytes)
-            .map_err(|e| format!("Failed to write uv archive: {}", e))?;
-
-        // Extract the archive using tar (available on macOS and Linux)
-        let temp_dir = dest_dir.join(format!("uv-temp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir)
-            .map_err(|e| format!("Failed to create temp dir: {}", e))?;
-
-        let output = tokio::process::Command::new("tar")
-            .args([
-                "-xzf",
-                &archive_path.to_string_lossy(),
-                "-C",
-                &temp_dir.to_string_lossy(),
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to extract uv archive: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("tar extraction failed: {}", stderr));
-        }
-
-        // Find the uv binary in the extracted contents
-        let uv_extracted = Self::find_file_recursive(&temp_dir, "uv")
-            .ok_or("uv binary not found in extracted archive")?;
-
-        let staged_path = dest_dir.join("uv.new");
-        std::fs::copy(&uv_extracted, &staged_path)
-            .map_err(|e| format!("Failed to copy uv binary: {}", e))?;
-
-        // Make executable
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o755);
-            std::fs::set_permissions(&staged_path, perms)
-                .map_err(|e| format!("Failed to chmod uv: {}", e))?;
-        }
-
-        let version = tokio::process::Command::new(&staged_path)
-            .arg("--version")
-            .output()
-            .await
-            .map_err(|e| format!("Failed to verify uv binary: {}", e))?;
-        let stdout = String::from_utf8_lossy(&version.stdout);
-        if !version.status.success()
-            || !stdout
-                .trim()
-                .starts_with(&format!("uv {}", super::UV_VERSION))
-        {
-            return Err(format!(
-                "Downloaded uv binary failed version verification: {stdout}"
-            ));
-        }
-
-        std::fs::rename(&staged_path, &dest_path)
-            .map_err(|e| format!("Failed to install uv binary: {}", e))?;
-
-        // Cleanup
-        let _ = std::fs::remove_file(&archive_path);
-        let _ = std::fs::remove_dir_all(&temp_dir);
-
-        println!(
-            "[mlx] uv {} installed at {:?}",
-            super::UV_VERSION,
-            dest_path
-        );
-        Ok(dest_path.to_string_lossy().into_owned())
+            .map_err(|error| format!("Could not build local MLX client: {error}"))
     }
 
-    /// Recursively find a file by name in a directory.
-    fn find_file_recursive(dir: &PathBuf, name: &str) -> Option<PathBuf> {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.file_name().map(|n| n == name).unwrap_or(false) {
-                    return Some(path);
-                }
-                if path.is_dir() {
-                    if let Some(found) = Self::find_file_recursive(&path, name) {
-                        return Some(found);
-                    }
-                }
-            }
-        }
-        None
+    fn clear_runtime_state(&self) {
+        *self.port.lock().unwrap_or_else(|error| error.into_inner()) = None;
+        *self
+            .served_model
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        *self
+            .effective_context
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        *self
+            .api_token
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        *self
+            .runtime_dir
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
     }
 }
 
@@ -579,202 +613,244 @@ impl InferenceEngine for MlxEngine {
         context_size: u32,
         _options: EngineStartOptions,
     ) -> Result<(u16, String), String> {
-        let venv = self
-            .get_venv_path()
-            .ok_or("MLX venv path not set — call set_app_data_dir first")?;
-        let python = self
-            .get_python_path()
-            .ok_or("MLX environment not bootstrapped. Run bootstrap() first.")?;
-
-        if !python.exists() {
-            return Err("MLX environment not found. Please set up MLX first.".into());
-        }
-
-        // Read the model's native context window from config.json
-        let model_max = super::read_model_max_context(model_path);
-        let effective = match model_max {
-            Some(model_limit) => {
-                let eff = context_size.min(model_limit);
-                println!(
-                    "[mlx] Model max context: {} (from config.json), user requested: {}, effective: {}",
-                    model_limit, context_size, eff
-                );
-                eff
-            }
-            None => {
-                println!(
-                    "[mlx] No max_position_embeddings in config.json, using user setting: {}",
-                    context_size
-                );
-                context_size
-            }
-        };
-
-        let port = Self::find_free_port()?;
-
-        // Detect vision models to select the correct model type for mlx-openai-server.
-        // Checks both config.json and actual safetensors weights to ensure the vision
-        // encoder was included in this conversion (some MLX conversions strip it).
-        let is_vlm = Self::is_vision_model(model_path);
-        let model_type = if is_vlm { "multimodal" } else { "lm" };
-
-        println!(
-            "[mlx] Starting mlx-openai-server on port {} with model {} (type={})",
-            port, model_path, model_type
-        );
-
-        let port_str = port.to_string();
-
-        // mlx-openai-server installs a CLI entry point in the venv's bin/ dir.
-        // We invoke it directly rather than using `python -m`.
-        let server_bin = venv.join("bin").join("mlx-openai-server");
-        if !server_bin.exists() {
+        let _lifecycle_guard = self.lifecycle.lock().await;
+        if context_size == 0 || context_size > MAX_CONTEXT_SIZE {
             return Err(format!(
-                "mlx-openai-server binary not found at {:?} — try re-bootstrapping",
-                server_bin
+                "Context size must be between 1 and {MAX_CONTEXT_SIZE}"
             ));
         }
+        if self
+            .process
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
+        {
+            return Err("MLX is already running; stop it before loading another model".into());
+        }
+        if !self.is_bootstrapped() {
+            return Err("MLX environment is missing or does not match the pinned version".into());
+        }
 
-        let child = tokio::process::Command::new(&server_bin)
+        let model_path = Self::validate_model_directory(model_path)?;
+        let model_path_string = model_path
+            .to_str()
+            .ok_or_else(|| "MLX model path is not valid UTF-8".to_string())?
+            .to_string();
+        let model_limit = super::read_model_max_context(&model_path_string);
+        let effective_context = model_limit
+            .map(|limit| context_size.min(limit))
+            .unwrap_or(context_size);
+        let model_type = if Self::is_vision_model(&model_path_string) {
+            "multimodal"
+        } else {
+            "lm"
+        };
+
+        let venv = self
+            .get_venv_path()
+            .ok_or_else(|| "MLX environment is not configured".to_string())?;
+        let server = Self::server_path_for(&venv);
+        if !Self::regular_resolved_file(&server) {
+            return Err("MLX server executable is unavailable".to_string());
+        }
+        let parent = venv
+            .parent()
+            .ok_or_else(|| "MLX environment has no parent directory".to_string())?;
+        let runtime_dir = tempfile::Builder::new()
+            .prefix(".mlx-runtime-")
+            .tempdir_in(parent)
+            .map_err(|error| format!("Could not create private MLX runtime directory: {error}"))?;
+        let prompt_cache = runtime_dir.path().join("prompt-cache");
+        std::fs::create_dir(&prompt_cache)
+            .map_err(|error| format!("Could not create private MLX prompt cache: {error}"))?;
+
+        let port = Self::find_free_port()?;
+        let token = Self::generate_api_token();
+        let client = Self::local_client()?;
+        let mut command = Command::new(&server);
+        command
             .args([
                 "launch",
                 "--model-path",
-                model_path,
+                &model_path_string,
                 "--model-type",
                 model_type,
+                "--served-model-name",
+                SERVED_MODEL_NAME,
                 "--port",
-                &port_str,
+                &port.to_string(),
                 "--host",
                 "127.0.0.1",
+                "--context-length",
+                &effective_context.to_string(),
+                "--queue-size",
+                "8",
+                "--decode-concurrency",
+                "4",
+                "--prompt-concurrency",
+                "1",
+                "--prefill-step-size",
+                "512",
+                "--max-tokens",
+                "8192",
+                "--prompt-cache-size",
+                "1",
+                "--max-bytes",
+                "2147483648",
+                "--prompt-cache-dir",
+                &prompt_cache.to_string_lossy(),
+                "--no-log-file",
+                "--log-level",
+                "ERROR",
             ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("Failed to spawn mlx-openai-server: {}", e))?;
+            .env_remove("PYTHONPATH")
+            .env_remove("PYTHONHOME")
+            .env_remove("VIRTUAL_ENV")
+            .env("PYTHONNOUSERSITE", "1")
+            .env("HF_HUB_OFFLINE", "1")
+            .env("TRANSFORMERS_OFFLINE", "1")
+            .env("TOKENIZERS_PARALLELISM", "false")
+            .env("THINCLAW_MLX_API_KEY", &token)
+            .current_dir(runtime_dir.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
 
-        *self.port.lock().unwrap_or_else(|e| e.into_inner()) = Some(port);
-        *self.process.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
-        *self.loaded_model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model_path.to_string());
-        *self
-            .effective_context
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(effective);
-
-        // Poll for readiness (up to 60 seconds for model loading)
-        let client = reqwest::Client::new();
-        let start = std::time::Instant::now();
-
+        // Keep the process and its private cache local until authenticated
+        // readiness succeeds. Cancellation drops both leases automatically.
+        let mut child = OwnedChild::spawn(&mut command)
+            .map_err(|error| format!("Failed to spawn MLX server: {error}"))?;
+        let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
         loop {
-            if start.elapsed().as_secs() > 60 {
-                self.stop().await.ok();
-                return Err("MLX server startup timeout (60s)".into());
-            }
-
-            // Check if process is still alive — extract dead child if exited
-            let dead_child = {
-                let mut guard = self.process.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(ref mut child) = *guard {
-                    match child.try_wait() {
-                        Ok(Some(status)) => Some((guard.take().unwrap(), status)),
-                        Ok(None) => None,
-                        Err(e) => return Err(format!("Failed to check MLX process: {}", e)),
-                    }
-                } else {
-                    None
-                }
-            };
-            // guard dropped here — safe to .await below
-
-            if let Some((mut child, status)) = dead_child {
-                let stderr_msg = if let Some(mut stderr) = child.stderr.take() {
-                    let mut buf = String::new();
-                    use tokio::io::AsyncReadExt;
-                    let _ = stderr.read_to_string(&mut buf).await;
-                    if buf.trim().is_empty() {
-                        String::from("(no stderr output)")
-                    } else {
-                        let trimmed = if buf.len() > 500 {
-                            let mut start = buf.len() - 500;
-                            while !buf.is_char_boundary(start) && start < buf.len() {
-                                start += 1;
-                            }
-                            format!("...{}", &buf[start..])
-                        } else {
-                            buf
-                        };
-                        trimmed.trim().to_string()
-                    }
-                } else {
-                    String::from("(stderr not available)")
-                };
-                println!(
-                    "[mlx] Server crashed during startup. stderr:\n{}",
-                    stderr_msg
-                );
+            if tokio::time::Instant::now() >= deadline {
+                let _ = child.kill().await;
                 return Err(format!(
-                    "MLX server exited during startup (code {:?}):\n{}",
-                    status.code(),
-                    stderr_msg
+                    "MLX server startup exceeded its {STARTUP_TIMEOUT:?} deadline"
+                ));
+            }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| format!("Failed to inspect MLX process: {error}"))?
+            {
+                return Err(format!(
+                    "MLX server exited during startup with code {:?}",
+                    status.code()
                 ));
             }
 
-            match client
-                .get(format!("http://127.0.0.1:{}/v1/models", port))
-                .timeout(std::time::Duration::from_secs(2))
+            if client
+                .get(format!("http://127.0.0.1:{port}/v1/models"))
+                .bearer_auth(&token)
                 .send()
                 .await
+                .is_ok_and(|response| response.status().is_success())
             {
-                Ok(res) if res.status().is_success() => {
-                    println!("[mlx] Server is ready on port {}", port);
-                    return Ok((port, String::new())); // MLX server has no auth token
-                }
-                _ => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                }
+                *self.port.lock().unwrap_or_else(|error| error.into_inner()) = Some(port);
+                *self
+                    .process
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(child);
+                *self
+                    .runtime_dir
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(runtime_dir);
+                *self
+                    .served_model
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) =
+                    Some(SERVED_MODEL_NAME.to_string());
+                *self
+                    .effective_context
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(effective_context);
+                *self
+                    .api_token
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(token.clone());
+                return Ok((port, token));
             }
+            tokio::time::sleep(Duration::from_millis(750)).await;
         }
     }
 
     async fn stop(&self) -> Result<(), String> {
-        let child = {
-            let mut guard = self.process.lock().unwrap_or_else(|e| e.into_inner());
-            guard.take()
+        let _lifecycle_guard = self.lifecycle.lock().await;
+        let child = self
+            .process
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        let result = if let Some(mut child) = child {
+            child
+                .kill()
+                .await
+                .map_err(|error| format!("Failed to stop MLX process tree: {error}"))
+        } else {
+            Ok(())
         };
-        if let Some(mut child) = child {
-            child.kill().await.ok();
-            println!("[mlx] Server stopped.");
-        }
-        *self.port.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        Ok(())
+        self.clear_runtime_state();
+        result
     }
 
     async fn is_ready(&self) -> bool {
-        let port = match *self.port.lock().unwrap_or_else(|e| e.into_inner()) {
-            Some(p) => p,
-            None => return false,
+        let alive = {
+            let mut guard = self
+                .process
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match guard.as_mut() {
+                Some(child) => matches!(child.try_wait(), Ok(None)),
+                None => false,
+            }
         };
-
-        reqwest::Client::new()
-            .get(format!("http://127.0.0.1:{}/v1/models", port))
-            .timeout(std::time::Duration::from_secs(2))
+        if !alive {
+            self.process
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            self.clear_runtime_state();
+            return false;
+        }
+        let Some(port) = *self.port.lock().unwrap_or_else(|error| error.into_inner()) else {
+            return false;
+        };
+        let Some(token) = self
+            .api_token
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+        else {
+            return false;
+        };
+        let Ok(client) = Self::local_client() else {
+            return false;
+        };
+        client
+            .get(format!("http://127.0.0.1:{port}/v1/models"))
+            .bearer_auth(token)
             .send()
             .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false)
+            .is_ok_and(|response| response.status().is_success())
     }
 
     fn base_url(&self) -> Option<String> {
         self.port
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .map(|p| format!("http://127.0.0.1:{}/v1", p))
+            .unwrap_or_else(|error| error.into_inner())
+            .map(|port| format!("http://127.0.0.1:{port}/v1"))
+    }
+
+    fn api_key(&self) -> Option<String> {
+        self.api_token
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     fn model_id(&self) -> Option<String> {
-        self.loaded_model
+        self.served_model
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
 
@@ -782,7 +858,7 @@ impl InferenceEngine for MlxEngine {
         *self
             .effective_context
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|error| error.into_inner())
     }
 
     fn display_name(&self) -> &'static str {
@@ -794,7 +870,7 @@ impl InferenceEngine for MlxEngine {
     }
 
     fn uses_single_file_model(&self) -> bool {
-        false // MLX uses model directories
+        false
     }
 
     fn hf_search_tag(&self) -> &'static str {
@@ -802,25 +878,23 @@ impl InferenceEngine for MlxEngine {
     }
 }
 
-// Cleanup on drop
-impl Drop for MlxEngine {
-    fn drop(&mut self) {
-        if let Ok(mut guard) = self.process.lock() {
-            if let Some(ref mut child) = *guard {
-                // Blocking kill — we're in drop so can't use async
-                let _ = child.start_kill();
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model_dir(config: &str, weight_map: Option<&str>) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("config.json"), config).unwrap();
+        std::fs::write(directory.path().join("model.safetensors"), [0_u8; 8]).unwrap();
+        if let Some(weight_map) = weight_map {
+            std::fs::write(
+                directory.path().join("model.safetensors.index.json"),
+                weight_map,
+            )
+            .unwrap();
+        }
+        directory
+    }
 
     #[test]
     fn mlx_engine_defaults() {
@@ -828,212 +902,110 @@ mod tests {
         assert_eq!(engine.engine_id(), "mlx");
         assert_eq!(engine.hf_search_tag(), "mlx");
         assert!(!engine.uses_single_file_model());
-        assert!(engine.base_url().is_none()); // no port set
+        assert!(engine.base_url().is_none());
+        assert!(engine.api_key().is_none());
     }
 
     #[test]
     fn venv_path_setup() {
+        let directory = tempfile::tempdir().unwrap();
         let engine = MlxEngine::new();
-        assert!(!engine.is_bootstrapped());
-
-        engine.set_app_data_dir(PathBuf::from("/tmp/test_scrappy"));
+        engine.set_app_data_dir(directory.path().to_path_buf());
         assert_eq!(
             engine.get_venv_path(),
-            Some(PathBuf::from("/tmp/test_scrappy/mlx-env"))
+            Some(directory.path().join("mlx-env"))
         );
         assert_eq!(
             engine.get_python_path(),
-            Some(PathBuf::from("/tmp/test_scrappy/mlx-env/bin/python3"))
+            Some(directory.path().join("mlx-env/bin/python3"))
         );
     }
 
     #[test]
-    fn is_vision_model_with_vision_config() {
-        let dir = std::env::temp_dir().join("scrappy_test_vision");
-        let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(
-            dir.join("config.json"),
-            r#"{"model_type": "mistral3", "vision_config": {"image_size": 512}}"#,
-        )
-        .unwrap();
-        // Need vision weights too
-        std::fs::write(
-            dir.join("model.safetensors.index.json"),
-            r#"{"weight_map": {"vision_tower.layer.weight": "model.safetensors", "language_model.layer.weight": "model.safetensors"}}"#,
-        )
-        .unwrap();
-        assert!(MlxEngine::is_vision_model(dir.to_str().unwrap()));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn vision_requires_config_and_matching_weights() {
+        let vision = model_dir(
+            r#"{"architectures":["LlavaForConditionalGeneration"],"vision_config":{}}"#,
+            Some(r#"{"weight_map":{"vision_tower.layer.weight":"model.safetensors"}}"#),
+        );
+        assert!(MlxEngine::is_vision_model(vision.path().to_str().unwrap()));
+
+        let text_only = model_dir(
+            r#"{"architectures":["LlamaForCausalLM"],"max_position_embeddings":4096}"#,
+            None,
+        );
+        assert!(!MlxEngine::is_vision_model(
+            text_only.path().to_str().unwrap()
+        ));
+
+        let misleading = model_dir(
+            r#"{"architectures":["MistralForConditionalGeneration"],"vision_config":{}}"#,
+            Some(r#"{"weight_map":{"language_model.layer.weight":"model.safetensors"}}"#),
+        );
+        assert!(!MlxEngine::is_vision_model(
+            misleading.path().to_str().unwrap()
+        ));
     }
 
     #[test]
-    fn is_vision_model_text_only() {
-        let dir = std::env::temp_dir().join("scrappy_test_text");
-        let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(
-            dir.join("config.json"),
-            r#"{"model_type": "llama", "max_position_embeddings": 4096}"#,
-        )
-        .unwrap();
-        assert!(!MlxEngine::is_vision_model(dir.to_str().unwrap()));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn single_file_safetensors_header_detects_vision_weights() {
+        let directory = tempfile::tempdir().unwrap();
+        let header =
+            br#"{"vision_model.layer.weight":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}"#;
+        let mut file = Vec::new();
+        file.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        file.extend_from_slice(header);
+        file.extend_from_slice(&[0, 0]);
+        let path = directory.path().join("model.safetensors");
+        std::fs::write(&path, file).unwrap();
+        assert!(MlxEngine::safetensors_contains_vision_keys(&path));
     }
 
     #[test]
-    fn is_vision_model_missing_config() {
-        assert!(!MlxEngine::is_vision_model("/nonexistent/path/to/model"));
+    fn model_validation_rejects_missing_weights_and_symlinked_config() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("config.json"), b"{}").unwrap();
+        assert!(MlxEngine::validate_model_directory(directory.path().to_str().unwrap()).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let target = directory.path().join("real-config.json");
+            std::fs::write(&target, b"{}").unwrap();
+            std::fs::remove_file(directory.path().join("config.json")).unwrap();
+            symlink(&target, directory.path().join("config.json")).unwrap();
+            std::fs::write(directory.path().join("weights.npz"), b"weights").unwrap();
+            assert!(
+                MlxEngine::validate_model_directory(directory.path().to_str().unwrap()).is_err()
+            );
+        }
     }
 
     #[test]
-    fn is_vision_model_empty_vision_config() {
-        // Some VLMs have an empty vision_config object — should detect if weights present
-        let dir = std::env::temp_dir().join("scrappy_test_empty_vc");
-        let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(
-            dir.join("config.json"),
-            r#"{"model_type": "gemma3", "vision_config": {}}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("model.safetensors.index.json"),
-            r#"{"weight_map": {"vision_model.encoder.weight": "model.safetensors"}}"#,
-        )
-        .unwrap();
-        assert!(MlxEngine::is_vision_model(dir.to_str().unwrap()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn is_vision_model_nested_text_config() {
-        // Gemma 3 VLMs wrap text_config + vision_config at root level
-        let dir = std::env::temp_dir().join("scrappy_test_nested");
-        let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(
-            dir.join("config.json"),
-            r#"{"model_type": "gemma3", "text_config": {"max_position_embeddings": 8192}, "vision_config": {"image_size": 896}}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("model.safetensors.index.json"),
-            r#"{"weight_map": {"vision_tower.encoder.weight": "model.safetensors", "multi_modal_projector.linear.weight": "model.safetensors"}}"#,
-        )
-        .unwrap();
-        assert!(MlxEngine::is_vision_model(dir.to_str().unwrap()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn is_vision_model_malformed_json() {
-        let dir = std::env::temp_dir().join("scrappy_test_malformed");
-        let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(dir.join("config.json"), "not valid json {{").unwrap();
-        assert!(!MlxEngine::is_vision_model(dir.to_str().unwrap()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn is_vision_model_ministral3_style() {
-        // Ministral-3 with BOTH config + vision weights → true
-        let dir = std::env::temp_dir().join("scrappy_test_ministral3");
-        let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(
-            dir.join("config.json"),
-            r#"{"model_type": "mistral3", "architectures": ["Mistral3ForConditionalGeneration"], "vision_feature_layer": -1, "image_token_index": 10, "text_config": {"max_position_embeddings": 262144}}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("model.safetensors.index.json"),
-            r#"{"weight_map": {"vision_tower.vision_model.transformer.layers.0.attention.k_proj.weight": "model.safetensors", "language_model.model.layers.0.mlp.gate_proj.weight": "model.safetensors"}}"#,
-        )
-        .unwrap();
-        assert!(MlxEngine::is_vision_model(dir.to_str().unwrap()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn is_vision_model_config_vlm_but_weights_text_only() {
-        // mlx-community/Ministral-3-3B-Instruct-2512: config says VLM but weights
-        // only contain language_model.* — should return false to prevent crash
-        let dir = std::env::temp_dir().join("scrappy_test_vlm_no_weights");
-        let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(
-            dir.join("config.json"),
-            r#"{"model_type": "mistral3", "architectures": ["Mistral3ForConditionalGeneration"], "vision_feature_layer": -1, "image_token_index": 10}"#,
-        )
-        .unwrap();
-        // Weights only have language_model — NO vision_tower
-        std::fs::write(
-            dir.join("model.safetensors.index.json"),
-            r#"{"weight_map": {"language_model.model.embed_tokens.weight": "model-00001.safetensors", "language_model.model.layers.0.mlp.gate_proj.weight": "model-00001.safetensors", "language_model.model.norm.weight": "model-00002.safetensors"}}"#,
-        )
-        .unwrap();
-        assert!(!MlxEngine::is_vision_model(dir.to_str().unwrap()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn is_vision_model_conditional_generation_arch() {
-        // HF convention: "ForConditionalGeneration" suffix means multimodal
-        let dir = std::env::temp_dir().join("scrappy_test_condgen");
-        let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(
-            dir.join("config.json"),
-            r#"{"architectures": ["LlavaForConditionalGeneration"], "model_type": "llava"}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("model.safetensors.index.json"),
-            r#"{"weight_map": {"vision_tower.encoder.weight": "model.safetensors", "multi_modal_projector.linear.weight": "model.safetensors"}}"#,
-        )
-        .unwrap();
-        assert!(MlxEngine::is_vision_model(dir.to_str().unwrap()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn base_url_with_port() {
+    fn bootstrap_requires_exact_marker_shim_and_executables() {
+        let directory = tempfile::tempdir().unwrap();
         let engine = MlxEngine::new();
-        assert!(engine.base_url().is_none());
-
-        // Manually set a port to test base_url formatting
-        *engine.port.lock().unwrap() = Some(8765);
-        assert_eq!(engine.base_url(), Some("http://127.0.0.1:8765/v1".into()));
-    }
-
-    #[test]
-    fn not_bootstrapped_without_app_dir() {
-        let engine = MlxEngine::new();
+        engine.set_app_data_dir(directory.path().to_path_buf());
+        let venv = directory.path().join("mlx-env");
+        let python = MlxEngine::python_path_for(&venv);
+        let server = MlxEngine::server_path_for(&venv);
+        let shim = MlxEngine::sitecustomize_path_for(&venv);
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::write(&python, b"python").unwrap();
+        std::fs::write(&server, b"server").unwrap();
+        std::fs::write(&shim, AUTH_SHIM).unwrap();
+        std::fs::write(venv.join(BOOTSTRAP_MARKER), b"old").unwrap();
         assert!(!engine.is_bootstrapped());
-        assert!(engine.get_venv_path().is_none());
-        assert!(engine.get_python_path().is_none());
-    }
-
-    #[test]
-    fn bootstrapped_requires_marker_file() {
-        let dir = std::env::temp_dir().join("scrappy_test_bootstrap_marker");
-        let venv = dir.join("mlx-env");
-        let _ = std::fs::create_dir_all(venv.join("bin"));
-        std::fs::write(venv.join("bin/python3"), "").unwrap();
-        std::fs::write(venv.join("bin/mlx-openai-server"), "").unwrap();
-
-        let engine = MlxEngine::new();
-        engine.set_app_data_dir(dir.clone());
-
-        // Venv dir exists but no marker → not bootstrapped
-        assert!(!engine.is_bootstrapped());
-
-        // A legacy/stale marker must trigger an upgrade.
-        std::fs::write(venv.join(".mlx-openai-server"), "installed").unwrap();
-        assert!(!engine.is_bootstrapped());
-
-        // Only the validated dependency fingerprint is current.
-        std::fs::write(
-            venv.join(".mlx-openai-server"),
-            super::super::MLX_BOOTSTRAP_FINGERPRINT,
-        )
-        .unwrap();
+        std::fs::write(venv.join(BOOTSTRAP_MARKER), MlxEngine::expected_marker()).unwrap();
         assert!(engine.is_bootstrapped());
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    #[test]
+    fn generated_api_tokens_are_high_entropy_and_unique() {
+        let first = MlxEngine::generate_api_token();
+        let second = MlxEngine::generate_api_token();
+        assert_eq!(first.len(), 64);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, second);
     }
 }

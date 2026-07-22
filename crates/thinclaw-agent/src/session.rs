@@ -44,6 +44,49 @@ pub fn message_is_startup_hook(metadata: &serde_json::Value) -> bool {
         == Some("startup_hook")
 }
 
+/// Whether a durable user row was intentionally injected as context without
+/// starting an agent turn. This distinguishes a completed user-only context
+/// entry from an incomplete hidden turn left behind by a crash.
+pub fn message_is_context_only(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("thinclaw_context_only")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Message-metadata keys owned by the context pipeline. Channel/user metadata
+/// must never be allowed to pre-populate these fields: hydration treats them
+/// as durable records of a transformation that ThinClaw itself applied.
+pub const EFFECTIVE_USER_INSTRUCTION_METADATA_KEY: &str = "_thinclaw_effective_user_instruction";
+pub const EFFECTIVE_USER_INSTRUCTION_VERSION_METADATA_KEY: &str =
+    "_thinclaw_effective_user_instruction_version";
+pub const EFFECTIVE_USER_INSTRUCTION_VERSION: u64 = 1;
+pub const MAX_EFFECTIVE_USER_INSTRUCTION_BYTES: usize = 100_000;
+
+/// Return the model-visible user instruction recorded by ThinClaw, if any.
+/// The raw conversation row remains unchanged for user-facing audit/history;
+/// this typed metadata is what makes the transformed prompt replayable after
+/// restart without granting ingress metadata the ability to spoof it.
+pub fn effective_user_instruction(metadata: &serde_json::Value) -> Option<&str> {
+    (metadata
+        .get(EFFECTIVE_USER_INSTRUCTION_VERSION_METADATA_KEY)
+        .and_then(serde_json::Value::as_u64)
+        == Some(EFFECTIVE_USER_INSTRUCTION_VERSION))
+    .then(|| {
+        metadata
+            .get(EFFECTIVE_USER_INSTRUCTION_METADATA_KEY)
+            .and_then(serde_json::Value::as_str)
+    })
+    .flatten()
+    .filter(|instruction| {
+        !instruction.is_empty() && instruction.len() <= MAX_EFFECTIVE_USER_INSTRUCTION_BYTES
+    })
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// A session containing one or more threads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -164,8 +207,49 @@ impl Session {
             .insert(Self::channel_tool_approval_key(channel, tool_name));
     }
 
+    /// Check an actor-scoped session approval. Direct sessions are already
+    /// actor-isolated, so legacy global/channel keys remain valid there.
+    /// Group sessions deliberately ignore legacy shared keys because applying
+    /// them would let one participant grant permissions to every participant.
+    pub fn is_tool_auto_approved_for_identity(
+        &self,
+        actor_id: &str,
+        channel: &str,
+        tool_name: &str,
+    ) -> bool {
+        self.auto_approved_tools
+            .contains(&Self::actor_channel_tool_approval_key(
+                actor_id, channel, tool_name,
+            ))
+            || (self.conversation_kind == ConversationKind::Direct
+                && self.actor_id == actor_id
+                && self.is_tool_auto_approved_for_channel(channel, tool_name))
+    }
+
+    /// Add an approval that belongs only to the actor who granted it.
+    pub fn auto_approve_tool_for_identity(
+        &mut self,
+        actor_id: &str,
+        channel: &str,
+        tool_name: &str,
+    ) {
+        self.auto_approved_tools
+            .insert(Self::actor_channel_tool_approval_key(
+                actor_id, channel, tool_name,
+            ));
+    }
+
     fn channel_tool_approval_key(channel: &str, tool_name: &str) -> String {
         format!("channel:{channel}:tool:{tool_name}")
+    }
+
+    fn actor_channel_tool_approval_key(actor_id: &str, channel: &str, tool_name: &str) -> String {
+        format!(
+            "actor:{}:{actor_id}:channel:{}:{channel}:tool:{}:{tool_name}",
+            actor_id.len(),
+            channel.len(),
+            tool_name.len()
+        )
     }
 
     /// Create a new thread in this session.
@@ -196,16 +280,13 @@ impl Session {
         match self.active_thread {
             None => self.create_thread(),
             Some(id) => {
-                if self.threads.contains_key(&id) {
-                    // Safe: contains_key confirmed the entry exists.
-                    self.threads
-                        .get_mut(&id)
-                        .expect("contains_key confirmed entry exists")
-                } else {
-                    // Stale active_thread ID: create a new thread, which
-                    // updates self.active_thread to the new thread's ID.
-                    self.create_thread()
-                }
+                let session_id = self.id;
+                // Recover a stale active-thread pointer without taking a
+                // second mutable borrow of `self`. Reusing the durable thread
+                // ID also keeps session/conversation identity stable.
+                self.threads
+                    .entry(id)
+                    .or_insert_with(|| Thread::with_id(id, session_id))
             }
         }
     }
@@ -269,6 +350,10 @@ pub struct PendingAuth {
     pub extension_name: String,
     #[serde(default = "default_pending_auth_mode")]
     pub auth_mode: PendingAuthMode,
+    /// Actor that initiated this authentication request. Missing identities
+    /// are legacy state and are deliberately not accepted for token capture.
+    #[serde(default)]
+    pub requesting_identity: Option<ResolvedIdentity>,
 }
 
 fn default_pending_auth_mode() -> PendingAuthMode {
@@ -294,6 +379,41 @@ pub struct PendingApproval {
     /// executed yet when approval was requested.
     #[serde(default)]
     pub deferred_tool_calls: Vec<ToolCall>,
+    /// Actor and ingress context that initiated this request.
+    #[serde(default)]
+    pub requesting_identity: Option<ResolvedIdentity>,
+    #[serde(default)]
+    pub request_channel: String,
+    #[serde(default)]
+    pub request_metadata: serde_json::Value,
+}
+
+fn same_requesting_actor(expected: &ResolvedIdentity, actual: &ResolvedIdentity) -> bool {
+    expected.principal_id == actual.principal_id
+        && expected.actor_id == actual.actor_id
+        && expected.conversation_kind == actual.conversation_kind
+        && (expected.conversation_kind == ConversationKind::Direct
+            || expected.conversation_scope_id == actual.conversation_scope_id)
+}
+
+impl PendingAuth {
+    /// Whether this credential-bearing response belongs to the actor that
+    /// initiated the flow. Legacy unbound state intentionally matches nobody.
+    pub fn accepts_identity(&self, identity: &ResolvedIdentity) -> bool {
+        self.requesting_identity
+            .as_ref()
+            .is_some_and(|expected| same_requesting_actor(expected, identity))
+    }
+}
+
+impl PendingApproval {
+    /// Whether an approval/rejection response is from the original requester.
+    /// Legacy unbound state intentionally matches nobody.
+    pub fn accepts_identity(&self, identity: &ResolvedIdentity) -> bool {
+        self.requesting_identity
+            .as_ref()
+            .is_some_and(|expected| same_requesting_actor(expected, identity))
+    }
 }
 
 impl From<ThreadState> for PortableThreadState {
@@ -343,6 +463,7 @@ impl From<PendingAuth> for PortablePendingAuth {
         Self {
             extension_name: value.extension_name,
             auth_mode: value.auth_mode.into(),
+            requesting_identity: value.requesting_identity,
         }
     }
 }
@@ -352,6 +473,7 @@ impl From<PortablePendingAuth> for PendingAuth {
         Self {
             extension_name: value.extension_name,
             auth_mode: value.auth_mode.into(),
+            requesting_identity: value.requesting_identity,
         }
     }
 }
@@ -366,6 +488,9 @@ impl From<PendingApproval> for PortablePendingApproval {
             tool_call_id: value.tool_call_id,
             context_messages: value.context_messages,
             deferred_tool_calls: value.deferred_tool_calls,
+            requesting_identity: value.requesting_identity,
+            request_channel: value.request_channel,
+            request_metadata: value.request_metadata,
         }
     }
 }
@@ -380,6 +505,9 @@ impl From<PortablePendingApproval> for PendingApproval {
             tool_call_id: value.tool_call_id,
             context_messages: value.context_messages,
             deferred_tool_calls: value.deferred_tool_calls,
+            requesting_identity: value.requesting_identity,
+            request_channel: value.request_channel,
+            request_metadata: value.request_metadata,
         }
     }
 }
@@ -479,29 +607,189 @@ impl Thread {
             prompt_manifest_digest: None,
             prompt_segment_order: Vec::new(),
             provider_context_refs: Vec::new(),
+            active_message_start_row: None,
             active_message_row_count: None,
+            inflight_tool_trace: self
+                .last_turn()
+                .filter(|turn| turn.response.is_none())
+                .map(|turn| durable_tool_trace(&turn.tool_calls))
+                .unwrap_or_default(),
             undo_checkpoints: Vec::new(),
             plan_mode: self.plan_mode,
         }
     }
 
     pub fn restore_runtime_snapshot(&mut self, runtime: ThreadRuntimeSnapshot) {
-        self.pending_approval = runtime.pending_approval.map(Into::into);
-        self.pending_auth = runtime.pending_auth.map(Into::into);
+        let restored_state = ThreadState::from(runtime.state);
+        let inflight_tool_trace = runtime.inflight_tool_trace.clone();
+        self.pending_approval = runtime
+            .pending_approval
+            .map(PendingApproval::from)
+            .filter(|pending| pending.requesting_identity.is_some());
+        self.pending_auth = runtime
+            .pending_auth
+            .map(PendingAuth::from)
+            .filter(|pending| pending.requesting_identity.is_some());
         self.plan_mode = runtime.plan_mode;
-        self.state = match ThreadState::from(runtime.state) {
-            ThreadState::Processing => {
-                if let Some(turn) = self.turns.last_mut() {
-                    turn.interrupt();
-                }
-                ThreadState::Interrupted
-            }
-            other => other,
-        };
-        if self.pending_approval.is_some() {
-            self.state = ThreadState::AwaitingApproval;
+
+        let pending_turn_is_resumable = self
+            .pending_approval
+            .clone()
+            .is_some_and(|pending| self.restore_pending_approval_turn(&pending));
+        if self.pending_approval.is_some() && !pending_turn_is_resumable {
+            tracing::warn!(
+                thread = %self.id,
+                "Discarding persisted approval without a resumable user turn"
+            );
+            self.pending_approval = None;
         }
+
+        if !inflight_tool_trace.is_empty()
+            && let Some(turn) = self.turns.last_mut().filter(|turn| turn.response.is_none())
+        {
+            for persisted in inflight_tool_trace {
+                if let Some(existing) = turn
+                    .tool_calls
+                    .iter_mut()
+                    .find(|existing| existing.id == persisted.id)
+                {
+                    if persisted.result.is_some() || persisted.error.is_some() {
+                        existing.result = persisted.result;
+                        existing.error = persisted.error;
+                    }
+                } else {
+                    turn.tool_calls.push(persisted);
+                }
+            }
+        }
+
+        self.state = if self.pending_approval.is_some() {
+            ThreadState::AwaitingApproval
+        } else {
+            match restored_state {
+                // A process cannot safely resume an arbitrary provider/tool
+                // future. A waiting-approval state without a valid pending
+                // envelope is equally non-resumable and must not strand the
+                // thread in a state that no response can satisfy.
+                ThreadState::Processing | ThreadState::AwaitingApproval => {
+                    if let Some(turn) = self
+                        .turns
+                        .iter_mut()
+                        .rev()
+                        .find(|turn| turn.response.is_none())
+                    {
+                        turn.interrupt();
+                    }
+                    ThreadState::Interrupted
+                }
+                other => other,
+            }
+        };
         self.updated_at = Utc::now();
+    }
+
+    /// Rebuild the live tool audit state needed to continue a persisted
+    /// approval after restart. Durable conversation rows contain the user
+    /// message but the assistant tool-call block is held in the pending
+    /// context snapshot until the final assistant response is written.
+    fn restore_pending_approval_turn(&mut self, pending: &PendingApproval) -> bool {
+        let Some(user_input) = pending
+            .context_messages
+            .iter()
+            .rev()
+            .find(|message| message.is_user_instruction())
+            .map(|message| message.content.clone())
+        else {
+            return false;
+        };
+        if self
+            .turns
+            .last()
+            .is_none_or(|turn| turn.response.is_some() || turn.user_input != user_input)
+        {
+            self.turns
+                .push(Turn::new(self.turns.len(), user_input, false));
+        }
+
+        let Some(turn) = self.turns.last_mut() else {
+            return false;
+        };
+        if turn.response.is_some() {
+            return false;
+        }
+        turn.state = TurnState::Processing;
+        turn.completed_at = None;
+        turn.error = None;
+
+        let tool_block = pending
+            .context_messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, message)| {
+                message.role == Role::Assistant
+                    && message
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+            });
+
+        if let Some((assistant_index, assistant)) = tool_block {
+            for call in assistant.tool_calls.clone().unwrap_or_default() {
+                if !turn
+                    .tool_calls
+                    .iter()
+                    .any(|existing| existing.id == call.id)
+                {
+                    turn.record_tool_call_with_id(call.id, call.name, call.arguments);
+                }
+            }
+            for result in pending.context_messages.iter().skip(assistant_index + 1) {
+                if result.role != Role::Tool {
+                    continue;
+                }
+                let Some(call_id) = result.tool_call_id.as_deref() else {
+                    continue;
+                };
+                if let Some(error) = result.content.strip_prefix("[error] ") {
+                    turn.record_tool_error_for_id(call_id, error.to_string());
+                } else {
+                    turn.record_tool_result_for_id(
+                        call_id,
+                        serde_json::Value::String(result.content.clone()),
+                    );
+                }
+            }
+        }
+
+        // Defensive fallback for legacy/trimmed context snapshots: the
+        // current pending call and its deferred siblings are sufficient to
+        // preserve provider-valid ordering for continuation.
+        if !turn
+            .tool_calls
+            .iter()
+            .any(|call| call.id == pending.tool_call_id)
+        {
+            turn.record_tool_call_with_id(
+                pending.tool_call_id.clone(),
+                pending.tool_name.clone(),
+                pending.parameters.clone(),
+            );
+        }
+        for call in &pending.deferred_tool_calls {
+            if !turn
+                .tool_calls
+                .iter()
+                .any(|existing| existing.id == call.id)
+            {
+                turn.record_tool_call_with_id(
+                    call.id.clone(),
+                    call.name.clone(),
+                    call.arguments.clone(),
+                );
+            }
+        }
+        true
     }
 
     /// Get the current turn number (1-indexed for display).
@@ -541,20 +829,30 @@ impl Thread {
 
     /// Complete the current turn with a response.
     pub fn complete_turn(&mut self, response: impl Into<String>) {
-        if let Some(turn) = self.turns.last_mut() {
+        if let Some(turn) = self
+            .turns
+            .iter_mut()
+            .rev()
+            .find(|turn| turn.state == TurnState::Processing)
+        {
             turn.complete(response);
+            self.state = ThreadState::Idle;
+            self.updated_at = Utc::now();
         }
-        self.state = ThreadState::Idle;
-        self.updated_at = Utc::now();
     }
 
     /// Fail the current turn with an error.
     pub fn fail_turn(&mut self, error: impl Into<String>) {
-        if let Some(turn) = self.turns.last_mut() {
+        if let Some(turn) = self
+            .turns
+            .iter_mut()
+            .rev()
+            .find(|turn| turn.state == TurnState::Processing)
+        {
             turn.fail(error);
+            self.state = ThreadState::Idle;
+            self.updated_at = Utc::now();
         }
-        self.state = ThreadState::Idle;
-        self.updated_at = Utc::now();
     }
 
     /// Mark the thread as awaiting approval with pending request details.
@@ -578,10 +876,16 @@ impl Thread {
 
     /// Enter auth mode: next user message will be routed directly to
     /// the credential store, bypassing the normal pipeline entirely.
-    pub fn enter_auth_mode(&mut self, extension_name: String, auth_mode: PendingAuthMode) {
+    pub fn enter_auth_mode(
+        &mut self,
+        extension_name: String,
+        auth_mode: PendingAuthMode,
+        requesting_identity: ResolvedIdentity,
+    ) {
         self.pending_auth = Some(PendingAuth {
             extension_name,
             auth_mode,
+            requesting_identity: Some(requesting_identity),
         });
         self.updated_at = Utc::now();
     }
@@ -593,9 +897,16 @@ impl Thread {
 
     /// Interrupt the current turn.
     pub fn interrupt(&mut self) {
-        if let Some(turn) = self.turns.last_mut() {
+        if let Some(turn) = self
+            .turns
+            .iter_mut()
+            .rev()
+            .find(|turn| turn.state == TurnState::Processing)
+        {
             turn.interrupt();
         }
+        self.pending_approval = None;
+        self.pending_auth = None;
         self.state = ThreadState::Interrupted;
         self.updated_at = Utc::now();
     }
@@ -606,6 +917,16 @@ impl Thread {
             self.state = ThreadState::Idle;
             self.updated_at = Utc::now();
         }
+    }
+
+    /// Append trusted context without starting an LLM turn. The entry is a
+    /// completed user-only turn, so it is visible to subsequent prompts while
+    /// never becoming the target of a later active-turn completion.
+    pub fn inject_context(&mut self, content: impl Into<String>, hide_from_ui: bool) {
+        let mut turn = Turn::new(self.turns.len(), content, hide_from_ui);
+        turn.complete_without_response();
+        self.turns.push(turn);
+        self.updated_at = Utc::now();
     }
 
     /// Get all messages for context building.
@@ -631,7 +952,21 @@ impl Thread {
     pub fn messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         for turn in &self.turns {
-            messages.push(ChatMessage::user(&turn.user_input));
+            let mut user_message = ChatMessage::user(&turn.user_input);
+            if !turn.has_durable_user_row {
+                user_message = user_message.with_provider_metadata(
+                    "thinclaw_turn_state",
+                    serde_json::json!({"has_durable_user_row": false}),
+                );
+            }
+            messages.push(user_message);
+            messages.extend(turn.untrusted_contexts.iter().map(|context| {
+                ChatMessage::untrusted_context(
+                    &context.segment_id,
+                    &context.source,
+                    &context.content,
+                )
+            }));
             turn.append_tool_exchange(&mut messages);
             if let Some(ref response) = turn.response {
                 messages.push(ChatMessage::assistant(response));
@@ -640,8 +975,10 @@ impl Thread {
         messages
     }
 
-    /// Number of durable conversation rows this thread represents: one `user`
-    /// row per turn plus one `assistant` row per completed turn.
+    /// Number of durable conversation rows this thread represents: normally
+    /// one `user` row per turn plus one `assistant` row per completed turn.
+    /// Synthetic assistant-only startup turns explicitly contribute no user
+    /// row.
     ///
     /// This is the unit the active-message watermark is stored in (it drives
     /// DB-row truncation on hydration after `/undo`, `/redo`, `/clear`,
@@ -653,7 +990,9 @@ impl Thread {
     pub fn persisted_message_count(&self) -> usize {
         self.turns
             .iter()
-            .map(|turn| 1 + usize::from(turn.response.is_some()))
+            .map(|turn| {
+                usize::from(turn.has_durable_user_row) + usize::from(turn.response.is_some())
+            })
             .sum()
     }
 
@@ -694,32 +1033,54 @@ impl Thread {
                 continue;
             }
 
+            let has_durable_user_row = msg
+                .provider_metadata
+                .get("thinclaw_turn_state")
+                .and_then(|metadata| metadata.get("has_durable_user_row"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
             let mut turn = Turn::new(turn_number, &msg.content, false);
+            turn.has_durable_user_row = has_durable_user_row;
 
             // Consume the rest of this turn: tool-call exchanges and/or a final
             // assistant text, stopping at the next user message.
             while let Some(next) = iter.peek() {
                 match next.role {
-                    Role::User => break,
+                    Role::User => {
+                        let Some((segment_id, source)) = next.untrusted_context_identity() else {
+                            break;
+                        };
+                        let segment_id = segment_id.to_string();
+                        let source = source.to_string();
+                        let Some(evidence) = iter.next() else { break };
+                        let content = evidence
+                            .untrusted_context_raw_content()
+                            .unwrap_or(&evidence.content)
+                            .to_string();
+                        turn.add_untrusted_context(segment_id, source, content);
+                    }
                     Role::Assistant => {
                         // Guaranteed Some after a successful peek().
                         let Some(assistant) = iter.next() else { break };
                         if let Some(calls) = assistant.tool_calls {
-                            // Tool-call block: record each call, then absorb the
-                            // matching tool_result messages that follow.
+                            // Tool-call block: register every call first, then
+                            // attach each contiguous result by provider-issued
+                            // ID. Parallel batches may finish out of order.
                             for call in calls {
-                                turn.record_tool_call(call.name, call.arguments);
-                                if let Some(result) = iter.peek()
-                                    && result.role == Role::Tool
-                                    && let Some(result) = iter.next()
-                                {
-                                    if let Some(err) = result.content.strip_prefix("[error] ") {
-                                        turn.record_tool_error(err.to_string());
-                                    } else {
-                                        turn.record_tool_result(serde_json::Value::String(
-                                            result.content,
-                                        ));
-                                    }
+                                turn.record_tool_call_with_id(call.id, call.name, call.arguments);
+                            }
+                            while iter.peek().is_some_and(|result| result.role == Role::Tool) {
+                                let Some(result) = iter.next() else { break };
+                                let Some(call_id) = result.tool_call_id.as_deref() else {
+                                    continue;
+                                };
+                                if let Some(err) = result.content.strip_prefix("[error] ") {
+                                    turn.record_tool_error_for_id(call_id, err.to_string());
+                                } else {
+                                    turn.record_tool_result_for_id(
+                                        call_id,
+                                        serde_json::Value::String(result.content),
+                                    );
                                 }
                             }
                         } else {
@@ -737,6 +1098,10 @@ impl Thread {
                         let _ = iter.next();
                     }
                 }
+            }
+
+            if turn.state == TurnState::Processing {
+                turn.complete_without_response();
             }
 
             self.turns.push(turn);
@@ -763,6 +1128,7 @@ impl Thread {
             if message.role != "user" {
                 if message.role == "assistant" && message_is_startup_hook(&message.metadata) {
                     let mut turn = Turn::new(turn_number, "", true);
+                    turn.has_durable_user_row = false;
                     turn.complete(&message.content);
                     self.turns.push(turn);
                     turn_number += 1;
@@ -771,17 +1137,55 @@ impl Thread {
             }
 
             let hide_user_input_from_ui = message_hides_user_input_in_main_chat(&message.metadata);
-            let mut turn = Turn::new(turn_number, &message.content, hide_user_input_from_ui);
+            let replayed_user_input =
+                effective_user_instruction(&message.metadata).unwrap_or(&message.content);
+            let mut turn = Turn::new(turn_number, replayed_user_input, hide_user_input_from_ui);
+            turn.durable_user_message_id = Some(message.id);
+            if let Some(contexts) = message
+                .metadata
+                .get("untrusted_attachment_contexts")
+                .and_then(|value| {
+                    serde_json::from_value::<Vec<TurnContextEvidence>>(value.clone()).ok()
+                })
+            {
+                turn.untrusted_contexts = bounded_turn_context_evidence(&contexts);
+            }
 
             if let Some(next) = iter.peek()
                 && next.role == "assistant"
                 && let Some(response) = iter.next()
             {
+                if let Some(trace) = response.metadata.get("tool_trace") {
+                    match serde_json::from_value::<Vec<TurnToolCall>>(trace.clone()) {
+                        Ok(tool_calls) => turn.tool_calls = durable_tool_trace(&tool_calls),
+                        Err(error) => tracing::warn!(
+                            message_id = %response.id,
+                            error = %error,
+                            "Ignoring invalid durable tool trace"
+                        ),
+                    }
+                }
                 turn.complete(&response.content);
             }
 
-            if turn.hide_user_input_from_ui && turn.response.is_none() {
+            if turn.hide_user_input_from_ui
+                && turn.response.is_none()
+                && !message_is_context_only(&message.metadata)
+            {
                 continue;
+            }
+
+            if turn.state == TurnState::Processing {
+                if message_is_context_only(&message.metadata) {
+                    turn.complete_without_response();
+                } else {
+                    // A durable user row without an assistant row is normally
+                    // a turn interrupted by a process crash. Do not silently
+                    // relabel it as a successfully completed context entry;
+                    // pending approvals explicitly restore it to Processing
+                    // from their runtime envelope below this hydration layer.
+                    turn.interrupt();
+                }
             }
 
             self.turns.push(turn);
@@ -815,10 +1219,25 @@ pub struct Turn {
     /// Whether the user-side prompt should be hidden from the main WebUI chat transcript.
     #[serde(default, alias = "hidden_from_ui")]
     pub hide_user_input_from_ui: bool,
+    /// Whether this turn corresponds to a durable user row. Synthetic
+    /// assistant-only startup turns set this to false so active-history
+    /// windows remain measured in actual database rows.
+    #[serde(default = "default_true")]
+    pub has_durable_user_row: bool,
+    /// Exact durable user-row identifier for the live turn. Hydration restores
+    /// it from the append-only transcript so post-ingress prompt transforms
+    /// can update only their owning row. It is intentionally optional for
+    /// deployments without a conversation store and legacy snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_user_message_id: Option<Uuid>,
     /// Agent response (if completed).
     pub response: Option<String>,
     /// Tool calls made during this turn.
     pub tool_calls: Vec<TurnToolCall>,
+    /// Evidence extracted from user-supplied documents or other untrusted
+    /// context sources. Kept separate from the user's instruction.
+    #[serde(default)]
+    pub untrusted_contexts: Vec<TurnContextEvidence>,
     /// Turn state.
     pub state: TurnState,
     /// When the turn started.
@@ -840,8 +1259,11 @@ impl Turn {
             turn_number,
             user_input: user_input.into(),
             hide_user_input_from_ui,
+            has_durable_user_row: true,
+            durable_user_message_id: None,
             response: None,
             tool_calls: Vec::new(),
+            untrusted_contexts: Vec::new(),
             state: TurnState::Processing,
             started_at: Utc::now(),
             completed_at: None,
@@ -852,6 +1274,14 @@ impl Turn {
     /// Complete this turn.
     pub fn complete(&mut self, response: impl Into<String>) {
         self.response = Some(response.into());
+        self.state = TurnState::Completed;
+        self.completed_at = Some(Utc::now());
+    }
+
+    /// Mark a context-only user entry complete without synthesizing an empty
+    /// assistant response.
+    pub fn complete_without_response(&mut self) {
+        self.response = None;
         self.state = TurnState::Completed;
         self.completed_at = Some(Utc::now());
     }
@@ -871,7 +1301,48 @@ impl Turn {
 
     /// Record a tool call.
     pub fn record_tool_call(&mut self, name: impl Into<String>, params: serde_json::Value) {
+        let id = synthetic_tool_call_id(self.turn_number, self.tool_calls.len());
+        self.record_tool_call_with_id(id, name, params);
+    }
+
+    pub fn add_untrusted_context(
+        &mut self,
+        segment_id: impl Into<String>,
+        source: impl Into<String>,
+        content: impl Into<String>,
+    ) {
+        let candidate = TurnContextEvidence {
+            segment_id: segment_id.into(),
+            source: source.into(),
+            content: content.into(),
+        };
+        let remaining =
+            MAX_TURN_CONTEXT_EVIDENCE_ITEMS.saturating_sub(self.untrusted_contexts.len());
+        if remaining == 0 {
+            return;
+        }
+        let used_chars = self
+            .untrusted_contexts
+            .iter()
+            .map(|context| context.content.chars().count())
+            .sum::<usize>();
+        let remaining_chars = MAX_TURN_CONTEXT_EVIDENCE_CHARS.saturating_sub(used_chars);
+        if let Some(context) = bounded_context_evidence_item(&candidate, remaining_chars) {
+            self.untrusted_contexts.push(context);
+        }
+    }
+
+    /// Record a tool call using the provider-issued ID. Results must be
+    /// attached through this ID because tool batches can execute concurrently
+    /// and complete out of order.
+    pub fn record_tool_call_with_id(
+        &mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        params: serde_json::Value,
+    ) {
         self.tool_calls.push(TurnToolCall {
+            id: id.into(),
             name: name.into(),
             parameters: params,
             result: None,
@@ -879,18 +1350,68 @@ impl Turn {
         });
     }
 
+    pub fn update_tool_call_parameters_for_id(
+        &mut self,
+        call_id: &str,
+        parameters: serde_json::Value,
+    ) -> bool {
+        let Some(call) = self
+            .tool_calls
+            .iter_mut()
+            .rev()
+            .find(|call| call.id == call_id)
+        else {
+            return false;
+        };
+        call.parameters = parameters;
+        true
+    }
+
     /// Record tool call result.
     pub fn record_tool_result(&mut self, result: serde_json::Value) {
         if let Some(call) = self.tool_calls.last_mut() {
             call.result = Some(result);
+            call.error = None;
         }
+    }
+
+    /// Attach a result to its exact tool call. Returns `false` when the call
+    /// was not registered, allowing callers to surface protocol corruption.
+    pub fn record_tool_result_for_id(&mut self, call_id: &str, result: serde_json::Value) -> bool {
+        let Some(call) = self
+            .tool_calls
+            .iter_mut()
+            .rev()
+            .find(|call| call.id == call_id)
+        else {
+            return false;
+        };
+        call.result = Some(result);
+        call.error = None;
+        true
     }
 
     /// Record tool call error.
     pub fn record_tool_error(&mut self, error: impl Into<String>) {
         if let Some(call) = self.tool_calls.last_mut() {
             call.error = Some(error.into());
+            call.result = None;
         }
+    }
+
+    /// Attach an error to its exact tool call.
+    pub fn record_tool_error_for_id(&mut self, call_id: &str, error: impl Into<String>) -> bool {
+        let Some(call) = self
+            .tool_calls
+            .iter_mut()
+            .rev()
+            .find(|call| call.id == call_id)
+        else {
+            return false;
+        };
+        call.error = Some(error.into());
+        call.result = None;
+        true
     }
 
     /// Append this turn's tool calls and their results to `messages` as a
@@ -899,7 +1420,8 @@ impl Turn {
     /// No-op when the turn recorded no tool calls. See [`Thread::messages`] for
     /// the reconstruction contract; ids are synthesized as `t{turn}_c{index}`
     /// and are stable for a given turn/call position so repeated calls produce
-    /// identical output.
+    /// identical output. Provider-issued IDs are preserved when available;
+    /// legacy calls without IDs receive stable synthetic IDs.
     pub(crate) fn append_tool_exchange(&self, messages: &mut Vec<ChatMessage>) {
         if self.tool_calls.is_empty() {
             return;
@@ -908,7 +1430,7 @@ impl Turn {
         let mut calls = Vec::with_capacity(self.tool_calls.len());
         for (idx, call) in self.tool_calls.iter().enumerate() {
             calls.push(ToolCall {
-                id: synthetic_tool_call_id(self.turn_number, idx),
+                id: call.effective_id(self.turn_number, idx),
                 name: call.name.clone(),
                 arguments: call.parameters.clone(),
             });
@@ -930,7 +1452,7 @@ impl Turn {
                 (None, None) => "[no result recorded]".to_string(),
             };
             messages.push(ChatMessage::tool_result(
-                synthetic_tool_call_id(self.turn_number, idx),
+                call.effective_id(self.turn_number, idx),
                 &call.name,
                 body,
             ));
@@ -969,6 +1491,9 @@ fn truncate_tool_body(body: &str) -> String {
 /// Record of a tool call made during a turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnToolCall {
+    /// Provider-issued call ID. Empty only for legacy serialized turns.
+    #[serde(default)]
+    pub id: String,
     /// Tool name.
     pub name: String,
     /// Parameters passed to the tool.
@@ -979,994 +1504,225 @@ pub struct TurnToolCall {
     pub error: Option<String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub const MAX_DURABLE_TOOL_CALLS: usize = 64;
+const MAX_DURABLE_TOOL_RESULT_CHARS: usize = 16 * 1024;
+const MAX_DURABLE_TOOL_ERROR_CHARS: usize = 4 * 1024;
+const MAX_DURABLE_PARAMETER_KEYS: usize = 64;
+const MAX_DURABLE_PARAMETER_KEY_CHARS: usize = 256;
 
-    #[test]
-    fn metadata_visibility_helpers_read_legacy_and_current_flags() {
-        assert!(message_hides_user_input_in_main_chat(
-            &serde_json::json!({ "hide_user_input_from_webui_chat": true })
-        ));
-        assert!(message_hides_user_input_in_main_chat(
-            &serde_json::json!({ "hide_from_webui_chat": true })
-        ));
-        assert!(!message_hides_user_input_in_main_chat(&serde_json::json!(
-            {}
-        )));
-    }
-
-    #[test]
-    fn metadata_startup_hook_helper_matches_synthetic_origin() {
-        assert!(message_is_startup_hook(
-            &serde_json::json!({ "synthetic_origin": "startup_hook" })
-        ));
-        assert!(!message_is_startup_hook(
-            &serde_json::json!({ "synthetic_origin": "manual" })
-        ));
-    }
-
-    #[test]
-    fn test_session_creation() {
-        let mut session = Session::new("user-123");
-        assert!(session.active_thread.is_none());
-
-        session.create_thread();
-        assert!(session.active_thread.is_some());
-    }
-
-    #[test]
-    fn test_touch_last_active_advances_timestamp() {
-        let mut session = Session::new("user-touch");
-        let baseline = session.last_active_at;
-
-        // Force a strictly earlier baseline so the assertion isn't flaky on
-        // fast clocks/coarse timer resolution.
-        session.last_active_at = baseline - chrono::TimeDelta::seconds(60);
-        let before = session.last_active_at;
-
-        session.touch_last_active();
-
-        assert!(session.last_active_at > before);
-    }
-
-    #[test]
-    fn test_thread_turns() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        thread.start_turn("Hello");
-        assert_eq!(thread.state, ThreadState::Processing);
-        assert_eq!(thread.turns.len(), 1);
-
-        thread.complete_turn("Hi there!");
-        assert_eq!(thread.state, ThreadState::Idle);
-        assert_eq!(thread.turns[0].response, Some("Hi there!".to_string()));
-    }
-
-    #[test]
-    fn test_thread_messages() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        thread.start_turn("First message");
-        thread.complete_turn("First response");
-        thread.start_turn("Second message");
-        thread.complete_turn("Second response");
-
-        let messages = thread.messages();
-        assert_eq!(messages.len(), 4);
-    }
-
-    #[test]
-    fn test_turn_tool_calls() {
-        let mut turn = Turn::new(0, "Test input", false);
-        turn.record_tool_call("echo", serde_json::json!({"message": "test"}));
-        turn.record_tool_result(serde_json::json!("test"));
-
-        assert_eq!(turn.tool_calls.len(), 1);
-        assert!(turn.tool_calls[0].result.is_some());
-    }
-
-    #[test]
-    fn test_restore_from_messages() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        // First add some turns
-        thread.start_turn("Original message");
-        thread.complete_turn("Original response");
-
-        // Now restore from different messages
-        let messages = vec![
-            ChatMessage::user("Hello"),
-            ChatMessage::assistant("Hi there!"),
-            ChatMessage::user("How are you?"),
-            ChatMessage::assistant("I'm good!"),
-        ];
-
-        thread.restore_from_messages(messages);
-
-        assert_eq!(thread.turns.len(), 2);
-        assert_eq!(thread.turns[0].user_input, "Hello");
-        assert_eq!(thread.turns[0].response, Some("Hi there!".to_string()));
-        assert_eq!(thread.turns[1].user_input, "How are you?");
-        assert_eq!(thread.turns[1].response, Some("I'm good!".to_string()));
-        assert_eq!(thread.state, ThreadState::Idle);
-    }
-
-    #[test]
-    fn test_restore_from_messages_incomplete_turn() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        // Messages with incomplete last turn (no assistant response)
-        let messages = vec![
-            ChatMessage::user("Hello"),
-            ChatMessage::assistant("Hi there!"),
-            ChatMessage::user("How are you?"),
-        ];
-
-        thread.restore_from_messages(messages);
-
-        assert_eq!(thread.turns.len(), 2);
-        assert_eq!(thread.turns[1].user_input, "How are you?");
-        assert!(thread.turns[1].response.is_none());
-    }
-
-    #[test]
-    fn test_restore_from_thread_messages_preserves_startup_visibility() {
-        let mut thread = Thread::new(Uuid::new_v4());
-        let now = Utc::now();
-        let conversation_id = Uuid::new_v4();
-        let messages = vec![
-            ThreadMessage {
-                id: Uuid::new_v4(),
-                conversation_id,
-                role: "user".to_string(),
-                content: "boot prompt".to_string(),
-                actor_id: None,
-                actor_display_name: None,
-                raw_sender_id: None,
-                metadata: serde_json::json!({"hide_from_webui_chat": true}),
-                created_at: now,
-            },
-            ThreadMessage {
-                id: Uuid::new_v4(),
-                conversation_id,
-                role: "assistant".to_string(),
-                content: "boot reply".to_string(),
-                actor_id: None,
-                actor_display_name: None,
-                raw_sender_id: None,
-                metadata: serde_json::json!({"synthetic_origin": "startup_hook"}),
-                created_at: now + chrono::TimeDelta::seconds(1),
-            },
-        ];
-
-        thread.restore_from_thread_messages(&messages);
-
-        assert_eq!(thread.turns.len(), 1);
-        assert!(thread.turns[0].hide_user_input_from_ui);
-        assert_eq!(thread.turns[0].response.as_deref(), Some("boot reply"));
-    }
-
-    #[test]
-    fn test_enter_auth_mode() {
-        let mut thread = Thread::new(Uuid::new_v4());
-        assert!(thread.pending_auth.is_none());
-
-        thread.enter_auth_mode("telegram".to_string(), PendingAuthMode::ManualToken);
-        assert!(thread.pending_auth.is_some());
-        assert_eq!(
-            thread.pending_auth.as_ref().unwrap().extension_name,
-            "telegram"
-        );
-        assert_eq!(
-            thread.pending_auth.as_ref().unwrap().auth_mode,
-            PendingAuthMode::ManualToken
-        );
-    }
-
-    #[test]
-    fn test_take_pending_auth() {
-        let mut thread = Thread::new(Uuid::new_v4());
-        thread.enter_auth_mode("notion".to_string(), PendingAuthMode::ManualToken);
-
-        let pending = thread.take_pending_auth();
-        assert!(pending.is_some());
-        assert_eq!(pending.unwrap().extension_name, "notion");
-
-        // Should be cleared after take
-        assert!(thread.pending_auth.is_none());
-        assert!(thread.take_pending_auth().is_none());
-    }
-
-    #[test]
-    fn test_pending_auth_serialization() {
-        let mut thread = Thread::new(Uuid::new_v4());
-        thread.enter_auth_mode("openai".to_string(), PendingAuthMode::ExternalOAuth);
-
-        let json = serde_json::to_string(&thread).expect("should serialize");
-        assert!(json.contains("pending_auth"));
-        assert!(json.contains("openai"));
-
-        let restored: Thread = serde_json::from_str(&json).expect("should deserialize");
-        assert!(restored.pending_auth.is_some());
-        let pending = restored.pending_auth.unwrap();
-        assert_eq!(pending.extension_name, "openai");
-        assert_eq!(pending.auth_mode, PendingAuthMode::ExternalOAuth);
-    }
-
-    #[test]
-    fn test_pending_auth_default_none() {
-        // Deserialization of old data without pending_auth should default to None
-        let mut thread = Thread::new(Uuid::new_v4());
-        thread.pending_auth = None;
-        let json = serde_json::to_string(&thread).expect("serialize");
-
-        // Remove the pending_auth field to simulate old data
-        let json = json.replace(",\"pending_auth\":null", "");
-        let restored: Thread = serde_json::from_str(&json).expect("should deserialize");
-        assert!(restored.pending_auth.is_none());
-    }
-
-    #[test]
-    fn test_runtime_snapshot_roundtrip_preserves_resume_fields() {
-        let mut thread = Thread::new(Uuid::new_v4());
-        thread.start_turn("inspect restart handling");
-        thread.state = ThreadState::AwaitingApproval;
-        thread.pending_approval = Some(PendingApproval {
-            request_id: Uuid::new_v4(),
-            tool_name: "shell".to_string(),
-            parameters: serde_json::json!({"cmd": "pwd"}),
-            description: "inspect workspace".to_string(),
-            tool_call_id: "call_runtime".to_string(),
-            context_messages: vec![ChatMessage::user("inspect restart handling")],
-            deferred_tool_calls: vec![],
-        });
-        thread.pending_auth = Some(PendingAuth {
-            extension_name: "github".to_string(),
-            auth_mode: PendingAuthMode::ManualToken,
-        });
-
-        let runtime = thread.runtime_snapshot(
-            Some("agent-ops".to_string()),
-            Some(crate::ports::ModelOverride {
-                model_spec: "openai/gpt-4.1".to_string(),
-                reason: Some("need stronger reasoning".to_string()),
-            }),
-            vec!["shell".to_string(), "read_file".to_string()],
-            vec![crate::ports::PortableSubagentState {
-                agent_id: Uuid::new_v4(),
-                name: "background-check".to_string(),
-                request: serde_json::json!({
-                    "name": "background-check",
-                    "task": "verify restart state",
-                    "allowed_tools": ["read_file"],
-                    "allowed_skills": ["github"],
-                    "principal_id": "principal-1",
-                    "actor_id": "actor-1",
-                    "timeout_secs": 30,
-                    "wait": false
-                }),
-                channel_name: "gateway".to_string(),
-                channel_metadata: serde_json::json!({"thread_id": "thread-1"}),
-                parent_user_id: "principal-1".to_string(),
-                parent_thread_id: "thread-1".to_string(),
-                reinject_result: true,
-            }],
-            Some(serde_json::json!("warning")),
-        );
-
-        let json = serde_json::to_value(&runtime).expect("serialize runtime");
-        let restored: ThreadRuntimeSnapshot =
-            serde_json::from_value(json).expect("deserialize runtime");
-
-        assert_eq!(restored.state, PortableThreadState::AwaitingApproval);
-        assert_eq!(
-            restored
-                .pending_auth
+/// Build a bounded, secret-minimized trace suitable for conversation metadata.
+/// Exact arguments remain available during the live turn, but durable history
+/// stores only their shape and digest so passwords, form input, tokens, and
+/// other tool parameters are not copied into undo/runtime metadata.
+pub fn durable_tool_trace(tool_calls: &[TurnToolCall]) -> Vec<TurnToolCall> {
+    tool_calls
+        .iter()
+        .take(MAX_DURABLE_TOOL_CALLS)
+        .map(|call| TurnToolCall {
+            id: bounded_identifier(&call.id, 512),
+            name: bounded_identifier(&call.name, 512),
+            parameters: summarized_tool_parameters(&call.parameters),
+            result: call
+                .result
                 .as_ref()
-                .map(|auth| auth.extension_name.as_str()),
-            Some("github")
-        );
-        assert_eq!(restored.owner_agent_id.as_deref(), Some("agent-ops"));
-        assert_eq!(
-            restored
-                .model_override
-                .as_ref()
-                .map(|m| m.model_spec.as_str()),
-            Some("openai/gpt-4.1")
-        );
-        assert_eq!(
-            restored.auto_approved_tools,
-            vec!["read_file".to_string(), "shell".to_string()]
-        );
-        assert_eq!(restored.active_subagents.len(), 1);
-        assert_eq!(
-            restored.last_context_pressure,
-            Some(serde_json::json!("warning"))
-        );
-        assert_eq!(
-            restored.active_subagents[0].request["allowed_skills"],
-            serde_json::json!(["github"])
-        );
+                .map(|result| bounded_durable_value(result, MAX_DURABLE_TOOL_RESULT_CHARS)),
+            error: call
+                .error
+                .as_deref()
+                .map(|error| bounded_durable_text(error, MAX_DURABLE_TOOL_ERROR_CHARS)),
+        })
+        .collect()
+}
+
+pub fn summarized_tool_parameters(parameters: &serde_json::Value) -> serde_json::Value {
+    use sha2::{Digest, Sha256};
+
+    // Rebuild known durable summaries instead of trusting the entire object.
+    // Persisted metadata can be legacy, malformed, or externally modified; a
+    // marker alone must not allow arbitrary fields (including secrets) to pass
+    // through the redaction boundary.
+    if let Some(summary) = normalized_existing_parameter_summary(parameters) {
+        return summary;
     }
 
-    #[test]
-    fn test_restore_runtime_snapshot_interrupts_processing_turns_on_resume() {
-        let mut thread = Thread::new(Uuid::new_v4());
-        thread.start_turn("long-running work");
-
-        thread.restore_runtime_snapshot(ThreadRuntimeSnapshot {
-            state: PortableThreadState::Processing,
-            pending_approval: None,
-            pending_auth: None,
-            owner_agent_id: None,
-            model_override: None,
-            auto_approved_tools: vec![],
-            active_subagents: vec![],
-            last_context_pressure: None,
-            post_compaction_context: None,
-            frozen_workspace_prompt: None,
-            frozen_provider_system_prompt: None,
-            prompt_snapshot_hash: None,
-            ephemeral_overlay_hash: None,
-            prompt_contract_version: None,
-            prompt_manifest_digest: None,
-            prompt_segment_order: Vec::new(),
-            provider_context_refs: Vec::new(),
-            active_message_row_count: None,
-            undo_checkpoints: Vec::new(),
-            plan_mode: false,
-        });
-
-        assert_eq!(thread.state, ThreadState::Interrupted);
-        assert_eq!(
-            thread.last_turn().map(|turn| turn.state),
-            Some(TurnState::Interrupted)
-        );
-    }
-
-    #[test]
-    fn test_thread_runtime_snapshot_serde_round_trip_preserves_prompt_fields() {
-        let runtime = ThreadRuntimeSnapshot {
-            state: PortableThreadState::Idle,
-            pending_approval: None,
-            pending_auth: None,
-            owner_agent_id: Some("agent-1".to_string()),
-            model_override: None,
-            auto_approved_tools: vec!["shell".to_string()],
-            active_subagents: Vec::new(),
-            last_context_pressure: Some(serde_json::json!("warning")),
-            post_compaction_context: Some("summary".to_string()),
-            frozen_workspace_prompt: Some("workspace".to_string()),
-            frozen_provider_system_prompt: Some("provider".to_string()),
-            prompt_snapshot_hash: Some("sha256:stable".to_string()),
-            ephemeral_overlay_hash: Some("sha256:ephemeral".to_string()),
-            prompt_contract_version: Some("v2".to_string()),
-            prompt_manifest_digest: Some("sha256:manifest".to_string()),
-            prompt_segment_order: vec![
-                "stable:identity".to_string(),
-                "ephemeral:provider_recall".to_string(),
-            ],
-            provider_context_refs: vec!["provider:1".to_string(), "provider:2".to_string()],
-            active_message_row_count: Some(4),
-            undo_checkpoints: Vec::new(),
-            plan_mode: false,
-        };
-
-        let encoded = serde_json::to_string(&runtime).expect("serialize runtime");
-        let decoded: ThreadRuntimeSnapshot =
-            serde_json::from_str(&encoded).expect("deserialize runtime");
-
-        assert_eq!(decoded.prompt_snapshot_hash, runtime.prompt_snapshot_hash);
-        assert_eq!(
-            decoded.prompt_contract_version,
-            runtime.prompt_contract_version
-        );
-        assert_eq!(
-            decoded.prompt_manifest_digest,
-            runtime.prompt_manifest_digest
-        );
-        assert_eq!(
-            decoded.frozen_workspace_prompt,
-            runtime.frozen_workspace_prompt
-        );
-        assert_eq!(
-            decoded.frozen_provider_system_prompt,
-            runtime.frozen_provider_system_prompt
-        );
-        assert_eq!(
-            decoded.ephemeral_overlay_hash,
-            runtime.ephemeral_overlay_hash
-        );
-        assert_eq!(decoded.prompt_segment_order, runtime.prompt_segment_order);
-        assert_eq!(decoded.provider_context_refs, runtime.provider_context_refs);
-        assert_eq!(
-            decoded.active_message_row_count,
-            runtime.active_message_row_count
-        );
-    }
-
-    #[test]
-    fn test_thread_with_id() {
-        let specific_id = Uuid::new_v4();
-        let session_id = Uuid::new_v4();
-        let thread = Thread::with_id(specific_id, session_id);
-
-        assert_eq!(thread.id, specific_id);
-        assert_eq!(thread.session_id, session_id);
-        assert_eq!(thread.state, ThreadState::Idle);
-        assert!(thread.turns.is_empty());
-    }
-
-    #[test]
-    fn test_thread_with_id_restore_messages() {
-        let thread_id = Uuid::new_v4();
-        let session_id = Uuid::new_v4();
-        let mut thread = Thread::with_id(thread_id, session_id);
-
-        let messages = vec![
-            ChatMessage::user("Hello from DB"),
-            ChatMessage::assistant("Restored response"),
-        ];
-        thread.restore_from_messages(messages);
-
-        assert_eq!(thread.id, thread_id);
-        assert_eq!(thread.turns.len(), 1);
-        assert_eq!(thread.turns[0].user_input, "Hello from DB");
-        assert_eq!(
-            thread.turns[0].response,
-            Some("Restored response".to_string())
-        );
-    }
-
-    #[test]
-    fn test_restore_from_messages_empty() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        // Add a turn first, then restore with empty vec
-        thread.start_turn("hello");
-        thread.complete_turn("hi");
-        assert_eq!(thread.turns.len(), 1);
-
-        thread.restore_from_messages(Vec::new());
-
-        // Should clear all turns and stay idle
-        assert!(thread.turns.is_empty());
-        assert_eq!(thread.state, ThreadState::Idle);
-    }
-
-    #[test]
-    fn test_restore_from_messages_only_assistant_messages() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        // Only assistant messages (no user messages to anchor turns)
-        let messages = vec![
-            ChatMessage::assistant("I'm here"),
-            ChatMessage::assistant("Still here"),
-        ];
-
-        thread.restore_from_messages(messages);
-
-        // Assistant-only messages have no user turn to attach to, so
-        // they should be skipped entirely.
-        assert!(thread.turns.is_empty());
-    }
-
-    #[test]
-    fn test_restore_from_messages_multiple_user_messages_in_a_row() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        // Two user messages with no assistant response between them
-        let messages = vec![
-            ChatMessage::user("first"),
-            ChatMessage::user("second"),
-            ChatMessage::assistant("reply to second"),
-        ];
-
-        thread.restore_from_messages(messages);
-
-        // First user message becomes a turn with no response,
-        // second user message pairs with the assistant response.
-        assert_eq!(thread.turns.len(), 2);
-        assert_eq!(thread.turns[0].user_input, "first");
-        assert!(thread.turns[0].response.is_none());
-        assert_eq!(thread.turns[1].user_input, "second");
-        assert_eq!(
-            thread.turns[1].response,
-            Some("reply to second".to_string())
-        );
-    }
-
-    #[test]
-    fn test_thread_switch() {
-        let mut session = Session::new("user-1");
-
-        let t1_id = session.create_thread().id;
-        let t2_id = session.create_thread().id;
-
-        // After creating two threads, active should be the last one
-        assert_eq!(session.active_thread, Some(t2_id));
-
-        // Switch back to the first
-        assert!(session.switch_thread(t1_id));
-        assert_eq!(session.active_thread, Some(t1_id));
-
-        // Switching to a nonexistent thread should fail
-        let fake_id = Uuid::new_v4();
-        assert!(!session.switch_thread(fake_id));
-        // Active thread should remain unchanged
-        assert_eq!(session.active_thread, Some(t1_id));
-    }
-
-    #[test]
-    fn test_get_or_create_thread_idempotent() {
-        let mut session = Session::new("user-1");
-
-        let tid1 = session.get_or_create_thread().id;
-        let tid2 = session.get_or_create_thread().id;
-
-        // Should return the same thread (not create a new one each time)
-        assert_eq!(tid1, tid2);
-        assert_eq!(session.threads.len(), 1);
-    }
-
-    #[test]
-    fn test_truncate_turns() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        for i in 0..5 {
-            thread.start_turn(format!("msg-{}", i));
-            thread.complete_turn(format!("resp-{}", i));
+    let encoded = serde_json::to_vec(parameters).unwrap_or_default();
+    let digest = hex::encode(Sha256::digest(&encoded));
+    let (shape, keys, key_count) = match parameters {
+        serde_json::Value::Object(values) => {
+            let mut keys = values.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            let key_count = keys.len();
+            keys.truncate(MAX_DURABLE_PARAMETER_KEYS);
+            let keys = keys
+                .into_iter()
+                .map(|key| bounded_identifier(&key, MAX_DURABLE_PARAMETER_KEY_CHARS))
+                .collect();
+            ("object", keys, key_count)
         }
-        assert_eq!(thread.turns.len(), 5);
+        serde_json::Value::Array(_) => ("array", Vec::new(), 0),
+        serde_json::Value::String(_) => ("string", Vec::new(), 0),
+        serde_json::Value::Number(_) => ("number", Vec::new(), 0),
+        serde_json::Value::Bool(_) => ("boolean", Vec::new(), 0),
+        serde_json::Value::Null => ("null", Vec::new(), 0),
+    };
+    serde_json::json!({
+        "_thinclaw_parameter_values_redacted": true,
+        "shape": shape,
+        "keys": keys,
+        "key_count": key_count,
+        "sha256": digest,
+        "encoded_bytes": encoded.len(),
+    })
+}
 
-        thread.truncate_turns(3);
-        assert_eq!(thread.turns.len(), 3);
-
-        // Should keep the most recent turns
-        assert_eq!(thread.turns[0].user_input, "msg-2");
-        assert_eq!(thread.turns[1].user_input, "msg-3");
-        assert_eq!(thread.turns[2].user_input, "msg-4");
-
-        // Turn numbers should be re-indexed
-        assert_eq!(thread.turns[0].turn_number, 0);
-        assert_eq!(thread.turns[1].turn_number, 1);
-        assert_eq!(thread.turns[2].turn_number, 2);
+fn normalized_existing_parameter_summary(
+    parameters: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let object = parameters.as_object()?;
+    if object
+        .get("_thinclaw_parameter_values_redacted")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return None;
     }
-
-    #[test]
-    fn test_truncate_turns_noop_when_fewer() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        thread.start_turn("only one");
-        thread.complete_turn("response");
-
-        thread.truncate_turns(10);
-        assert_eq!(thread.turns.len(), 1);
-        assert_eq!(thread.turns[0].user_input, "only one");
+    let shape = object.get("shape")?.as_str()?;
+    if !matches!(
+        shape,
+        "object" | "array" | "string" | "number" | "boolean" | "null"
+    ) {
+        return None;
     }
-
-    #[test]
-    fn test_thread_interrupt_and_resume() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        thread.start_turn("do something");
-        assert_eq!(thread.state, ThreadState::Processing);
-
-        thread.interrupt();
-        assert_eq!(thread.state, ThreadState::Interrupted);
-
-        let last_turn = thread.last_turn().unwrap();
-        assert_eq!(last_turn.state, TurnState::Interrupted);
-        assert!(last_turn.completed_at.is_some());
-
-        thread.resume();
-        assert_eq!(thread.state, ThreadState::Idle);
+    let digest = object.get("sha256")?.as_str()?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
     }
-
-    #[test]
-    fn test_resume_only_from_interrupted() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        // Idle thread: resume should be a no-op
-        assert_eq!(thread.state, ThreadState::Idle);
-        thread.resume();
-        assert_eq!(thread.state, ThreadState::Idle);
-
-        // Processing thread: resume should not change state
-        thread.start_turn("work");
-        assert_eq!(thread.state, ThreadState::Processing);
-        thread.resume();
-        assert_eq!(thread.state, ThreadState::Processing);
-    }
-
-    #[test]
-    fn test_turn_fail() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        thread.start_turn("risky operation");
-        thread.fail_turn("connection timed out");
-
-        assert_eq!(thread.state, ThreadState::Idle);
-
-        let turn = thread.last_turn().unwrap();
-        assert_eq!(turn.state, TurnState::Failed);
-        assert_eq!(turn.error, Some("connection timed out".to_string()));
-        assert!(turn.response.is_none());
-        assert!(turn.completed_at.is_some());
-    }
-
-    #[test]
-    fn test_messages_with_incomplete_last_turn() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        thread.start_turn("first");
-        thread.complete_turn("first reply");
-        thread.start_turn("second (in progress)");
-
-        let messages = thread.messages();
-        // Should have 3 messages: user, assistant, user (no assistant for in-progress)
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].content, "first");
-        assert_eq!(messages[1].content, "first reply");
-        assert_eq!(messages[2].content, "second (in progress)");
-    }
-
-    #[test]
-    fn test_messages_reconstruct_tool_calls_across_turns() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        // Turn 0: uses a tool, gets a result, then answers.
-        thread.start_turn("what files are here?");
-        {
-            let turn = thread.last_turn_mut().unwrap();
-            turn.record_tool_call("list_files", serde_json::json!({ "path": "." }));
-            turn.record_tool_result(serde_json::json!("a.rs\nb.rs"));
-        }
-        thread.complete_turn("There are two files.");
-
-        // Turn 1: a follow-up that should be able to see the prior tool output.
-        thread.start_turn("open the first one");
-
-        let messages = thread.messages();
-        // user, assistant(tool_calls), tool_result, assistant(text), user
-        assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0].role, Role::User);
-
-        assert_eq!(messages[1].role, Role::Assistant);
-        let calls = messages[1].tool_calls.as_ref().expect("tool calls present");
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "list_files");
-        let call_id = calls[0].id.clone();
-
-        assert_eq!(messages[2].role, Role::Tool);
-        // The tool result must reference the exact id of the preceding call so
-        // no provider rejects an orphaned tool call.
-        assert_eq!(messages[2].tool_call_id.as_deref(), Some(call_id.as_str()));
-        assert!(messages[2].content.contains("a.rs"));
-
-        assert_eq!(messages[3].role, Role::Assistant);
-        assert_eq!(messages[3].content, "There are two files.");
-        assert!(messages[3].tool_calls.is_none());
-
-        assert_eq!(messages[4].role, Role::User);
-        assert_eq!(messages[4].content, "open the first one");
-    }
-
-    #[test]
-    fn test_messages_tool_call_ids_are_paired_and_unique() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        thread.start_turn("do two things");
-        {
-            let turn = thread.last_turn_mut().unwrap();
-            turn.record_tool_call("first", serde_json::json!({}));
-            turn.record_tool_result(serde_json::json!("ok-1"));
-            turn.record_tool_call("second", serde_json::json!({}));
-            turn.record_tool_error("boom");
-        }
-        thread.complete_turn("done");
-
-        let messages = thread.messages();
-        let calls = messages[1].tool_calls.as_ref().unwrap();
-        assert_eq!(calls.len(), 2);
-
-        // Every advertised tool-call id has exactly one matching tool result.
-        let result_ids: Vec<_> = messages
-            .iter()
-            .filter(|m| m.role == Role::Tool)
-            .filter_map(|m| m.tool_call_id.clone())
-            .collect();
-        assert_eq!(result_ids.len(), 2);
-        for call in calls {
-            assert!(result_ids.contains(&call.id), "unpaired call {}", call.id);
-        }
-        // Errors are surfaced to the model, not silently dropped.
-        assert!(
-            messages
-                .iter()
-                .any(|m| m.role == Role::Tool && m.content.contains("[error] boom"))
-        );
-    }
-
-    #[test]
-    fn test_plan_mode_survives_runtime_snapshot_round_trip() {
-        let mut thread = Thread::new(Uuid::new_v4());
-        assert!(!thread.plan_mode);
-        thread.plan_mode = true;
-
-        let snapshot = thread.runtime_snapshot(None, None, Vec::new(), Vec::new(), None);
-        assert!(snapshot.plan_mode);
-
-        // Serde round-trip (the snapshot is persisted as JSON).
-        let json = serde_json::to_string(&snapshot).unwrap();
-        let restored: ThreadRuntimeSnapshot = serde_json::from_str(&json).unwrap();
-
-        let mut fresh = Thread::new(Uuid::new_v4());
-        fresh.restore_runtime_snapshot(restored);
-        assert!(fresh.plan_mode, "plan mode lost across snapshot round-trip");
-    }
-
-    #[test]
-    fn test_persisted_message_count_excludes_tool_messages() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        // A tool-using turn reconstructs to 4 messages but is still 2 DB rows.
-        thread.start_turn("run tests");
-        {
-            let turn = thread.last_turn_mut().unwrap();
-            turn.record_tool_call("shell", serde_json::json!({}));
-            turn.record_tool_result(serde_json::json!("ok"));
-        }
-        thread.complete_turn("done");
-        // A plain turn: 2 messages, 2 rows.
-        thread.start_turn("thanks");
-        thread.complete_turn("welcome");
-        // An in-progress turn: 1 user row, no assistant yet.
-        thread.start_turn("more?");
-
-        // messages() is inflated by the reconstructed tool exchange...
-        assert!(thread.messages().len() > thread.persisted_message_count());
-        // ...but the watermark counts DB rows: 2 + 2 + 1 = 5.
-        assert_eq!(thread.persisted_message_count(), 5);
-    }
-
-    #[test]
-    fn test_messages_without_tools_unchanged() {
-        let mut thread = Thread::new(Uuid::new_v4());
-        thread.start_turn("hi");
-        thread.complete_turn("hello");
-
-        let messages = thread.messages();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, Role::User);
-        assert_eq!(messages[1].role, Role::Assistant);
-        assert!(messages[1].tool_calls.is_none());
-    }
-
-    #[test]
-    fn test_truncate_tool_body_bounds_large_output() {
-        let big = "x".repeat(MAX_HISTORICAL_TOOL_RESULT_CHARS + 500);
-        let truncated = truncate_tool_body(&big);
-        assert!(truncated.contains("[truncated"));
-        // Kept head + marker, not the entire original.
-        assert!(truncated.chars().count() < big.chars().count());
-
-        let small = "small output";
-        assert_eq!(truncate_tool_body(small), small);
-    }
-
-    #[test]
-    fn test_messages_restore_round_trip_preserves_tool_exchange() {
-        // Undo/redo captures thread.messages() and later restores it. With
-        // tool-call reconstruction the checkpoint stream now carries tool
-        // messages; restore must not drop the response text or the calls.
-        let mut thread = Thread::new(Uuid::new_v4());
-        thread.start_turn("run the tests");
-        {
-            let turn = thread.last_turn_mut().unwrap();
-            turn.record_tool_call("shell", serde_json::json!({ "cmd": "cargo test" }));
-            turn.record_tool_result(serde_json::json!("42 passed"));
-        }
-        thread.complete_turn("All tests pass.");
-        thread.start_turn("great, ship it");
-        thread.complete_turn("Shipped.");
-
-        let snapshot = thread.messages();
-
-        let mut restored = Thread::new(Uuid::new_v4());
-        restored.restore_from_messages(snapshot.clone());
-
-        // The rebuilt turns reproduce an equivalent message stream.
-        let round_tripped = restored.messages();
-        assert_eq!(round_tripped.len(), snapshot.len());
-        for (a, b) in snapshot.iter().zip(round_tripped.iter()) {
-            assert_eq!(a.role, b.role, "role drift on round trip");
-            assert_eq!(a.content, b.content, "content drift on round trip");
-        }
-
-        // Concretely: the response text and the tool call survived.
-        assert_eq!(restored.turns.len(), 2);
-        assert_eq!(
-            restored.turns[0].response.as_deref(),
-            Some("All tests pass.")
-        );
-        assert_eq!(restored.turns[0].tool_calls.len(), 1);
-        assert_eq!(restored.turns[0].tool_calls[0].name, "shell");
-        assert_eq!(restored.turns[1].response.as_deref(), Some("Shipped."));
-    }
-
-    #[test]
-    fn test_thread_serialization_round_trip() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        thread.start_turn("hello");
-        thread.complete_turn("world");
-
-        let json = serde_json::to_string(&thread).unwrap();
-        let restored: Thread = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(restored.id, thread.id);
-        assert_eq!(restored.session_id, thread.session_id);
-        assert_eq!(restored.turns.len(), 1);
-        assert_eq!(restored.turns[0].user_input, "hello");
-        assert_eq!(restored.turns[0].response, Some("world".to_string()));
-    }
-
-    #[test]
-    fn test_session_serialization_round_trip() {
-        let mut session = Session::new("user-ser");
-        session.create_thread();
-        session.auto_approve_tool("echo");
-
-        let json = serde_json::to_string(&session).unwrap();
-        let restored: Session = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(restored.user_id, "user-ser");
-        assert_eq!(restored.threads.len(), 1);
-        assert!(restored.is_tool_auto_approved("echo"));
-        assert!(!restored.is_tool_auto_approved("shell"));
-    }
-
-    #[test]
-    fn test_auto_approved_tools() {
-        let mut session = Session::new("user-1");
-
-        assert!(!session.is_tool_auto_approved("shell"));
-        session.auto_approve_tool("shell");
-        assert!(session.is_tool_auto_approved("shell"));
-
-        // Idempotent
-        session.auto_approve_tool("shell");
-        assert_eq!(session.auto_approved_tools.len(), 1);
-    }
-
-    #[test]
-    fn test_channel_scoped_auto_approval() {
-        let mut session = Session::new("user-chan");
-
-        session.auto_approve_tool_for_channel("gateway", "shell");
-        assert!(session.is_tool_auto_approved_for_channel("gateway", "shell"));
-        assert!(!session.is_tool_auto_approved_for_channel("telegram", "shell"));
-    }
-
-    #[test]
-    fn test_legacy_global_auto_approval_still_applies() {
-        let mut session = Session::new("user-legacy");
-
-        session.auto_approve_tool("http");
-        assert!(session.is_tool_auto_approved_for_channel("gateway", "http"));
-        assert!(session.is_tool_auto_approved_for_channel("telegram", "http"));
-    }
-
-    #[test]
-    fn test_turn_tool_call_error() {
-        let mut turn = Turn::new(0, "test", false);
-        turn.record_tool_call("http", serde_json::json!({"url": "example.com"}));
-        turn.record_tool_error("timeout");
-
-        assert_eq!(turn.tool_calls.len(), 1);
-        assert_eq!(turn.tool_calls[0].error, Some("timeout".to_string()));
-        assert!(turn.tool_calls[0].result.is_none());
-    }
-
-    #[test]
-    fn test_turn_number_increments() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        // Before any turns, turn_number() is 1 (1-indexed for display)
-        assert_eq!(thread.turn_number(), 1);
-
-        thread.start_turn("first");
-        thread.complete_turn("done");
-        assert_eq!(thread.turn_number(), 2);
-
-        thread.start_turn("second");
-        assert_eq!(thread.turn_number(), 3);
-    }
-
-    #[test]
-    fn test_complete_turn_on_empty_thread() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        // Completing a turn when there are no turns should be a safe no-op
-        thread.complete_turn("phantom response");
-        assert_eq!(thread.state, ThreadState::Idle);
-        assert!(thread.turns.is_empty());
-    }
-
-    #[test]
-    fn test_fail_turn_on_empty_thread() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        // Failing a turn when there are no turns should be a safe no-op
-        thread.fail_turn("phantom error");
-        assert_eq!(thread.state, ThreadState::Idle);
-        assert!(thread.turns.is_empty());
-    }
-
-    #[test]
-    fn test_pending_approval_flow() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        let approval = PendingApproval {
-            request_id: Uuid::new_v4(),
-            tool_name: "shell".to_string(),
-            parameters: serde_json::json!({"command": "rm -rf /"}),
-            description: "dangerous command".to_string(),
-            tool_call_id: "call_123".to_string(),
-            context_messages: vec![ChatMessage::user("do it")],
-            deferred_tool_calls: vec![],
-        };
-
-        thread.await_approval(approval);
-        assert_eq!(thread.state, ThreadState::AwaitingApproval);
-        assert!(thread.pending_approval.is_some());
-
-        let taken = thread.take_pending_approval();
-        assert!(taken.is_some());
-        assert_eq!(taken.unwrap().tool_name, "shell");
-        assert!(thread.pending_approval.is_none());
-    }
-
-    #[test]
-    fn test_clear_pending_approval() {
-        let mut thread = Thread::new(Uuid::new_v4());
-
-        let approval = PendingApproval {
-            request_id: Uuid::new_v4(),
-            tool_name: "http".to_string(),
-            parameters: serde_json::json!({}),
-            description: "test".to_string(),
-            tool_call_id: "call_456".to_string(),
-            context_messages: vec![],
-            deferred_tool_calls: vec![],
-        };
-
-        thread.await_approval(approval);
-        thread.clear_pending_approval();
-
-        assert_eq!(thread.state, ThreadState::Idle);
-        assert!(thread.pending_approval.is_none());
-    }
-
-    #[test]
-    fn test_active_thread_accessors() {
-        let mut session = Session::new("user-1");
-
-        assert!(session.active_thread().is_none());
-        assert!(session.active_thread_mut().is_none());
-
-        let tid = session.create_thread().id;
-
-        assert!(session.active_thread().is_some());
-        assert_eq!(session.active_thread().unwrap().id, tid);
-
-        // Mutably modify through accessor
-        session.active_thread_mut().unwrap().start_turn("test");
-        assert_eq!(
-            session.active_thread().unwrap().state,
-            ThreadState::Processing
-        );
+    let encoded_bytes = object.get("encoded_bytes")?.as_u64()?;
+    let raw_keys = object
+        .get("keys")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let key_count = object
+        .get("key_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(raw_keys.len() as u64);
+    let keys = raw_keys
+        .into_iter()
+        .filter_map(|key| key.as_str().map(ToOwned::to_owned))
+        .take(MAX_DURABLE_PARAMETER_KEYS)
+        .map(|key| bounded_identifier(&key, MAX_DURABLE_PARAMETER_KEY_CHARS))
+        .collect::<Vec<_>>();
+    Some(serde_json::json!({
+        "_thinclaw_parameter_values_redacted": true,
+        "shape": shape,
+        "keys": keys,
+        "key_count": key_count,
+        "sha256": digest.to_ascii_lowercase(),
+        "encoded_bytes": encoded_bytes,
+    }))
+}
+
+fn bounded_identifier(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value.to_string()
+    } else {
+        value.chars().take(max_chars).collect()
     }
 }
+
+fn bounded_durable_value(value: &serde_json::Value, max_chars: usize) -> serde_json::Value {
+    let rendered = match value {
+        serde_json::Value::String(value) => value.clone(),
+        value => value.to_string(),
+    };
+    if rendered.chars().count() <= max_chars {
+        return value.clone();
+    }
+    use sha2::{Digest, Sha256};
+    serde_json::json!({
+        "_thinclaw_truncated": true,
+        "preview": rendered.chars().take(max_chars).collect::<String>(),
+        "original_chars": rendered.chars().count(),
+        "sha256": hex::encode(Sha256::digest(rendered.as_bytes())),
+    })
+}
+
+fn bounded_durable_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    use sha2::{Digest, Sha256};
+    format!(
+        "{}\n… [truncated; original_chars={}; sha256={}]",
+        value.chars().take(max_chars).collect::<String>(),
+        value.chars().count(),
+        hex::encode(Sha256::digest(value.as_bytes()))
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnContextEvidence {
+    pub segment_id: String,
+    pub source: String,
+    pub content: String,
+}
+
+pub const MAX_TURN_CONTEXT_EVIDENCE_ITEMS: usize = 64;
+pub const MAX_TURN_CONTEXT_EVIDENCE_CHARS: usize = 64 * 1024;
+const MAX_TURN_CONTEXT_SEGMENT_ID_CHARS: usize = 512;
+const MAX_TURN_CONTEXT_SOURCE_CHARS: usize = 1_024;
+
+/// Normalize untrusted evidence at every persistence/restart boundary. Live
+/// attachment extraction already applies the same aggregate content budget,
+/// but hydration and undo must not trust legacy metadata to have done so.
+pub fn bounded_turn_context_evidence(contexts: &[TurnContextEvidence]) -> Vec<TurnContextEvidence> {
+    let mut bounded = Vec::new();
+    let mut remaining_chars = MAX_TURN_CONTEXT_EVIDENCE_CHARS;
+    for context in contexts.iter().take(MAX_TURN_CONTEXT_EVIDENCE_ITEMS) {
+        let Some(context) = bounded_context_evidence_item(context, remaining_chars) else {
+            continue;
+        };
+        remaining_chars = remaining_chars.saturating_sub(context.content.chars().count());
+        bounded.push(context);
+        if remaining_chars == 0 {
+            break;
+        }
+    }
+    bounded
+}
+
+fn bounded_context_evidence_item(
+    context: &TurnContextEvidence,
+    remaining_chars: usize,
+) -> Option<TurnContextEvidence> {
+    if remaining_chars == 0 {
+        return None;
+    }
+    let content = context
+        .content
+        .chars()
+        .take(remaining_chars)
+        .collect::<String>();
+    if content.trim().is_empty() {
+        return None;
+    }
+    Some(TurnContextEvidence {
+        segment_id: bounded_identifier(&context.segment_id, MAX_TURN_CONTEXT_SEGMENT_ID_CHARS),
+        source: bounded_identifier(&context.source, MAX_TURN_CONTEXT_SOURCE_CHARS),
+        content,
+    })
+}
+
+impl TurnToolCall {
+    fn effective_id(&self, turn_number: usize, call_index: usize) -> String {
+        if self.id.is_empty() {
+            synthetic_tool_call_id(turn_number, call_index)
+        } else {
+            self.id.clone()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

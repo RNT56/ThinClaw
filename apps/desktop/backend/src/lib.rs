@@ -1,121 +1,6 @@
 use sqlx::sqlite::SqlitePoolOptions;
-use std::borrow::Cow;
 use std::fs;
 use std::sync::OnceLock;
-
-fn embedded_migrator() -> sqlx::migrate::Migrator {
-    use sqlx::migrate::{Migration, MigrationType, Migrator};
-
-    macro_rules! migration {
-        ($version:literal, $description:literal, $file:literal) => {
-            Migration::new(
-                $version,
-                Cow::Borrowed($description),
-                MigrationType::Simple,
-                Cow::Borrowed(include_str!(concat!("../migrations/", $file))),
-                false,
-            )
-        };
-    }
-
-    let migrations = vec![
-        migration!(20240101000000, "init", "20240101000000_init.sql"),
-        migration!(20240101000001, "fts", "20240101000001_fts.sql"),
-        migration!(
-            20240115000001,
-            "add images to messages",
-            "20240115000001_add_images_to_messages.sql"
-        ),
-        migration!(
-            20260116000000,
-            "add chat id to documents",
-            "20260116000000_add_chat_id_to_documents.sql"
-        ),
-        migration!(
-            20260116205500,
-            "add attached docs",
-            "20260116205500_add_attached_docs.sql"
-        ),
-        migration!(
-            20260117000000,
-            "add projects",
-            "20260117000000_add_projects.sql"
-        ),
-        migration!(
-            20260119000000,
-            "add web search results",
-            "20260119000000_add_web_search_results.sql"
-        ),
-        migration!(
-            20260127000000,
-            "add reordering",
-            "20260127000000_add_reordering.sql"
-        ),
-        migration!(
-            20260208000000,
-            "model catalog",
-            "20260208000000_model_catalog.sql"
-        ),
-        migration!(
-            20260209000000,
-            "generated images",
-            "20260209000000_generated_images.sql"
-        ),
-        migration!(
-            20260224000000,
-            "add messages index",
-            "20260224000000_add_messages_index.sql"
-        ),
-        migration!(
-            20260225000000,
-            "normalize timestamps",
-            "20260225000000_normalize_timestamps.sql"
-        ),
-        migration!(
-            20260301000000,
-            "cloud storage",
-            "20260301000000_cloud_storage.sql"
-        ),
-        migration!(
-            20260301000001,
-            "direct assets",
-            "20260301000001_direct_assets.sql"
-        ),
-        migration!(
-            20260302000000,
-            "message assets",
-            "20260302000000_message_assets.sql"
-        ),
-    ];
-
-    Migrator {
-        migrations: Cow::Owned(migrations),
-        ..Migrator::DEFAULT
-    }
-}
-
-#[cfg(test)]
-mod migration_tests {
-    #[tokio::test]
-    async fn embedded_migrations_apply_to_a_clean_database() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open in-memory sqlite");
-
-        super::embedded_migrator()
-            .run(&pool)
-            .await
-            .expect("apply embedded migrations");
-
-        let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
-            .fetch_one(&pool)
-            .await
-            .expect("read applied migration count");
-        assert_eq!(applied, 15);
-    }
-}
 
 /// Global log broadcaster — shared between the tracing subscriber (WebLogLayer)
 /// and the ThinClaw bridge so all tracing::* events reach the UI Logs panel.
@@ -183,6 +68,7 @@ fn toggle_spotlight(app: tauri::AppHandle) {
 pub mod chat;
 pub mod cloud;
 pub mod config;
+mod debug_redaction;
 pub mod direct_assets;
 pub mod engine;
 pub mod file_store;
@@ -205,7 +91,6 @@ pub mod rig_cache;
 pub mod rig_lib;
 pub mod secret_store;
 pub mod setup;
-pub mod shared_services;
 pub mod sidecar;
 pub mod stt;
 pub mod system;
@@ -221,9 +106,9 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 
-#[cfg(debug_assertions)]
 pub(crate) fn sanitize_typescript_bindings_source(source: &str) -> String {
     let mut source = source.to_string();
+
     source = source.replace(
         "export type TAURI_CHANNEL<TSend> = null",
         "export type TAURI_CHANNEL<TSend> = import(\"@tauri-apps/api/core\").Channel<TSend>",
@@ -411,7 +296,6 @@ fn copy_dir_contents(from: &std::path::Path, to: &std::path::Path) -> std::io::R
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let startup_started = std::time::Instant::now();
     // ── Tracing / Logging init ───────────────────────────────────────────
     // ThinClaw's init_tracing() installs:
     //   1. A reloadable EnvFilter (ironclaw=debug by default)
@@ -510,21 +394,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error building tauri application");
 
-    let crash_reporter = thinclaw::desktop_observer::DesktopCrashReporter::new(
-        app.handle()
-            .path()
-            .app_data_dir()
-            .expect("failed to get app data dir for crash reporter")
-            .join("crash-reports"),
-    );
-    crash_reporter.install_panic_hook();
-    app.manage(crash_reporter);
-
     app.manage(SidecarManager::new());
     app.manage(model_manager::DownloadManager::new());
+    // Load the secure store before ConfigManager so legacy plaintext MCP
+    // credentials can be migrated without clobbering the in-memory key cache.
+    thinclaw::config::keychain::load_all();
     app.manage(config::ConfigManager::new(app.handle()));
     app.manage(thinclaw::ThinClawManager::new(app.handle().clone()));
-    app.manage(thinclaw::remote_access::RemoteAccessState::new());
     app.manage(rig_cache::RigManagerCache::new());
 
     // FileStore — centralized file I/O abstraction (local-first, cloud-ready)
@@ -541,26 +417,37 @@ pub fn run() {
                 .expect("failed to get app data dir");
             migrate_legacy_app_data(&app_data_dir);
             fs::create_dir_all(&app_data_dir).expect("failed to create app data dir");
+            match cloud::migration::apply_pending_restore(&app_data_dir).await {
+                Ok(true) => println!("[main] Activated pending cloud restore before startup."),
+                Ok(false) => {}
+                Err(error) => {
+                    panic!(
+                        "Refusing to start with a partially applied cloud restore: {}",
+                        error
+                    );
+                }
+            }
 
-            // ── Load ALL API keys from one encrypted Keychain envelope ───────
-            // Normal startup reads the master-key item and the data-envelope
-            // item, then caches decrypted values in memory. Must happen before
-            // ThinClawConfig::new() or any keychain::get_key() call.
-            thinclaw::config::keychain::load_all()
-                .expect("failed to initialize encrypted Desktop secrets");
-
+            // ── Load ALL API keys from Keychain in a single read ─────────────
+            // This triggers exactly one macOS authorization prompt, then caches
+            // everything in memory.  Must happen before ThinClawConfig::new()
+            // or any other code that calls keychain::get_key().
             // ── App-wide secret store (reads from the just-loaded keychain) ───
             let secret_store = secret_store::SecretStore::new();
-            // All consumers share the same grant state and keychain access
-            // path; cloning the service does not construct another store.
-            let shared_secret_store = std::sync::Arc::new(secret_store.clone());
+            // Every consumer shares both the one keychain cache and the live
+            // agent-grant snapshot carried by cloned SecretStore handles.
+            let secret_store_for_router = std::sync::Arc::new(secret_store.clone());
             handle.manage(secret_store);
 
-            // ── Shared model/provider registry + inference router ───
-            // The router clone shares this registry's discovery cache and key vault.
-            let model_registry = inference::ModelProviderRegistry::new(shared_secret_store);
-            let inference_router = inference::InferenceRouter::new(model_registry.clone());
+            // ── Inference Router — routes all AI modalities to backends ───
+            let inference_router = inference::InferenceRouter::new(
+                secret_store_for_router.clone(),
+                app_data_dir.join("images"),
+            );
             handle.manage(inference_router);
+
+            // ── Cloud Model Discovery Registry ───
+            let model_registry = inference::CloudModelRegistry::new(secret_store_for_router);
             handle.manage(model_registry);
 
             // Engine Manager — singleton inference engine instance
@@ -575,21 +462,10 @@ pub fn run() {
             // Vector Store Manager Init (per-scope index files)
             // Use the dimension stored in user config (updated whenever a new
             // embedding model with a different hidden_size is loaded).
-            let configured_dims = handle
+            let dims = handle
                 .state::<config::ConfigManager>()
                 .get_config()
                 .vector_dimensions as usize;
-            let dims = if (1..=inference::embedding::MAX_EMBEDDING_DIMENSIONS)
-                .contains(&configured_dims)
-            {
-                configured_dims
-            } else {
-                tracing::warn!(
-                    configured_dims,
-                    "invalid persisted vector dimension; recovering to 384"
-                );
-                384
-            };
             println!("[main] Initializing vector store with dimension {}.", dims);
             let vectors_dir = app_data_dir.join("vectors");
             let vector_manager = vector_store::VectorStoreManager::new(vectors_dir, dims)
@@ -619,63 +495,55 @@ pub fn run() {
                 .await
                 .expect("failed to connect to database");
 
-            embedded_migrator()
+            sqlx::migrate!("./migrations")
                 .run(&pool)
                 .await
                 .expect("failed to run migrations");
 
-            // Direct Workbench and the embedded agent share the canonical
-            // conversation database. Import the legacy Direct history once,
-            // then expose one app-wide service to every conversation consumer.
-            let shared_history = history::SharedHistoryStore::open(&app_data_dir, &pool)
-                .await
-                .expect("failed to initialize shared history store");
-            #[cfg(feature = "runtime-libsql")]
-            handle
-                .state::<config::ConfigManager>()
-                .attach_database(shared_history.runtime_store())
-                .await
-                .expect("failed to initialize canonical settings store");
-
-            // Restore persisted cloud inference selections only after the
-            // canonical settings database has replaced the recovery-file
-            // snapshot. The router starts empty by design.
-            let mut inference_config = handle.state::<config::ConfigManager>().get_config();
-            if inference::migrate_retired_embedding_selection(&mut inference_config) {
-                handle
-                    .state::<config::ConfigManager>()
-                    .save_config(&inference_config)
-                    .await
-                    .expect("failed to persist embedding model migration");
-            }
-            let reconfigured = handle
-                .state::<inference::InferenceRouter>()
-                .reconfigure(&inference_config)
-                .await;
-            let desired_dimensions = if reconfigured.new_embedding_dims > 0 {
-                reconfigured.new_embedding_dims
-            } else {
-                let configured = inference_config.vector_dimensions as usize;
-                if (1..=inference::embedding::MAX_EMBEDDING_DIMENSIONS).contains(&configured) {
-                    configured
-                } else {
-                    384
-                }
-            };
-            let vector_manager = handle.state::<vector_store::VectorStoreManager>();
-            inference::reconcile_embedding_dimensions(
-                &handle,
-                &vector_manager,
-                desired_dimensions,
-                inference_config
-                    .embedding_backend
-                    .as_deref()
-                    .unwrap_or("configured backend"),
-            )
-            .await
-            .expect("failed to reconcile configured embedding dimensions");
-            handle.manage(shared_history);
             handle.manage(pool);
+
+            // Restore persisted cloud inference selections on every launch.
+            // Previously the router was only configured when the settings UI
+            // changed a backend, so cloud modalities silently disappeared
+            // after a restart.
+            {
+                let config_manager = handle.state::<config::ConfigManager>();
+                let mut user_config = config_manager.get_config();
+                let router = handle.state::<inference::InferenceRouter>();
+                let result = router.reconfigure(&user_config).await;
+                if let Some(backend) = router.embedding_backend().await {
+                    let pool = handle.state::<sqlx::SqlitePool>();
+                    let vectors = handle.state::<vector_store::VectorStoreManager>();
+                    match rag::activate_embedding_profile(
+                        pool.inner(),
+                        vectors.inner(),
+                        &backend.profile_id(),
+                        backend.dimensions(),
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            if user_config.vector_dimensions as usize != backend.dimensions() {
+                                user_config.vector_dimensions =
+                                    u32::try_from(backend.dimensions()).unwrap_or(u32::MAX);
+                                if let Err(error) = config_manager.save_config(&user_config) {
+                                    tracing::warn!(
+                                        "Failed to persist restored embedding dimensions: {error}"
+                                    );
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("[main] Failed to restore embedding profile: {error}");
+                            router.clear_backend(inference::Modality::Embedding).await;
+                        }
+                    }
+                } else if result.new_embedding_dims > 0 {
+                    // Defensive: a dimension without a backend should never be
+                    // externally observable.
+                    router.clear_backend(inference::Modality::Embedding).await;
+                }
+            }
 
             // Cloud Storage Manager
             let cloud_manager = cloud::CloudManager::new(app_data_dir.clone());
@@ -699,7 +567,10 @@ pub fn run() {
                 let cloud_state = handle.state::<cloud::CloudManager>();
                 if cloud_state.is_cloud_mode().await {
                     let fs_state = handle.state::<file_store::FileStore>();
-                    match cloud::live_sync::start_live_sync(&fs_state, &cloud_state).await {
+                    let pool_state = handle.state::<sqlx::SqlitePool>();
+                    match cloud::live_sync::start_live_sync(&fs_state, &cloud_state, &pool_state)
+                        .await
+                    {
                         Ok(handles) => {
                             cloud_state.install_sync_handles(handles).await;
                             println!("[main] Cloud mode restored: live sync started.");
@@ -748,7 +619,6 @@ pub fn run() {
                 ironclaw_state_dir,
             );
             handle.manage(ironclaw_state);
-            handle.manage(shared_services::SharedServices::new(handle.clone()));
 
             let ironclaw_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -826,8 +696,8 @@ pub fn run() {
                     }
                 }
 
-                // Feed the shared Desktop secret service into ThinClaw's
-                // grant-aware SecretsStore trait view.
+                // Feed the shared, live grant-aware Desktop secret service to
+                // the embedded runtime.
                 let secrets_store: Option<
                     std::sync::Arc<dyn thinclaw_core::secrets::SecretsStore + Send + Sync>,
                 > = Some(std::sync::Arc::new(
@@ -857,22 +727,6 @@ pub fn run() {
         setup::shortcuts::register_shortcuts(&app);
     }
 
-    system::record_startup_ready(startup_started.elapsed());
-    let startup_ready_ms = startup_started.elapsed().as_millis();
-    if startup_ready_ms > 8_000 {
-        tracing::warn!(
-            startup_ready_ms,
-            budget_ms = 8_000,
-            "desktop backend startup exceeded its performance budget"
-        );
-    } else {
-        tracing::info!(
-            startup_ready_ms,
-            budget_ms = 8_000,
-            "desktop backend startup ready"
-        );
-    }
-
     app.run(|_app_handle, _event| {
         match _event {
             tauri::RunEvent::WindowEvent {
@@ -889,12 +743,6 @@ pub fn run() {
                 // instead of being orphaned on exit.
                 if let Some(cloud) = _app_handle.try_state::<cloud::CloudManager>() {
                     tauri::async_runtime::block_on(cloud.stop_sync());
-                }
-                // Remove network exposure before stopping the loopback gateway.
-                if let Some(remote_access) =
-                    _app_handle.try_state::<thinclaw::remote_access::RemoteAccessState>()
-                {
-                    tauri::async_runtime::block_on(remote_access.shutdown());
                 }
                 // Shutdown ThinClaw runtime gracefully
                 if let Some(state) =

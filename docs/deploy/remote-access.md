@@ -185,8 +185,8 @@ Tailscale.
 Linux or Pi installer path:
 
 ```bash
-sudo bash deploy/setup.sh --mode auto --token replace-with-a-long-random-token \
-  --tailscale tskey-auth-...
+printf '%s\n%s\n' "$(openssl rand -hex 32)" 'tskey-auth-...' | \
+  sudo bash deploy/setup.sh --secrets-stdin --mode auto
 ```
 
 Manual path:
@@ -232,7 +232,7 @@ HTTPS tunnel/reverse proxy for channels that require callbacks.
 |---|---|---|---|
 | Tailscale Funnel | Tailscale app plus CLI installed, Funnel enabled in admin console | Yes | `TUNNEL_PROVIDER=tailscale`, `TUNNEL_TS_FUNNEL=true` |
 | ngrok | `ngrok` binary, auth token | Paid plan only | `TUNNEL_PROVIDER=ngrok`, `TUNNEL_NGROK_TOKEN=...` |
-| Cloudflare Tunnel | `cloudflared` binary, tunnel token | Yes | `TUNNEL_PROVIDER=cloudflare`, `TUNNEL_CF_TOKEN=...` |
+| Cloudflare Tunnel | `cloudflared` binary, tunnel token, configured public hostname | Yes | `TUNNEL_PROVIDER=cloudflare`, `TUNNEL_CF_TOKEN=...`, `TUNNEL_CF_HOSTNAME=https://agent.example.com` |
 | Custom | Your own tunnel command | Depends | `TUNNEL_PROVIDER=custom`, `TUNNEL_CUSTOM_COMMAND=...` |
 | Static URL | You manage the tunnel yourself | Depends | `TUNNEL_URL=https://...` |
 
@@ -250,7 +250,8 @@ Prerequisites:
    - macOS App Store or standalone: use the menu bar app settings and click
      Install CLI
    - macOS Homebrew: `brew install tailscale`
-   - Linux: `curl -fsSL https://tailscale.com/install.sh | sh`
+   - Linux: follow Tailscale's distribution-specific signed-package
+     instructions at https://tailscale.com/docs/install/linux
 3. Enable HTTPS in the Tailscale admin console: https://login.tailscale.com/admin/dns
 4. Enable Funnel in your ACL policy: https://login.tailscale.com/admin/acls/file
 

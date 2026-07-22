@@ -92,8 +92,9 @@ prebuilt release binary, verifies its checksum, installs it under
 curl -L -o deploy-setup.sh \
   https://raw.githubusercontent.com/RNT56/ThinClaw/main/deploy/setup.sh
 
-sudo bash deploy-setup.sh --mode native --profile edge \
-  --token "$(openssl rand -hex 32)"
+printf '%s\n\n' "$(openssl rand -hex 32)" | \
+  sudo bash deploy-setup.sh --secrets-stdin --mode native --profile edge \
+    --allow-public-http
 ```
 
 Use the full `aarch64-unknown-linux-gnu` release artifact when you need ACP,
@@ -101,8 +102,9 @@ tunnels, Docker sandbox, browser automation, Nostr, PostgreSQL, or the local
 WASM runtime.
 
 ```bash
-sudo bash deploy-setup.sh --mode native --profile full \
-  --token "$(openssl rand -hex 32)"
+printf '%s\n\n' "$(openssl rand -hex 32)" | \
+  sudo bash deploy-setup.sh --secrets-stdin --mode native --profile full \
+    --allow-public-http
 ```
 
 Use `--binary /path/to/thinclaw` only when installing a locally patched binary.
@@ -111,7 +113,8 @@ If you are running from a repo checkout on the Pi, `--mode auto` selects native
 mode automatically on Raspberry Pi OS Lite 64-bit:
 
 ```bash
-sudo bash deploy/setup.sh --mode auto --token "$(openssl rand -hex 32)"
+printf '%s\n\n' "$(openssl rand -hex 32)" | \
+  sudo bash deploy/setup.sh --secrets-stdin --mode auto --allow-public-http
 ```
 
 The native installer:
@@ -189,8 +192,9 @@ sandbox/browser features. On Pi, prefer the published multi-arch image instead
 of building on-device:
 
 ```bash
-sudo bash deploy/setup.sh --mode docker --token replace-with-a-long-random-token \
-  --image ghcr.io/rnt56/thinclaw:latest
+printf '%s\n\n' "$(openssl rand -hex 32)" | \
+  sudo bash deploy/setup.sh --secrets-stdin --mode docker --allow-public-http \
+    --image ghcr.io/rnt56/thinclaw:latest
 ```
 
 Manual Compose path from a repo checkout:
@@ -230,9 +234,9 @@ git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
 cargo build --release --no-default-features --features edge --bin thinclaw
 
-sudo bash deploy/setup.sh --mode native \
-  --binary target/release/thinclaw \
-  --token "$(openssl rand -hex 32)"
+printf '%s\n\n' "$(openssl rand -hex 32)" | \
+  sudo bash deploy/setup.sh --secrets-stdin --mode native \
+    --binary target/release/thinclaw --allow-public-http
 ```
 
 Use `cargo build --release --features full --bin thinclaw` only if you need the
@@ -244,8 +248,8 @@ For private access from ThinClaw Desktop or devices that should connect without 
 SSH tunnel, use Tailscale:
 
 ```bash
-sudo bash deploy/setup.sh --mode auto --token replace-with-a-long-random-token \
-  --tailscale tskey-auth-...
+printf '%s\n%s\n' "$(openssl rand -hex 32)" 'tskey-auth-...' | \
+  sudo bash deploy/setup.sh --secrets-stdin --mode auto
 ```
 
 You can also install Tailscale yourself and bind the gateway to the tailnet IP:
@@ -279,7 +283,7 @@ webhook tunnels, use [remote-access.md](remote-access.md).
 - Keep the default `GATEWAY_PORT=3000` unless you intentionally change it.
 - 4 GB RAM or more is recommended for `full` plus Docker.
 - Increase swap before large on-device source builds.
-- Browser automation on Lite needs Docker Chromium fallback (`CHROMIUM_IMAGE=chromedp/headless-shell:latest` by default) or an explicitly configured local browser.
+- Browser automation on Lite needs Docker Chromium fallback (a digest-pinned multi-arch `chromedp/headless-shell` image by default) or an explicitly configured local browser.
 - Use `thinclaw onboard --profile pi-os-lite-64` for interactive setup on-device.
 - Native installs write `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and `THINCLAW_HEADLESS=true`; with those markers, reckless desktop autonomy tools are blocked at runtime even if misconfigured.
 - Keep `DESKTOP_AUTONOMY_ENABLED=false` on Pi OS Lite.

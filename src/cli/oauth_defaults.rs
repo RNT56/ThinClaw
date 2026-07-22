@@ -24,8 +24,16 @@ use std::time::Duration;
 
 use rand::RngExt;
 use subtle::ConstantTimeEq;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinSet;
+
+const OAUTH_CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
+const OAUTH_CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_OAUTH_CALLBACK_CONNECTIONS: usize = 16;
+const MAX_OAUTH_REQUEST_LINE_BYTES: usize = 16 * 1024;
+const MAX_OAUTH_CALLBACK_PARAMS: usize = 32;
+const MAX_OAUTH_CALLBACK_VALUE_BYTES: usize = 8 * 1024;
 
 // ── Optional compile-time credentials ──────────────────────────────────
 
@@ -178,10 +186,24 @@ pub const OAUTH_CALLBACK_PORT: u16 = 9876;
 /// deployments where `127.0.0.1` is unreachable from the user's browser),
 /// then falls back to `http://{callback_host()}:{OAUTH_CALLBACK_PORT}`.
 pub fn callback_url() -> String {
-    std::env::var("THINCLAW_OAUTH_CALLBACK_URL")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| format!("http://{}:{}", callback_host(), OAUTH_CALLBACK_PORT))
+    if let Ok(value) = std::env::var("THINCLAW_OAUTH_CALLBACK_URL")
+        && value.len() <= 16 * 1024
+        && let Ok(mut parsed) = url::Url::parse(&value)
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && parsed.host_str().is_some()
+        && (parsed.scheme() == "https"
+            || (parsed.scheme() == "http" && parsed.host_str().is_some_and(is_loopback_host)))
+    {
+        let path = parsed.path().trim_end_matches('/').to_string();
+        parsed.set_path(&path);
+        return parsed.to_string().trim_end_matches('/').to_string();
+    }
+    // The built-in listener is intentionally loopback-only. Remote callbacks
+    // require an explicit HTTPS reverse-proxy URL above.
+    format!("http://127.0.0.1:{OAUTH_CALLBACK_PORT}")
 }
 
 /// Returns the hostname used in OAuth callback URLs.
@@ -257,6 +279,9 @@ pub enum OAuthCallbackError {
 
     #[error("IO error: {0}")]
     Io(String),
+
+    #[error("OAuth callback listener must bind to a loopback host")]
+    InsecureHost,
 }
 
 /// Map a `std::io::Error` from a bind attempt to an `OAuthCallbackError`.
@@ -298,10 +323,7 @@ pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError>
             .await
             .map_err(bind_error)
     } else {
-        // Remote mode: bind to the specific configured host address only,
-        // not 0.0.0.0, to limit exposure to the intended interface.
-        let addr = format!("{}:{}", host, OAUTH_CALLBACK_PORT);
-        TcpListener::bind(&addr).await.map_err(bind_error)
+        Err(OAuthCallbackError::InsecureHost)
     }
 }
 
@@ -369,83 +391,230 @@ pub async fn wait_for_callback_with_state(
     display_name: &str,
     expected_state: Option<&str>,
 ) -> Result<String, OAuthCallbackError> {
+    if path_prefix.is_empty()
+        || path_prefix.len() > 1024
+        || !path_prefix.starts_with('/')
+        || path_prefix.contains(['?', '#'])
+        || param_name.is_empty()
+        || param_name.len() > 128
+        || !param_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        || expected_state.is_some_and(|state| {
+            state.is_empty()
+                || state.len() > MAX_OAUTH_CALLBACK_VALUE_BYTES
+                || state.chars().any(char::is_control)
+        })
+    {
+        return Err(OAuthCallbackError::Io(
+            "invalid OAuth callback configuration".to_string(),
+        ));
+    }
     let path_prefix = path_prefix.to_string();
     let param_name = param_name.to_string();
-    let display_name = display_name.to_string();
+    let display_name = display_name
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(128)
+        .collect::<String>();
     let expected_state = expected_state.map(str::to_string);
 
-    tokio::time::timeout(Duration::from_secs(300), async move {
+    tokio::time::timeout(OAUTH_CALLBACK_TIMEOUT, async move {
+        let mut connections = JoinSet::new();
         loop {
-            let (mut socket, _) = listener
-                .accept()
-                .await
-                .map_err(|e| OAuthCallbackError::Io(e.to_string()))?;
-
-            let mut reader = BufReader::new(&mut socket);
-            let mut request_line = String::new();
-            reader
-                .read_line(&mut request_line)
-                .await
-                .map_err(|e| OAuthCallbackError::Io(e.to_string()))?;
-
-            if let Some(path) = request_line.split_whitespace().nth(1)
-                && path.starts_with(&path_prefix)
-                && let Some(query) = path.split('?').nth(1)
-            {
-                // Check for error first
-                if query.contains("error=") {
-                    let _ =
-                        write_landing(&mut socket, &display_name, false, "400 Bad Request").await;
-                    return Err(OAuthCallbackError::Denied);
+            tokio::select! {
+                accepted = listener.accept(), if connections.len() < MAX_OAUTH_CALLBACK_CONNECTIONS => {
+                    let (socket, peer) = accepted
+                        .map_err(|error| OAuthCallbackError::Io(error.to_string()))?;
+                    let path_prefix = path_prefix.clone();
+                    let param_name = param_name.clone();
+                    let display_name = display_name.clone();
+                    let expected_state = expected_state.clone();
+                    connections.spawn(async move {
+                        tokio::time::timeout(
+                            OAUTH_CONNECTION_TIMEOUT,
+                            process_callback_connection(
+                                socket,
+                                peer,
+                                &path_prefix,
+                                &param_name,
+                                &display_name,
+                                expected_state.as_deref(),
+                            ),
+                        )
+                        .await
+                        .unwrap_or(CallbackAttempt::Ignore)
+                    });
                 }
-
-                // Parse all query parameters once so we can validate `state`
-                // independently of the target parameter's position.
-                let params: std::collections::HashMap<String, String> = query
-                    .split('&')
-                    .filter_map(|pair| {
-                        let mut it = pair.splitn(2, '=');
-                        let key = it.next()?;
-                        let raw_value = it.next().unwrap_or("");
-                        let value = urlencoding::decode(raw_value)
-                            .unwrap_or_else(|_| raw_value.into())
-                            .into_owned();
-                        Some((key.to_string(), value))
-                    })
-                    .collect();
-
-                // CSRF defense: when a state nonce is expected, the callback must
-                // echo it back unchanged. Reject missing or mismatched values.
-                if let Some(expected) = expected_state.as_deref() {
-                    let received_ok = params
-                        .get("state")
-                        .map(|received| oauth_state_matches(expected, received))
-                        .unwrap_or(false);
-                    if !received_ok {
-                        tracing::warn!(
-                            "[oauth] callback rejected: missing or mismatched state parameter"
-                        );
-                        let _ = write_landing(&mut socket, &display_name, false, "400 Bad Request")
-                            .await;
-                        return Err(OAuthCallbackError::Denied);
+                Some(completed) = connections.join_next(), if !connections.is_empty() => {
+                    match completed {
+                        Ok(CallbackAttempt::Success(value)) => return Ok(value),
+                        Ok(CallbackAttempt::Denied) => return Err(OAuthCallbackError::Denied),
+                        Ok(CallbackAttempt::Ignore) => {}
+                        Err(error) if error.is_cancelled() => {}
+                        Err(error) => tracing::debug!(error = %error, "OAuth callback connection task failed"),
                     }
                 }
-
-                // Look for the target parameter
-                if let Some(value) = params.get(&param_name) {
-                    let _ = write_landing(&mut socket, &display_name, true, "200 OK").await;
-                    let _ = socket.shutdown().await;
-                    return Ok(value.clone());
-                }
             }
-
-            // Not the callback we're looking for
-            let response = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
-            let _ = socket.write_all(response.as_bytes()).await;
         }
     })
     .await
     .map_err(|_| OAuthCallbackError::Timeout)?
+}
+
+enum CallbackAttempt {
+    Success(String),
+    Denied,
+    Ignore,
+}
+
+async fn process_callback_connection(
+    mut socket: TcpStream,
+    peer: std::net::SocketAddr,
+    expected_path: &str,
+    param_name: &str,
+    display_name: &str,
+    expected_state: Option<&str>,
+) -> CallbackAttempt {
+    // The legacy state-less entry point is retained for compatibility, but it
+    // must never accept a callback arriving through a non-loopback interface.
+    if expected_state.is_none() && !peer.ip().is_loopback() {
+        let _ = write_empty_response(&mut socket, "403 Forbidden").await;
+        return CallbackAttempt::Ignore;
+    }
+
+    let Some(request_line) = read_bounded_request_line(&mut socket).await else {
+        let _ = write_empty_response(&mut socket, "400 Bad Request").await;
+        return CallbackAttempt::Ignore;
+    };
+    let mut request_parts = request_line.split_whitespace();
+    let (Some(method), Some(target), Some(version)) = (
+        request_parts.next(),
+        request_parts.next(),
+        request_parts.next(),
+    ) else {
+        let _ = write_empty_response(&mut socket, "400 Bad Request").await;
+        return CallbackAttempt::Ignore;
+    };
+    if method != "GET"
+        || !version.starts_with("HTTP/1.")
+        || request_parts.next().is_some()
+        || !target.starts_with('/')
+        || target.contains('#')
+    {
+        let _ = write_empty_response(&mut socket, "400 Bad Request").await;
+        return CallbackAttempt::Ignore;
+    }
+    let Some((path, query)) = target.split_once('?') else {
+        let _ = write_empty_response(&mut socket, "404 Not Found").await;
+        return CallbackAttempt::Ignore;
+    };
+    if path != expected_path {
+        let _ = write_empty_response(&mut socket, "404 Not Found").await;
+        return CallbackAttempt::Ignore;
+    }
+    if !valid_percent_encoding(query) {
+        let _ = write_empty_response(&mut socket, "400 Bad Request").await;
+        return CallbackAttempt::Ignore;
+    }
+
+    let mut params = std::collections::HashMap::new();
+    for (index, (key, value)) in url::form_urlencoded::parse(query.as_bytes()).enumerate() {
+        if index >= MAX_OAUTH_CALLBACK_PARAMS
+            || key.is_empty()
+            || key.len() > 128
+            || value.len() > MAX_OAUTH_CALLBACK_VALUE_BYTES
+            || key.chars().any(char::is_control)
+            || value.chars().any(char::is_control)
+            || params
+                .insert(key.into_owned(), value.into_owned())
+                .is_some()
+        {
+            let _ = write_empty_response(&mut socket, "400 Bad Request").await;
+            return CallbackAttempt::Ignore;
+        }
+    }
+
+    // Validate state before honoring either an OAuth error or a code. A forged
+    // callback must not be able to cancel the legitimate flow.
+    if let Some(expected) = expected_state {
+        let state_matches = params
+            .get("state")
+            .is_some_and(|received| oauth_state_matches(expected, received));
+        if !state_matches {
+            tracing::warn!("[oauth] ignored callback with missing or mismatched state");
+            let _ = write_landing(&mut socket, display_name, false, "400 Bad Request").await;
+            return CallbackAttempt::Ignore;
+        }
+    }
+
+    if params.contains_key("error") {
+        let _ = write_landing(&mut socket, display_name, false, "400 Bad Request").await;
+        return CallbackAttempt::Denied;
+    }
+    let Some(value) = params.get(param_name) else {
+        let _ = write_empty_response(&mut socket, "400 Bad Request").await;
+        return CallbackAttempt::Ignore;
+    };
+    if value.is_empty() || value.len() > MAX_OAUTH_CALLBACK_VALUE_BYTES {
+        let _ = write_empty_response(&mut socket, "400 Bad Request").await;
+        return CallbackAttempt::Ignore;
+    }
+
+    let _ = write_landing(&mut socket, display_name, true, "200 OK").await;
+    let _ = socket.shutdown().await;
+    CallbackAttempt::Success(value.clone())
+}
+
+async fn read_bounded_request_line(socket: &mut TcpStream) -> Option<String> {
+    let mut line = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+        let read = socket.read(&mut buffer).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        let bytes = &buffer[..read];
+        let line_end = bytes.iter().position(|byte| *byte == b'\n');
+        let portion = line_end.map_or(bytes, |index| &bytes[..=index]);
+        if line.len().saturating_add(portion.len()) > MAX_OAUTH_REQUEST_LINE_BYTES {
+            return None;
+        }
+        line.extend_from_slice(portion);
+        if line_end.is_some() {
+            break;
+        }
+    }
+    let line = std::str::from_utf8(&line)
+        .ok()?
+        .trim_end_matches(['\r', '\n']);
+    Some(line.to_string())
+}
+
+fn valid_percent_encoding(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    true
+}
+
+async fn write_empty_response(socket: &mut TcpStream, status: &str) -> std::io::Result<()> {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n"
+    );
+    socket.write_all(response.as_bytes()).await
 }
 
 /// Write the branded OAuth landing page with the given HTTP status line.
@@ -462,9 +631,16 @@ where
     let response = format!(
         "HTTP/1.1 {status}\r\n\
          Content-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
          Connection: close\r\n\
+         Cache-Control: no-store\r\n\
+         Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         X-Frame-Options: DENY\r\n\
          \r\n\
-         {html}"
+         {html}",
+        html.len()
     );
     socket.write_all(response.as_bytes()).await
 }
@@ -630,9 +806,10 @@ mod tests {
             std::env::remove_var("THINCLAW_OAUTH_CALLBACK_URL");
         }
         assert_eq!(callback_host(), "203.0.113.10");
-        // callback_url() fallback should incorporate the custom host
+        // A remote plain-HTTP callback host is never used as the redirect
+        // fallback; remote deployments must provide an explicit HTTPS proxy.
         let url = callback_url();
-        assert!(url.contains("203.0.113.10"), "url was: {url}");
+        assert_eq!(url, "http://127.0.0.1:9876");
         // Restore
         unsafe {
             if let Some(val) = original_host {
@@ -830,7 +1007,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_wait_for_callback_with_state_rejects_mismatch() {
+    async fn test_wait_for_callback_with_state_ignores_mismatch_then_accepts_match() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::{TcpListener, TcpStream};
 
@@ -840,6 +1017,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         let expected = super::generate_oauth_state();
+        let expected_for_client = expected.clone();
         let server = tokio::spawn(async move {
             super::wait_for_callback_with_state(
                 listener,
@@ -863,11 +1041,68 @@ mod tests {
         let mut buf = Vec::new();
         let _ = client.read_to_end(&mut buf).await;
 
-        let result = server.await.unwrap();
-        assert!(
-            matches!(result, Err(super::OAuthCallbackError::Denied)),
-            "mismatched state must be rejected, got: {result:?}"
+        // A forged callback is ignored rather than being allowed to cancel the
+        // real authorization flow.
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "GET /callback?code=good-code&state={expected_for_client} HTTP/1.1\r\nHost: localhost\r\n\r\n"
         );
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let _ = client.read_to_end(&mut buf).await;
+
+        let result = server.await.unwrap();
+        assert_eq!(result.unwrap(), "good-code");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_callback_ignores_forged_error_and_slow_client() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let expected = super::generate_oauth_state();
+        let expected_for_client = expected.clone();
+        let server = tokio::spawn(async move {
+            super::wait_for_callback_with_state(
+                listener,
+                "/callback",
+                "code",
+                "Test",
+                Some(&expected),
+            )
+            .await
+        });
+
+        // Hold one accepted connection without sending a request line.
+        let _slow_client = TcpStream::connect(addr).await.unwrap();
+
+        // An attacker cannot terminate the flow by supplying an error under a
+        // state value they do not possess.
+        let mut forged = TcpStream::connect(addr).await.unwrap();
+        forged
+            .write_all(
+                b"GET /callback?error=access_denied&state=attacker HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        let _ = forged.read_to_end(&mut response).await;
+
+        let mut valid = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "GET /callback?code=good-code&state={expected_for_client} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        );
+        valid.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        let _ = valid.read_to_end(&mut response).await;
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("slow peer must not monopolize the callback listener")
+            .unwrap();
+        assert_eq!(result.unwrap(), "good-code");
     }
 
     #[tokio::test]

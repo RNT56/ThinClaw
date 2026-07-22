@@ -42,6 +42,9 @@ pub struct PromptManageParams {
 pub struct PromptManageTargetResolution {
     pub resolved_target: String,
     pub timezone_sync_target: bool,
+    /// Actor whose private USER.md owns the timezone. `None` denotes the
+    /// principal-shared USER.md timezone.
+    pub timezone_actor_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -801,10 +804,9 @@ pub fn prompt_manage_user_target(
     metadata: &serde_json::Value,
     actor_id: Option<&str>,
 ) -> Result<String, ToolError> {
-    let actor_id = metadata
-        .get("actor_id")
-        .and_then(|v| v.as_str())
-        .or(actor_id);
+    // `actor_id` is carried by JobContext and was canonicalized at ingress.
+    // Metadata is compatibility-only and must never be able to redirect a
+    // mutation to a sibling actor.
     let conversation_kind = metadata
         .get("conversation_kind")
         .or_else(|| metadata.get("chat_type"))
@@ -813,11 +815,29 @@ pub fn prompt_manage_user_target(
         .to_ascii_lowercase();
     let is_group = matches!(
         conversation_kind.as_str(),
-        "group" | "channel" | "supergroup"
+        "group" | "group_chat" | "channel" | "supergroup" | "room" | "guild"
     );
 
+    if is_group {
+        return Err(ToolError::NotAuthorized(
+            "USER prompt mutation is not available from a group conversation".to_string(),
+        ));
+    }
+
     match scope {
-        "shared" => Ok(paths::USER.to_string()),
+        "shared" => {
+            if metadata
+                .get("principal_admin")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                Ok(paths::USER.to_string())
+            } else {
+                Err(ToolError::NotAuthorized(
+                    "scope='shared' requires principal-admin authorization".to_string(),
+                ))
+            }
+        }
         "actor" => {
             let Some(actor_id) = actor_id else {
                 return Err(ToolError::InvalidParameters(
@@ -844,35 +864,40 @@ pub fn resolve_prompt_manage_target(
     scope: &str,
     metadata: &serde_json::Value,
     actor_id: Option<&str>,
-    user_id: &str,
+    _user_id: &str,
 ) -> Result<PromptManageTargetResolution, ToolError> {
+    let principal_admin = metadata
+        .get("principal_admin")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if target != paths::USER && !principal_admin {
+        return Err(ToolError::NotAuthorized(format!(
+            "mutating '{}' requires principal-admin authorization",
+            target
+        )));
+    }
     let resolved_target = if target == paths::USER {
         prompt_manage_user_target(scope, metadata, actor_id)?
     } else {
         target.to_string()
     };
-    let owner_actor_user = if target == paths::USER {
-        Some(paths::actor_user(user_id))
-    } else {
-        None
-    };
-    let timezone_sync_target = target == paths::USER
-        && (resolved_target == paths::USER
-            || owner_actor_user
-                .as_deref()
-                .is_some_and(|path| resolved_target == path));
+    let timezone_sync_target = target == paths::USER;
+    let timezone_actor_id = (timezone_sync_target && resolved_target != paths::USER)
+        .then(|| actor_id.map(str::to_string))
+        .flatten();
 
     Ok(PromptManageTargetResolution {
         resolved_target,
         timezone_sync_target,
+        timezone_actor_id,
     })
 }
 
 pub fn validate_relative_skill_path(path: &str) -> Result<std::path::PathBuf, ToolError> {
     let trimmed = path.trim().trim_start_matches('/');
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.len() > 1024 || trimmed.chars().any(char::is_control) {
         return Err(ToolError::InvalidParameters(
-            "path cannot be empty".to_string(),
+            "path must be non-empty, bounded, and contain no control characters".to_string(),
         ));
     }
 
@@ -1326,38 +1351,66 @@ mod tests {
             .unwrap(),
             paths::actor_user("actor-1")
         );
-        assert_eq!(
+        assert!(
             prompt_manage_user_target(
                 "auto",
                 &serde_json::json!({ "conversation_kind": "group" }),
                 Some("actor-1")
             )
-            .unwrap(),
-            paths::USER
+            .is_err()
         );
         assert!(prompt_manage_user_target("actor", &serde_json::json!({}), None).is_err());
+        assert_eq!(
+            prompt_manage_user_target(
+                "actor",
+                &serde_json::json!({
+                    "conversation_kind": "direct",
+                    "actor_id": "spoofed-sibling"
+                }),
+                Some("canonical-actor")
+            )
+            .unwrap(),
+            paths::actor_user("canonical-actor")
+        );
+        assert!(
+            prompt_manage_user_target(
+                "actor",
+                &serde_json::json!({
+                    "conversation_kind": "direct",
+                    "actor_id": "metadata-only"
+                }),
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn prompt_manage_target_resolution_marks_timezone_targets() {
-        let direct = serde_json::json!({ "conversation_kind": "direct" });
+        let direct = serde_json::json!({
+            "conversation_kind": "direct",
+            "principal_admin": true
+        });
         let actor_user =
             resolve_prompt_manage_target(paths::USER, "auto", &direct, Some("user-1"), "user-1")
                 .unwrap();
         assert_eq!(actor_user.resolved_target, paths::actor_user("user-1"));
         assert!(actor_user.timezone_sync_target);
+        assert_eq!(actor_user.timezone_actor_id.as_deref(), Some("user-1"));
 
         let other_actor =
             resolve_prompt_manage_target(paths::USER, "auto", &direct, Some("actor-2"), "user-1")
                 .unwrap();
         assert_eq!(other_actor.resolved_target, paths::actor_user("actor-2"));
-        assert!(!other_actor.timezone_sync_target);
+        assert!(other_actor.timezone_sync_target);
+        assert_eq!(other_actor.timezone_actor_id.as_deref(), Some("actor-2"));
 
         let soul =
             resolve_prompt_manage_target(paths::SOUL, "auto", &direct, Some("user-1"), "user-1")
                 .unwrap();
         assert_eq!(soul.resolved_target, paths::SOUL);
         assert!(!soul.timezone_sync_target);
+        assert!(soul.timezone_actor_id.is_none());
     }
 
     #[test]

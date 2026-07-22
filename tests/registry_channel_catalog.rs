@@ -166,7 +166,7 @@ fn wave6_channel_setup_descriptors_match_auth_summary() {
 
         if let Some(endpoint) = &caps.setup.validation_endpoint {
             assert!(
-                endpoint.starts_with("http://") || endpoint.starts_with("https://"),
+                endpoint.url().starts_with("http://") || endpoint.url().starts_with("https://"),
                 "{name} validation endpoint should be an HTTP(S) URL template"
             );
         }

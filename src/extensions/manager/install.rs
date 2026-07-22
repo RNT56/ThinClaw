@@ -12,6 +12,132 @@ use thinclaw_tools::builtin::extension_tools::{CombinedInstallError, FallbackDec
 use super::ExtensionManager;
 use super::core::{install_error_kind, install_outcome};
 
+async fn download_extension_bytes(url: &str, max_bytes: usize) -> Result<Vec<u8>, ExtensionError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        download_extension_bytes_inner(url, max_bytes),
+    )
+    .await
+    .map_err(|_| ExtensionError::DownloadFailed("extension download timed out".to_string()))?
+}
+
+async fn download_extension_bytes_inner(
+    url: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ExtensionError> {
+    let mut current = url.to_string();
+    for redirect_count in 0..=5 {
+        let guarded = thinclaw_tools_core::validate_outbound_url_pinned_async(
+            &current,
+            &thinclaw_tools_core::OutboundUrlGuardOptions {
+                require_https: true,
+                upgrade_http_to_https: false,
+                allowlist: Vec::new(),
+            },
+        )
+        .await
+        .map_err(|error| ExtensionError::InvalidUrl(error.to_string()))?;
+        if guarded.url.fragment().is_some() {
+            return Err(ExtensionError::InvalidUrl(
+                "extension download URLs cannot contain fragments".to_string(),
+            ));
+        }
+
+        let host = guarded.url.host_str().ok_or_else(|| {
+            ExtensionError::InvalidUrl("extension download URL has no host".to_string())
+        })?;
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if !guarded.pinned_addrs.is_empty() {
+            builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+        }
+        let client = builder
+            .build()
+            .map_err(|error| ExtensionError::DownloadFailed(error.to_string()))?;
+        let response = client
+            .get(guarded.url.clone())
+            .send()
+            .await
+            .map_err(|error| ExtensionError::DownloadFailed(error.without_url().to_string()))?;
+
+        if response.status().is_redirection() {
+            if redirect_count == 5 {
+                return Err(ExtensionError::DownloadFailed(
+                    "extension download exceeded 5 redirects".to_string(),
+                ));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .ok_or_else(|| {
+                    ExtensionError::DownloadFailed(
+                        "extension redirect omitted its Location header".to_string(),
+                    )
+                })?
+                .to_str()
+                .map_err(|_| {
+                    ExtensionError::DownloadFailed(
+                        "extension redirect Location is not valid text".to_string(),
+                    )
+                })?;
+            current = guarded
+                .url
+                .join(location)
+                .map_err(|error| ExtensionError::InvalidUrl(error.to_string()))?
+                .to_string();
+            continue;
+        }
+
+        if !response.status().is_success() {
+            return Err(ExtensionError::DownloadFailed(format!(
+                "extension download returned HTTP {}",
+                response.status()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > u64::try_from(max_bytes).unwrap_or(u64::MAX))
+        {
+            return Err(ExtensionError::InstallFailed(format!(
+                "Extension download exceeds the {max_bytes}-byte limit"
+            )));
+        }
+        return crate::http_response::bounded_bytes(response, max_bytes)
+            .await
+            .map_err(|error| ExtensionError::DownloadFailed(error.to_string()));
+    }
+    Err(ExtensionError::DownloadFailed(
+        "extension redirect processing failed".to_string(),
+    ))
+}
+
+fn read_extension_archive_entry(
+    entry: &mut impl std::io::Read,
+    limit: usize,
+    filename: &str,
+) -> Result<Vec<u8>, ExtensionError> {
+    use std::io::Read as _;
+
+    let mut data = Vec::new();
+    entry
+        .take(limit as u64 + 1)
+        .read_to_end(&mut data)
+        .map_err(|error| {
+            ExtensionError::InstallFailed(format!(
+                "Failed to read archive entry '{filename}': {error}"
+            ))
+        })?;
+    if data.len() > limit {
+        return Err(ExtensionError::InstallFailed(format!(
+            "Archive entry '{filename}' exceeds the {limit}-byte limit"
+        )));
+    }
+    Ok(data)
+}
+
 impl ExtensionManager {
     pub(super) async fn install_from_entry(
         &self,
@@ -84,12 +210,13 @@ impl ExtensionManager {
         ) {
             FallbackDecision::Return => primary_result,
             FallbackDecision::TryFallback => {
-                let primary_err =
-                    primary_result.expect_err("TryFallback requires primary install to fail");
-                let fallback = entry
-                    .fallback_source
-                    .as_ref()
-                    .expect("TryFallback requires fallback_source");
+                let (Err(primary_err), Some(fallback)) =
+                    (primary_result, entry.fallback_source.as_deref())
+                else {
+                    return Err(ExtensionError::Other(
+                        "extension fallback policy returned an inconsistent decision".to_string(),
+                    ));
+                };
                 tracing::info!(
                     extension = %entry.name,
                     primary_error = %primary_err,
@@ -212,6 +339,7 @@ impl ExtensionManager {
         name: &str,
         url: &str,
     ) -> Result<InstallResult, ExtensionError> {
+        let _operation = self.mcp_operation_lock.lock().await;
         // Check if already installed
         if self.get_mcp_server(name).await.is_ok() {
             return Err(ExtensionError::AlreadyInstalled(name.to_string()));
@@ -226,7 +354,11 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::Config(e.to_string()))?;
 
-        tracing::info!("Installed MCP server '{}' at {}", name, url);
+        tracing::info!(
+            "Installed MCP server '{}' at {}",
+            name,
+            crate::registry::installer::redacted_download_url(url)
+        );
 
         Ok(InstallResult {
             name: name.to_string(),
@@ -253,8 +385,20 @@ impl ExtensionManager {
         url: &str,
         capabilities_url: Option<&str>,
     ) -> Result<InstallResult, ExtensionError> {
-        self.download_and_install_wasm(name, url, capabilities_url, &self.wasm_tools_dir)
-            .await?;
+        if thinclaw_tools::registry::PROTECTED_TOOL_NAMES.contains(&name) {
+            return Err(ExtensionError::InstallFailed(format!(
+                "WASM tool '{}' conflicts with a protected built-in tool name",
+                name
+            )));
+        }
+        self.download_and_install_wasm(
+            name,
+            url,
+            capabilities_url,
+            &self.wasm_tools_dir,
+            ExtensionKind::WasmTool,
+        )
+        .await?;
 
         Ok(InstallResult {
             name: name.to_string(),
@@ -269,8 +413,14 @@ impl ExtensionManager {
         url: &str,
         capabilities_url: Option<&str>,
     ) -> Result<InstallResult, ExtensionError> {
-        self.download_and_install_wasm(name, url, capabilities_url, &self.wasm_channels_dir)
-            .await?;
+        self.download_and_install_wasm(
+            name,
+            url,
+            capabilities_url,
+            &self.wasm_channels_dir,
+            ExtensionKind::WasmChannel,
+        )
+        .await?;
 
         Ok(InstallResult {
             name: name.to_string(),
@@ -292,131 +442,69 @@ impl ExtensionManager {
         url: &str,
         capabilities_url: Option<&str>,
         target_dir: &std::path::Path,
+        kind: ExtensionKind,
     ) -> Result<(), ExtensionError> {
-        // Require HTTPS to prevent downgrade attacks
-        if !url.starts_with("https://") {
-            return Err(ExtensionError::InstallFailed(
-                "Only HTTPS URLs are allowed for extension downloads".to_string(),
-            ));
-        }
-
         // 50 MB cap to prevent disk-fill DoS
         const MAX_DOWNLOAD_SIZE: usize = 50 * 1024 * 1024;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .map_err(|e| ExtensionError::DownloadFailed(e.to_string()))?;
-
-        tracing::debug!(extension = %name, url = %url, "Downloading WASM extension");
-
-        let response = client.get(url).send().await.map_err(|e| {
-            tracing::error!(extension = %name, url = %url, error = %e, "Download request failed");
-            ExtensionError::DownloadFailed(e.to_string())
-        })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            tracing::error!(
-                extension = %name,
-                url = %url,
-                status = %status,
-                "Download returned non-success HTTP status"
-            );
-            return Err(ExtensionError::DownloadFailed(format!(
-                "HTTP {} from {}",
-                status, url
-            )));
-        }
-
-        // Check Content-Length header before downloading the full body
-        if let Some(len) = response.content_length()
-            && len as usize > MAX_DOWNLOAD_SIZE
-        {
-            return Err(ExtensionError::InstallFailed(format!(
-                "Download too large ({} bytes, max {} bytes)",
-                len, MAX_DOWNLOAD_SIZE
-            )));
-        }
-
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| ExtensionError::DownloadFailed(e.to_string()))?;
-
-        if bytes.len() > MAX_DOWNLOAD_SIZE {
-            return Err(ExtensionError::InstallFailed(format!(
-                "Download too large ({} bytes, max {} bytes)",
-                bytes.len(),
-                MAX_DOWNLOAD_SIZE
-            )));
-        }
-
-        // Ensure target directory exists
-        tokio::fs::create_dir_all(target_dir)
-            .await
-            .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+        tracing::debug!(
+            extension = %name,
+            url = %crate::registry::installer::redacted_download_url(url),
+            "Downloading WASM extension"
+        );
+        let bytes = download_extension_bytes(url, MAX_DOWNLOAD_SIZE).await?;
 
         let wasm_path = target_dir.join(format!("{}.wasm", name));
         let caps_path = target_dir.join(format!("{}.capabilities.json", name));
 
-        // Detect format: gzip (tar.gz bundle) or bare WASM
-        if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
-            // tar.gz bundle: extract {name}.wasm and {name}.capabilities.json
-            self.extract_wasm_tar_gz(name, &bytes, &wasm_path, &caps_path)?;
+        // Decode and validate all bytes before publishing either file.
+        let (wasm_bytes, capabilities_bytes) = if bytes.starts_with(&[0x1f, 0x8b]) {
+            self.extract_wasm_tar_gz(name, &bytes)?
         } else {
-            // Bare WASM file: validate magic number
-            if bytes.len() < 4 || &bytes[..4] != b"\0asm" {
+            let capabilities = match capabilities_url {
+                Some(caps_url) => {
+                    const MAX_CAPS_SIZE: usize = 1024 * 1024;
+                    Some(download_extension_bytes(caps_url, MAX_CAPS_SIZE).await?)
+                }
+                None => None,
+            };
+            (bytes, capabilities)
+        };
+
+        let manifest_kind = match kind {
+            ExtensionKind::WasmTool => crate::registry::manifest::ManifestKind::Tool,
+            ExtensionKind::WasmChannel => crate::registry::manifest::ManifestKind::Channel,
+            _ => {
                 return Err(ExtensionError::InstallFailed(
-                    "Downloaded file is not a valid WASM binary (bad magic number)".to_string(),
+                    "WASM installer received a non-WASM extension kind".to_string(),
                 ));
             }
-
-            tokio::fs::write(&wasm_path, &bytes)
-                .await
-                .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
-
-            // Download capabilities separately if URL provided
-            if let Some(caps_url) = capabilities_url {
-                const MAX_CAPS_SIZE: usize = 1024 * 1024; // 1 MB
-                match client.get(caps_url).send().await {
-                    Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                        Ok(caps_bytes) if caps_bytes.len() <= MAX_CAPS_SIZE => {
-                            if let Err(e) = tokio::fs::write(&caps_path, &caps_bytes).await {
-                                tracing::warn!(
-                                    "Failed to write capabilities for '{}': {}",
-                                    name,
-                                    e
-                                );
-                            }
-                        }
-                        Ok(caps_bytes) => {
-                            tracing::warn!(
-                                "Capabilities file for '{}' too large ({} bytes, max {})",
-                                name,
-                                caps_bytes.len(),
-                                MAX_CAPS_SIZE
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to download capabilities for '{}': {}", name, e);
-                        }
-                    },
-                    _ => {
-                        tracing::warn!(
-                            "Failed to download capabilities for '{}' from {}",
-                            name,
-                            caps_url
-                        );
-                    }
-                }
-            }
+        };
+        crate::registry::installer::validate_wasm_payload(&wasm_bytes, url)
+            .map_err(|error| ExtensionError::InstallFailed(error.to_string()))?;
+        if let Some(capabilities) = capabilities_bytes.as_deref() {
+            crate::registry::installer::validate_capabilities_payload(
+                manifest_kind,
+                name,
+                capabilities,
+                capabilities_url.unwrap_or(url),
+            )
+            .map_err(|error| ExtensionError::InstallFailed(error.to_string()))?;
         }
+        crate::registry::installer::publish_extension_files(
+            wasm_path.clone(),
+            caps_path,
+            wasm_bytes,
+            capabilities_bytes,
+            true,
+        )
+        .await
+        .map_err(|error| ExtensionError::InstallFailed(error.to_string()))?;
 
         tracing::info!(
             "Installed WASM extension '{}' from {} to {}",
             name,
-            url,
+            crate::registry::installer::redacted_download_url(url),
             wasm_path.display()
         );
 
@@ -428,13 +516,9 @@ impl ExtensionManager {
         &self,
         name: &str,
         bytes: &[u8],
-        target_wasm: &std::path::Path,
-        target_caps: &std::path::Path,
-    ) -> Result<(), ExtensionError> {
+    ) -> Result<(Vec<u8>, Option<Vec<u8>>), ExtensionError> {
         use flate2::read::GzDecoder;
         use tar::Archive;
-
-        use std::io::Read as _;
 
         let decoder = GzDecoder::new(bytes);
         let mut archive = Archive::new(decoder);
@@ -443,28 +527,27 @@ impl ExtensionManager {
         #[cfg(any(unix, target_os = "redox"))]
         archive.set_unpack_xattrs(false);
 
-        // 100 MB cap on decompressed entry size to prevent decompression bombs
-        const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
+        const MAX_ARCHIVE_ENTRIES: usize = 1024;
+        const MAX_WASM_SIZE: usize = 50 * 1024 * 1024;
+        const MAX_CAPS_SIZE: usize = 1024 * 1024;
 
         let wasm_filename = format!("{}.wasm", name);
         let caps_filename = format!("{}.capabilities.json", name);
-        let mut found_wasm = false;
+        let mut wasm = None;
+        let mut capabilities = None;
 
         let entries = archive
             .entries()
             .map_err(|e| ExtensionError::InstallFailed(format!("Bad tar.gz archive: {}", e)))?;
 
-        for entry in entries {
-            let mut entry = entry
-                .map_err(|e| ExtensionError::InstallFailed(format!("Bad tar.gz entry: {}", e)))?;
-
-            if entry.size() > MAX_ENTRY_SIZE {
+        for (entry_index, entry) in entries.enumerate() {
+            if entry_index >= MAX_ARCHIVE_ENTRIES {
                 return Err(ExtensionError::InstallFailed(format!(
-                    "Archive entry too large ({} bytes, max {} bytes)",
-                    entry.size(),
-                    MAX_ENTRY_SIZE
+                    "Archive exceeds the {MAX_ARCHIVE_ENTRIES}-entry limit"
                 )));
             }
+            let mut entry = entry
+                .map_err(|e| ExtensionError::InstallFailed(format!("Bad tar.gz entry: {}", e)))?;
 
             let entry_path = entry
                 .path()
@@ -479,34 +562,49 @@ impl ExtensionManager {
                 .unwrap_or("");
 
             if filename == wasm_filename {
-                let mut data = Vec::with_capacity(entry.size() as usize);
-                std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
-                    .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
-                std::fs::write(target_wasm, &data)
-                    .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
-                found_wasm = true;
+                if wasm.is_some()
+                    || !entry.header().entry_type().is_file()
+                    || entry.size() > MAX_WASM_SIZE as u64
+                {
+                    return Err(ExtensionError::InstallFailed(format!(
+                        "Archive entry '{wasm_filename}' is duplicate, non-regular, or oversized"
+                    )));
+                }
+                wasm = Some(read_extension_archive_entry(
+                    &mut entry,
+                    MAX_WASM_SIZE,
+                    &wasm_filename,
+                )?);
             } else if filename == caps_filename {
-                let mut data = Vec::with_capacity(entry.size() as usize);
-                std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
-                    .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
-                std::fs::write(target_caps, &data)
-                    .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+                if capabilities.is_some()
+                    || !entry.header().entry_type().is_file()
+                    || entry.size() > MAX_CAPS_SIZE as u64
+                {
+                    return Err(ExtensionError::InstallFailed(format!(
+                        "Archive entry '{caps_filename}' is duplicate, non-regular, or oversized"
+                    )));
+                }
+                capabilities = Some(read_extension_archive_entry(
+                    &mut entry,
+                    MAX_CAPS_SIZE,
+                    &caps_filename,
+                )?);
             }
         }
 
-        if !found_wasm {
-            return Err(ExtensionError::InstallFailed(format!(
+        let wasm = wasm.ok_or_else(|| {
+            ExtensionError::InstallFailed(format!(
                 "tar.gz archive does not contain '{}'",
                 wasm_filename
-            )));
-        }
+            ))
+        })?;
 
-        Ok(())
+        Ok((wasm, capabilities))
     }
 
     /// Install a WASM extension from local build artifacts (WasmBuildable source).
     ///
-    /// Resolves the build directory (relative to `CARGO_MANIFEST_DIR` or absolute),
+    /// Resolves the build directory relative to `CARGO_MANIFEST_DIR`,
     /// looks for the compiled WASM artifact, and copies it (plus capabilities.json)
     /// to the install directory. Falls back to an error if artifacts don't exist.
     async fn install_wasm_from_buildable(
@@ -519,21 +617,53 @@ impl ExtensionManager {
     ) -> Result<InstallResult, ExtensionError> {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
 
-        // Resolve build directory
-        let resolved_dir = match build_dir {
-            Some(dir) => {
-                let p = std::path::Path::new(dir);
-                if p.is_absolute() {
-                    p.to_path_buf()
-                } else {
-                    manifest_dir.join(dir)
-                }
-            }
-            None => manifest_dir.to_path_buf(),
-        };
+        let requested_dir = std::path::Path::new(build_dir.unwrap_or("."));
+        if requested_dir.is_absolute()
+            || requested_dir.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(ExtensionError::InstallFailed(
+                "WASM build directory must remain inside the ThinClaw source checkout".to_string(),
+            ));
+        }
+        let manifest_root = std::fs::canonicalize(manifest_dir).map_err(|error| {
+            ExtensionError::InstallFailed(format!(
+                "Failed to resolve ThinClaw source checkout: {error}"
+            ))
+        })?;
+        let resolved_dir =
+            std::fs::canonicalize(manifest_dir.join(requested_dir)).map_err(|error| {
+                ExtensionError::InstallFailed(format!(
+                    "Failed to resolve WASM build directory '{}': {error}",
+                    requested_dir.display()
+                ))
+            })?;
+        if !resolved_dir.starts_with(&manifest_root) || !resolved_dir.is_dir() {
+            return Err(ExtensionError::InstallFailed(
+                "WASM build directory must be a real directory inside the ThinClaw source checkout"
+                    .to_string(),
+            ));
+        }
 
         // Determine the binary name to look for
         let binary_name = crate_name.unwrap_or(name);
+        if binary_name.is_empty()
+            || binary_name.len() > 128
+            || !binary_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(ExtensionError::InstallFailed(
+                "WASM crate name must contain only ASCII letters, digits, hyphens, or underscores"
+                    .to_string(),
+            ));
+        }
 
         let wasm_src =
             crate::registry::artifacts::find_wasm_artifact(&resolved_dir, binary_name, "release")
@@ -553,6 +683,15 @@ impl ExtensionManager {
             &resolved_dir,
             name,
             target_dir,
+            match kind {
+                ExtensionKind::WasmTool => crate::registry::manifest::ManifestKind::Tool,
+                ExtensionKind::WasmChannel => crate::registry::manifest::ManifestKind::Channel,
+                _ => {
+                    return Err(ExtensionError::InstallFailed(
+                        "WASM build installer received a non-WASM extension kind".to_string(),
+                    ));
+                }
+            },
             true,
         )
         .await

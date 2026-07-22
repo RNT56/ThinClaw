@@ -58,6 +58,13 @@ fn overlay_from_metadata_value(metadata: &serde_json::Value) -> Option<SessionPe
     serde_json::from_value(entry.clone()).ok()
 }
 
+fn job_belongs_to_identity(
+    job: &crate::context::JobContext,
+    identity: &crate::identity::ResolvedIdentity,
+) -> bool {
+    job.principal_id == identity.principal_id && job.owner_actor_id() == identity.actor_id
+}
+
 /// Persist the session personality overlay for `thread_id` so hydration can
 /// restore it after a restart. Mirrors the `/model` command's use of
 /// `mutate_thread_runtime`, but writes a dedicated conversation-metadata key
@@ -117,16 +124,20 @@ impl Agent {
                     .await?
             }
             MessageIntent::CheckJobStatus { job_id } => {
-                self.handle_check_status(&message.user_id, job_id).await?
+                self.handle_check_status(&message.resolved_identity(), job_id)
+                    .await?
             }
             MessageIntent::CancelJob { job_id } => {
-                self.handle_cancel_job(&message.user_id, &job_id).await?
+                self.handle_cancel_job(&message.resolved_identity(), &job_id)
+                    .await?
             }
             MessageIntent::ListJobs { filter } => {
-                self.handle_list_jobs(&message.user_id, filter).await?
+                self.handle_list_jobs(&message.resolved_identity(), filter)
+                    .await?
             }
             MessageIntent::HelpJob { job_id } => {
-                self.handle_help_job(&message.user_id, &job_id).await?
+                self.handle_help_job(&message.resolved_identity(), &job_id)
+                    .await?
             }
             MessageIntent::Command { command, args } => {
                 match self
@@ -150,6 +161,48 @@ impl Agent {
         category: Option<String>,
     ) -> Result<String, Error> {
         let identity = message.resolved_identity();
+        let mut metadata = match message.metadata.as_object() {
+            Some(metadata) => metadata.clone(),
+            None => serde_json::Map::new(),
+        };
+        metadata.insert(
+            "channel".to_string(),
+            serde_json::json!(message.channel.clone()),
+        );
+        if let Some(thread_id) = message.thread_id.as_deref() {
+            metadata.insert("thread_id".to_string(), serde_json::json!(thread_id));
+        }
+        metadata.insert(
+            "principal_id".to_string(),
+            serde_json::json!(identity.principal_id.clone()),
+        );
+        metadata.insert(
+            "actor_id".to_string(),
+            serde_json::json!(identity.actor_id.clone()),
+        );
+        metadata.insert(
+            "conversation_kind".to_string(),
+            serde_json::json!(identity.conversation_kind.as_str()),
+        );
+        metadata.insert(
+            "conversation_scope_id".to_string(),
+            serde_json::json!(identity.conversation_scope_id.to_string()),
+        );
+        metadata.insert(
+            "stable_external_conversation_key".to_string(),
+            serde_json::json!(identity.stable_external_conversation_key.clone()),
+        );
+        if let Some(workspace) = self.workspace() {
+            metadata.insert(
+                "user_timezone".to_string(),
+                serde_json::json!(
+                    workspace
+                        .effective_timezone_for_identity(&identity)
+                        .await
+                        .to_string()
+                ),
+            );
+        }
         let job_id = self
             .scheduler
             .dispatch_job_for_identity(
@@ -157,7 +210,7 @@ impl Agent {
                 &identity.actor_id,
                 &title,
                 &description,
-                None,
+                Some(serde_json::Value::Object(metadata)),
             )
             .await?;
 
@@ -178,7 +231,7 @@ impl Agent {
 
     async fn handle_check_status(
         &self,
-        user_id: &str,
+        identity: &crate::identity::ResolvedIdentity,
         job_id: Option<String>,
     ) -> Result<String, Error> {
         match job_id {
@@ -187,7 +240,7 @@ impl Agent {
                     .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
                 let ctx = self.context_manager.get_context(uuid).await?;
-                if ctx.user_id != user_id {
+                if !job_belongs_to_identity(&ctx, identity) {
                     return Err(crate::error::JobError::NotFound { id: uuid }.into());
                 }
 
@@ -201,7 +254,10 @@ impl Agent {
             }
             None => {
                 // Show summary of all jobs
-                let summary = self.context_manager.summary_for(user_id).await;
+                let summary = self
+                    .context_manager
+                    .summary_for_actor(&identity.principal_id, &identity.actor_id)
+                    .await;
                 Ok(command_catalog::jobs_summary_text(
                     command_catalog::JobSummaryView {
                         total: summary.total,
@@ -215,12 +271,16 @@ impl Agent {
         }
     }
 
-    async fn handle_cancel_job(&self, user_id: &str, job_id: &str) -> Result<String, Error> {
+    async fn handle_cancel_job(
+        &self,
+        identity: &crate::identity::ResolvedIdentity,
+        job_id: &str,
+    ) -> Result<String, Error> {
         let uuid = Uuid::parse_str(job_id)
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != user_id {
+        if !job_belongs_to_identity(&ctx, identity) {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
@@ -231,15 +291,18 @@ impl Agent {
 
     async fn handle_list_jobs(
         &self,
-        user_id: &str,
+        identity: &crate::identity::ResolvedIdentity,
         _filter: Option<String>,
     ) -> Result<String, Error> {
-        let jobs = self.context_manager.all_jobs_for(user_id).await;
+        let jobs = self
+            .context_manager
+            .all_jobs_for_actor(&identity.principal_id, &identity.actor_id)
+            .await;
 
         let mut visible_jobs = Vec::new();
         for job_id in jobs {
             if let Ok(ctx) = self.context_manager.get_context(job_id).await
-                && ctx.user_id == user_id
+                && job_belongs_to_identity(&ctx, identity)
             {
                 visible_jobs.push((job_id, ctx.title, ctx.state));
             }
@@ -248,12 +311,16 @@ impl Agent {
         Ok(command_catalog::job_list_text(visible_jobs))
     }
 
-    async fn handle_help_job(&self, user_id: &str, job_id: &str) -> Result<String, Error> {
+    async fn handle_help_job(
+        &self,
+        identity: &crate::identity::ResolvedIdentity,
+        job_id: &str,
+    ) -> Result<String, Error> {
         let uuid = Uuid::parse_str(job_id)
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != user_id {
+        if !job_belongs_to_identity(&ctx, identity) {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
@@ -280,7 +347,10 @@ impl Agent {
     }
 
     /// Trigger a manual heartbeat check.
-    pub(super) async fn process_heartbeat(&self) -> Result<SubmissionResult, Error> {
+    pub(super) async fn process_heartbeat(
+        &self,
+        message: &IncomingMessage,
+    ) -> Result<SubmissionResult, Error> {
         let Some(workspace) = self.workspace() else {
             return Ok(SubmissionResult::error(
                 "Heartbeat requires a workspace (database must be connected).",
@@ -306,10 +376,16 @@ impl Agent {
             .unwrap_or_default()
             .to_workspace_config();
 
-        let mut runner = crate::agent::HeartbeatRunner::new(
+        let identity = message.resolved_identity();
+        let workspace = Arc::new(crate::workspace::AuthorizedWorkspace::conversation(
+            workspace,
+            &identity,
+            &message.channel,
+        ));
+        let mut runner = crate::agent::HeartbeatRunner::new_authorized(
             runtime_heartbeat,
             hygiene_cfg,
-            workspace.clone(),
+            workspace,
             self.llm().clone(),
         );
         if let Some(ref tracker) = self.deps.cost_tracker {
@@ -337,6 +413,7 @@ impl Agent {
     /// Summarize the current thread's conversation.
     pub(super) async fn process_summarize(
         &self,
+        message: &IncomingMessage,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
@@ -381,16 +458,8 @@ impl Agent {
             serde_json::to_string_pretty(&transcript).unwrap_or_default(),
         ));
 
-        let request = crate::llm::CompletionRequest::new(context)
-            .with_max_tokens(512)
-            .with_temperature(0.3);
-
-        let mut reasoning = Reasoning::new(self.llm().clone());
-        if let Some(ref tracker) = self.deps.cost_tracker {
-            reasoning = reasoning.with_cost_tracker(std::sync::Arc::clone(tracker));
-        }
-        match reasoning.complete(request).await {
-            Ok((text, _usage)) => Ok(SubmissionResult::response(
+        match self.complete_command_llm(message, context, 512, 0.3).await {
+            Ok(text) => Ok(SubmissionResult::response(
                 command_catalog::thread_summary_text(&text),
             )),
             Err(e) => Ok(SubmissionResult::error(
@@ -402,6 +471,7 @@ impl Agent {
     /// Suggest next steps based on the current thread.
     pub(super) async fn process_suggest(
         &self,
+        message: &IncomingMessage,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
@@ -444,22 +514,198 @@ impl Agent {
             serde_json::to_string_pretty(&transcript).unwrap_or_default(),
         ));
 
-        let request = crate::llm::CompletionRequest::new(context)
-            .with_max_tokens(512)
-            .with_temperature(0.5);
-
-        let mut reasoning = Reasoning::new(self.llm().clone());
-        if let Some(ref tracker) = self.deps.cost_tracker {
-            reasoning = reasoning.with_cost_tracker(std::sync::Arc::clone(tracker));
-        }
-        match reasoning.complete(request).await {
-            Ok((text, _usage)) => Ok(SubmissionResult::response(
+        match self.complete_command_llm(message, context, 512, 0.5).await {
+            Ok(text) => Ok(SubmissionResult::response(
                 command_catalog::suggested_next_steps_text(&text),
             )),
             Err(e) => Ok(SubmissionResult::error(
                 command_catalog::suggest_failed_text(e),
             )),
         }
+    }
+
+    /// Execute a command-scoped LLM call through the same input/output policy
+    /// hooks as the primary dispatcher. Auxiliary commands must not become a
+    /// policy bypass merely because they do not use the tool loop.
+    async fn complete_command_llm(
+        &self,
+        message: &IncomingMessage,
+        mut context: Vec<ChatMessage>,
+        max_tokens: u32,
+        temperature: f32,
+    ) -> Result<String, Error> {
+        let model = self.llm().active_model_name();
+        let original_system = context
+            .iter()
+            .find(|item| item.role == crate::llm::Role::System)
+            .map(|item| item.content.clone());
+        let original_user = context
+            .iter()
+            .rev()
+            .find(|item| item.is_user_instruction())
+            .map(|item| item.content.clone())
+            .unwrap_or_default();
+        let input_event = crate::hooks::HookEvent::LlmInput {
+            model: model.clone(),
+            system_message: original_system.clone(),
+            user_message: original_user.clone(),
+            message_count: context.len(),
+            user_id: message.user_id.clone(),
+        };
+        match self.hooks().run_returning_event(&input_event).await {
+            Ok((crate::hooks::HookOutcome::Continue { modified }, final_event)) => {
+                if let Some(modified) = modified
+                    && let Some(user) = context
+                        .iter_mut()
+                        .rev()
+                        .find(|item| item.is_user_instruction())
+                {
+                    user.content = modified;
+                }
+                if let crate::hooks::HookEvent::LlmInput {
+                    system_message,
+                    user_message,
+                    ..
+                } = final_event
+                {
+                    if user_message != original_user
+                        && let Some(user) = context
+                            .iter_mut()
+                            .rev()
+                            .find(|item| item.is_user_instruction())
+                    {
+                        user.content = user_message;
+                    }
+                    if system_message != original_system
+                        && let Some(system_message) = system_message
+                        && let Some(system) = context
+                            .iter_mut()
+                            .find(|item| item.role == crate::llm::Role::System)
+                    {
+                        system.content = system_message;
+                    }
+                }
+            }
+            Ok((crate::hooks::HookOutcome::Reject { reason }, _))
+            | Err(crate::hooks::HookError::Rejected { reason }) => {
+                return Err(Error::Hook(crate::hooks::HookError::Rejected {
+                    reason: format!("BeforeLlmInput hook rejected: {reason}"),
+                }));
+            }
+            Err(error) => {
+                tracing::warn!(%error, "BeforeLlmInput hook failed open for command LLM call");
+            }
+        }
+
+        // `/summarize` and `/suggest` bypass the ordinary agentic-loop history
+        // cap. Enforce the active model's real request budget here after hooks
+        // have applied their final system-message rewrite; a count limit of 20
+        // messages is not a token limit when one turn can be very large.
+        let mut monitor = self.context_monitor_for_model(&model);
+        if let Ok(metadata) = self.llm().model_metadata().await
+            && let Some(provider_limit) = metadata.context_length.filter(|limit| *limit > 0)
+        {
+            // A custom/local endpoint can advertise a narrower window than
+            // the static catalog entry. The narrowest positive source is the
+            // only safe admission limit.
+            monitor = monitor.with_limit(monitor.limit().min(provider_limit as usize));
+        }
+        let safety_margin = monitor.limit().saturating_mul(
+            thinclaw_agent::context_monitor::AUXILIARY_CONTEXT_SAFETY_MARGIN_PERCENT as usize,
+        ) / 100;
+        let estimated_request_tokens = monitor
+            .estimate_tokens(&context)
+            .saturating_add(max_tokens as usize)
+            .saturating_add(safety_margin);
+        if estimated_request_tokens > monitor.limit() {
+            let evidence_indexes = context
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| item.untrusted_context_identity().map(|_| index))
+                .collect::<Vec<_>>();
+            if evidence_indexes.len() != 1 {
+                return Err(crate::error::LlmError::ContextLengthExceeded {
+                    used: estimated_request_tokens,
+                    limit: monitor.limit(),
+                }
+                .into());
+            }
+
+            let evidence_index = evidence_indexes[0];
+            let evidence = &context[evidence_index];
+            let Some((segment_id, source)) = evidence.untrusted_context_identity() else {
+                return Err(crate::error::LlmError::ContextLengthExceeded {
+                    used: estimated_request_tokens,
+                    limit: monitor.limit(),
+                }
+                .into());
+            };
+            let raw_content = evidence
+                .untrusted_context_raw_content()
+                .unwrap_or(evidence.content.as_str());
+            let fixed_messages = context
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| (index != evidence_index).then_some(item.clone()))
+                .collect::<Vec<_>>();
+            let Some(bounded) = thinclaw_agent::context_monitor::bound_recent_untrusted_context(
+                &monitor,
+                &fixed_messages,
+                segment_id,
+                source,
+                raw_content,
+                max_tokens as usize,
+                thinclaw_agent::context_monitor::AUXILIARY_CONTEXT_SAFETY_MARGIN_PERCENT,
+            ) else {
+                return Err(crate::error::LlmError::ContextLengthExceeded {
+                    used: estimated_request_tokens,
+                    limit: monitor.limit(),
+                }
+                .into());
+            };
+            tracing::info!(
+                model,
+                original_estimated_tokens = estimated_request_tokens,
+                bounded_input_tokens = bounded.estimated_input_tokens,
+                input_token_limit = bounded.input_token_limit,
+                retained_chars = bounded.retained_chars,
+                "Bounded auxiliary command evidence to the active model window"
+            );
+            context[evidence_index] = bounded.message;
+        }
+
+        let request = crate::llm::CompletionRequest::new(context)
+            .with_max_tokens(max_tokens)
+            .with_temperature(temperature);
+        let mut reasoning = Reasoning::new(self.llm().clone());
+        if let Some(ref tracker) = self.deps.cost_tracker {
+            reasoning = reasoning.with_cost_tracker(std::sync::Arc::clone(tracker));
+        }
+        let (mut text, usage) = reasoning.complete(request).await?;
+
+        let output_event = crate::hooks::HookEvent::LlmOutput {
+            model,
+            content: text.clone(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            user_id: message.user_id.clone(),
+        };
+        match self.hooks().run(&output_event).await {
+            Ok(crate::hooks::HookOutcome::Continue {
+                modified: Some(modified),
+            }) => text = modified,
+            Ok(crate::hooks::HookOutcome::Continue { modified: None }) => {}
+            Ok(crate::hooks::HookOutcome::Reject { reason })
+            | Err(crate::hooks::HookError::Rejected { reason }) => {
+                return Err(Error::Hook(crate::hooks::HookError::Rejected {
+                    reason: format!("AfterLlmOutput hook rejected: {reason}"),
+                }));
+            }
+            Err(error) => {
+                tracing::warn!(%error, "AfterLlmOutput hook failed open for command LLM call");
+            }
+        }
+        Ok(text)
     }
 
     /// Handle system commands that bypass thread-state checks entirely.
@@ -840,46 +1086,51 @@ impl Agent {
 
                 // Workspace sections (identity files)
                 if let Some(workspace) = ws {
-                    let paths = [
-                        ("SOUL.md (home)", "SOUL.md (home)"),
+                    let identity = message.resolved_identity();
+                    let principal_workspace =
+                        workspace.scoped_clone(identity.principal_id.clone(), workspace.agent_id());
+                    let conversation_workspace =
+                        crate::workspace::AuthorizedWorkspace::conversation(
+                            &principal_workspace,
+                            &identity,
+                            &message.channel,
+                        );
+
+                    let control_paths = [
                         (crate::workspace::paths::AGENTS, "AGENTS.md"),
                         (crate::workspace::paths::SOUL_LOCAL, "SOUL.local.md"),
-                        (crate::workspace::paths::USER, "USER.md"),
-                        (crate::workspace::paths::IDENTITY, "IDENTITY.md"),
-                        (crate::workspace::paths::MEMORY, "MEMORY.md"),
-                        (crate::workspace::paths::HEARTBEAT, "HEARTBEAT.md"),
+                        (crate::workspace::paths::IDENTITY, "IDENTITY.md (agent)"),
                         (crate::workspace::paths::BOOT, "BOOT.md"),
                     ];
-                    for (path, label) in paths {
-                        if path == "SOUL.md (home)" {
-                            match crate::identity::soul_store::read_home_soul() {
-                                Ok(content) if !content.is_empty() => {
-                                    let preview = if detail {
-                                        content
-                                    } else {
-                                        let first_line = content.lines().next().unwrap_or("");
-                                        format!("{} ({} chars)", first_line, content.len())
-                                    };
-                                    sections.push(command_catalog::ContextSourceSection::new(
-                                        label, true, preview,
-                                    ));
-                                }
-                                Ok(_) => {
-                                    sections.push(command_catalog::ContextSourceSection::new(
-                                        label, false, "(empty)",
-                                    ));
-                                }
-                                Err(_) => {
-                                    sections.push(command_catalog::ContextSourceSection::new(
-                                        label,
-                                        false,
-                                        "(not found)",
-                                    ));
-                                }
-                            }
-                            continue;
+
+                    match crate::identity::soul_store::read_home_soul() {
+                        Ok(content) if !content.is_empty() => {
+                            let preview = if detail {
+                                content
+                            } else {
+                                let first_line = content.lines().next().unwrap_or("");
+                                format!("{} ({} chars)", first_line, content.len())
+                            };
+                            sections.push(command_catalog::ContextSourceSection::new(
+                                "SOUL.md (home)",
+                                true,
+                                preview,
+                            ));
                         }
-                        match workspace.read(path).await {
+                        Ok(_) => sections.push(command_catalog::ContextSourceSection::new(
+                            "SOUL.md (home)",
+                            false,
+                            "(empty)",
+                        )),
+                        Err(_) => sections.push(command_catalog::ContextSourceSection::new(
+                            "SOUL.md (home)",
+                            false,
+                            "(not found)",
+                        )),
+                    }
+
+                    for (path, label) in control_paths {
+                        match principal_workspace.read(path).await {
                             Ok(doc) if !doc.content.is_empty() => {
                                 let preview = if detail {
                                     doc.content.clone()
@@ -903,6 +1154,44 @@ impl Agent {
                                     "(not found)",
                                 ));
                             }
+                        }
+                    }
+
+                    let mut conversation_paths = vec![
+                        (crate::workspace::paths::MEMORY, "MEMORY.md"),
+                        (crate::workspace::paths::HEARTBEAT, "HEARTBEAT.md"),
+                    ];
+                    if identity.conversation_kind == crate::identity::ConversationKind::Direct {
+                        conversation_paths.insert(0, (crate::workspace::paths::USER, "USER.md"));
+                        conversation_paths.insert(
+                            1,
+                            (
+                                crate::workspace::paths::IDENTITY,
+                                "IDENTITY.md (actor overlay)",
+                            ),
+                        );
+                    }
+                    for (path, label) in conversation_paths {
+                        match conversation_workspace.read(path).await {
+                            Ok(doc) if !doc.content.is_empty() => {
+                                let preview = if detail {
+                                    doc.content.clone()
+                                } else {
+                                    let first_line = doc.content.lines().next().unwrap_or("");
+                                    format!("{} ({} chars)", first_line, doc.content.len())
+                                };
+                                sections.push(command_catalog::ContextSourceSection::new(
+                                    label, true, preview,
+                                ));
+                            }
+                            Ok(_) => sections.push(command_catalog::ContextSourceSection::new(
+                                label, false, "(empty)",
+                            )),
+                            Err(_) => sections.push(command_catalog::ContextSourceSection::new(
+                                label,
+                                false,
+                                "(not found)",
+                            )),
                         }
                     }
                 } else {
@@ -1138,6 +1427,31 @@ impl Agent {
 #[cfg(test)]
 mod personality_overlay_persistence_tests {
     use super::*;
+
+    #[test]
+    fn job_ownership_requires_both_principal_and_actor() {
+        let job =
+            crate::context::JobContext::with_identity("household", "alice", "private job", "test");
+        let alice = crate::identity::resolved_identity_from_carried_context(
+            "household",
+            "alice",
+            crate::identity::ConversationKind::Direct,
+            None,
+            None,
+        )
+        .unwrap();
+        let sibling = crate::identity::resolved_identity_from_carried_context(
+            "household",
+            "bob",
+            crate::identity::ConversationKind::Direct,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(job_belongs_to_identity(&job, &alice));
+        assert!(!job_belongs_to_identity(&job, &sibling));
+    }
 
     #[test]
     fn overlay_round_trips_through_metadata_value() {

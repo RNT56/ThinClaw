@@ -5,7 +5,7 @@ use super::types::*;
 use std::collections::HashMap;
 
 pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
-    let client = reqwest::Client::new();
+    let client = super::http_client(api_key)?;
 
     let response = client
         .get("https://api.together.xyz/v1/models")
@@ -13,12 +13,6 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
         .send()
         .await
         .map_err(|e| format!("Together API request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("Together API error ({}): {}", status, body));
-    }
 
     #[derive(serde::Deserialize)]
     struct ModelData {
@@ -30,10 +24,7 @@ pub async fn discover(api_key: &str) -> Result<Vec<CloudModelEntry>, String> {
         model_type: Option<String>,
     }
 
-    let resp: Vec<ModelData> = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse Together models: {}", e))?;
+    let resp: Vec<ModelData> = super::bounded_json(response, "Together AI").await?;
 
     let models: Vec<CloudModelEntry> = resp
         .into_iter()

@@ -356,6 +356,15 @@ pub enum Command {
         model: String,
     },
 
+    /// Run the fixed-target sandbox network relay (internal use only).
+    #[cfg(feature = "docker-sandbox")]
+    #[command(name = "network-relay", hide = true)]
+    NetworkRelay {
+        /// Forward in LISTEN_PORT=host.docker.internal:TARGET_PORT form.
+        #[arg(long = "forward", required = true)]
+        forwards: Vec<String>,
+    },
+
     /// Run as a lease-scoped remote experiment runner (internal/automation use).
     ExperimentRunner {
         #[arg(long)]

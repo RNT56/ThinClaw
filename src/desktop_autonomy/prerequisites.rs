@@ -215,7 +215,7 @@ impl DesktopAutonomyManager {
                 }
                 let window_backend = if command_on_path("wmctrl") {
                     Some("wmctrl")
-                } else if python_module_on_path("pyatspi") {
+                } else if python_module_on_path("pyatspi").await {
                     Some("pyatspi")
                 } else {
                     None

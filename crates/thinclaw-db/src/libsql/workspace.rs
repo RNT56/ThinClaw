@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use libsql::params;
+use libsql::{TransactionBehavior, params};
 use uuid::Uuid;
 
 use super::{
@@ -20,6 +20,7 @@ use thinclaw_workspace::{
 use chrono::Utc;
 
 const LIBSQL_VECTOR_DIM: usize = 1536;
+const MAX_CHUNK_BACKFILL_RESULTS: usize = 10_000;
 
 fn serialize_libsql_embedding(embedding: &[f32]) -> (Option<Vec<u8>>, Vec<u8>, i64) {
     let canonical = embedding
@@ -177,16 +178,28 @@ impl WorkspaceStore for LibSqlBackend {
             })?;
         let id = Uuid::new_v4();
         let agent_id_str = agent_id.map(|id| id.to_string());
-        conn.execute(
-            r#"
+        let insert = if agent_id.is_none() {
+            conn.execute(
+                r#"
+                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
+                VALUES (?1, ?2, NULL, ?3, '', '{}')
+                ON CONFLICT (user_id, path) WHERE agent_id IS NULL DO NOTHING
+                "#,
+                params![id.to_string(), user_id, path],
+            )
+            .await
+        } else {
+            conn.execute(
+                r#"
                 INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
                 VALUES (?1, ?2, ?3, ?4, '', '{}')
                 ON CONFLICT (user_id, agent_id, path) DO NOTHING
                 "#,
-            params![id.to_string(), user_id, agent_id_str.as_deref(), path],
-        )
-        .await
-        .map_err(|e| WorkspaceError::SearchFailed {
+                params![id.to_string(), user_id, agent_id_str.as_deref(), path],
+            )
+            .await
+        };
+        insert.map_err(|e| WorkspaceError::SearchFailed {
             reason: format!("Insert failed: {}", e),
         })?;
 
@@ -202,7 +215,14 @@ impl WorkspaceStore for LibSqlBackend {
             })?;
         let now = fmt_ts(&Utc::now());
         conn.execute(
-            "UPDATE memory_documents SET content = ?2, updated_at = ?3 WHERE id = ?1",
+            r#"UPDATE memory_documents
+               SET content = ?2,
+                   updated_at = ?3,
+                   metadata = json_set(
+                       CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                       '$.index_dirty', json('true')
+                   )
+               WHERE id = ?1"#,
             params![id.to_string(), content, now],
         )
         .await
@@ -210,6 +230,119 @@ impl WorkspaceStore for LibSqlBackend {
             reason: format!("Update failed: {}", e),
         })?;
         Ok(())
+    }
+
+    async fn update_document_if_current(
+        &self,
+        id: Uuid,
+        expected_content: &str,
+        content: &str,
+    ) -> Result<bool, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let now = fmt_ts(&Utc::now());
+        let affected = conn
+            .execute(
+                r#"UPDATE memory_documents
+                   SET content = ?3,
+                       updated_at = ?4,
+                       metadata = json_set(
+                           CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                           '$.index_dirty', json('true')
+                       )
+                   WHERE id = ?1 AND content = ?2"#,
+                params![id.to_string(), expected_content, content, now],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Conditional update failed: {e}"),
+            })?;
+        Ok(affected == 1)
+    }
+
+    async fn append_document_by_path(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        path: &str,
+        separator: &str,
+        content: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let id = Uuid::new_v4();
+        let now = fmt_ts(&Utc::now());
+        let agent_id_str = agent_id.map(|value| value.to_string());
+        let sql = if agent_id.is_none() {
+            r#"
+            INSERT INTO memory_documents
+                (id, user_id, agent_id, path, content, metadata, created_at, updated_at)
+            VALUES (?1, ?2, NULL, ?3, ?4, '{"index_dirty":true}', ?5, ?5)
+            ON CONFLICT (user_id, path) WHERE agent_id IS NULL
+            DO UPDATE SET
+                content = CASE
+                    WHEN memory_documents.content = '' THEN excluded.content
+                    ELSE memory_documents.content || ?6 || excluded.content
+                END,
+                updated_at = ?5,
+                metadata = json_set(
+                    CASE WHEN json_valid(memory_documents.metadata)
+                         THEN memory_documents.metadata ELSE '{}' END,
+                    '$.index_dirty', json('true')
+                )
+            "#
+        } else {
+            r#"
+            INSERT INTO memory_documents
+                (id, user_id, agent_id, path, content, metadata, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, '{"index_dirty":true}', ?6, ?6)
+            ON CONFLICT (user_id, agent_id, path)
+            DO UPDATE SET
+                content = CASE
+                    WHEN memory_documents.content = '' THEN excluded.content
+                    ELSE memory_documents.content || ?7 || excluded.content
+                END,
+                updated_at = ?6,
+                metadata = json_set(
+                    CASE WHEN json_valid(memory_documents.metadata)
+                         THEN memory_documents.metadata ELSE '{}' END,
+                    '$.index_dirty', json('true')
+                )
+            "#
+        };
+        let result = if agent_id.is_none() {
+            conn.execute(
+                sql,
+                params![id.to_string(), user_id, path, content, now, separator],
+            )
+            .await
+        } else {
+            conn.execute(
+                sql,
+                params![
+                    id.to_string(),
+                    user_id,
+                    agent_id_str.as_deref(),
+                    path,
+                    content,
+                    now,
+                    separator
+                ],
+            )
+            .await
+        };
+        result.map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Atomic append failed: {e}"),
+        })?;
+        self.get_document_by_path(user_id, agent_id, path).await
     }
 
     async fn delete_document_by_path(
@@ -482,8 +615,8 @@ impl WorkspaceStore for LibSqlBackend {
         Ok(id)
     }
 
-    /// Atomically replace all chunks for a document using a single connection
-    /// and an explicit BEGIN / COMMIT transaction.
+    /// Atomically replace all chunks for a document using a cancellation-safe
+    /// transaction that rolls back when its future is dropped.
     ///
     /// This prevents the split-brain state where old chunks are deleted but
     /// new ones have not yet been written (which would make the document
@@ -493,6 +626,7 @@ impl WorkspaceStore for LibSqlBackend {
         document_id: Uuid,
         chunks: &[(i32, String, Option<Vec<f32>>)],
     ) -> Result<(), WorkspaceError> {
+        let _transaction_guard = self.transaction_lock.lock().await;
         let conn = self
             .connect()
             .await
@@ -500,27 +634,21 @@ impl WorkspaceStore for LibSqlBackend {
                 reason: e.to_string(),
             })?;
 
-        // Begin transaction
-        conn.execute("BEGIN", ())
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|e| WorkspaceError::ChunkingFailed {
                 reason: format!("BEGIN failed: {}", e),
             })?;
 
-        // Delete existing chunks
-        let del_result = conn
-            .execute(
-                "DELETE FROM memory_chunks WHERE document_id = ?1",
-                params![document_id.to_string()],
-            )
-            .await;
-
-        if let Err(e) = del_result {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(WorkspaceError::ChunkingFailed {
-                reason: format!("Delete failed: {}", e),
-            });
-        }
+        tx.execute(
+            "DELETE FROM memory_chunks WHERE document_id = ?1",
+            params![document_id.to_string()],
+        )
+        .await
+        .map_err(|e| WorkspaceError::ChunkingFailed {
+            reason: format!("Delete failed: {}", e),
+        })?;
 
         // Insert new chunks
         for (index, content, embedding) in chunks {
@@ -532,8 +660,7 @@ impl WorkspaceStore for LibSqlBackend {
                     (indexed, Some(canonical), Some(dim))
                 });
 
-            let ins_result = conn
-                .execute(
+            tx.execute(
                     r#"INSERT INTO memory_chunks (
                            id, document_id, chunk_index, content, embedding, embedding_blob, embedding_dim
                        )
@@ -548,24 +675,142 @@ impl WorkspaceStore for LibSqlBackend {
                         embedding_dim,
                     ],
                 )
-                .await;
-
-            if let Err(e) = ins_result {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(WorkspaceError::ChunkingFailed {
+                .await
+                .map_err(|e| WorkspaceError::ChunkingFailed {
                     reason: format!("Insert failed: {}", e),
-                });
-            }
+                })?;
         }
 
-        // Commit
-        conn.execute("COMMIT", ())
+        tx.commit()
             .await
             .map_err(|e| WorkspaceError::ChunkingFailed {
                 reason: format!("COMMIT failed: {}", e),
             })?;
 
         Ok(())
+    }
+
+    async fn replace_chunks_if_current(
+        &self,
+        document_id: Uuid,
+        expected_content: &str,
+        chunks: &[(i32, String, Option<Vec<f32>>)],
+    ) -> Result<bool, WorkspaceError> {
+        let _transaction_guard = self.transaction_lock.lock().await;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: e.to_string(),
+            })?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("BEGIN failed: {e}"),
+            })?;
+
+        let operation = async {
+            let mut rows = tx
+                .query(
+                    "SELECT content FROM memory_documents WHERE id = ?1",
+                    params![document_id.to_string()],
+                )
+                .await
+                .map_err(|e| WorkspaceError::ChunkingFailed {
+                    reason: format!("Document read failed: {e}"),
+                })?;
+            let Some(row) = rows
+                .next()
+                .await
+                .map_err(|e| WorkspaceError::ChunkingFailed {
+                    reason: format!("Document row fetch failed: {e}"),
+                })?
+            else {
+                return Err(WorkspaceError::DocumentNotFound {
+                    doc_type: document_id.to_string(),
+                    user_id: "unknown".to_string(),
+                });
+            };
+            if get_text(&row, 0) != expected_content {
+                return Ok(false);
+            }
+
+            tx.execute(
+                "DELETE FROM memory_chunks WHERE document_id = ?1",
+                params![document_id.to_string()],
+            )
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Delete failed: {e}"),
+            })?;
+            for (index, content, embedding) in chunks {
+                let chunk_id = Uuid::new_v4();
+                let (indexed_embedding, canonical_embedding, embedding_dim) = embedding
+                    .as_ref()
+                    .map(|value| serialize_libsql_embedding(value))
+                    .map_or((None, None, None), |(indexed, canonical, dim)| {
+                        (indexed, Some(canonical), Some(dim))
+                    });
+                tx.execute(
+                    r#"INSERT INTO memory_chunks (
+                           id, document_id, chunk_index, content,
+                           embedding, embedding_blob, embedding_dim
+                       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+                    params![
+                        chunk_id.to_string(),
+                        document_id.to_string(),
+                        *index as i64,
+                        content.as_str(),
+                        indexed_embedding.map(libsql::Value::Blob),
+                        canonical_embedding.map(libsql::Value::Blob),
+                        embedding_dim,
+                    ],
+                )
+                .await
+                .map_err(|e| WorkspaceError::ChunkingFailed {
+                    reason: format!("Insert failed: {e}"),
+                })?;
+            }
+            tx.execute(
+                r#"UPDATE memory_documents
+                   SET metadata = json_set(
+                       CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                       '$.index_dirty', json('false')
+                   )
+                   WHERE id = ?1"#,
+                params![document_id.to_string()],
+            )
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Index state update failed: {e}"),
+            })?;
+            Ok(true)
+        }
+        .await;
+
+        match operation {
+            Ok(true) => {
+                tx.commit()
+                    .await
+                    .map_err(|e| WorkspaceError::ChunkingFailed {
+                        reason: format!("COMMIT failed: {e}"),
+                    })?;
+                Ok(true)
+            }
+            Ok(false) => {
+                tx.rollback()
+                    .await
+                    .map_err(|e| WorkspaceError::ChunkingFailed {
+                        reason: format!("ROLLBACK failed: {e}"),
+                    })?;
+                Ok(false)
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
     }
 
     async fn update_chunk_embedding(
@@ -627,7 +872,11 @@ impl WorkspaceStore for LibSqlBackend {
                   AND c.embedding_blob IS NULL
                 LIMIT ?3
                 "#,
-                params![user_id, agent_id_str.as_deref(), limit as i64],
+                params![
+                    user_id,
+                    agent_id_str.as_deref(),
+                    limit.min(MAX_CHUNK_BACKFILL_RESULTS) as i64
+                ],
             )
             .await
             .map_err(|e| WorkspaceError::SearchFailed {
@@ -662,6 +911,10 @@ impl WorkspaceStore for LibSqlBackend {
         embedding: Option<&[f32]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        let config = config
+            .clone()
+            .validate_and_normalize()
+            .map_err(|reason| WorkspaceError::SearchFailed { reason })?;
         let conn = self
             .connect()
             .await
@@ -670,6 +923,8 @@ impl WorkspaceStore for LibSqlBackend {
             })?;
         let agent_id_str = agent_id.map(|id| id.to_string());
         let pre_limit = config.pre_fusion_limit as i64;
+        let path_prefixes_json =
+            serde_json::to_string(&config.path_prefixes).unwrap_or_else(|_| "[]".to_string());
 
         let fts_results = if config.use_fts {
             // Expand query with morphological variants for better FTS recall.
@@ -693,16 +948,30 @@ impl WorkspaceStore for LibSqlBackend {
                 let mut rows = conn
                     .query(
                         r#"
-                    SELECT c.id, c.document_id, d.path, c.content, c.created_at
+                    SELECT c.id, c.document_id, d.path, c.content, d.updated_at
                     FROM memory_chunks_fts fts
                     JOIN memory_chunks c ON c._rowid = fts.rowid
                     JOIN memory_documents d ON d.id = c.document_id
                     WHERE d.user_id = ?1 AND d.agent_id IS ?2
                       AND memory_chunks_fts MATCH ?3
+                      AND (
+                          ?5 = '[]' OR EXISTS (
+                              SELECT 1 FROM json_each(?5) AS allowed
+                              WHERE d.path = allowed.value
+                                 OR substr(d.path, 1, length(allowed.value) + 1)
+                                    = allowed.value || '/'
+                          )
+                      )
                     ORDER BY rank
                     LIMIT ?4
                     "#,
-                        params![user_id, agent_id_str.as_deref(), sanitized_query, pre_limit],
+                        params![
+                            user_id,
+                            agent_id_str.as_deref(),
+                            sanitized_query,
+                            pre_limit,
+                            path_prefixes_json.as_str()
+                        ],
                     )
                     .await
                     .map_err(|e| WorkspaceError::SearchFailed {
@@ -743,58 +1012,243 @@ impl WorkspaceStore for LibSqlBackend {
                         .join(",")
                 );
 
-                let mut rows = conn
+                // `vector_top_k` ranks the whole index before these joins can
+                // apply principal/path predicates. A fixed K therefore lets
+                // another scope's vectors starve all authorized recall. Grow
+                // the indexed candidate window until K authorized rows are
+                // found or the index is exhausted. Filtering preserves the
+                // global similarity order, yielding the exact scoped top-K.
+                let mut count_rows = conn
                     .query(
-                        r#"
-                    SELECT c.id, c.document_id, d.path, c.content, c.created_at, c.embedding
-                    FROM vector_top_k('idx_memory_chunks_embedding', vector(?1), ?2) AS top_k
-                    JOIN memory_chunks c ON c._rowid = top_k.id
-                    JOIN memory_documents d ON d.id = c.document_id
-                    WHERE d.user_id = ?3 AND d.agent_id IS ?4
-                    "#,
-                        params![vector_json, pre_limit, user_id, agent_id_str.as_deref()],
+                        "SELECT COUNT(*) FROM memory_chunks WHERE embedding IS NOT NULL",
+                        (),
                     )
                     .await
                     .map_err(|e| WorkspaceError::SearchFailed {
-                        reason: format!("Vector query failed: {}", e),
+                        reason: format!("Vector index count failed: {e}"),
                     })?;
-
+                let total_indexed = count_rows
+                    .next()
+                    .await
+                    .map_err(|e| WorkspaceError::SearchFailed {
+                        reason: format!("Vector index count fetch failed: {e}"),
+                    })?
+                    .map(|row| get_i64(&row, 0).max(0))
+                    .unwrap_or(0);
+                let wanted = pre_limit.max(0);
+                let mut scoped_count_rows = conn
+                    .query(
+                        r#"
+                        SELECT COUNT(*)
+                        FROM memory_chunks c
+                        JOIN memory_documents d ON d.id = c.document_id
+                        WHERE c.embedding IS NOT NULL
+                          AND d.user_id = ?1 AND d.agent_id IS ?2
+                          AND (
+                              ?3 = '[]' OR EXISTS (
+                                  SELECT 1 FROM json_each(?3) AS allowed
+                                  WHERE d.path = allowed.value
+                                     OR substr(d.path, 1, length(allowed.value) + 1)
+                                        = allowed.value || '/'
+                              )
+                          )
+                        "#,
+                        params![
+                            user_id,
+                            agent_id_str.as_deref(),
+                            path_prefixes_json.as_str()
+                        ],
+                    )
+                    .await
+                    .map_err(|e| WorkspaceError::SearchFailed {
+                        reason: format!("Scoped vector count failed: {e}"),
+                    })?;
+                let scoped_indexed = scoped_count_rows
+                    .next()
+                    .await
+                    .map_err(|e| WorkspaceError::SearchFailed {
+                        reason: format!("Scoped vector count fetch failed: {e}"),
+                    })?
+                    .map(|row| get_i64(&row, 0).max(0))
+                    .unwrap_or(0);
+                let expected = wanted.min(scoped_indexed);
+                let mut candidate_limit = wanted.max(1).min(total_indexed);
                 let mut results = Vec::new();
-                while let Some(row) =
-                    rows.next()
+
+                while expected > 0 && candidate_limit > 0 {
+                    let mut rows = conn
+                        .query(
+                            r#"
+                        SELECT c.id, c.document_id, d.path, c.content, d.updated_at, c.embedding
+                        FROM vector_top_k('idx_memory_chunks_embedding', vector(?1), ?2) AS top_k
+                        JOIN memory_chunks c ON c._rowid = top_k.id
+                        JOIN memory_documents d ON d.id = c.document_id
+                        WHERE d.user_id = ?3 AND d.agent_id IS ?4
+                          AND (
+                              ?5 = '[]' OR EXISTS (
+                                  SELECT 1 FROM json_each(?5) AS allowed
+                                  WHERE d.path = allowed.value
+                                     OR substr(d.path, 1, length(allowed.value) + 1)
+                                        = allowed.value || '/'
+                              )
+                          )
+                        "#,
+                            params![
+                                vector_json.as_str(),
+                                candidate_limit,
+                                user_id,
+                                agent_id_str.as_deref(),
+                                path_prefixes_json.as_str()
+                            ],
+                        )
                         .await
                         .map_err(|e| WorkspaceError::SearchFailed {
-                            reason: format!("Vector row fetch failed: {}", e),
-                        })?
-                {
-                    results.push(RankedResult {
-                        chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
-                        document_id: get_text(&row, 1).parse().unwrap_or_default(),
-                        path: get_text(&row, 2),
-                        content: get_text(&row, 3),
-                        rank: results.len() as u32 + 1,
-                        created_at: get_opt_ts(&row, 4),
-                        embedding: row
+                            reason: format!("Vector query failed: {e}"),
+                        })?;
+
+                    results.clear();
+                    while let Some(row) =
+                        rows.next()
+                            .await
+                            .map_err(|e| WorkspaceError::SearchFailed {
+                                reason: format!("Vector row fetch failed: {e}"),
+                            })?
+                    {
+                        results.push(RankedResult {
+                            chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
+                            document_id: get_text(&row, 1).parse().unwrap_or_default(),
+                            path: get_text(&row, 2),
+                            content: get_text(&row, 3),
+                            rank: results.len() as u32 + 1,
+                            created_at: get_opt_ts(&row, 4),
+                            embedding: row
+                                .get::<Vec<u8>>(5)
+                                .ok()
+                                .and_then(|bytes| deserialize_libsql_embedding(&bytes)),
+                        });
+                    }
+                    if results.len() >= expected as usize || candidate_limit >= total_indexed {
+                        break;
+                    }
+                    candidate_limit = candidate_limit
+                        .saturating_mul(2)
+                        .max(candidate_limit.saturating_add(1))
+                        .min(total_indexed);
+                }
+
+                // libSQL's ANN index can return fewer than K rows when many
+                // near-duplicate vectors from other tenants crowd its search
+                // frontier, even when K reaches the physical row count. Never
+                // let that approximation become an ACL-scoped recall outage:
+                // fall back to exact cosine scoring over only the authorized
+                // principal/agent/path slice when the index under-fills it.
+                if results.len() < expected as usize {
+                    tracing::debug!(
+                        indexed_results = results.len(),
+                        expected,
+                        total_indexed,
+                        "Scoped vector index under-filled; using exact authorized fallback"
+                    );
+                    let mut rows = conn
+                        .query(
+                            r#"
+                            SELECT c.id, c.document_id, d.path, c.content,
+                                   d.updated_at, c.embedding_blob
+                            FROM memory_chunks c
+                            JOIN memory_documents d ON d.id = c.document_id
+                            WHERE d.user_id = ?1 AND d.agent_id IS ?2
+                              AND c.embedding_blob IS NOT NULL
+                              AND c.embedding_dim = ?3
+                              AND (
+                                  ?4 = '[]' OR EXISTS (
+                                      SELECT 1 FROM json_each(?4) AS allowed
+                                      WHERE d.path = allowed.value
+                                         OR substr(d.path, 1, length(allowed.value) + 1)
+                                            = allowed.value || '/'
+                                  )
+                              )
+                            "#,
+                            params![
+                                user_id,
+                                agent_id_str.as_deref(),
+                                LIBSQL_VECTOR_DIM as i64,
+                                path_prefixes_json.as_str()
+                            ],
+                        )
+                        .await
+                        .map_err(|e| WorkspaceError::SearchFailed {
+                            reason: format!("Scoped vector fallback query failed: {e}"),
+                        })?;
+
+                    let mut scored = Vec::new();
+                    while let Some(row) =
+                        rows.next()
+                            .await
+                            .map_err(|e| WorkspaceError::SearchFailed {
+                                reason: format!("Scoped vector fallback row failed: {e}"),
+                            })?
+                    {
+                        let candidate_embedding = row
                             .get::<Vec<u8>>(5)
                             .ok()
-                            .and_then(|bytes| deserialize_libsql_embedding(&bytes)),
-                    });
+                            .and_then(|bytes| deserialize_libsql_embedding(&bytes));
+                        if let Some(candidate_embedding) = candidate_embedding
+                            && let Some(score) = cosine_similarity(emb, &candidate_embedding)
+                        {
+                            scored.push((
+                                score,
+                                RankedResult {
+                                    chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
+                                    document_id: get_text(&row, 1).parse().unwrap_or_default(),
+                                    path: get_text(&row, 2),
+                                    content: get_text(&row, 3),
+                                    rank: 0,
+                                    created_at: get_opt_ts(&row, 4),
+                                    embedding: Some(candidate_embedding),
+                                },
+                            ));
+                        }
+                    }
+                    scored
+                        .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                    results = scored
+                        .into_iter()
+                        .take(wanted as usize)
+                        .enumerate()
+                        .map(|(index, (_, mut result))| {
+                            result.rank = (index + 1) as u32;
+                            result
+                        })
+                        .collect();
                 }
+                results.truncate(wanted as usize);
                 results
             } else {
                 let query_dim = emb.len() as i64;
                 let mut rows = conn
                     .query(
                         r#"
-                    SELECT c.id, c.document_id, d.path, c.content, c.created_at, c.embedding_blob
+                    SELECT c.id, c.document_id, d.path, c.content, d.updated_at, c.embedding_blob
                     FROM memory_chunks c
                     JOIN memory_documents d ON d.id = c.document_id
                     WHERE d.user_id = ?1 AND d.agent_id IS ?2
                       AND c.embedding_blob IS NOT NULL
                       AND c.embedding_dim = ?3
-                    LIMIT ?4
+                      AND (
+                          ?4 = '[]' OR EXISTS (
+                              SELECT 1 FROM json_each(?4) AS allowed
+                              WHERE d.path = allowed.value
+                                 OR substr(d.path, 1, length(allowed.value) + 1)
+                                    = allowed.value || '/'
+                          )
+                      )
                     "#,
-                        params![user_id, agent_id_str.as_deref(), query_dim, pre_limit],
+                        params![
+                            user_id,
+                            agent_id_str.as_deref(),
+                            query_dim,
+                            path_prefixes_json.as_str()
+                        ],
                     )
                     .await
                     .map_err(|e| WorkspaceError::SearchFailed {
@@ -833,6 +1287,7 @@ impl WorkspaceStore for LibSqlBackend {
                 scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 scored
                     .into_iter()
+                    .take(pre_limit.max(0) as usize)
                     .enumerate()
                     .map(|(idx, (_, mut result))| {
                         result.rank = (idx + 1) as u32;
@@ -864,7 +1319,7 @@ impl WorkspaceStore for LibSqlBackend {
             }
         }
 
-        let mut results = reciprocal_rank_fusion(fts_results, vector_results, config);
+        let mut results = reciprocal_rank_fusion(fts_results, vector_results, &config);
 
         // Apply temporal decay if configured.
         if let Some(half_life) = config.temporal_decay_half_life_days

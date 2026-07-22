@@ -99,5 +99,13 @@ fn credential_location_to_root(
                 placeholder: placeholder.clone(),
             }
         }
+        CredentialLocation::UrlBase { placeholder } => {
+            crate::secrets::CredentialLocation::UrlBase {
+                placeholder: placeholder.clone(),
+            }
+        }
+        CredentialLocation::Body { placeholder } => crate::secrets::CredentialLocation::Body {
+            placeholder: placeholder.clone(),
+        },
     }
 }

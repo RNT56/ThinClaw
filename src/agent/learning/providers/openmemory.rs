@@ -5,6 +5,10 @@ impl MemoryProvider for OpenMemoryProvider {
         "openmemory"
     }
 
+    fn supports_strict_subject_scoping(&self) -> bool {
+        true
+    }
+
     async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus {
         configured_provider_health(
             self.name(),
@@ -33,7 +37,7 @@ impl MemoryProvider for OpenMemoryProvider {
         }
         let base_url = provider_base_url_or(&provider.config, "http://localhost:8888");
         let path = provider_path(&provider.config, "search_path", "/search");
-        let url = provider_join_url(&base_url, &path);
+        let url = provider_join_url(&base_url, &path)?;
         let scoped_user_id = provider_scoped_user_id(&provider.config, user_id);
         let response = provider_json_request(
             &provider.config,
@@ -65,7 +69,7 @@ impl MemoryProvider for OpenMemoryProvider {
         }
         let base_url = provider_base_url_or(&provider.config, "http://localhost:8888");
         let path = provider_path(&provider.config, "sync_path", "/memories");
-        let url = provider_join_url(&base_url, &path);
+        let url = provider_join_url(&base_url, &path)?;
         let scoped_user_id = provider_scoped_user_id(&provider.config, user_id);
         let _ = provider_json_request(
             &provider.config,

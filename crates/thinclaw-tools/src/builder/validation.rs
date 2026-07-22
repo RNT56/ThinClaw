@@ -135,7 +135,9 @@ impl WasmValidator {
 
     /// Validate a WASM file.
     pub async fn validate_file(&self, path: &Path) -> Result<ValidationResult, ValidationError> {
-        let bytes = tokio::fs::read(path).await?;
+        let bytes =
+            thinclaw_platform::read_regular_file_bounded_async(path.to_path_buf(), self.max_size)
+                .await?;
         self.validate_bytes(&bytes)
     }
 

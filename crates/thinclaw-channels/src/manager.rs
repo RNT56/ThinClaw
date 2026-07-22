@@ -1,14 +1,15 @@
 //! Channel manager for coordinating multiple input channels.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use futures::stream;
+use futures::{future::join_all, stream};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
@@ -23,6 +24,33 @@ use thinclaw_types::error::ChannelError;
 const LEGACY_WEB_CHANNEL_ALIAS: &str = "web";
 const GATEWAY_CHANNEL_NAME: &str = "gateway";
 const CHANNEL_FORWARDER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(not(test))]
+const CHANNEL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const CHANNEL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(not(test))]
+const CHANNEL_BEST_EFFORT_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const CHANNEL_BEST_EFFORT_TIMEOUT: Duration = Duration::from_millis(100);
+#[cfg(not(test))]
+const CHANNEL_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const CHANNEL_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(1);
+
+async fn bounded_channel_operation<T>(
+    channel_name: &str,
+    operation: &'static str,
+    deadline: Duration,
+    future: impl Future<Output = Result<T, ChannelError>>,
+) -> Result<T, ChannelError> {
+    match tokio::time::timeout(deadline, future).await {
+        Ok(result) => result,
+        Err(_) => Err(ChannelError::SendFailed {
+            name: channel_name.to_string(),
+            reason: format!("{operation} timed out after {:.1}s", deadline.as_secs_f64()),
+        }),
+    }
+}
 
 /// Descriptor for a native channel surface that the runtime can expose in
 /// status/configuration before the concrete transport is registered.
@@ -258,6 +286,10 @@ pub struct ChannelManager {
     status_sink: RwLock<Option<ChannelStatusSink>>,
     /// Hot-added/restarted stream forwarders keyed by channel name.
     stream_forwarders: RwLock<HashMap<String, JoinHandle<()>>>,
+    /// Serializes channel start/restart/removal/shutdown transitions so a
+    /// health restart cannot race operator reconfiguration or process exit.
+    lifecycle_lock: tokio::sync::Mutex<()>,
+    shutting_down: AtomicBool,
 }
 
 impl ChannelManager {
@@ -274,6 +306,8 @@ impl ChannelManager {
             started_at: Instant::now(),
             status_sink: RwLock::new(None),
             stream_forwarders: RwLock::new(HashMap::new()),
+            lifecycle_lock: tokio::sync::Mutex::new(()),
+            shutting_down: AtomicBool::new(false),
         }
     }
 
@@ -449,14 +483,23 @@ impl ChannelManager {
             let mut guard = self.stream_forwarders.write().await;
             guard.drain().collect::<Vec<_>>()
         };
-        for (name, handle) in handles {
+        join_all(handles.into_iter().map(|(name, handle)| async move {
             drain_stream_forwarder_task(handle, &name).await;
-        }
+        }))
+        .await;
     }
 
     /// Add a channel to the manager.
     pub async fn add(&self, channel: Box<dyn Channel>) {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
         let name = channel.name().to_string();
+        if self.shutting_down.load(Ordering::Acquire) {
+            tracing::warn!(
+                channel = %name,
+                "Rejected channel registration after manager shutdown began"
+            );
+            return;
+        }
         self.channels
             .write()
             .await
@@ -484,15 +527,45 @@ impl ChannelManager {
     /// and spawns a task that forwards its stream messages through `inject_tx` into
     /// the agent loop.
     pub async fn hot_add(&self, channel: Box<dyn Channel>) -> Result<(), ChannelError> {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(ChannelError::StartupFailed {
+                name: channel.name().to_string(),
+                reason: "channel manager is shutting down".to_string(),
+            });
+        }
         let channel: Arc<dyn Channel> = Arc::from(channel);
         let name = channel.name().to_string();
-        let stream = channel.start().await?;
+        let stream = match tokio::time::timeout(CHANNEL_LIFECYCLE_TIMEOUT, channel.start()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(ChannelError::StartupFailed {
+                    name,
+                    reason: format!(
+                        "start timed out after {:.1}s",
+                        CHANNEL_LIFECYCLE_TIMEOUT.as_secs_f64()
+                    ),
+                });
+            }
+        };
 
         // Register for respond/broadcast/send_status
-        self.channels
+        let previous = self
+            .channels
             .write()
             .await
             .insert(name.clone(), Arc::clone(&channel));
+        if let Some(previous) = previous
+            && let Err(error) = bounded_channel_operation(
+                &name,
+                "replacement shutdown",
+                CHANNEL_LIFECYCLE_TIMEOUT,
+                previous.shutdown(),
+            )
+            .await
+        {
+            tracing::warn!(channel = %name, %error, "Replaced channel did not shut down cleanly");
+        }
         let _ = self.counter_for(&name).await;
         self.mark_running(&name).await;
 
@@ -515,10 +588,18 @@ impl ChannelManager {
     /// Shuts down the channel and removes it from the channels map.
     /// The channel's stream task will end naturally when the channel is dropped.
     pub async fn hot_remove(&self, name: &str) -> Result<(), ChannelError> {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
         let channel = self.channels.write().await.remove(name);
 
         if let Some(channel) = channel {
-            if let Err(e) = channel.shutdown().await {
+            if let Err(e) = bounded_channel_operation(
+                name,
+                "shutdown",
+                CHANNEL_LIFECYCLE_TIMEOUT,
+                channel.shutdown(),
+            )
+            .await
+            {
                 tracing::warn!(channel = %name, error = %e, "Error shutting down hot-removed channel");
             }
             self.drain_stream_forwarder(name).await;
@@ -547,23 +628,54 @@ impl ChannelManager {
     /// Also merges the injection channel so background tasks can push messages
     /// into the same stream.
     pub async fn start_all(&self) -> Result<MessageStream, ChannelError> {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(ChannelError::StartupFailed {
+                name: "all".to_string(),
+                reason: "channel manager is shutting down".to_string(),
+            });
+        }
         // Snapshot handles, then start each without holding the read guard.
         let channels: Vec<(String, Arc<dyn Channel>)> = {
             let guard = self.channels.read().await;
             guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
+        let starts = join_all(channels.into_iter().map(|(name, channel)| async move {
+            let result = tokio::time::timeout(CHANNEL_LIFECYCLE_TIMEOUT, channel.start()).await;
+            (name, result)
+        }))
+        .await;
         let mut streams: Vec<MessageStream> = Vec::new();
 
-        for (name, channel) in channels {
-            match channel.start().await {
-                Ok(stream) => {
+        for (name, result) in starts {
+            match result {
+                Err(_) => {
+                    let error = ChannelError::StartupFailed {
+                        name: name.clone(),
+                        reason: format!(
+                            "start timed out after {:.1}s",
+                            CHANNEL_LIFECYCLE_TIMEOUT.as_secs_f64()
+                        ),
+                    };
+                    let counter = self.counter_for(&name).await;
+                    Self::record_channel_error(counter.as_ref(), &error);
+                    self.mark_failed(&name, &error).await;
+                    self.emit_channel_status_change(
+                        name.clone(),
+                        "failed",
+                        Some(format!("Channel '{name}' failed to start: {error}")),
+                    )
+                    .await;
+                    tracing::error!(channel = %name, %error, "Channel start timed out");
+                }
+                Ok(Ok(stream)) => {
                     let counter = self.counter_for(&name).await;
                     Self::clear_channel_error(counter.as_ref());
                     self.mark_running(&name).await;
                     tracing::info!("Started channel: {}", name);
                     streams.push(stream);
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let counter = self.counter_for(&name).await;
                     Self::record_channel_error(counter.as_ref(), &e);
                     self.mark_failed(&name, &e).await;
@@ -630,7 +742,13 @@ impl ChannelManager {
                 reason: "Channel not found".to_string(),
             });
         };
-        let result = channel.respond(msg, response).await;
+        let result = bounded_channel_operation(
+            &resolved_channel_name,
+            "response delivery",
+            CHANNEL_DELIVERY_TIMEOUT,
+            channel.respond(msg, response),
+        )
+        .await;
         let counter = self.counter_for(&resolved_channel_name).await;
         if result.is_ok() {
             counter.sent.fetch_add(1, Ordering::Relaxed);
@@ -654,7 +772,15 @@ impl ChannelManager {
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
         match self.channel_for(channel_name).await {
-            Some(channel) => channel.send_status(status, metadata).await,
+            Some(channel) => {
+                bounded_channel_operation(
+                    channel_name,
+                    "status delivery",
+                    CHANNEL_BEST_EFFORT_TIMEOUT,
+                    channel.send_status(status, metadata),
+                )
+                .await
+            }
             // Silently ignore if channel not found (status is best-effort)
             None => Ok(()),
         }
@@ -681,7 +807,13 @@ impl ChannelManager {
                 reason: "Channel not found".to_string(),
             });
         };
-        let result = channel.broadcast(user_id, response).await;
+        let result = bounded_channel_operation(
+            &resolved_channel_name,
+            "broadcast delivery",
+            CHANNEL_DELIVERY_TIMEOUT,
+            channel.broadcast(user_id, response),
+        )
+        .await;
         let counter = self.counter_for(&resolved_channel_name).await;
         if result.is_ok() {
             counter.sent.fetch_add(1, Ordering::Relaxed);
@@ -706,10 +838,23 @@ impl ChannelManager {
             let guard = self.channels.read().await;
             guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
-        let mut results = Vec::new();
+        let deliveries = join_all(channels.into_iter().map(|(name, channel)| {
+            let response = response.clone();
+            async move {
+                let result = bounded_channel_operation(
+                    &name,
+                    "broadcast delivery",
+                    CHANNEL_DELIVERY_TIMEOUT,
+                    channel.broadcast(user_id, response),
+                )
+                .await;
+                (name, result)
+            }
+        }))
+        .await;
+        let mut results = Vec::with_capacity(deliveries.len());
 
-        for (name, channel) in channels {
-            let result = channel.broadcast(user_id, response.clone()).await;
+        for (name, result) in deliveries {
             let counter = self.counter_for(&name).await;
             if result.is_ok() {
                 counter.sent.fetch_add(1, Ordering::Relaxed);
@@ -731,10 +876,20 @@ impl ChannelManager {
             let guard = self.channels.read().await;
             guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
-        let mut results = HashMap::new();
+        let checks = join_all(channels.into_iter().map(|(name, channel)| async move {
+            let result = bounded_channel_operation(
+                &name,
+                "health check",
+                CHANNEL_BEST_EFFORT_TIMEOUT,
+                channel.health_check(),
+            )
+            .await;
+            (name, result)
+        }))
+        .await;
+        let mut results = HashMap::with_capacity(checks.len());
 
-        for (name, channel) in channels {
-            let result = channel.health_check().await;
+        for (name, result) in checks {
             let counter = self.counter_for(&name).await;
             match &result {
                 Ok(()) => {
@@ -754,16 +909,31 @@ impl ChannelManager {
 
     /// Shutdown all channels.
     pub async fn shutdown_all(&self) -> Result<(), ChannelError> {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        self.shutting_down.store(true, Ordering::Release);
         let channels: Vec<(String, Arc<dyn Channel>)> = {
             let guard = self.channels.read().await;
             guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
-        for (name, channel) in channels {
+        for (name, _) in &channels {
             self.runtime_states
                 .write()
                 .await
                 .insert(name.clone(), ChannelViewState::Draining);
-            if let Err(e) = channel.shutdown().await {
+        }
+        let shutdowns = join_all(channels.into_iter().map(|(name, channel)| async move {
+            let result = bounded_channel_operation(
+                &name,
+                "shutdown",
+                CHANNEL_LIFECYCLE_TIMEOUT,
+                channel.shutdown(),
+            )
+            .await;
+            (name, result)
+        }))
+        .await;
+        for (name, result) in shutdowns {
+            if let Err(e) = result {
                 tracing::error!("Error shutting down channel {}: {}", name, e);
             }
             self.runtime_states
@@ -815,7 +985,17 @@ impl ChannelManager {
     /// Return channel-specific diagnostics when the implementation exposes them.
     pub async fn channel_diagnostics(&self, channel_name: &str) -> Option<serde_json::Value> {
         let channel = self.channel_for(channel_name).await?;
-        channel.diagnostics().await
+        match tokio::time::timeout(CHANNEL_BEST_EFFORT_TIMEOUT, channel.diagnostics()).await {
+            Ok(diagnostics) => diagnostics,
+            Err(_) => {
+                tracing::warn!(
+                    channel = %channel_name,
+                    timeout_secs = CHANNEL_BEST_EFFORT_TIMEOUT.as_secs_f64(),
+                    "Channel diagnostics timed out"
+                );
+                None
+            }
+        }
     }
 
     /// Return live `ChannelStatusEntry` list for `openclaw_channel_status_list`.
@@ -924,6 +1104,7 @@ impl ChannelManager {
     /// Returns `StreamMode::None` if the channel is not found.
     pub async fn stream_mode(&self, channel_name: &str) -> StreamMode {
         let channels = self.channels.read().await;
+        let channel_name = Self::resolve_channel_name(channel_name, &channels);
         channels
             .get(channel_name)
             .map(|c| c.stream_mode())
@@ -939,8 +1120,16 @@ impl ChannelManager {
         draft: &DraftReplyState,
         metadata: &serde_json::Value,
     ) -> Result<Option<String>, ChannelError> {
-        match self.channel_exact(channel_name).await {
-            Some(channel) => channel.send_draft(draft, metadata).await,
+        match self.channel_for(channel_name).await {
+            Some(channel) => {
+                bounded_channel_operation(
+                    channel_name,
+                    "draft delivery",
+                    CHANNEL_BEST_EFFORT_TIMEOUT,
+                    channel.send_draft(draft, metadata),
+                )
+                .await
+            }
             None => Ok(None),
         }
     }
@@ -955,8 +1144,16 @@ impl ChannelManager {
         message_id: &str,
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
-        match self.channel_exact(channel_name).await {
-            Some(channel) => channel.delete_message(message_id, metadata).await,
+        match self.channel_for(channel_name).await {
+            Some(channel) => {
+                bounded_channel_operation(
+                    channel_name,
+                    "message deletion",
+                    CHANNEL_BEST_EFFORT_TIMEOUT,
+                    channel.delete_message(message_id, metadata),
+                )
+                .await
+            }
             None => Ok(()),
         }
     }
@@ -965,8 +1162,19 @@ impl ChannelManager {
     ///
     /// This allows the WebUI to change telegram streaming mode without restart.
     pub async fn set_channel_stream_mode(&self, channel_name: &str, mode: StreamMode) {
-        match self.channel_exact(channel_name).await {
-            Some(channel) => channel.set_stream_mode(mode).await,
+        match self.channel_for(channel_name).await {
+            Some(channel) => {
+                if tokio::time::timeout(CHANNEL_BEST_EFFORT_TIMEOUT, channel.set_stream_mode(mode))
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        timeout_secs = CHANNEL_BEST_EFFORT_TIMEOUT.as_secs_f64(),
+                        "Updating channel stream mode timed out"
+                    );
+                }
+            }
             None => tracing::debug!(
                 channel = %channel_name,
                 "Cannot set stream mode: channel not found"
@@ -980,14 +1188,34 @@ impl ChannelManager {
         channel_name: &str,
         updates: std::collections::HashMap<String, serde_json::Value>,
     ) -> Result<(), ChannelError> {
-        let Some(channel) = self.channel_exact(channel_name).await else {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(ChannelError::SendFailed {
+                name: channel_name.to_string(),
+                reason: "channel manager is shutting down".to_string(),
+            });
+        }
+        let Some(channel) = self.channel_for(channel_name).await else {
             return Err(ChannelError::SendFailed {
                 name: channel_name.to_string(),
                 reason: "Channel not found".to_string(),
             });
         };
-        channel.update_runtime_config(updates).await;
-        Ok(())
+        match tokio::time::timeout(
+            CHANNEL_LIFECYCLE_TIMEOUT,
+            channel.update_runtime_config(updates),
+        )
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(_) => Err(ChannelError::SendFailed {
+                name: channel_name.to_string(),
+                reason: format!(
+                    "runtime configuration update timed out after {:.1}s",
+                    CHANNEL_LIFECYCLE_TIMEOUT.as_secs_f64()
+                ),
+            }),
+        }
     }
 
     /// Clear transient connection state before a manual reconnect.
@@ -995,13 +1223,26 @@ impl ChannelManager {
         &self,
         channel_name: &str,
     ) -> Result<(), ChannelError> {
-        let Some(channel) = self.channel_exact(channel_name).await else {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(ChannelError::SendFailed {
+                name: channel_name.to_string(),
+                reason: "channel manager is shutting down".to_string(),
+            });
+        }
+        let Some(channel) = self.channel_for(channel_name).await else {
             return Err(ChannelError::SendFailed {
                 name: channel_name.to_string(),
                 reason: "Channel not found".to_string(),
             });
         };
-        channel.reset_connection_state().await
+        bounded_channel_operation(
+            channel_name,
+            "connection-state reset",
+            CHANNEL_LIFECYCLE_TIMEOUT,
+            channel.reset_connection_state(),
+        )
+        .await
     }
 
     /// Restart a channel in-place: shutdown → re-start → merge new stream.
@@ -1011,6 +1252,13 @@ impl ChannelManager {
     ///
     /// Used by `ChannelHealthMonitor` for auto-restart after consecutive failures.
     pub async fn restart_channel(&self, name: &str) -> Result<(), ChannelError> {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(ChannelError::SendFailed {
+                name: name.to_string(),
+                reason: "channel manager is shutting down".to_string(),
+            });
+        }
         let Some(channel) = self.channel_exact(name).await else {
             return Err(ChannelError::SendFailed {
                 name: name.to_string(),
@@ -1028,7 +1276,14 @@ impl ChannelManager {
 
         // Shutdown the old transport (best-effort). The read guard is already
         // dropped, so a slow shutdown/start here never blocks other channels.
-        if let Err(e) = channel.shutdown().await {
+        if let Err(e) = bounded_channel_operation(
+            name,
+            "shutdown",
+            CHANNEL_LIFECYCLE_TIMEOUT,
+            channel.shutdown(),
+        )
+        .await
+        {
             tracing::warn!(
                 channel = %name,
                 error = %e,
@@ -1037,9 +1292,9 @@ impl ChannelManager {
         }
 
         // Re-start to get a fresh stream.
-        let stream = match channel.start().await {
-            Ok(stream) => stream,
-            Err(error) => {
+        let stream = match tokio::time::timeout(CHANNEL_LIFECYCLE_TIMEOUT, channel.start()).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
                 let counter = self.counter_for(name).await;
                 Self::record_channel_error(counter.as_ref(), &error);
                 self.mark_failed(name, &error).await;
@@ -1050,6 +1305,26 @@ impl ChannelManager {
                 )
                 .await;
                 tracing::error!(channel = %name, error = %error, "Failed to restart channel");
+                return Err(error);
+            }
+            Err(_) => {
+                let error = ChannelError::StartupFailed {
+                    name: name.to_string(),
+                    reason: format!(
+                        "restart timed out after {:.1}s",
+                        CHANNEL_LIFECYCLE_TIMEOUT.as_secs_f64()
+                    ),
+                };
+                let counter = self.counter_for(name).await;
+                Self::record_channel_error(counter.as_ref(), &error);
+                self.mark_failed(name, &error).await;
+                self.emit_channel_status_change(
+                    name.to_string(),
+                    "failed",
+                    Some(format!("Channel '{name}' failed to restart: {error}")),
+                )
+                .await;
+                tracing::error!(channel = %name, %error, "Channel restart timed out");
                 return Err(error);
             }
         };
@@ -1080,7 +1355,21 @@ impl ChannelManager {
     /// For channels that don't support debug mode (e.g., REPL), returns `false`.
     pub async fn toggle_debug_mode(&self, channel_name: &str) -> bool {
         match self.channel_for(channel_name).await {
-            Some(channel) => channel.toggle_debug_mode().await,
+            Some(channel) => {
+                match tokio::time::timeout(CHANNEL_BEST_EFFORT_TIMEOUT, channel.toggle_debug_mode())
+                    .await
+                {
+                    Ok(enabled) => enabled,
+                    Err(_) => {
+                        tracing::warn!(
+                            channel = %channel_name,
+                            timeout_secs = CHANNEL_BEST_EFFORT_TIMEOUT.as_secs_f64(),
+                            "Toggling channel debug mode timed out"
+                        );
+                        false
+                    }
+                }
+            }
             None => false,
         }
     }
@@ -1208,418 +1497,4 @@ impl Default for ChannelManager {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-    use futures::stream;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering as AtomicOrdering},
-    };
-    use tokio::sync::Mutex;
-
-    #[derive(Default)]
-    struct MockChannelState {
-        broadcasts: Mutex<Vec<(String, String)>>,
-        diagnostics_calls: Mutex<usize>,
-    }
-
-    struct MockChannel {
-        name: String,
-        state: Arc<MockChannelState>,
-    }
-
-    #[derive(Default)]
-    struct ForwardingChannelState {
-        sender: Mutex<Option<mpsc::Sender<IncomingMessage>>>,
-        shutdowns: AtomicUsize,
-    }
-
-    struct ForwardingChannel {
-        name: String,
-        state: Arc<ForwardingChannelState>,
-    }
-
-    struct FailingStartChannel {
-        name: String,
-    }
-
-    impl MockChannel {
-        fn new(name: &str, state: Arc<MockChannelState>) -> Self {
-            Self {
-                name: name.to_string(),
-                state,
-            }
-        }
-    }
-
-    impl ForwardingChannel {
-        fn new(name: &str, state: Arc<ForwardingChannelState>) -> Self {
-            Self {
-                name: name.to_string(),
-                state,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Channel for MockChannel {
-        fn name(&self) -> &str {
-            &self.name
-        }
-
-        async fn start(&self) -> Result<MessageStream, ChannelError> {
-            Ok(Box::pin(stream::empty()))
-        }
-
-        async fn respond(
-            &self,
-            _msg: &IncomingMessage,
-            _response: OutgoingResponse,
-        ) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        async fn broadcast(
-            &self,
-            user_id: &str,
-            response: OutgoingResponse,
-        ) -> Result<(), ChannelError> {
-            self.state
-                .broadcasts
-                .lock()
-                .await
-                .push((user_id.to_string(), response.content));
-            Ok(())
-        }
-
-        async fn diagnostics(&self) -> Option<serde_json::Value> {
-            let mut calls = self.state.diagnostics_calls.lock().await;
-            *calls += 1;
-            Some(serde_json::json!({"channel": self.name}))
-        }
-
-        async fn health_check(&self) -> Result<(), ChannelError> {
-            Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl Channel for ForwardingChannel {
-        fn name(&self) -> &str {
-            &self.name
-        }
-
-        async fn start(&self) -> Result<MessageStream, ChannelError> {
-            let (tx, rx) = mpsc::channel(1);
-            *self.state.sender.lock().await = Some(tx);
-            Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
-        }
-
-        async fn respond(
-            &self,
-            _msg: &IncomingMessage,
-            _response: OutgoingResponse,
-        ) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        async fn shutdown(&self) -> Result<(), ChannelError> {
-            self.state.shutdowns.fetch_add(1, AtomicOrdering::Relaxed);
-            *self.state.sender.lock().await = None;
-            Ok(())
-        }
-
-        async fn health_check(&self) -> Result<(), ChannelError> {
-            Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl Channel for FailingStartChannel {
-        fn name(&self) -> &str {
-            &self.name
-        }
-
-        async fn start(&self) -> Result<MessageStream, ChannelError> {
-            Err(ChannelError::StartupFailed {
-                name: self.name.clone(),
-                reason: "intentional startup failure".to_string(),
-            })
-        }
-
-        async fn respond(
-            &self,
-            _msg: &IncomingMessage,
-            _response: OutgoingResponse,
-        ) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        async fn health_check(&self) -> Result<(), ChannelError> {
-            Err(ChannelError::HealthCheckFailed {
-                name: self.name.clone(),
-            })
-        }
-    }
-
-    /// A channel whose `respond` signals when it starts, then blocks until
-    /// released — used to prove the manager isn't holding the channels lock
-    /// while a channel is mid-`respond`.
-    struct BlockingChannel {
-        name: String,
-        entered: Arc<tokio::sync::Notify>,
-        release: Arc<tokio::sync::Notify>,
-    }
-
-    #[async_trait]
-    impl Channel for BlockingChannel {
-        fn name(&self) -> &str {
-            &self.name
-        }
-
-        async fn start(&self) -> Result<MessageStream, ChannelError> {
-            Ok(Box::pin(stream::empty()))
-        }
-
-        async fn respond(
-            &self,
-            _msg: &IncomingMessage,
-            _response: OutgoingResponse,
-        ) -> Result<(), ChannelError> {
-            self.entered.notify_one();
-            self.release.notified().await;
-            Ok(())
-        }
-
-        async fn health_check(&self) -> Result<(), ChannelError> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn respond_releases_channels_lock_before_awaiting_channel() {
-        let manager = Arc::new(ChannelManager::new());
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        manager
-            .add(Box::new(BlockingChannel {
-                name: "slow".to_string(),
-                entered: Arc::clone(&entered),
-                release: Arc::clone(&release),
-            }))
-            .await;
-
-        // Drive a respond that will block inside the channel.
-        let m = Arc::clone(&manager);
-        let slow = tokio::spawn(async move {
-            let msg = IncomingMessage::new("slow", "user", "hi");
-            m.respond(&msg, OutgoingResponse::text("x")).await
-        });
-
-        // Wait until the channel's respond is actually executing (mid-await).
-        entered.notified().await;
-
-        // A write-lock operation (hot_add) must succeed while the slow respond
-        // is still in flight. If respond held the read guard across its await,
-        // this write would block and the timeout would fire. This is the
-        // regression guard for the lock-across-await fix.
-        let added = tokio::time::timeout(
-            Duration::from_secs(2),
-            manager.hot_add(Box::new(MockChannel::new(
-                "added",
-                Arc::new(MockChannelState::default()),
-            ))),
-        )
-        .await;
-        assert!(
-            added.is_ok(),
-            "hot_add blocked — respond held the channels read guard across its await"
-        );
-        assert!(added.unwrap().is_ok());
-
-        // Release the slow channel and let its task finish cleanly.
-        release.notify_one();
-        let _ = slow.await;
-    }
-
-    #[tokio::test]
-    async fn broadcast_resolves_legacy_web_alias_to_gateway() {
-        let manager = ChannelManager::new();
-        let state = Arc::new(MockChannelState::default());
-        manager
-            .add(Box::new(MockChannel::new("gateway", Arc::clone(&state))))
-            .await;
-
-        manager
-            .broadcast("web", "user-1", OutgoingResponse::text("hello"))
-            .await
-            .expect("legacy web alias should reach gateway channel");
-
-        let broadcasts = state.broadcasts.lock().await;
-        assert_eq!(
-            broadcasts.as_slice(),
-            &[("user-1".to_string(), "hello".to_string())]
-        );
-    }
-
-    #[tokio::test]
-    async fn channel_diagnostics_resolves_legacy_web_alias_to_gateway() {
-        let manager = ChannelManager::new();
-        let state = Arc::new(MockChannelState::default());
-        manager
-            .add(Box::new(MockChannel::new("gateway", Arc::clone(&state))))
-            .await;
-
-        let diagnostics = manager
-            .channel_diagnostics("web")
-            .await
-            .expect("legacy web alias should resolve diagnostics");
-        assert_eq!(
-            diagnostics.get("channel").and_then(|value| value.as_str()),
-            Some("gateway")
-        );
-        assert_eq!(*state.diagnostics_calls.lock().await, 1);
-    }
-
-    #[tokio::test]
-    async fn startup_failure_is_reported_as_failed_not_running() {
-        let manager = ChannelManager::new();
-        manager
-            .add(Box::new(MockChannel::new(
-                "healthy",
-                Arc::new(MockChannelState::default()),
-            )))
-            .await;
-        manager
-            .add(Box::new(FailingStartChannel {
-                name: "broken".to_string(),
-            }))
-            .await;
-
-        let _stream = manager
-            .start_all()
-            .await
-            .expect("one healthy channel should keep the runtime available");
-        let entries = manager.status_entries().await;
-        let broken = entries
-            .iter()
-            .find(|entry| entry.name == "broken")
-            .expect("failed channel remains visible for diagnostics");
-
-        assert!(matches!(broken.state, ChannelViewState::Failed { .. }));
-        assert_eq!(broken.errors, 1);
-        assert!(
-            broken
-                .last_error
-                .as_deref()
-                .is_some_and(|error| error.contains("intentional startup failure"))
-        );
-    }
-
-    #[tokio::test]
-    async fn hot_add_emits_status_through_gateway_neutral_sink() {
-        let manager = ChannelManager::new();
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        manager
-            .set_status_change_sink(move |event| {
-                let _ = event_tx.send(event);
-            })
-            .await;
-
-        manager
-            .hot_add(Box::new(MockChannel::new(
-                "dynamic",
-                Arc::new(MockChannelState::default()),
-            )))
-            .await
-            .expect("hot add succeeds");
-
-        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
-            .await
-            .expect("status event should arrive")
-            .expect("status sink remains open");
-        assert_eq!(event.channel, "dynamic");
-        assert_eq!(event.status, "online");
-    }
-
-    #[tokio::test]
-    async fn status_entries_include_native_lifecycle_surfaces_without_shadowing_active_channels() {
-        let manager = ChannelManager::new();
-        manager
-            .add_descriptor(ChannelDescriptor::native_lifecycle(
-                "matrix",
-                true,
-                true,
-                "Matrix rooms and DMs",
-            ))
-            .await;
-        manager
-            .add_descriptor(ChannelDescriptor::native_lifecycle(
-                "gateway",
-                true,
-                true,
-                "Gateway lifecycle surface should be shadowed",
-            ))
-            .await;
-        manager
-            .add(Box::new(MockChannel::new(
-                "gateway",
-                Arc::new(MockChannelState::default()),
-            )))
-            .await;
-
-        let entries = manager.status_entries().await;
-        let matrix = entries
-            .iter()
-            .find(|entry| entry.name == "matrix")
-            .expect("matrix lifecycle surface should be visible");
-        assert_eq!(matrix.channel_type, "native-lifecycle");
-        assert_eq!(matrix.state, ChannelViewState::Disabled);
-        assert!(
-            matrix
-                .last_error
-                .as_deref()
-                .is_some_and(|err| err.contains("no native transport instance"))
-        );
-
-        assert_eq!(
-            entries
-                .iter()
-                .filter(|entry| entry.name == "gateway")
-                .count(),
-            1
-        );
-        let gateway = entries
-            .iter()
-            .find(|entry| entry.name == "gateway")
-            .expect("active gateway entry should remain");
-        assert_eq!(gateway.channel_type, "gateway");
-    }
-
-    #[tokio::test]
-    async fn hot_remove_drains_stream_forwarder() {
-        let manager = ChannelManager::new();
-        let state = Arc::new(ForwardingChannelState::default());
-        manager
-            .hot_add(Box::new(ForwardingChannel::new(
-                "forwarded",
-                Arc::clone(&state),
-            )))
-            .await
-            .unwrap();
-
-        assert!(
-            manager
-                .stream_forwarders
-                .read()
-                .await
-                .contains_key("forwarded")
-        );
-
-        manager.hot_remove("forwarded").await.unwrap();
-
-        assert!(manager.stream_forwarders.read().await.is_empty());
-        assert_eq!(state.shutdowns.load(AtomicOrdering::Relaxed), 1);
-    }
-}
+mod tests;

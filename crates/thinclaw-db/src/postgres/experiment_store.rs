@@ -18,8 +18,27 @@ impl ExperimentStore for PgBackend {
         self.store.get_experiment_project(id).await
     }
 
+    async fn get_experiment_project_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentProject>, DatabaseError> {
+        self.store
+            .get_experiment_project_for_owner(id, owner_user_id)
+            .await
+    }
+
     async fn list_experiment_projects(&self) -> Result<Vec<ExperimentProject>, DatabaseError> {
         self.store.list_experiment_projects().await
+    }
+
+    async fn list_experiment_projects_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentProject>, DatabaseError> {
+        self.store
+            .list_experiment_projects_for_owner(owner_user_id)
+            .await
     }
 
     async fn update_experiment_project(
@@ -31,6 +50,16 @@ impl ExperimentStore for PgBackend {
 
     async fn delete_experiment_project(&self, id: Uuid) -> Result<bool, DatabaseError> {
         self.store.delete_experiment_project(id).await
+    }
+
+    async fn delete_experiment_project_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.store
+            .delete_experiment_project_for_owner(id, owner_user_id)
+            .await
     }
 
     async fn create_experiment_runner_profile(
@@ -47,10 +76,29 @@ impl ExperimentStore for PgBackend {
         self.store.get_experiment_runner_profile(id).await
     }
 
+    async fn get_experiment_runner_profile_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentRunnerProfile>, DatabaseError> {
+        self.store
+            .get_experiment_runner_profile_for_owner(id, owner_user_id)
+            .await
+    }
+
     async fn list_experiment_runner_profiles(
         &self,
     ) -> Result<Vec<ExperimentRunnerProfile>, DatabaseError> {
         self.store.list_experiment_runner_profiles().await
+    }
+
+    async fn list_experiment_runner_profiles_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentRunnerProfile>, DatabaseError> {
+        self.store
+            .list_experiment_runner_profiles_for_owner(owner_user_id)
+            .await
     }
 
     async fn update_experiment_runner_profile(
@@ -62,6 +110,16 @@ impl ExperimentStore for PgBackend {
 
     async fn delete_experiment_runner_profile(&self, id: Uuid) -> Result<bool, DatabaseError> {
         self.store.delete_experiment_runner_profile(id).await
+    }
+
+    async fn delete_experiment_runner_profile_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.store
+            .delete_experiment_runner_profile_for_owner(id, owner_user_id)
+            .await
     }
 
     async fn create_experiment_campaign(

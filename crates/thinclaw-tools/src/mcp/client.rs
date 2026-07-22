@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use tokio::sync::{Mutex, RwLock, oneshot};
+use tokio::sync::{Mutex, OnceCell, RwLock, oneshot};
 
 use thinclaw_secrets::{SecretAccessContext, SecretError, SecretsStore};
 use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolArtifact, ToolError, ToolOutput};
@@ -46,9 +46,7 @@ struct McpRuntimeState {
     capability_policy: McpCapabilityPolicy,
     roots_grants: RwLock<Vec<String>>,
     config_store: Option<McpConfigStore>,
-    pending_interactions: RwLock<HashMap<String, McpPendingInteraction>>,
-    interaction_waiters: Mutex<HashMap<String, oneshot::Sender<PendingInteractionResolution>>>,
-    interaction_request_ids: Mutex<HashMap<u64, String>>,
+    pending_interactions: Mutex<PendingInteractionState>,
 }
 
 // MCP interaction DTOs moved to `thinclaw-tools-core` so light consumers can use
@@ -58,6 +56,35 @@ pub use thinclaw_tools_core::mcp_interaction::{McpInteractionKind, McpPendingInt
 enum PendingInteractionResolution {
     Approved(serde_json::Value),
     Denied(String),
+}
+
+#[derive(Default)]
+struct PendingInteractionState {
+    interactions: HashMap<String, McpPendingInteraction>,
+    waiters: HashMap<String, oneshot::Sender<PendingInteractionResolution>>,
+    request_ids: HashMap<u64, String>,
+}
+
+impl PendingInteractionState {
+    fn remove(
+        &mut self,
+        interaction_id: &str,
+        request_id: Option<u64>,
+    ) -> Option<oneshot::Sender<PendingInteractionResolution>> {
+        self.interactions.remove(interaction_id);
+        if let Some(request_id) = request_id {
+            self.request_ids.remove(&request_id);
+        } else if let Some(request_id) =
+            self.request_ids
+                .iter()
+                .find_map(|(request_id, pending_id)| {
+                    (pending_id == interaction_id).then_some(*request_id)
+                })
+        {
+            self.request_ids.remove(&request_id);
+        }
+        self.waiters.remove(interaction_id)
+    }
 }
 
 impl McpRuntimeState {
@@ -86,9 +113,7 @@ impl McpRuntimeState {
             capability_policy,
             roots_grants: RwLock::new(roots_grants),
             config_store,
-            pending_interactions: RwLock::new(HashMap::new()),
-            interaction_waiters: Mutex::new(HashMap::new()),
-            interaction_request_ids: Mutex::new(HashMap::new()),
+            pending_interactions: Mutex::new(PendingInteractionState::default()),
         }
     }
 
@@ -249,8 +274,9 @@ impl McpRuntimeState {
     async fn list_pending_interactions(&self) -> Vec<McpPendingInteraction> {
         let mut pending = self
             .pending_interactions
-            .read()
+            .lock()
             .await
+            .interactions
             .values()
             .cloned()
             .collect::<Vec<_>>();
@@ -263,25 +289,29 @@ impl McpRuntimeState {
         interaction_id: &str,
         resolution: PendingInteractionResolution,
     ) -> Result<(), ToolError> {
-        let Some(request_id) = self.pending_request_id(interaction_id).await else {
-            return Err(ToolError::InvalidParameters(format!(
-                "No pending MCP interaction with id '{}'",
-                interaction_id
-            )));
+        let sender = {
+            let mut pending = self.pending_interactions.lock().await;
+            let request_id = pending
+                .request_ids
+                .iter()
+                .find_map(|(request_id, pending_id)| {
+                    (pending_id == interaction_id).then_some(*request_id)
+                })
+                .ok_or_else(|| {
+                    ToolError::InvalidParameters(format!(
+                        "No pending MCP interaction with id '{}'",
+                        interaction_id
+                    ))
+                })?;
+            pending
+                .remove(interaction_id, Some(request_id))
+                .ok_or_else(|| {
+                    ToolError::InvalidParameters(format!(
+                        "No pending MCP interaction with id '{}'",
+                        interaction_id
+                    ))
+                })?
         };
-        self.remove_pending_tracking(interaction_id, Some(request_id))
-            .await;
-        let sender = self
-            .interaction_waiters
-            .lock()
-            .await
-            .remove(interaction_id)
-            .ok_or_else(|| {
-                ToolError::InvalidParameters(format!(
-                    "No pending MCP interaction with id '{}'",
-                    interaction_id
-                ))
-            })?;
         sender.send(resolution).map_err(|_| {
             ToolError::ExecutionFailed(format!(
                 "Pending MCP interaction '{}' was already dropped",
@@ -290,50 +320,38 @@ impl McpRuntimeState {
         })
     }
 
-    async fn pending_request_id(&self, interaction_id: &str) -> Option<u64> {
-        let request_ids = self.interaction_request_ids.lock().await;
-        request_ids.iter().find_map(|(request_id, pending_id)| {
-            (pending_id == interaction_id).then_some(*request_id)
-        })
-    }
-
-    async fn remove_pending_tracking(&self, interaction_id: &str, request_id: Option<u64>) {
+    async fn finish_pending_interaction(&self, interaction_id: &str, request_id: u64) {
         self.pending_interactions
-            .write()
+            .lock()
             .await
-            .remove(interaction_id);
-        let mut request_ids = self.interaction_request_ids.lock().await;
-        if let Some(request_id) = request_id {
-            request_ids.remove(&request_id);
-        } else if let Some(request_id) = request_ids.iter().find_map(|(request_id, pending_id)| {
-            (pending_id == interaction_id).then_some(*request_id)
-        }) {
-            request_ids.remove(&request_id);
-        }
+            .remove(interaction_id, Some(request_id));
     }
 
     async fn cancel_pending_server_request(&self, request_id: Option<u64>, reason: String) {
         let Some(request_id) = request_id else {
             return;
         };
-        let interaction_id = self
-            .interaction_request_ids
-            .lock()
-            .await
-            .get(&request_id)
-            .cloned();
-        let Some(interaction_id) = interaction_id else {
-            return;
+        let sender = {
+            let mut pending = self.pending_interactions.lock().await;
+            let Some(interaction_id) = pending.request_ids.get(&request_id).cloned() else {
+                return;
+            };
+            pending.remove(&interaction_id, Some(request_id))
         };
-        self.remove_pending_tracking(&interaction_id, Some(request_id))
-            .await;
-        if let Some(sender) = self
-            .interaction_waiters
-            .lock()
-            .await
-            .remove(&interaction_id)
-        {
+        if let Some(sender) = sender {
             let _ = sender.send(PendingInteractionResolution::Denied(reason));
+        }
+    }
+
+    async fn cancel_all_pending_interactions(&self, reason: &str) {
+        let waiters = {
+            let mut pending = self.pending_interactions.lock().await;
+            pending.interactions.clear();
+            pending.request_ids.clear();
+            std::mem::take(&mut pending.waiters)
+        };
+        for (_, sender) in waiters {
+            let _ = sender.send(PendingInteractionResolution::Denied(reason.to_string()));
         }
     }
 
@@ -341,14 +359,17 @@ impl McpRuntimeState {
         &self,
         request: &McpRequest,
         kind: McpInteractionKind,
-    ) -> (
-        McpPendingInteraction,
-        oneshot::Receiver<PendingInteractionResolution>,
-    ) {
+    ) -> Result<
+        (
+            McpPendingInteraction,
+            oneshot::Receiver<PendingInteractionResolution>,
+        ),
+        McpError,
+    > {
         let interaction_id = uuid::Uuid::new_v4().to_string();
         let params = request.params.clone().unwrap_or(serde_json::Value::Null);
         let (title, description, schema) = describe_pending_interaction(&kind, &params);
-        let pending = McpPendingInteraction {
+        let pending_interaction = McpPendingInteraction {
             id: interaction_id.clone(),
             server_name: self.server_name.clone(),
             method: request.method.clone(),
@@ -359,20 +380,30 @@ impl McpRuntimeState {
             schema,
             created_at: Utc::now().to_rfc3339(),
         };
-        let (tx, rx) = oneshot::channel();
-        self.pending_interactions
-            .write()
-            .await
-            .insert(interaction_id.clone(), pending.clone());
-        self.interaction_waiters
-            .lock()
-            .await
-            .insert(interaction_id, tx);
-        self.interaction_request_ids
-            .lock()
-            .await
-            .insert(request.id, pending.id.clone());
-        (pending, rx)
+        let (sender, receiver) = oneshot::channel();
+        // A single lock makes registration cancellation-safe: the future has
+        // no suspension point between these related inserts.
+        let mut pending = self.pending_interactions.lock().await;
+        if pending.request_ids.contains_key(&request.id) {
+            return Err(McpError::invalid_request(format!(
+                "MCP client request id {} is already active",
+                request.id
+            )));
+        }
+        if pending.interactions.len() >= MAX_PENDING_MCP_INTERACTIONS {
+            return Err(McpError::request_cancelled(
+                "MCP pending interaction capacity is exhausted",
+            ));
+        }
+        pending
+            .interactions
+            .insert(interaction_id.clone(), pending_interaction.clone());
+        pending.waiters.insert(interaction_id, sender);
+        pending
+            .request_ids
+            .insert(request.id, pending_interaction.id.clone());
+        drop(pending);
+        Ok((pending_interaction, receiver))
     }
 
     async fn run_pending_interaction(
@@ -381,34 +412,33 @@ impl McpRuntimeState {
         kind: McpInteractionKind,
     ) -> McpResponse {
         let request_id = request.id;
-        let (pending, receiver) = self.build_pending_interaction(&request, kind).await;
+        let (pending, receiver) = match self.build_pending_interaction(&request, kind).await {
+            Ok(pending) => pending,
+            Err(error) => return McpResponse::error(request_id, error),
+        };
 
         match tokio::time::timeout(MCP_INTERACTION_TIMEOUT, receiver).await {
             Ok(Ok(PendingInteractionResolution::Approved(result))) => {
-                self.remove_pending_tracking(&pending.id, Some(request_id))
+                self.finish_pending_interaction(&pending.id, request_id)
                     .await;
-                self.interaction_waiters.lock().await.remove(&pending.id);
                 McpResponse::success(request_id, result)
             }
             Ok(Ok(PendingInteractionResolution::Denied(message))) => {
-                self.remove_pending_tracking(&pending.id, Some(request_id))
+                self.finish_pending_interaction(&pending.id, request_id)
                     .await;
-                self.interaction_waiters.lock().await.remove(&pending.id);
                 McpResponse::error(request_id, McpError::request_cancelled(message))
             }
             Ok(Err(_)) => {
-                self.remove_pending_tracking(&pending.id, Some(request_id))
+                self.finish_pending_interaction(&pending.id, request_id)
                     .await;
-                self.interaction_waiters.lock().await.remove(&pending.id);
                 McpResponse::error(
                     request_id,
                     McpError::request_cancelled("MCP interaction was cancelled".to_string()),
                 )
             }
             Err(_) => {
-                self.remove_pending_tracking(&pending.id, Some(request_id))
+                self.finish_pending_interaction(&pending.id, request_id)
                     .await;
-                self.interaction_waiters.lock().await.remove(&pending.id);
                 McpResponse::error(
                     request_id,
                     McpError::request_cancelled(
@@ -442,6 +472,11 @@ impl McpInboundHandler for McpRuntimeState {
     async fn handle_notification(&self, notification: McpNotification) {
         self.handle_notification_inner(&notification).await;
     }
+
+    async fn cancel_request(&self, request_id: u64, reason: &str) {
+        self.cancel_pending_server_request(Some(request_id), reason.to_string())
+            .await;
+    }
 }
 
 /// Build the long-lived HTTP client for an MCP Streamable-HTTP server, pinning
@@ -451,23 +486,15 @@ impl McpInboundHandler for McpRuntimeState {
 /// re-resolving the hostname at connect time (when it could rebind to a private
 /// address such as the cloud metadata endpoint).
 ///
-/// MCP servers are operator-configured and frequently **local** (`localhost` /
-/// private addresses), which the SSRF blocklist legitimately rejects. To avoid
-/// regressing those, pinning is best-effort: when validation fails (a local
-/// server) or there is nothing to pin (an IP-literal host), the unpinned client
-/// is returned and behavior is identical to before. The config-time policy
-/// (`McpServerConfig::validate`, honoring `allow_local_http`) remains the gate
-/// for *whether* a server URL is permitted; this only freezes resolution for the
-/// public hostnames where rebinding is a real threat. `require_https` is left
-/// off here so a public `http://` server is still pinnable; the HTTPS policy is
-/// enforced at config time.
-fn build_pinned_mcp_client(server_url: &str) -> reqwest::Client {
-    let base = || {
-        reqwest::Client::builder()
-            .build()
-            .expect("Failed to create HTTP client")
-    };
-    super::build_pinned(reqwest::Client::builder(), server_url, base)
+/// Local endpoints are accepted only when the persisted config explicitly sets
+/// `allow_local_http` (or when a caller uses the low-level unconfigured
+/// constructor). Validation, DNS resolution, pinning, redirects, and client
+/// construction all fail closed.
+async fn build_pinned_mcp_client(
+    server_url: &str,
+    allow_local: bool,
+) -> Result<reqwest::Client, ToolError> {
+    super::build_pinned(reqwest::Client::builder(), server_url, allow_local).await
 }
 
 /// MCP client for communicating with MCP servers.
@@ -479,7 +506,13 @@ pub struct McpClient {
     server_name: String,
 
     /// HTTP client (used for HTTP transport only).
-    http_client: reqwest::Client,
+    http_client: Arc<OnceCell<Result<reqwest::Client, String>>>,
+
+    /// Whether an explicitly configured local HTTP endpoint is permitted.
+    http_client_allow_local: bool,
+
+    /// Structural configuration errors captured by synchronous constructors.
+    http_client_validation_error: Option<String>,
 
     /// Stdio transport (used for stdio transport only).
     stdio_transport: Option<Arc<StdioTransport>>,
@@ -501,11 +534,32 @@ pub struct McpClient {
 
     /// Server configuration (for token secret name lookup).
     server_config: Option<McpServerConfig>,
+
+    /// Serializes refreshes across cloned clients so a burst of requests near
+    /// expiry does not rotate the same refresh token concurrently.
+    token_refresh_lock: Arc<Mutex<()>>,
 }
 
 const MCP_INTERACTION_TIMEOUT: Duration = Duration::from_secs(1800);
 const MCP_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(1830);
 const MCP_HTTP_CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PENDING_MCP_INTERACTIONS: usize = 32;
+const MAX_MCP_HTTP_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MCP_HTTP_ERROR_BYTES: usize = 16 * 1024;
+const MAX_MCP_SSE_STREAM_BYTES: usize = 64 * 1024 * 1024;
+const MAX_MCP_SSE_EVENTS: usize = 4096;
+const MAX_MCP_SESSION_ID_BYTES: usize = 4 * 1024;
+const MAX_MCP_CATALOG_PAGES: usize = 128;
+const MAX_MCP_CATALOG_ITEMS: usize = 8 * 1024;
+const MAX_MCP_CATALOG_BYTES: usize = 32 * 1024 * 1024;
+const MAX_MCP_CURSOR_BYTES: usize = 8 * 1024;
+const MCP_OAUTH_MAX_REFRESH_SKEW_SECS: i64 = 60;
+
+enum StoredAccessToken {
+    Missing,
+    RefreshRequired,
+    Available(String),
+}
 
 impl McpClient {
     /// Create a new simple MCP client (no authentication).
@@ -579,8 +633,24 @@ impl McpClient {
         user_id: String,
         server_config: Option<McpServerConfig>,
     ) -> Self {
+        let http_client_allow_local = server_config
+            .as_ref()
+            .map(|config| config.allow_local_http)
+            // Low-level constructors are used by tests and embedded callers;
+            // an explicit local URL remains an operator choice.
+            .unwrap_or(true);
+        let http_client_validation_error = if stdio_transport.is_some() {
+            None
+        } else {
+            server_config
+                .as_ref()
+                .and_then(|config| config.validate().err())
+                .map(|error| error.to_string())
+        };
         Self {
-            http_client: build_pinned_mcp_client(&server_url),
+            http_client: Arc::new(OnceCell::new()),
+            http_client_allow_local,
+            http_client_validation_error,
             server_url,
             server_name,
             stdio_transport,
@@ -590,7 +660,27 @@ impl McpClient {
             secrets,
             user_id,
             server_config,
+            token_refresh_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    async fn http_client(&self) -> Result<&reqwest::Client, ToolError> {
+        if let Some(error) = self.http_client_validation_error.as_deref() {
+            return Err(ToolError::NotAuthorized(format!(
+                "MCP HTTP endpoint is not permitted: {error}"
+            )));
+        }
+        self.http_client
+            .get_or_init(|| async {
+                build_pinned_mcp_client(&self.server_url, self.http_client_allow_local)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .as_ref()
+            .map_err(|error| {
+                ToolError::NotAuthorized(format!("MCP HTTP endpoint is not permitted: {error}"))
+            })
     }
 
     /// Create a new MCP client with stdio transport.
@@ -739,31 +829,108 @@ impl McpClient {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Get the access token for this server (if authenticated).
-    async fn get_access_token(&self) -> Result<Option<String>, ToolError> {
+    async fn inspect_access_token(&self) -> Result<StoredAccessToken, ToolError> {
         let Some(ref secrets) = self.secrets else {
-            return Ok(None);
+            return Ok(StoredAccessToken::Missing);
         };
 
         let Some(ref config) = self.server_config else {
-            return Ok(None);
+            return Ok(StoredAccessToken::Missing);
         };
+
+        let token_name = config.token_secret_name();
+        match secrets.get(&self.user_id, &token_name).await {
+            Ok(secret)
+                if secret.expires_at.is_some_and(|expires_at| {
+                    let lifetime_seconds = expires_at
+                        .signed_duration_since(secret.updated_at)
+                        .num_seconds()
+                        .max(0);
+                    let skew_seconds =
+                        (lifetime_seconds / 10).clamp(1, MCP_OAUTH_MAX_REFRESH_SKEW_SECS);
+                    expires_at <= Utc::now() + chrono::Duration::seconds(skew_seconds)
+                }) =>
+            {
+                return Ok(StoredAccessToken::RefreshRequired);
+            }
+            Ok(_) => {}
+            Err(SecretError::Expired) => return Ok(StoredAccessToken::RefreshRequired),
+            Err(SecretError::NotFound(_)) => return Ok(StoredAccessToken::Missing),
+            Err(error) => {
+                return Err(ToolError::ExternalService(format!(
+                    "Failed to inspect access token: {error}"
+                )));
+            }
+        }
 
         match secrets
             .get_for_injection(
                 &self.user_id,
-                &config.token_secret_name(),
+                &token_name,
                 SecretAccessContext::new("mcp.client", "oauth_access_token"),
             )
             .await
         {
-            Ok(token) => Ok(Some(token.expose().to_string())),
-            Err(SecretError::NotFound(_)) => Ok(None),
-            Err(e) => Err(ToolError::ExternalService(format!(
-                "Failed to get access token: {}",
-                e
+            Ok(token) => Ok(StoredAccessToken::Available(token.expose().to_string())),
+            Err(SecretError::Expired) => Ok(StoredAccessToken::RefreshRequired),
+            Err(SecretError::NotFound(_)) => Ok(StoredAccessToken::Missing),
+            Err(error) => Err(ToolError::ExternalService(format!(
+                "Failed to get access token: {error}"
             ))),
         }
+    }
+
+    /// Get the access token for this server (if authenticated), refreshing it
+    /// before its persisted expiry under a clone-shared single-flight lock.
+    async fn get_access_token(&self) -> Result<Option<String>, ToolError> {
+        match self.inspect_access_token().await? {
+            StoredAccessToken::Available(token) => return Ok(Some(token)),
+            StoredAccessToken::Missing => return Ok(None),
+            StoredAccessToken::RefreshRequired => {}
+        }
+
+        let _refresh_guard = self.token_refresh_lock.lock().await;
+        match self.inspect_access_token().await? {
+            StoredAccessToken::Available(token) => return Ok(Some(token)),
+            StoredAccessToken::Missing => return Ok(None),
+            StoredAccessToken::RefreshRequired => {}
+        }
+
+        let (Some(config), Some(secrets)) = (&self.server_config, &self.secrets) else {
+            return Ok(None);
+        };
+        let refreshed = refresh_access_token(config, secrets, &self.user_id)
+            .await
+            .map_err(|error| {
+                ToolError::ExternalService(format!(
+                    "MCP access token expired and refresh failed: {error}"
+                ))
+            })?;
+        Ok(Some(refreshed.access_token))
+    }
+
+    async fn refresh_after_unauthorized(
+        &self,
+        rejected_token: Option<&str>,
+    ) -> Result<(), ToolError> {
+        let _refresh_guard = self.token_refresh_lock.lock().await;
+        if let StoredAccessToken::Available(current_token) = self.inspect_access_token().await?
+            && rejected_token.is_some_and(|rejected| rejected != current_token.as_str())
+        {
+            // Another request already replaced the credential that received
+            // this 401, so retry with that value without rotating again.
+            return Ok(());
+        }
+
+        let (Some(config), Some(secrets)) = (&self.server_config, &self.secrets) else {
+            return Err(ToolError::NotAuthorized(
+                "MCP client has no OAuth configuration".to_string(),
+            ));
+        };
+        refresh_access_token(config, secrets, &self.user_id)
+            .await
+            .map(|_| ())
+            .map_err(|error| ToolError::ExternalService(error.to_string()))
     }
 
     async fn send_notification(&self, notification: McpNotification) -> Result<(), ToolError> {
@@ -771,14 +938,17 @@ impl McpClient {
             return transport.send_notification(notification).await;
         }
 
+        let payload = serialize_http_payload(&notification)?;
+
         let mut req_builder = self
-            .http_client
+            .http_client()
+            .await?
             .post(&self.server_url)
             .header("Accept", "application/json, text/event-stream")
             .header("Content-Type", "application/json")
             .header("MCP-Protocol-Version", PROTOCOL_VERSION)
             .timeout(MCP_HTTP_CONTROL_TIMEOUT)
-            .json(&notification);
+            .body(payload);
 
         if let Some(token) = self.get_access_token().await? {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
@@ -799,7 +969,7 @@ impl McpClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = bounded_error_body(response).await;
             return Err(ToolError::ExternalService(format!(
                 "MCP notification returned status: {} - {}",
                 status, body
@@ -814,14 +984,17 @@ impl McpClient {
             return Ok(());
         }
 
+        let payload = serialize_http_payload(&response)?;
+
         let mut req_builder = self
-            .http_client
+            .http_client()
+            .await?
             .post(&self.server_url)
             .header("Accept", "application/json, text/event-stream")
             .header("Content-Type", "application/json")
             .header("MCP-Protocol-Version", PROTOCOL_VERSION)
             .timeout(MCP_HTTP_CONTROL_TIMEOUT)
-            .json(&response);
+            .body(payload);
 
         if let Some(token) = self.get_access_token().await? {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
@@ -839,7 +1012,7 @@ impl McpClient {
         self.capture_session_id(http_response.headers()).await;
         if !http_response.status().is_success() {
             let status = http_response.status();
-            let body = http_response.text().await.unwrap_or_default();
+            let body = bounded_error_body(http_response).await;
             return Err(ToolError::ExternalService(format!(
                 "MCP client response returned status: {} - {}",
                 status, body
@@ -858,17 +1031,20 @@ impl McpClient {
     }
 
     async fn send_request_http(&self, request: McpRequest) -> Result<McpResponse, ToolError> {
+        let payload = serialize_http_payload(&request)?;
         for attempt in 0..2 {
             let mut req_builder = self
-                .http_client
+                .http_client()
+                .await?
                 .post(&self.server_url)
                 .header("Accept", "application/json, text/event-stream")
                 .header("Content-Type", "application/json")
                 .header("MCP-Protocol-Version", PROTOCOL_VERSION)
                 .timeout(MCP_HTTP_REQUEST_TIMEOUT)
-                .json(&request);
+                .body(payload.clone());
 
-            if let Some(token) = self.get_access_token().await? {
+            let access_token = self.get_access_token().await?;
+            if let Some(ref token) = access_token {
                 req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
             }
 
@@ -885,9 +1061,8 @@ impl McpClient {
 
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 if attempt == 0
-                    && let Some(ref secrets) = self.secrets
-                    && let Some(ref config) = self.server_config
-                    && refresh_access_token(config, secrets, &self.user_id)
+                    && self
+                        .refresh_after_unauthorized(access_token.as_deref())
                         .await
                         .is_ok()
                 {
@@ -900,7 +1075,14 @@ impl McpClient {
                 )));
             }
 
-            return self.parse_response(response).await;
+            let parsed = self.parse_response(response).await?;
+            if parsed.id != request.id {
+                return Err(ToolError::ExternalService(format!(
+                    "MCP server '{}' returned response id {} for request id {}",
+                    self.server_name, parsed.id, request.id
+                )));
+            }
+            return Ok(parsed);
         }
 
         Err(ToolError::ExternalService(
@@ -914,7 +1096,8 @@ impl McpClient {
                 .get("MCP-Session-Id")
                 .or_else(|| headers.get("Mcp-Session-Id"))
                 .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+                .filter(|value| !value.is_empty() && value.len() <= MAX_MCP_SESSION_ID_BYTES)
+                .map(str::to_string);
             if session_id.is_some() {
                 session_manager
                     .update_session_id(&self.server_name, session_id)
@@ -929,7 +1112,7 @@ impl McpClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = bounded_error_body(response).await;
             return Err(ToolError::ExternalService(format!(
                 "MCP server returned status: {} - {}",
                 status, body
@@ -947,11 +1130,13 @@ impl McpClient {
             return self.parse_sse_response(response).await;
         }
 
-        let body = response.text().await.map_err(|e| {
-            ToolError::ExternalService(format!("Failed to read MCP response body: {e}"))
+        let body = read_limited_response(response, MAX_MCP_HTTP_MESSAGE_BYTES, "MCP response body")
+            .await?;
+        let body = std::str::from_utf8(&body).map_err(|error| {
+            ToolError::ExternalService(format!("MCP response body is not valid UTF-8: {error}"))
         })?;
 
-        if let Some(parsed) = self.process_transport_payload(&body).await? {
+        if let Some(parsed) = self.process_transport_payload(body).await? {
             return Ok(parsed);
         }
 
@@ -982,65 +1167,131 @@ impl McpClient {
 
     async fn process_sse_event(
         &self,
-        current_data: &mut Vec<String>,
+        current_data: &mut Vec<u8>,
     ) -> Result<Option<McpResponse>, ToolError> {
         if current_data.is_empty() {
             return Ok(None);
         }
 
-        let payload = current_data.join("\n");
+        let payload = std::str::from_utf8(current_data).map_err(|error| {
+            ToolError::ExternalService(format!("MCP SSE data is not valid UTF-8: {error}"))
+        })?;
+        let result = self.process_transport_payload(payload).await;
         current_data.clear();
-        self.process_transport_payload(&payload).await
+        result
+    }
+
+    async fn process_sse_line(
+        &self,
+        line: &[u8],
+        current_data: &mut Vec<u8>,
+        event_count: &mut usize,
+    ) -> Result<Option<McpResponse>, ToolError> {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            if current_data.is_empty() {
+                return Ok(None);
+            }
+            *event_count = event_count.checked_add(1).ok_or_else(|| {
+                ToolError::ExternalService("MCP SSE event count overflow".to_string())
+            })?;
+            if *event_count > MAX_MCP_SSE_EVENTS {
+                return Err(ToolError::ExternalService(format!(
+                    "MCP SSE response exceeds the {MAX_MCP_SSE_EVENTS} event limit"
+                )));
+            }
+            return self.process_sse_event(current_data).await;
+        }
+
+        let Some(data) = line.strip_prefix(b"data:") else {
+            return Ok(None);
+        };
+        let data = data.strip_prefix(b" ").unwrap_or(data);
+        let separator_bytes = usize::from(!current_data.is_empty());
+        let new_len = current_data
+            .len()
+            .checked_add(separator_bytes)
+            .and_then(|len| len.checked_add(data.len()))
+            .ok_or_else(|| ToolError::ExternalService("MCP SSE event size overflow".to_string()))?;
+        if new_len > MAX_MCP_HTTP_MESSAGE_BYTES {
+            return Err(ToolError::ExternalService(format!(
+                "MCP SSE event exceeds the {MAX_MCP_HTTP_MESSAGE_BYTES} byte limit"
+            )));
+        }
+        if separator_bytes != 0 {
+            current_data.push(b'\n');
+        }
+        current_data.extend_from_slice(data);
+        Ok(None)
     }
 
     async fn parse_sse_response(
         &self,
         mut response: reqwest::Response,
     ) -> Result<McpResponse, ToolError> {
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_MCP_SSE_STREAM_BYTES as u64)
+        {
+            return Err(ToolError::ExternalService(format!(
+                "MCP SSE response exceeds the {MAX_MCP_SSE_STREAM_BYTES} byte stream limit"
+            )));
+        }
+
         let mut current_data = Vec::new();
-        let mut buffer = Vec::new();
+        let mut line = Vec::new();
+        let mut total_bytes = 0usize;
+        let mut event_count = 0usize;
 
         while let Some(chunk) = response.chunk().await.map_err(|e| {
             ToolError::ExternalService(format!("Failed to read MCP SSE response chunk: {e}"))
         })? {
-            buffer.extend_from_slice(&chunk);
+            total_bytes = total_bytes.checked_add(chunk.len()).ok_or_else(|| {
+                ToolError::ExternalService("MCP SSE stream size overflow".to_string())
+            })?;
+            if total_bytes > MAX_MCP_SSE_STREAM_BYTES {
+                return Err(ToolError::ExternalService(format!(
+                    "MCP SSE response exceeds the {MAX_MCP_SSE_STREAM_BYTES} byte stream limit"
+                )));
+            }
 
-            while let Some(newline_pos) = buffer.iter().position(|byte| *byte == b'\n') {
-                let mut line = buffer.drain(..=newline_pos).collect::<Vec<_>>();
-                if matches!(line.last(), Some(b'\n')) {
-                    line.pop();
-                }
-                if matches!(line.last(), Some(b'\r')) {
-                    line.pop();
-                }
-                let line = String::from_utf8(line).map_err(|e| {
-                    ToolError::ExternalService(format!("Failed to decode MCP SSE line: {e}"))
-                })?;
-
-                if line.is_empty() {
-                    if let Some(parsed) = self.process_sse_event(&mut current_data).await? {
-                        return Ok(parsed);
-                    }
+            let mut fragment_start = 0usize;
+            for (index, byte) in chunk.iter().enumerate() {
+                if *byte != b'\n' {
                     continue;
                 }
-
-                if let Some(data) = line.strip_prefix("data:") {
-                    current_data.push(data.trim_start().to_string());
+                append_sse_line_fragment(&mut line, &chunk[fragment_start..index])?;
+                if let Some(parsed) = self
+                    .process_sse_line(&line, &mut current_data, &mut event_count)
+                    .await?
+                {
+                    return Ok(parsed);
                 }
+                line.clear();
+                fragment_start = index + 1;
             }
+            append_sse_line_fragment(&mut line, &chunk[fragment_start..])?;
         }
 
-        if !buffer.is_empty() {
-            let line = String::from_utf8(std::mem::take(&mut buffer)).map_err(|e| {
-                ToolError::ExternalService(format!("Failed to decode trailing MCP SSE line: {e}"))
-            })?;
-            if let Some(data) = line.strip_prefix("data:") {
-                current_data.push(data.trim_start().to_string());
-            }
-        }
-
-        if let Some(parsed) = self.process_sse_event(&mut current_data).await? {
+        if !line.is_empty()
+            && let Some(parsed) = self
+                .process_sse_line(&line, &mut current_data, &mut event_count)
+                .await?
+        {
             return Ok(parsed);
+        }
+        if !current_data.is_empty() {
+            event_count = event_count.checked_add(1).ok_or_else(|| {
+                ToolError::ExternalService("MCP SSE event count overflow".to_string())
+            })?;
+            if event_count > MAX_MCP_SSE_EVENTS {
+                return Err(ToolError::ExternalService(format!(
+                    "MCP SSE response exceeds the {MAX_MCP_SSE_EVENTS} event limit"
+                )));
+            }
+            if let Some(parsed) = self.process_sse_event(&mut current_data).await? {
+                return Ok(parsed);
+            }
         }
 
         Err(ToolError::ExternalService(
@@ -1116,7 +1367,9 @@ impl McpClient {
 
         let mut cursor = None::<String>;
         let mut tools = Vec::new();
+        let mut pagination = CatalogPagination::default();
         loop {
+            pagination.begin_page("tools")?;
             let request = McpRequest::list_tools(self.next_request_id(), cursor.as_deref());
             let response = self.send_request(request).await?;
             if let Some(error) = response.error {
@@ -1130,8 +1383,9 @@ impl McpClient {
                     ToolError::ExternalService("No result in MCP tools/list response".to_string())
                 })?)
                 .map_err(|e| ToolError::ExternalService(format!("Invalid tools list: {}", e)))?;
+            pagination.accept_items(tools.len(), &page.tools, "tools")?;
             tools.extend(page.tools);
-            cursor = page.cursor.next_cursor;
+            cursor = pagination.accept_cursor(page.cursor.next_cursor, "tools")?;
             if cursor.is_none() {
                 break;
             }
@@ -1151,7 +1405,9 @@ impl McpClient {
 
         let mut cursor = None::<String>;
         let mut resources = Vec::new();
+        let mut pagination = CatalogPagination::default();
         loop {
+            pagination.begin_page("resources")?;
             let request = McpRequest::list_resources(self.next_request_id(), cursor.as_deref());
             let response = self.send_request(request).await?;
             if let Some(error) = response.error {
@@ -1169,8 +1425,9 @@ impl McpClient {
                 .map_err(|e| {
                     ToolError::ExternalService(format!("Invalid resources list: {}", e))
                 })?;
+            pagination.accept_items(resources.len(), &page.resources, "resources")?;
             resources.extend(page.resources);
-            cursor = page.cursor.next_cursor;
+            cursor = pagination.accept_cursor(page.cursor.next_cursor, "resources")?;
             if cursor.is_none() {
                 break;
             }
@@ -1207,7 +1464,9 @@ impl McpClient {
 
         let mut cursor = None::<String>;
         let mut templates = Vec::new();
+        let mut pagination = CatalogPagination::default();
         loop {
+            pagination.begin_page("resource templates")?;
             let request =
                 McpRequest::list_resource_templates(self.next_request_id(), cursor.as_deref());
             let response = self.send_request(request).await?;
@@ -1226,8 +1485,13 @@ impl McpClient {
                 .map_err(|e| {
                     ToolError::ExternalService(format!("Invalid resource template list: {}", e))
                 })?;
+            pagination.accept_items(
+                templates.len(),
+                &page.resource_templates,
+                "resource templates",
+            )?;
             templates.extend(page.resource_templates);
-            cursor = page.cursor.next_cursor;
+            cursor = pagination.accept_cursor(page.cursor.next_cursor, "resource templates")?;
             if cursor.is_none() {
                 break;
             }
@@ -1280,7 +1544,9 @@ impl McpClient {
 
         let mut cursor = None::<String>;
         let mut prompts = Vec::new();
+        let mut pagination = CatalogPagination::default();
         loop {
+            pagination.begin_page("prompts")?;
             let request = McpRequest::list_prompts(self.next_request_id(), cursor.as_deref());
             let response = self.send_request(request).await?;
             if let Some(error) = response.error {
@@ -1294,8 +1560,9 @@ impl McpClient {
                     ToolError::ExternalService("No result in MCP prompts/list response".to_string())
                 })?)
                 .map_err(|e| ToolError::ExternalService(format!("Invalid prompts list: {}", e)))?;
+            pagination.accept_items(prompts.len(), &page.prompts, "prompts")?;
             prompts.extend(page.prompts);
-            cursor = page.cursor.next_cursor;
+            cursor = pagination.accept_cursor(page.cursor.next_cursor, "prompts")?;
             if cursor.is_none() {
                 break;
             }
@@ -1519,6 +1786,16 @@ impl McpClient {
         }
         Ok(())
     }
+
+    /// Stop transport-owned processes and cancel pending server interactions.
+    pub async fn shutdown(&self) {
+        self.runtime
+            .cancel_all_pending_interactions("MCP client shut down")
+            .await;
+        if let Some(transport) = self.stdio_transport.as_ref() {
+            transport.shutdown().await;
+        }
+    }
 }
 
 impl Clone for McpClient {
@@ -1527,6 +1804,8 @@ impl Clone for McpClient {
             server_url: self.server_url.clone(),
             server_name: self.server_name.clone(),
             http_client: self.http_client.clone(),
+            http_client_allow_local: self.http_client_allow_local,
+            http_client_validation_error: self.http_client_validation_error.clone(),
             stdio_transport: self.stdio_transport.clone(),
             next_id: AtomicU64::new(self.next_id.load(Ordering::SeqCst)),
             runtime: self.runtime.clone(),
@@ -1534,121 +1813,13 @@ impl Clone for McpClient {
             secrets: self.secrets.clone(),
             user_id: self.user_id.clone(),
             server_config: self.server_config.clone(),
+            token_refresh_lock: self.token_refresh_lock.clone(),
         }
     }
 }
 
-/// Extract a server name from a URL for logging/display purposes.
-fn extract_server_name(url: &str) -> String {
-    reqwest::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_string()))
-        .unwrap_or_else(|| "unknown".to_string())
-        .replace('.', "_")
-}
-
-/// Encode a server or tool identifier component for ThinClaw tool names.
-fn encode_tool_component(value: &str) -> String {
-    let mut encoded = String::new();
-    for byte in value.bytes() {
-        let ch = byte as char;
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            encoded.push(ch.to_ascii_lowercase());
-        } else {
-            encoded.push('_');
-            encoded.push_str(&format!("{byte:02x}"));
-        }
-    }
-    encoded
-}
-
-fn normalize_root_uri(root: &str) -> String {
-    if root.contains("://") {
-        return root.to_string();
-    }
-
-    url::Url::from_file_path(root)
-        .map(|url| url.to_string())
-        .unwrap_or_else(|_| root.to_string())
-}
-
-fn root_name(root: &str) -> String {
-    Path::new(root)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(root)
-        .to_string()
-}
-
-fn describe_pending_interaction(
-    kind: &McpInteractionKind,
-    params: &serde_json::Value,
-) -> (String, String, Option<serde_json::Value>) {
-    match kind {
-        McpInteractionKind::Sampling => {
-            let parsed =
-                serde_json::from_value::<SamplingCreateMessageRequest>(params.clone()).ok();
-            let message_count = parsed
-                .as_ref()
-                .map(|request| request.messages.len())
-                .unwrap_or(0);
-            let system_prompt = parsed
-                .as_ref()
-                .and_then(|request| request.system_prompt.as_deref())
-                .filter(|prompt| !prompt.trim().is_empty())
-                .map(str::to_string);
-            let title = if let Some(system_prompt) = system_prompt.as_deref() {
-                format!("Sampling request: {}", truncate_label(system_prompt, 48))
-            } else {
-                "Sampling request".to_string()
-            };
-            let description = if message_count > 0 {
-                format!(
-                    "Server requested an assistant message from {} input messages.",
-                    message_count
-                )
-            } else {
-                "Server requested an assistant message from the client.".to_string()
-            };
-            (title, description, None)
-        }
-        McpInteractionKind::Elicitation => {
-            let parsed = serde_json::from_value::<ElicitationCreateRequest>(params.clone()).ok();
-            let title = parsed
-                .as_ref()
-                .and_then(|request| request.title.as_deref())
-                .filter(|title| !title.trim().is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| "Form input requested".to_string());
-            let description = parsed
-                .as_ref()
-                .and_then(|request| {
-                    request
-                        .instructions
-                        .as_deref()
-                        .or(request.message.as_deref())
-                        .filter(|text| !text.trim().is_empty())
-                })
-                .map(str::to_string)
-                .unwrap_or_else(|| "Server requested structured user input.".to_string());
-            let schema = parsed.and_then(|request| request.requested_schema);
-            (title, description, schema)
-        }
-    }
-}
-
-fn truncate_label(value: &str, max_chars: usize) -> String {
-    let char_count = value.chars().count();
-    if char_count <= max_chars {
-        return value.to_string();
-    }
-    let cutoff = value
-        .char_indices()
-        .nth(max_chars.saturating_sub(1))
-        .map(|(idx, _)| idx)
-        .unwrap_or(value.len());
-    format!("{}...", &value[..cutoff])
-}
+mod support;
+use support::*;
 
 /// Wrapper that implements Tool for an MCP tool.
 struct McpToolWrapper {
@@ -1787,80 +1958,4 @@ fn content_block_to_artifact(block: &ContentBlock) -> Option<ToolArtifact> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mcp_request_list_tools() {
-        let req = McpRequest::list_tools(1, None);
-        assert_eq!(req.method, "tools/list");
-        assert_eq!(req.id, 1);
-    }
-
-    #[test]
-    fn test_mcp_request_call_tool() {
-        let req = McpRequest::call_tool(2, "test", serde_json::json!({"key": "value"}));
-        assert_eq!(req.method, "tools/call");
-        assert!(req.params.is_some());
-    }
-
-    #[test]
-    fn test_extract_server_name() {
-        assert_eq!(
-            extract_server_name("https://mcp.notion.com/v1"),
-            "mcp_notion_com"
-        );
-        assert_eq!(extract_server_name("http://localhost:8080"), "localhost");
-        assert_eq!(extract_server_name("invalid"), "unknown");
-    }
-
-    #[test]
-    fn test_registered_tool_prefix() {
-        assert_eq!(
-            McpClient::registered_tool_prefix("GitHub Copilot"),
-            "mcp__github_20copilot__"
-        );
-    }
-
-    #[test]
-    fn test_simple_client_creation() {
-        let client = McpClient::new("http://localhost:8080");
-        assert_eq!(client.server_url(), "http://localhost:8080");
-        assert!(client.session_manager.is_none());
-        assert!(client.secrets.is_none());
-    }
-
-    #[tokio::test]
-    async fn health_check_ok_for_live_stdio_process() {
-        // `cat` reads stdin and stays alive, so the stdio transport's reader
-        // loop keeps running and health_check reports healthy.
-        let config = crate::mcp::config::McpServerConfig::new_stdio("health-live", "cat", vec![]);
-        let Ok(client) = McpClient::new_stdio(&config) else {
-            // No `cat` on this platform — skip rather than fail spuriously.
-            return;
-        };
-        assert!(client.health_check().await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn health_check_errs_for_exited_stdio_process() {
-        // A command that exits immediately: the reader loop observes EOF and
-        // flips `is_running()` to false, which health_check reports as unhealthy.
-        let config = crate::mcp::config::McpServerConfig::new_stdio(
-            "health-dead",
-            "sh",
-            vec!["-c".to_string(), "exit 0".to_string()],
-        );
-        let Ok(client) = McpClient::new_stdio(&config) else {
-            return;
-        };
-        // Give the spawned reader task a moment to observe the child's EOF.
-        for _ in 0..50 {
-            if client.health_check().await.is_err() {
-                return; // observed unhealthy as expected
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        panic!("stdio health_check never reported the exited process as unhealthy");
-    }
-}
+mod tests;

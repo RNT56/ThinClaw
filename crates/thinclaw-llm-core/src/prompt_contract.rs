@@ -328,7 +328,21 @@ impl PromptCompiler {
             if candidate.segment.trust.may_enter_system_preamble() {
                 system_parts.push(candidate.rendered);
             } else {
-                messages.push(ChatMessage::user(candidate.rendered));
+                match candidate.segment.trust {
+                    PromptTrust::UserInstruction => {
+                        messages.push(ChatMessage::user(candidate.rendered));
+                    }
+                    PromptTrust::UntrustedData => {
+                        messages.push(ChatMessage::untrusted_context_rendered(
+                            candidate.segment.id,
+                            candidate.segment.source,
+                            candidate.rendered,
+                        ));
+                    }
+                    PromptTrust::ImmutablePolicy | PromptTrust::TrustedConfiguration => {
+                        unreachable!("system-preamble trust handled above")
+                    }
+                }
             }
         }
 

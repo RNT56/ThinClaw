@@ -237,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn safety_config_controls_temp_path_access() {
-        let base_dir = PathBuf::from("/workspace");
+        let base_dir = std::env::current_dir().expect("test working directory must exist");
         let command = serde_json::json!({"command": "echo /tmp/thinclaw-temp-path"});
         let context = JobContext::default();
         let strict_config = SafetyConfig {

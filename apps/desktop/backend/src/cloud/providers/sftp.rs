@@ -7,20 +7,24 @@
 //!
 //! # Configuration
 //!
-//! - `endpoint`: Host and port (e.g. `sftp://server.example.com:22`)
+//! - `endpoint`: Host and port (e.g. `ssh://server.example.com:22`)
 //! - `access_key_id`: SSH username
-//! - `secret_access_key`: SSH password (or key passphrase)
+//! - `secret_access_key`: Absolute or `~/` path to an SSH private key
 //! - `root`: Remote path prefix (default: `thinclaw-desktop/`)
 
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use opendal::services::Sftp;
 use opendal::Operator;
 use std::collections::HashSet;
 use tracing::{debug, info};
 
+const MAX_LIST_ENTRIES: usize = 100_000;
+
 use super::super::provider::{
-    opendal_timestamp_millis, primary_object_root, should_read_legacy_object_root, CloudEntry,
-    CloudError, CloudProvider, CloudProviderConfig, CloudStatus, LEGACY_OBJECT_ROOT,
+    opendal_timestamp_millis, primary_object_root, should_read_legacy_object_root,
+    validate_object_key, validate_object_prefix, validate_provider_config, CloudEntry, CloudError,
+    CloudProvider, CloudProviderConfig, CloudStatus, LEGACY_OBJECT_ROOT,
 };
 
 /// SFTP storage provider.
@@ -33,10 +37,12 @@ pub struct SftpProvider {
 impl SftpProvider {
     /// Create a new SFTP provider from user configuration.
     pub fn from_config(config: &CloudProviderConfig) -> Result<Self, CloudError> {
+        validate_provider_config(config)?;
         let endpoint = config
             .endpoint
             .as_deref()
             .ok_or_else(|| CloudError::Provider("SFTP host:port is required".into()))?;
+        let display_endpoint = sftp_endpoint_label(endpoint);
 
         let root = primary_object_root(config).to_string();
         let operator = Self::build_operator(config, &root)?;
@@ -48,7 +54,7 @@ impl SftpProvider {
 
         info!(
             "[cloud/sftp] Created SFTP provider: endpoint={}, root={}, legacy_read_fallback={}",
-            endpoint,
+            display_endpoint,
             root,
             legacy_operator.is_some()
         );
@@ -56,7 +62,7 @@ impl SftpProvider {
         Ok(Self {
             operator,
             legacy_operator,
-            endpoint: endpoint.to_string(),
+            endpoint: display_endpoint,
         })
     }
 
@@ -65,9 +71,13 @@ impl SftpProvider {
             .endpoint
             .as_deref()
             .ok_or_else(|| CloudError::Provider("SFTP host:port is required".into()))?;
+        let normalized_endpoint = endpoint
+            .strip_prefix("sftp://")
+            .map(|endpoint| format!("ssh://{endpoint}"))
+            .unwrap_or_else(|| endpoint.to_string());
 
         let mut builder = Sftp::default();
-        builder = builder.endpoint(endpoint);
+        builder = builder.endpoint(&normalized_endpoint);
         builder = builder.root(root);
 
         // Authentication
@@ -75,29 +85,45 @@ impl SftpProvider {
             builder = builder.user(username);
         }
 
-        // SSH key path (use secret_access_key as the key path for now)
-        // In the future, we could add a dedicated key_path field to CloudProviderConfig
+        // SSH key path (the shared config field is used until a dedicated
+        // provider-specific config type is introduced).
         if let Some(key_path) = &config.secret_access_key {
-            // If it looks like a path, use as key; otherwise treat as password
-            if key_path.starts_with('/') || key_path.starts_with('~') {
-                builder = builder.key(key_path);
-            }
-            // Password-based auth is not directly supported by opendal SFTP
-            // as it requires interactive auth. SSH key is the recommended approach.
+            builder = builder.key(key_path);
         }
 
         Operator::new(builder)
             .map_err(|e| CloudError::Provider(format!("Failed to create SFTP operator: {}", e)))
     }
 
-    async fn read_key(operator: &Operator, key: &str) -> Result<Vec<u8>, CloudError> {
-        let data = operator.read(key).await.map_err(|e| {
+    async fn read_key(
+        operator: &Operator,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CloudError> {
+        let metadata = operator.stat(key).await.map_err(|e| {
             if e.kind() == opendal::ErrorKind::NotFound {
                 CloudError::NotFound(format!("'{}' not found", key))
             } else {
                 CloudError::DownloadFailed(format!("read '{}': {}", key, e))
             }
         })?;
+        if metadata.content_length() > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+            return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+        }
+        if metadata.content_length() == 0 {
+            return Ok(Vec::new());
+        }
+        let reader = operator
+            .reader(key)
+            .await
+            .map_err(|e| CloudError::DownloadFailed(format!("read '{}': {}", key, e)))?;
+        let data = reader
+            .read(0..metadata.content_length())
+            .await
+            .map_err(|e| CloudError::DownloadFailed(format!("read '{}': {}", key, e)))?;
+        if data.len() > max_bytes {
+            return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+        }
 
         Ok(data.to_vec())
     }
@@ -105,34 +131,58 @@ impl SftpProvider {
     async fn list_from(operator: &Operator, prefix: &str) -> Result<Vec<CloudEntry>, CloudError> {
         let path = if prefix.is_empty() { "/" } else { prefix };
 
-        let entries_stream = operator.list(path).await.map_err(|e| {
-            if e.kind() == opendal::ErrorKind::NotFound {
-                CloudError::NotFound(format!("'{}' not found", path))
-            } else {
-                CloudError::Provider(format!("list '{}': {}", path, e))
-            }
-        })?;
+        let mut entries_stream = operator
+            .lister_with(path)
+            .recursive(true)
+            .await
+            .map_err(|e| {
+                if e.kind() == opendal::ErrorKind::NotFound {
+                    CloudError::NotFound(format!("'{}' not found", path))
+                } else {
+                    CloudError::Provider(format!("list '{}': {}", path, e))
+                }
+            })?;
 
         let mut results = Vec::new();
+        let mut entries_seen = 0_usize;
 
-        for entry in entries_stream {
+        while let Some(entry) = entries_stream
+            .try_next()
+            .await
+            .map_err(|error| CloudError::Provider(format!("list '{}': {}", path, error)))?
+        {
+            entries_seen += 1;
+            if entries_seen > MAX_LIST_ENTRIES {
+                return Err(CloudError::Provider(
+                    "SFTP listing exceeds its safety limit".to_string(),
+                ));
+            }
             // Skip directories
             if entry.path().ends_with('/') {
                 continue;
             }
-            let meta = operator.stat(entry.path()).await;
-
-            match meta {
-                Ok(m) if m.is_file() => {
-                    results.push(CloudEntry {
-                        key: entry.path().to_string(),
-                        size: m.content_length(),
-                        last_modified: m.last_modified().map(opendal_timestamp_millis).unwrap_or(0),
-                        checksum: None,
-                    });
+            validate_object_key(entry.path())?;
+            let meta = match operator.stat(entry.path()).await {
+                Ok(metadata) if metadata.is_file() => metadata,
+                Ok(_) => continue,
+                Err(error) if error.kind() == opendal::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(CloudError::Provider(format!(
+                        "stat '{}': {}",
+                        entry.path(),
+                        error
+                    )))
                 }
-                _ => continue,
-            }
+            };
+            results.push(CloudEntry {
+                key: entry.path().to_string(),
+                size: meta.content_length(),
+                last_modified: meta
+                    .last_modified()
+                    .map(opendal_timestamp_millis)
+                    .unwrap_or(0),
+                checksum: None,
+            });
         }
 
         Ok(results)
@@ -146,14 +196,41 @@ impl SftpProvider {
         }
     }
 
-    fn merge_legacy_entries(primary: &mut Vec<CloudEntry>, legacy: Vec<CloudEntry>) {
+    fn merge_legacy_entries(
+        primary: &mut Vec<CloudEntry>,
+        legacy: Vec<CloudEntry>,
+    ) -> Result<(), CloudError> {
         let mut seen: HashSet<String> = primary.iter().map(|entry| entry.key.clone()).collect();
         for entry in legacy {
             if seen.insert(entry.key.clone()) {
                 primary.push(entry);
+                if primary.len() > MAX_LIST_ENTRIES {
+                    return Err(CloudError::Provider(
+                        "SFTP listing exceeds its safety limit".to_string(),
+                    ));
+                }
             }
         }
+        Ok(())
     }
+}
+
+fn sftp_endpoint_label(endpoint: &str) -> String {
+    let candidate = if endpoint.contains("://") {
+        endpoint.to_string()
+    } else {
+        format!("ssh://{endpoint}")
+    };
+    reqwest::Url::parse(&candidate)
+        .ok()
+        .and_then(|url| {
+            let host = url.host_str()?.to_string();
+            Some(match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host,
+            })
+        })
+        .unwrap_or_else(|| "configured host".to_string())
 }
 
 #[async_trait]
@@ -169,11 +246,12 @@ impl CloudProvider for SftpProvider {
         })?;
 
         // Calculate usage by listing all files
-        let mut total_size = 0u64;
-        let entries = self.list("").await.unwrap_or_default();
-        for entry in &entries {
-            total_size += entry.size;
-        }
+        let entries = self.list("").await.map_err(|error| {
+            CloudError::ConnectionFailed(format!("SFTP listing failed: {error}"))
+        })?;
+        let total_size = entries
+            .iter()
+            .fold(0_u64, |total, entry| total.saturating_add(entry.size));
 
         Ok(CloudStatus {
             connected: true,
@@ -184,6 +262,7 @@ impl CloudProvider for SftpProvider {
     }
 
     async fn put(&self, key: &str, data: &[u8]) -> Result<(), CloudError> {
+        validate_object_key(key)?;
         debug!("[cloud/sftp] PUT {} ({} bytes)", key, data.len());
 
         // Ensure parent directory exists
@@ -193,7 +272,12 @@ impl CloudProvider for SftpProvider {
                 self.operator
                     .create_dir(&format!("{}/", parent_str))
                     .await
-                    .ok();
+                    .map_err(|error| {
+                        CloudError::UploadFailed(format!(
+                            "create parent directory '{}': {}",
+                            parent_str, error
+                        ))
+                    })?;
             }
         }
 
@@ -204,15 +288,16 @@ impl CloudProvider for SftpProvider {
             .map_err(|e| CloudError::UploadFailed(format!("write '{}': {}", key, e)))
     }
 
-    async fn get(&self, key: &str) -> Result<Vec<u8>, CloudError> {
+    async fn get_bounded(&self, key: &str, max_bytes: usize) -> Result<Vec<u8>, CloudError> {
+        validate_object_key(key)?;
         debug!("[cloud/sftp] GET {}", key);
 
-        match Self::read_key(&self.operator, key).await {
+        match Self::read_key(&self.operator, key, max_bytes).await {
             Ok(data) => Ok(data),
             Err(CloudError::NotFound(_)) => {
                 if let Some(legacy_operator) = &self.legacy_operator {
                     debug!("[cloud/sftp] GET {} falling back to legacy root", key);
-                    Self::read_key(legacy_operator, key).await
+                    Self::read_key(legacy_operator, key, max_bytes).await
                 } else {
                     Err(CloudError::NotFound(format!("'{}' not found", key)))
                 }
@@ -222,6 +307,7 @@ impl CloudProvider for SftpProvider {
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudError> {
+        validate_object_key(key)?;
         debug!("[cloud/sftp] DELETE {}", key);
 
         self.operator
@@ -231,6 +317,7 @@ impl CloudProvider for SftpProvider {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<CloudEntry>, CloudError> {
+        validate_object_prefix(prefix)?;
         let path = if prefix.is_empty() { "/" } else { prefix };
 
         debug!("[cloud/sftp] LIST prefix={}", path);
@@ -248,13 +335,14 @@ impl CloudProvider for SftpProvider {
                 Err(CloudError::NotFound(_)) => Vec::new(),
                 Err(e) => return Err(e),
             };
-            Self::merge_legacy_entries(&mut results, legacy_entries);
+            Self::merge_legacy_entries(&mut results, legacy_entries)?;
         }
 
         Ok(results)
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudError> {
+        validate_object_key(key)?;
         if Self::exists_in(&self.operator, key).await? {
             return Ok(true);
         }

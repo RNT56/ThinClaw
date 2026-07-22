@@ -5,6 +5,10 @@ impl MemoryProvider for Mem0Provider {
         "mem0"
     }
 
+    fn supports_strict_subject_scoping(&self) -> bool {
+        true
+    }
+
     async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus {
         let provider = settings.providers.provider(self.name());
         let default_base = Some("https://api.mem0.ai");
@@ -58,7 +62,7 @@ impl MemoryProvider for Mem0Provider {
         }
         let base_url = provider_base_url_or(&provider.config, "https://api.mem0.ai");
         let path = provider_path(&provider.config, "search_path", "/v2/memories/search/");
-        let url = provider_join_url(&base_url, &path);
+        let url = provider_join_url(&base_url, &path)?;
         let scoped_user_id = provider_scoped_user_id(&provider.config, user_id);
         let mut body = serde_json::json!({
             "query": query,
@@ -97,7 +101,7 @@ impl MemoryProvider for Mem0Provider {
         }
         let base_url = provider_base_url_or(&provider.config, "https://api.mem0.ai");
         let path = provider_path(&provider.config, "sync_path", "/v1/memories/");
-        let url = provider_join_url(&base_url, &path);
+        let url = provider_join_url(&base_url, &path)?;
         let scoped_user_id = provider_scoped_user_id(&provider.config, user_id);
         let body = serde_json::json!({
             "messages": provider_export_messages(&provider.config, payload),

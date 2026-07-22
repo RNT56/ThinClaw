@@ -65,7 +65,7 @@ impl ActiveOutcomeUserGuard {
     fn acquire(active_users: &Arc<Mutex<HashSet<String>>>, user_id: &str) -> Option<Self> {
         let mut users = active_users
             .lock()
-            .expect("active outcome users mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !users.insert(user_id.to_string()) {
             return None;
         }
@@ -80,7 +80,7 @@ impl Drop for ActiveOutcomeUserGuard {
     fn drop(&mut self) {
         self.active_users
             .lock()
-            .expect("active outcome users mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&self.user_id);
     }
 }

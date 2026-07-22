@@ -12,6 +12,11 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
+pub const MAX_SEARCH_RESULTS: usize = 500;
+pub const MAX_PRE_FUSION_RESULTS: usize = 2_000;
+pub const MAX_SEARCH_PATH_PREFIXES: usize = 256;
+pub const MAX_SEARCH_PATH_PREFIX_BYTES: usize = 1_024;
+
 /// Configuration for hybrid search.
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
@@ -35,6 +40,10 @@ pub struct SearchConfig {
     /// MMR lambda parameter (0.0 = pure diversity, 1.0 = pure relevance).
     /// Only used when `enable_mmr` is true. Default: 0.5.
     pub mmr_lambda: f32,
+    /// Canonical document roots allowed for this query. Empty means the
+    /// entire principal workspace. Prefixes are enforced in each backend
+    /// before ranking/fusion so unauthorized documents cannot starve recall.
+    pub path_prefixes: Vec<String>,
 }
 
 impl Default for SearchConfig {
@@ -49,11 +58,47 @@ impl Default for SearchConfig {
             temporal_decay_half_life_days: None,
             enable_mmr: false,
             mmr_lambda: 0.5,
+            path_prefixes: Vec::new(),
         }
     }
 }
 
 impl SearchConfig {
+    /// Validate caller-controlled fields and cap work before a backend turns
+    /// them into SQL limits, vectors, or query parameters.
+    pub fn validate_and_normalize(mut self) -> Result<Self, String> {
+        if !self.min_score.is_finite() {
+            return Err("search min_score must be finite".to_string());
+        }
+        if !self.mmr_lambda.is_finite() {
+            return Err("search mmr_lambda must be finite".to_string());
+        }
+        if self
+            .temporal_decay_half_life_days
+            .is_some_and(|days| !days.is_finite() || days <= 0.0)
+        {
+            return Err("search temporal decay half-life must be finite and positive".to_string());
+        }
+        if self.path_prefixes.len() > MAX_SEARCH_PATH_PREFIXES {
+            return Err(format!(
+                "search accepts at most {MAX_SEARCH_PATH_PREFIXES} path prefixes"
+            ));
+        }
+        if self.path_prefixes.iter().any(|prefix| {
+            prefix.is_empty()
+                || prefix.len() > MAX_SEARCH_PATH_PREFIX_BYTES
+                || prefix.chars().any(char::is_control)
+        }) {
+            return Err("search contains an invalid or oversized path prefix".to_string());
+        }
+
+        self.limit = self.limit.min(MAX_SEARCH_RESULTS);
+        self.pre_fusion_limit = self.pre_fusion_limit.min(MAX_PRE_FUSION_RESULTS);
+        self.min_score = self.min_score.clamp(0.0, 1.0);
+        self.mmr_lambda = self.mmr_lambda.clamp(0.0, 1.0);
+        Ok(self)
+    }
+
     /// Set the result limit.
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = limit;
@@ -104,6 +149,16 @@ impl SearchConfig {
     pub fn with_mmr(mut self, lambda: f32) -> Self {
         self.enable_mmr = true;
         self.mmr_lambda = lambda.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn with_path_prefixes(mut self, prefixes: impl IntoIterator<Item = String>) -> Self {
+        self.path_prefixes = prefixes
+            .into_iter()
+            .filter(|prefix| !prefix.trim().is_empty())
+            .collect();
+        self.path_prefixes.sort();
+        self.path_prefixes.dedup();
         self
     }
 }
@@ -595,6 +650,28 @@ mod tests {
         let vector_only = SearchConfig::default().vector_only();
         assert!(!vector_only.use_fts);
         assert!(vector_only.use_vector);
+    }
+
+    #[test]
+    fn search_config_normalization_bounds_work_and_rejects_non_finite_values() {
+        let normalized = SearchConfig {
+            limit: usize::MAX,
+            pre_fusion_limit: usize::MAX,
+            ..SearchConfig::default()
+        }
+        .validate_and_normalize()
+        .unwrap();
+        assert_eq!(normalized.limit, MAX_SEARCH_RESULTS);
+        assert_eq!(normalized.pre_fusion_limit, MAX_PRE_FUSION_RESULTS);
+
+        assert!(
+            SearchConfig {
+                mmr_lambda: f32::NAN,
+                ..SearchConfig::default()
+            }
+            .validate_and_normalize()
+            .is_err()
+        );
     }
 
     #[test]

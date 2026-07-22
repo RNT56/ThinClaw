@@ -1,11 +1,13 @@
 //! WASM channel setup.
 
-use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use thinclaw_channels::setup as channel_setup;
 
 use crate::setup::prompts::{
     confirm, optional_input, print_blank_line, print_error, print_info, print_success, secret_input,
+};
+use crate::setup::validation::{
+    ValidationCredential, ValidationEndpointGrant, validate_extension_credential,
 };
 
 use super::{ChannelSetupError, SecretsContext};
@@ -21,8 +23,9 @@ pub struct WasmChannelSetupResult {
 pub async fn setup_wasm_channel(
     secrets: &SecretsContext,
     channel_name: &str,
-    setup: &crate::channels::wasm::SetupSchema,
+    capabilities: &crate::channels::wasm::ChannelCapabilitiesFile,
 ) -> Result<WasmChannelSetupResult, ChannelSetupError> {
+    let setup = &capabilities.setup;
     print_info(&format!("{channel_name} setup"));
     print_blank_line();
 
@@ -94,63 +97,97 @@ pub async fn setup_wasm_channel(
         print_success(&format!("{} saved to database", secret_config.name));
     }
 
-    // Validate configured credentials by substituting secrets into the
-    // validation URL and making a GET request to verify they work.
+    // Validate only through the channel's declared HTTP grant. Credentials are
+    // injected in headers and never interpolated into URLs.
     if let Some(ref validation_endpoint) = setup.validation_endpoint {
-        let mut url = validation_endpoint.clone();
-
-        // Substitute secret placeholders: {{secret_name}} → actual value
-        for secret_config in &setup.required_secrets {
-            let placeholder = format!("{{{{{}}}}}", secret_config.name);
-            if url.contains(&placeholder) {
-                match secrets.get_secret(&secret_config.name).await {
-                    Ok(value) => {
-                        url = url.replace(&placeholder, value.expose_secret());
-                    }
+        print_info("Validating credentials...");
+        let request = validation_endpoint.request();
+        let method = request.map_or("GET", |request| request.method.as_str());
+        let expected_status = request.map_or(200, |request| request.success_status);
+        let secret = if let Some(name) = request.and_then(|request| request.secret_name.as_deref())
+        {
+            if !setup
+                .required_secrets
+                .iter()
+                .any(|required| required.name == name)
+            {
+                print_error("Validation credential is not a declared setup secret");
+                None
+            } else {
+                match secrets.get_secret(name).await {
+                    Ok(value) => Some(value),
                     Err(_) => {
-                        // Secret not found — skip validation
                         print_info(&format!(
-                            "Skipping validation: secret '{}' not available",
-                            secret_config.name
+                            "Skipping validation: secret '{}' is not available",
+                            name
                         ));
-                        url.clear();
-                        break;
+                        None
                     }
                 }
             }
-        }
-
-        if !url.is_empty() {
-            print_info("Validating credentials...");
-            let client = Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .ok();
-
-            if let Some(client) = client {
-                match client.get(&url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        print_success("Credentials validated successfully");
-                    }
-                    Ok(resp) => {
-                        let status = resp.status();
-                        let body = resp.text().await.unwrap_or_default();
-                        print_error(&format!(
-                            "Credential validation failed (HTTP {}): {}",
-                            status,
-                            body.chars().take(200).collect::<String>()
-                        ));
-                        print_info(
-                            "The channel will still be configured, but credentials may be invalid.",
-                        );
-                    }
-                    Err(e) => {
-                        print_info(&format!(
-                            "Could not reach validation endpoint: {} (channel configured anyway)",
-                            e
-                        ));
-                    }
-                }
+        } else {
+            None
+        };
+        let credential = match (
+            request.and_then(|request| request.credential.as_ref()),
+            secret.as_ref(),
+        ) {
+            (None, None) => Some(ValidationCredential::None),
+            (
+                None | Some(crate::channels::wasm::CredentialLocationSchema::Bearer),
+                Some(secret),
+            ) => Some(ValidationCredential::Bearer(secret.expose_secret())),
+            (
+                Some(crate::channels::wasm::CredentialLocationSchema::Basic { username }),
+                Some(secret),
+            ) => Some(ValidationCredential::Basic {
+                username,
+                password: secret.expose_secret(),
+            }),
+            (
+                Some(crate::channels::wasm::CredentialLocationSchema::Header { name, prefix }),
+                Some(secret),
+            ) => Some(ValidationCredential::Header {
+                name,
+                prefix: prefix.as_deref(),
+                value: secret.expose_secret(),
+            }),
+            _ => None,
+        };
+        let grants = capabilities
+            .to_capabilities()
+            .tool_capabilities
+            .http
+            .map(|http| {
+                http.allowlist
+                    .into_iter()
+                    .map(|grant| ValidationEndpointGrant {
+                        host: grant.host,
+                        path_prefix: grant.path_prefix,
+                        methods: grant.methods,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let result = if let Some(credential) = credential {
+            validate_extension_credential(
+                validation_endpoint.url(),
+                method,
+                expected_status,
+                &grants,
+                credential,
+            )
+            .await
+        } else {
+            Err(crate::setup::validation::ValidationRequestError::Invalid(
+                "credential setup is missing or uses an unsafe URL location".to_string(),
+            ))
+        };
+        match result {
+            Ok(()) => print_success("Credentials validated successfully"),
+            Err(error) => {
+                print_error(&format!("Credential validation failed: {error}"));
+                print_info("The channel will still be configured, but credentials may be invalid.");
             }
         }
     }

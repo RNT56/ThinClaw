@@ -34,15 +34,37 @@ Use [../src/workspace/README.md](../src/workspace/README.md) for the code-adjace
 
 For the current outcome-backed learning behavior, manual review semantics, and rollout roadmap, use [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md).
 
-## Stable Prompt Freezing
+## Identity And Namespace Boundaries
 
-ThinClaw now freezes the project/workspace prompt block at session runtime by default.
+Every memory operation is first scoped to a canonical principal, then to the exact conversation context:
 
-- `prompt.session_freeze_enabled = true` keeps the stable workspace/provider prompt blocks fixed across turns within the same thread runtime.
+- Direct conversations resolve caller-relative paths such as `MEMORY.md`, `USER.md`, `daily/`, and custom notes below `actors/<actor>/`.
+- Group conversations resolve the same relative paths below `conversations/<canonical-scope-uuid>/`. A group context without that canonical scope fails closed.
+- `shared/` is principal-wide knowledge. Conversation tools may read it but may not mutate it.
+- `SOUL.md`, `SOUL.local.md`, `AGENTS.md`, root `IDENTITY.md`, hooks, and skills are trusted control-plane material. Unknown files default to conversation-authored evidence rather than silently becoming system instructions.
+- Transcript recall uses the authoritative job principal/actor. Group recall is additionally authorized against the exact persisted conversation ID and stable conversation scope.
+
+Gateway memory requests can explicitly select `conversation` or `principal_admin` scope. Omitted scope always means `conversation`, even for an Admin credential; principal-wide access must be requested explicitly. Conversation list/search responses use caller-relative paths and never expose internal actor or conversation prefixes.
+
+ThinClaw Desktop presents a deliberate composite view: trusted control files plus the current actor's relative knowledge. Both local and remote mode use the same classifier, so editing `MEMORY.md` or a daily log changes what chat and routines recall, while editing `SOUL.md` changes the canonical home soul. Root `IDENTITY.md` is the trusted agent identity; the current direct actor's private identity overlay is exposed without collision as `actor/IDENTITY.md`. Sibling actor/group namespaces are excluded even when the remote connection uses an Admin token, and callers cannot address hidden canonical `actors/` or `conversations/` paths directly.
+
+Startup hooks, `/context`, manual heartbeats, scheduled heartbeats, profile evolution, and agent-to-agent context all resolve through the same actor/conversation boundary. Preloaded startup memory is labeled as untrusted evidence rather than control instructions.
+
+Learning candidates carry a reserved identity envelope copied from the persisted event record. Auto-apply recomputes direct scopes, verifies group candidates against the exact durable conversation, never invents a missing group scope, and requires the principal owner for global prompt, routine, skill, or code mutations. The gateway Learning Ledger is an Admin-only control surface because its candidates and artifact history are principal-wide.
+
+Older desktop databases used the principal `default` and stored personal knowledge at the principal root. Startup copies missing documents into `local_user` with compare-and-swap protection, and the first owner-scoped access migrates legacy personal knowledge into the actor namespace. Durable hidden markers make both migrations resumable and prevent a later clear from repopulating old data.
+
+## Stable Prompt Contracts And Live Knowledge
+
+ThinClaw pins the prompt compiler contract for a thread while refreshing mutable knowledge on every turn.
+
+- `prompt.session_freeze_enabled = true` keeps the selected prompt-contract rollout stable for the thread. It does not freeze memory or provider knowledge.
+- Workspace and provider prompt blocks are refreshed each turn, so approved edits, provider changes, actor scope changes, and local-day rollovers take effect without starting a new thread.
+- The last successful workspace block is retained only as a fallback for a transient workspace read failure. A disabled or unavailable provider fails closed instead of replaying stale provider instructions.
 - `prompt.project_context_max_tokens` caps sanitized project-context payloads before they become part of the stable prompt.
 - The runtime records a stable prompt hash and logs a cache-bust event if the effective stable prompt changes.
 
-This keeps project guidance cache-friendly while leaving ephemeral recall, channel hints, and post-compaction fragments free to change turn by turn.
+This preserves rollout consistency and cache observability without making durable knowledge stale for the lifetime of a task.
 
 When context compaction summarizes older turns (automatically or via `/compress`), the generated summary is folded into the post-compaction fragment under a `## Summary of Earlier Conversation` heading, so the model keeps the gist of the dropped turns instead of resuming with no memory of them. The fragment persists in the thread runtime and survives rehydration.
 

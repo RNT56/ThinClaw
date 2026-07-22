@@ -56,6 +56,142 @@ use types::*;
 
 /// Cache TTL — models change infrequently, so 30 min is plenty.
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+const MODEL_DISCOVERY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MODEL_DISCOVERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_MODEL_DISCOVERY_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MODEL_DISCOVERY_ERROR_BYTES: usize = 16 * 1024;
+const MAX_DISCOVERED_MODELS: usize = 4_096;
+const MAX_MODEL_FIELD_BYTES: usize = 512;
+const MAX_MODEL_METADATA_ENTRIES: usize = 32;
+const MAX_MODEL_METADATA_BYTES: usize = 64 * 1024;
+
+pub(super) fn http_client(api_key: &str) -> Result<reqwest::Client, String> {
+    if api_key.is_empty() || api_key.len() > 4_096 || api_key.chars().any(char::is_control) {
+        return Err("The provider API credential is missing or invalid".to_string());
+    }
+
+    reqwest::Client::builder()
+        .connect_timeout(MODEL_DISCOVERY_CONNECT_TIMEOUT)
+        .timeout(MODEL_DISCOVERY_REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("Could not build model discovery HTTP client: {error}"))
+}
+
+fn safe_error_excerpt(text: &str) -> String {
+    let mut excerpt = String::with_capacity(text.len().min(2_048));
+    for character in text.chars() {
+        if excerpt.len() >= 2_048 {
+            break;
+        }
+        if !character.is_control() || matches!(character, '\n' | '\r' | '\t') {
+            excerpt.push(character);
+        }
+    }
+    excerpt.trim().to_string()
+}
+
+pub(super) async fn bounded_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    provider: &str,
+) -> Result<T, String> {
+    let status = response.status();
+    if !status.is_success() {
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(format!(
+                "{provider} rejected the configured API credential (HTTP {status})"
+            ));
+        }
+        let detail =
+            thinclaw_core::http_response::bounded_text(response, MAX_MODEL_DISCOVERY_ERROR_BYTES)
+                .await
+                .ok()
+                .map(|text| safe_error_excerpt(&text))
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| "no bounded error detail".to_string());
+        return Err(format!("{provider} API error (HTTP {status}): {detail}"));
+    }
+
+    thinclaw_core::http_response::bounded_json(response, MAX_MODEL_DISCOVERY_RESPONSE_BYTES)
+        .await
+        .map_err(|error| format!("Invalid bounded {provider} model response: {error}"))
+}
+
+fn valid_model_field(value: &str, allow_empty: bool) -> bool {
+    (allow_empty || !value.is_empty())
+        && value.len() <= MAX_MODEL_FIELD_BYTES
+        && !value.chars().any(char::is_control)
+}
+
+fn validate_pricing(pricing: &ModelPricing) -> bool {
+    [
+        pricing.input_per_million,
+        pricing.output_per_million,
+        pricing.per_image,
+        pricing.per_minute,
+        pricing.per_1k_chars,
+    ]
+    .into_iter()
+    .flatten()
+    .all(|value| value.is_finite() && (0.0..=1_000_000_000.0).contains(&value))
+}
+
+pub(crate) fn validate_models(
+    expected_provider: &str,
+    models: Vec<CloudModelEntry>,
+) -> Result<Vec<CloudModelEntry>, String> {
+    if models.len() > MAX_DISCOVERED_MODELS {
+        return Err(format!(
+            "{expected_provider} returned more than {MAX_DISCOVERED_MODELS} models"
+        ));
+    }
+
+    for model in &models {
+        if !valid_model_field(&model.id, false)
+            || !valid_model_field(&model.display_name, false)
+            || !valid_model_field(&model.provider, false)
+            || !valid_model_field(&model.provider_name, false)
+            || model.provider != expected_provider
+        {
+            return Err(format!(
+                "{expected_provider} returned invalid model identity metadata"
+            ));
+        }
+        if model.embedding_dimensions == Some(0)
+            || model
+                .embedding_dimensions
+                .is_some_and(|value| value > 1_000_000)
+            || model
+                .pricing
+                .as_ref()
+                .is_some_and(|pricing| !validate_pricing(pricing))
+            || model.metadata.len() > MAX_MODEL_METADATA_ENTRIES
+        {
+            return Err(format!(
+                "{expected_provider} returned invalid model capability metadata"
+            ));
+        }
+        let metadata_bytes = model
+            .metadata
+            .iter()
+            .try_fold(0_usize, |total, (key, value)| {
+                if !valid_model_field(key, false)
+                    || value.len() > MAX_MODEL_METADATA_BYTES
+                    || value.chars().any(char::is_control)
+                {
+                    return None;
+                }
+                total.checked_add(key.len())?.checked_add(value.len())
+            });
+        if metadata_bytes.is_none_or(|bytes| bytes > MAX_MODEL_METADATA_BYTES) {
+            return Err(format!(
+                "{expected_provider} returned oversized model metadata"
+            ));
+        }
+    }
+
+    Ok(models)
+}
 
 /// Internal cache entry for a provider.
 struct CachedDiscovery {
@@ -241,11 +377,13 @@ impl ModelProviderRegistry {
     }
 
     /// Scan the local model inventory through the same shared registry seam.
-    pub fn list_local_models(
+    pub async fn list_local_models(
         &self,
         app: &AppHandle,
     ) -> Result<Vec<crate::model_manager::ModelFile>, String> {
-        Ok(crate::model_manager::list_local_models(app)?)
+        crate::model_manager::list_models(app.clone())
+            .await
+            .map_err(Into::into)
     }
 
     /// Snapshot the active local runtime for both Desktop product modes.
@@ -463,11 +601,19 @@ async fn discover_for_provider(
     };
 
     match result {
-        Ok(models) => ProviderDiscoveryResult {
-            provider: provider.to_string(),
-            models,
-            from_cache: false,
-            error: None,
+        Ok(models) => match validate_models(provider, models) {
+            Ok(models) => ProviderDiscoveryResult {
+                provider: provider.to_string(),
+                models,
+                from_cache: false,
+                error: None,
+            },
+            Err(error) => ProviderDiscoveryResult {
+                provider: provider.to_string(),
+                models: vec![],
+                from_cache: false,
+                error: Some(error),
+            },
         },
         Err(e) => {
             tracing::warn!("[model_discovery] Failed to discover {}: {}", provider, e);

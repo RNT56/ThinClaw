@@ -367,6 +367,8 @@ pub enum ExperimentLeaseStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExperimentProject {
     pub id: Uuid,
+    #[serde(default = "default_experiment_owner_user_id")]
+    pub owner_user_id: String,
     pub name: String,
     pub workspace_path: String,
     pub git_remote_name: String,
@@ -405,6 +407,8 @@ pub struct ExperimentProject {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExperimentRunnerProfile {
     pub id: Uuid,
+    #[serde(default = "default_experiment_owner_user_id")]
+    pub owner_user_id: String,
     pub name: String,
     pub backend: ExperimentRunnerBackend,
     #[serde(default)]
@@ -649,7 +653,7 @@ pub struct ExperimentOpportunity {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ExperimentLease {
     pub id: Uuid,
     pub campaign_id: Uuid,
@@ -671,10 +675,39 @@ pub struct ExperimentLease {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Debug for ExperimentLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExperimentLease")
+            .field("id", &self.id)
+            .field("campaign_id", &self.campaign_id)
+            .field("trial_id", &self.trial_id)
+            .field("runner_profile_id", &self.runner_profile_id)
+            .field("status", &self.status)
+            .field("token_hash", &"[REDACTED]")
+            .field("job_payload", &"[OMITTED]")
+            .field("credentials_payload", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("claimed_at", &self.claimed_at)
+            .field("completed_at", &self.completed_at)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ExperimentLeaseAuthentication {
     pub lease_id: Uuid,
     pub token: String,
+}
+
+impl std::fmt::Debug for ExperimentLeaseAuthentication {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExperimentLeaseAuthentication")
+            .field("lease_id", &self.lease_id)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

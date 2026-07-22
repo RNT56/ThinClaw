@@ -42,14 +42,9 @@ pub async fn start_campaign(
     let normalized_gateway_url = req
         .gateway_url
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    if req.gateway_url.is_some() && normalized_gateway_url.is_none() {
-        return Err(ApiError::InvalidInput(
-            "gateway_url must not be empty when provided.".to_string(),
-        ));
-    }
+        .map(adapters::validate_gateway_url)
+        .transpose()
+        .map_err(ApiError::InvalidInput)?;
 
     let now = Utc::now();
     let campaign_id = Uuid::new_v4();
@@ -517,7 +512,7 @@ pub(super) async fn revoke_lease_with_runner(
         token: String::new(),
     };
     let message = if let Some(runner) = store
-        .get_experiment_runner_profile(campaign.runner_profile_id)
+        .get_experiment_runner_profile_for_owner(campaign.runner_profile_id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
     {
@@ -768,7 +763,7 @@ pub async fn reissue_lease(
         message: err,
         bootstrap_command: campaign_gateway_url(&campaign)
             .as_deref()
-            .map(|gateway| adapters::build_bootstrap_command(gateway, &lease)),
+            .and_then(|gateway| adapters::build_bootstrap_command(gateway, &lease).ok()),
         provider_template: None,
         provider_job_id: None,
         provider_job_metadata: serde_json::json!({}),
@@ -786,7 +781,10 @@ pub async fn reissue_lease(
     }
     trial.summary = Some(launch_outcome.message.clone());
     trial.provider_job_id = launch_outcome.provider_job_id.clone();
-    trial.provider_job_metadata = launch_outcome.provider_job_metadata.clone();
+    trial.provider_job_metadata = adapters::sanitize_provider_job_metadata(
+        runner.backend,
+        &launch_outcome.provider_job_metadata,
+    );
     trial.updated_at = Utc::now();
     campaign.status = ExperimentCampaignStatus::Running;
     campaign.queue_state = ExperimentCampaignQueueState::Active;
@@ -801,10 +799,11 @@ pub async fn reissue_lease(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+    let response_lease = launch_outcome.requires_operator_action.then_some(lease);
     Ok(ExperimentCampaignActionResponse {
         campaign,
         trial: Some(trial),
-        lease: Some(lease),
+        lease: response_lease,
         launch: Some(launch_details_from_outcome(launch_outcome)),
         message: "Lease reissued.".to_string(),
     })

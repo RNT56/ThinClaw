@@ -285,6 +285,29 @@ fn parse_secret_reference_infers_uppercase_env_alias() {
         parse_secret_reference("runpod:RUNPOD_API_KEY"),
         Some(("runpod".to_string(), vec!["RUNPOD_API_KEY".to_string()]))
     );
+    assert_eq!(parse_secret_reference("runpod:BAD-NAME"), None);
+    assert_eq!(parse_secret_reference("runpod:RUNPOD_API_KEY:EXTRA"), None);
+    assert_eq!(parse_secret_reference("9invalid"), None);
+}
+
+#[test]
+fn secret_reference_validation_bounds_and_disambiguates_destinations() {
+    assert!(
+        validate_secret_references(&[
+            "runpod:RUNPOD_API_KEY".to_string(),
+            "other:OTHER_API_KEY".to_string(),
+        ])
+        .is_ok()
+    );
+    assert!(validate_secret_references(&[" runpod".to_string()]).is_err());
+    assert!(
+        validate_secret_references(&[
+            "runpod:RUNPOD_API_KEY".to_string(),
+            "other:RUNPOD_API_KEY".to_string(),
+        ])
+        .is_err()
+    );
+    assert!(validate_secret_references(&vec!["SECRET".to_string(); 257]).is_err());
 }
 
 #[test]
@@ -292,6 +315,7 @@ fn ready_project_status_requires_workspace_mutable_paths_and_command() {
     let now = Utc::now();
     let mut project = ExperimentProject {
         id: Uuid::new_v4(),
+        owner_user_id: "default".to_string(),
         name: "demo".to_string(),
         workspace_path: ".".to_string(),
         git_remote_name: "origin".to_string(),
@@ -728,4 +752,35 @@ fn llm_usage_summary_groups_costs_by_role_and_provider() {
     assert_eq!(summary.details["by_role_usd"]["planner"], 0.12);
     assert_eq!(summary.details["by_role_usd"]["mutator"], 0.08);
     assert_eq!(summary.details["by_provider_usd"]["openai"], 0.20);
+}
+
+#[test]
+fn lease_debug_output_redacts_authentication_and_credentials() {
+    let token = "exp_0123456789ab_0123456789abcdef0123456789abcdef";
+    let auth = ExperimentLeaseAuthentication {
+        lease_id: Uuid::new_v4(),
+        token: token.to_string(),
+    };
+    assert!(!format!("{auth:?}").contains(token));
+
+    let now = Utc::now();
+    let lease = ExperimentLease {
+        id: auth.lease_id,
+        campaign_id: Uuid::new_v4(),
+        trial_id: Uuid::new_v4(),
+        runner_profile_id: Uuid::new_v4(),
+        status: ExperimentLeaseStatus::Pending,
+        token_hash: "sensitive-hash".to_string(),
+        job_payload: serde_json::json!({ "repo_url": "sensitive-job" }),
+        credentials_payload: serde_json::json!({ "env": { "API_KEY": "secret" } }),
+        expires_at: now,
+        claimed_at: None,
+        completed_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let debug = format!("{lease:?}");
+    for secret in ["sensitive-hash", "sensitive-job", "API_KEY", "secret"] {
+        assert!(!debug.contains(secret));
+    }
 }

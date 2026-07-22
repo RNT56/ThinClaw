@@ -30,7 +30,8 @@ pub use capabilities_schema::{
     ValidationEndpointSchema,
 };
 pub use credential_injector::{
-    CredentialInjector, InjectedCredentials, InjectionError, SharedCredentialRegistry,
+    CredentialInjector, CredentialRegistryError, InjectedCredentials, InjectionError,
+    SharedCredentialRegistry,
 };
 pub use error::{TrapCode, TrapInfo, WasmError};
 pub use host::{HostState, LogEntry, LogLevel};
@@ -41,14 +42,16 @@ pub use limits::{
 };
 #[cfg(feature = "wasm-runtime")]
 pub use loader::{
-    DiscoveredTool, LoadResults, WasmLoadError, WasmToolLoader, discover_dev_tools, discover_tools,
-    load_dev_tools, resolve_wasm_target_dir, wasm_artifact_path,
+    DiscoveredTool, LoadResults, LoadedToolMetadata, WasmLoadError, WasmToolLoader,
+    discover_dev_tools, discover_tools, load_dev_tools, resolve_wasm_target_dir,
+    wasm_artifact_path,
 };
 pub use oauth::{
     GOOGLE_OAUTH_TOKEN, LEGACY_GMAIL_OAUTH_TOKEN, OAuthPkcePair, OAuthRefreshConfig,
     ResolvedOAuthConfig, WasmOAuthTokenExchange, WasmToolAuthCheck, WasmToolAuthMode,
     WasmToolAuthStatus, WasmToolAuthorizationRequest, WasmToolOAuthError, WasmToolOAuthFlow,
-    build_authorization_url, canonical_secret_name, is_google_secret_name, refresh_secret_name,
+    build_authorization_url, canonical_secret_name, client_id_secret_name,
+    client_secret_secret_name, is_google_secret_name, refresh_secret_name,
     resolve_oauth_refresh_config, scopes_secret_name, shared_auth_provider,
 };
 pub use rate_limiter::{LimitType, RateLimitError, RateLimitResult, RateLimiter};
@@ -141,6 +144,11 @@ mod stubs {
 
     pub struct WasmToolLoader;
 
+    #[derive(Debug)]
+    pub struct LoadedToolMetadata {
+        pub capabilities_file: Option<super::CapabilitiesFile>,
+    }
+
     impl WasmToolLoader {
         pub fn new(
             _runtime: Arc<WasmToolRuntime>,
@@ -169,6 +177,18 @@ mod stubs {
             _wasm_path: &Path,
             _capabilities_path: Option<&Path>,
         ) -> Result<(), super::WasmError> {
+            Err(super::WasmError::ConfigError(format!(
+                "WASM runtime is not available for tool '{}'",
+                name
+            )))
+        }
+
+        pub async fn load_from_files_with_metadata(
+            &self,
+            name: &str,
+            _wasm_path: &Path,
+            _capabilities_path: Option<&Path>,
+        ) -> Result<LoadedToolMetadata, super::WasmError> {
             Err(super::WasmError::ConfigError(format!(
                 "WASM runtime is not available for tool '{}'",
                 name

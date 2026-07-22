@@ -22,6 +22,23 @@ import { CanvasPanelRenderer } from './CanvasPanelRenderer';
 interface Position { x: number; y: number; }
 interface Size { w: number; h: number; }
 
+function safeLegacyCanvasUrl(raw?: string): string | null {
+    if (!raw) return null;
+    try {
+        const parsed = new URL(raw);
+        return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : null;
+    } catch {
+        return null;
+    }
+}
+
+function escapeHtmlText(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
 const POSITION_DEFAULTS: Record<string, { pos: (ww: number, wh: number, sw: number, sh: number) => Position; size: Size }> = {
     right: {
         pos: (_ww, _wh, sw, _sh) => ({ x: sw - 436, y: 80 }),
@@ -232,9 +249,8 @@ function A2UIPanel({ panel, isFocused, onFocus, onDismiss }: {
             {/* Content — native component rendering */}
             <div className="flex-1 overflow-y-auto bg-white/2 scrollbar-thin scrollbar-thumb-white/10">
                 <CanvasPanelRenderer
+                    panelId={panel.id}
                     components={panel.components}
-                    sessionKey={panel.sessionKey}
-                    runId={panel.runId}
                 />
             </div>
 
@@ -269,26 +285,19 @@ function LegacyPanel({ content, onClose }: {
     const [pos, setPos] = useState<Position>({ x: -1, y: -1 });
     const [size] = useState<Size>({ w: 420, h: 600 });
     const [isMaximized, setIsMaximized] = useState(false);
+    const safeUrl = useMemo(() => safeLegacyCanvasUrl(content.url), [content.url]);
     const dragging = useRef(false);
     const dragOffset = useRef({ x: 0, y: 0 });
 
     // Iframe message handler
     useEffect(() => {
         const handleMessage = (event: MessageEvent) => {
-            const frameWindow = iframeRef.current?.contentWindow;
-            if (!frameWindow || event.source !== frameWindow) return;
-
-            let expectedOrigin = 'null';
-            if (content.url) {
-                try {
-                    expectedOrigin = new URL(content.url, window.location.href).origin;
-                } catch {
-                    return;
-                }
-            }
-            if (event.origin !== expectedOrigin) return;
-
-            if (event.data?.source === 'thinclaw-canvas') {
+            if (
+                !content.url
+                &&
+                event.source === iframeRef.current?.contentWindow
+                && event.data?.source === 'thinclaw-canvas'
+            ) {
                 const { eventType, payload } = event.data;
                 if (content.sessionKey) {
                     dispatchCanvasEvent(content.sessionKey, eventType, payload, content.runId)
@@ -336,10 +345,12 @@ function LegacyPanel({ content, onClose }: {
     const getSrcDoc = () => {
         if (content.url) return undefined;
         const script = `window.thinclaw={emit:(t,p)=>window.parent.postMessage({source:'thinclaw-canvas',eventType:t,payload:p},'*')};`;
+        const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+        const policy = `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src data: https: http:; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'`;
         if (content.type === 'html') {
-            return `<!DOCTYPE html><html><head><script>${script}</script><style>body{margin:0;padding:1rem;color:#e4e4e7;font-family:ui-sans-serif,system-ui,sans-serif;}a{color:#818cf8;}</style></head><body>${content.data}</body></html>`;
+            return `<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="${policy}"><script nonce="${nonce}">${script}</script><style>body{margin:0;padding:1rem;color:#e4e4e7;font-family:ui-sans-serif,system-ui,sans-serif;}a{color:#818cf8;}</style></head><body>${content.data}</body></html>`;
         }
-        return `<html><head><script>${script}</script></head><body style="background:#000;color:#0f0;"><pre>${content.data}</pre></body></html>`;
+        return `<html><head><meta http-equiv="Content-Security-Policy" content="${policy}"><script nonce="${nonce}">${script}</script></head><body style="background:#000;color:#0f0;"><pre>${escapeHtmlText(content.data)}</pre></body></html>`;
     };
 
     const windowStyle: React.CSSProperties = isMaximized
@@ -386,14 +397,16 @@ function LegacyPanel({ content, onClose }: {
 
             {/* Content */}
             <div className="flex-1 bg-white/2 relative">
-                {content.url ? (
+                {safeUrl ? (
                     <iframe
                         ref={iframeRef}
-                        src={content.url}
+                        src={safeUrl}
                         className="w-full h-full border-none"
                         title="Canvas URL"
-                        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                        sandbox="allow-scripts allow-forms allow-popups"
                     />
+                ) : content.url ? (
+                    <div className="p-4 text-sm text-amber-400">Blocked unsafe Canvas URL</div>
                 ) : (
                     <iframe
                         ref={iframeRef}

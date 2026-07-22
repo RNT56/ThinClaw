@@ -18,6 +18,7 @@ const CACHE_TTL: Duration = Duration::from_secs(3600);
 
 /// Request timeout.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_OSV_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Result of an OSV malware check.
 #[derive(Debug, Clone)]
@@ -57,7 +58,6 @@ struct CachedResult {
 /// OSV malware checker with caching.
 pub struct OsvChecker {
     endpoint: String,
-    client: reqwest::Client,
     cache: Arc<RwLock<HashMap<String, CachedResult>>>,
     disabled: bool,
 }
@@ -72,14 +72,8 @@ impl OsvChecker {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-        let client = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .unwrap_or_default();
-
         Self {
             endpoint,
-            client,
             cache: Arc::new(RwLock::new(HashMap::new())),
             disabled,
         }
@@ -146,7 +140,35 @@ impl OsvChecker {
             }
         });
 
-        let response = match self.client.post(&self.endpoint).json(&body).send().await {
+        let guarded = match thinclaw_tools_core::validate_outbound_url_pinned_async(
+            &self.endpoint,
+            &thinclaw_tools_core::OutboundUrlGuardOptions {
+                require_https: true,
+                upgrade_http_to_https: false,
+                allowlist: Vec::new(),
+            },
+        )
+        .await
+        {
+            Ok(guarded) => guarded,
+            Err(error) => return OsvCheckResult::CheckFailed(error.to_string()),
+        };
+        let Some(host) = guarded.url.host_str() else {
+            return OsvCheckResult::CheckFailed("OSV endpoint has no host".to_string());
+        };
+        let mut builder = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if !guarded.pinned_addrs.is_empty() {
+            builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+        }
+        let client = match builder.build() {
+            Ok(client) => client,
+            Err(error) => return OsvCheckResult::CheckFailed(error.to_string()),
+        };
+        let response = match client.post(guarded.url).json(&body).send().await {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::warn!(
@@ -168,8 +190,29 @@ impl OsvChecker {
             return OsvCheckResult::CheckFailed(format!("HTTP {}", status));
         }
 
-        let data: serde_json::Value = match response.json().await {
-            Ok(v) => v,
+        let mut response = response;
+        if response.content_length().is_some_and(|length| {
+            usize::try_from(length).map_or(true, |length| length > MAX_OSV_RESPONSE_BYTES)
+        }) {
+            return OsvCheckResult::CheckFailed("OSV response is oversized".to_string());
+        }
+        let mut response_bytes = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if response_bytes.len().saturating_add(chunk.len()) > MAX_OSV_RESPONSE_BYTES {
+                        return OsvCheckResult::CheckFailed(
+                            "OSV response is oversized".to_string(),
+                        );
+                    }
+                    response_bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(error) => return OsvCheckResult::CheckFailed(error.to_string()),
+            }
+        }
+        let data: serde_json::Value = match serde_json::from_slice(&response_bytes) {
+            Ok(value) => value,
             Err(e) => {
                 tracing::warn!(
                     package = %package_name,

@@ -12,6 +12,7 @@ use super::Workspace;
 use super::seed::HEARTBEAT_SEED;
 use super::{normalize_directory, normalize_path};
 use crate::document::{MemoryDocument, WorkspaceEntry, paths};
+use crate::is_control_plane_path;
 
 impl Workspace {
     // ==================== File Operations ====================
@@ -75,19 +76,23 @@ impl Workspace {
     ///
     /// Reindex failures are logged as warnings but do NOT fail the append.
     pub async fn append(&self, path: &str, content: &str) -> Result<(), WorkspaceError> {
+        self.append_with_separator(path, content, "\n").await?;
+        Ok(())
+    }
+
+    /// Atomically append using an explicit separator. This is used for
+    /// semantic memory entries (`\n\n`) as well as line-oriented logs (`\n`).
+    pub async fn append_with_separator(
+        &self,
+        path: &str,
+        content: &str,
+        separator: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
         let path = normalize_path(path);
         let doc = self
             .storage
-            .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
+            .append_document_by_path(&self.user_id, self.agent_id, &path, separator, content)
             .await?;
-
-        let new_content = if doc.content.is_empty() {
-            content.to_string()
-        } else {
-            format!("{}\n{}", doc.content, content)
-        };
-
-        self.storage.update_document(doc.id, &new_content).await?;
 
         // Reindex for search — non-fatal (same reasoning as write()).
         if let Err(e) = self.reindex_document(doc.id).await {
@@ -99,7 +104,7 @@ impl Workspace {
             );
         }
 
-        Ok(())
+        self.storage.get_document_by_id(doc.id).await
     }
 
     /// Check if a file exists.
@@ -156,6 +161,165 @@ impl Workspace {
             .await
     }
 
+    /// Copy legacy principal-root knowledge into the owner's actor-private
+    /// namespace exactly once. The migration is resumable and race-safe: each
+    /// destination is populated only through a content compare-and-swap, and
+    /// the marker is written only after every path has been considered.
+    ///
+    /// This is deliberately restricted to `actor_id == principal_id`; linked
+    /// household actors must never inherit the principal owner's private root.
+    pub async fn migrate_legacy_owner_knowledge(
+        &self,
+        actor_id: &str,
+    ) -> Result<usize, WorkspaceError> {
+        if actor_id.trim().is_empty() || actor_id != self.user_id.as_str() {
+            return Ok(0);
+        }
+
+        let actor_root = paths::actor_root(actor_id);
+        let marker = format!("{actor_root}/.thinclaw/legacy-root-v1");
+        let cache_key = format!("owner:{}:{:?}:{}", self.user_id, self.agent_id, actor_root);
+        if self
+            .migration_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&cache_key)
+        {
+            return Ok(0);
+        }
+        if self.exists(&marker).await? {
+            self.migration_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(cache_key);
+            return Ok(0);
+        }
+
+        let mut migrated = 0;
+        for source_path in self.list_all().await? {
+            if source_path == paths::SHARED_DIR
+                || source_path.starts_with(&format!("{}/", paths::SHARED_DIR))
+                || is_control_plane_path(&source_path)
+            {
+                continue;
+            }
+
+            let source = match self.read(&source_path).await {
+                Ok(document) if !document.content.is_empty() => document,
+                Ok(_) | Err(WorkspaceError::DocumentNotFound { .. }) => continue,
+                Err(error) => return Err(error),
+            };
+            let destination = format!("{actor_root}/{source_path}");
+            let document = self
+                .storage
+                .get_or_create_document_by_path(&self.user_id, self.agent_id, &destination)
+                .await?;
+            if document.content.is_empty()
+                && self
+                    .storage
+                    .update_document_if_current(document.id, "", &source.content)
+                    .await?
+            {
+                migrated += 1;
+                if let Err(error) = self.reindex_document(document.id).await {
+                    tracing::warn!(
+                        path = %destination,
+                        error = %error,
+                        "Legacy owner knowledge migrated but indexing remains dirty"
+                    );
+                }
+            }
+        }
+
+        // An empty marker is sufficient and intentionally produces no search
+        // chunks. Its hidden namespace is never projected to conversation UIs.
+        self.write(&marker, "").await?;
+        self.migration_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(cache_key);
+        Ok(migrated)
+    }
+
+    /// Copy every missing document from a legacy principal scope into this
+    /// workspace. This is used by the desktop's `default` → `local_user`
+    /// compatibility migration before channels start accepting work.
+    pub async fn migrate_missing_principal_scope(
+        &self,
+        legacy_principal_id: &str,
+    ) -> Result<usize, WorkspaceError> {
+        let legacy = legacy_principal_id.trim();
+        if legacy.is_empty() || legacy == self.user_id.as_str() {
+            return Ok(0);
+        }
+
+        let marker_component = legacy
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let marker = format!(".thinclaw/migrations/principal-{marker_component}-v1");
+        let cache_key = format!(
+            "principal:{}:{:?}:{}",
+            self.user_id, self.agent_id, marker_component
+        );
+        if self
+            .migration_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&cache_key)
+        {
+            return Ok(0);
+        }
+        if self.exists(&marker).await? {
+            self.migration_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(cache_key);
+            return Ok(0);
+        }
+
+        let source = self.scoped_clone(legacy.to_string(), self.agent_id);
+        let mut migrated = 0;
+        for path in source.list_all().await? {
+            let source_document = match source.read(&path).await {
+                Ok(document) => document,
+                Err(WorkspaceError::DocumentNotFound { .. }) => continue,
+                Err(error) => return Err(error),
+            };
+            let destination = self
+                .storage
+                .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
+                .await?;
+            if destination.content.is_empty()
+                && self
+                    .storage
+                    .update_document_if_current(destination.id, "", &source_document.content)
+                    .await?
+            {
+                migrated += 1;
+                if let Err(error) = self.reindex_document(destination.id).await {
+                    tracing::warn!(
+                        path = %path,
+                        error = %error,
+                        "Legacy principal document migrated but indexing remains dirty"
+                    );
+                }
+            }
+        }
+        self.write(&marker, "").await?;
+        self.migration_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(cache_key);
+        Ok(migrated)
+    }
+
     // ==================== Convenience Methods ====================
 
     /// Get the main MEMORY.md document (long-term curated memory).
@@ -209,15 +373,8 @@ impl Workspace {
     /// This is for important facts, decisions, and preferences worth
     /// remembering long-term.
     pub async fn append_memory(&self, entry: &str) -> Result<(), WorkspaceError> {
-        // Use double newline for memory entries (semantic separation)
-        let doc = self.memory().await?;
-        let new_content = if doc.content.is_empty() {
-            entry.to_string()
-        } else {
-            format!("{}\n\n{}", doc.content, entry)
-        };
-        self.storage.update_document(doc.id, &new_content).await?;
-        self.reindex_document(doc.id).await?;
+        self.append_with_separator(paths::MEMORY, entry, "\n\n")
+            .await?;
         Ok(())
     }
 

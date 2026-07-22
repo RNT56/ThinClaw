@@ -160,7 +160,7 @@ pub struct NativeLifecycleSetupStatusInput {
     pub required_fields: Vec<SetupFieldStatus>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GmailSetupStatusInput {
     pub enabled: bool,
     pub project_id: Option<String>,
@@ -170,6 +170,23 @@ pub struct GmailSetupStatusInput {
     /// True when refresh credentials (refresh_token + client_id + client_secret)
     /// are configured, so the channel can self-refresh without an OAuth token.
     pub refresh_ready: bool,
+}
+
+impl std::fmt::Debug for GmailSetupStatusInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GmailSetupStatusInput")
+            .field("enabled", &self.enabled)
+            .field("project_id", &self.project_id)
+            .field("subscription_id", &self.subscription_id)
+            .field("topic_id", &self.topic_id)
+            .field(
+                "oauth_token",
+                &self.oauth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("refresh_ready", &self.refresh_ready)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

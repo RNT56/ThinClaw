@@ -4,6 +4,8 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub const DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
+pub const MAX_SANDBOX_PROMPT_BYTES: usize = 64 * 1024;
+pub const MAX_PENDING_SANDBOX_PROMPTS: usize = 32;
 
 const SANDBOX_METADATA_KEY: &str = "_sandbox";
 const RAW_METADATA_KEY: &str = "_raw_metadata";
@@ -202,6 +204,10 @@ pub struct SandboxJobSpec {
     pub allowed_skills: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_profile: Option<String>,
+    /// Stable owner scope for crash cleanup. Populated by the host runtime,
+    /// never accepted as authority from a worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -218,6 +224,8 @@ struct SandboxMetadataEnvelope {
     allowed_skills: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_scope: Option<String>,
 }
 
 impl SandboxJobSpec {
@@ -243,6 +251,7 @@ impl SandboxJobSpec {
             allowed_tools: None,
             allowed_skills: None,
             tool_profile: None,
+            runtime_scope: None,
         }
     }
 
@@ -266,6 +275,7 @@ impl SandboxJobSpec {
                 allowed_tools: self.allowed_tools.clone(),
                 allowed_skills: self.allowed_skills.clone(),
                 tool_profile: self.tool_profile.clone(),
+                runtime_scope: self.runtime_scope.clone(),
             })
             .unwrap_or_else(|_| serde_json::json!({})),
         );
@@ -296,6 +306,7 @@ impl SandboxJobSpec {
             allowed_tools: sandbox_meta.allowed_tools,
             allowed_skills: sandbox_meta.allowed_skills,
             tool_profile: sandbox_meta.tool_profile,
+            runtime_scope: sandbox_meta.runtime_scope,
             metadata,
         }
     }
@@ -348,7 +359,11 @@ pub fn normalize_terminal_sandbox_status(status: &str, success: bool) -> String 
         "interrupted" => "interrupted".to_string(),
         "completed" | "success" => "failed".to_string(),
         "error" | "failed" => "failed".to_string(),
-        other if success => other.to_string(),
+        // Worker bridges are free to use provider-specific terminal labels
+        // (for example `done` or `ok`). Persist only the canonical finite
+        // state machine so summaries, child drains, and restart recovery all
+        // agree that a successful terminal report is complete.
+        _ if success => "completed".to_string(),
         _ => "failed".to_string(),
     }
 }
@@ -434,7 +449,10 @@ mod tests {
             normalize_terminal_sandbox_status("completed", false),
             "failed"
         );
-        assert_eq!(normalize_terminal_sandbox_status("custom", true), "custom");
+        assert_eq!(
+            normalize_terminal_sandbox_status("custom", true),
+            "completed"
+        );
         assert_eq!(normalize_terminal_sandbox_status("custom", false), "failed");
     }
 }

@@ -41,6 +41,11 @@ pub mod paths {
     pub const PROFILE: &str = "context/profile.json";
     /// Actor directory root for private overlays.
     pub const ACTORS_DIR: &str = "actors";
+    /// Conversation directory root for group-scoped memory and knowledge.
+    pub const CONVERSATIONS_DIR: &str = "conversations";
+    /// Explicit principal-wide knowledge that is safe to recall across actors
+    /// and groups. Ordinary model tools may read but not mutate this namespace.
+    pub const SHARED_DIR: &str = "shared";
 
     /// Build the actor directory path.
     pub fn actor_root(actor_id: &str) -> String {
@@ -60,6 +65,16 @@ pub mod paths {
     /// Actor-private profile path.
     pub fn actor_profile(actor_id: &str) -> String {
         format!("{}/context/profile.json", actor_root(actor_id))
+    }
+
+    /// Group/conversation-private root. UUID scope IDs are used rather than a
+    /// transport room ID so paths cannot contain external identifiers.
+    pub fn conversation_root(scope_id: uuid::Uuid) -> String {
+        format!("{}/{}", CONVERSATIONS_DIR, scope_id)
+    }
+
+    pub fn conversation_memory(scope_id: uuid::Uuid) -> String {
+        format!("{}/MEMORY.md", conversation_root(scope_id))
     }
 
     fn sanitize_component(component: &str) -> String {

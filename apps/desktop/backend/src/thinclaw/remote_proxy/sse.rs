@@ -3,12 +3,148 @@
 
 use std::time::Duration;
 
+use reqwest::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use tracing::{error, info, warn};
 
 use super::core::{ConnectionState, RemoteGatewayProxy};
 
-const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
-const MAX_SSE_BACKOFF: Duration = Duration::from_secs(30);
+const MAX_SSE_LINE_BYTES: usize = 512 * 1024;
+const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
+
+/// Incremental SSE decoder with bounded line and event storage. Keeping the
+/// input as bytes until an event boundary preserves UTF-8 code points split
+/// across transport chunks.
+struct SseDecoder {
+    line: Vec<u8>,
+    data: Vec<u8>,
+    skip_lf: bool,
+    first_line: bool,
+    max_line_bytes: usize,
+    max_event_bytes: usize,
+}
+
+impl SseDecoder {
+    fn new() -> Self {
+        Self {
+            line: Vec::new(),
+            data: Vec::new(),
+            skip_lf: false,
+            first_line: true,
+            max_line_bytes: MAX_SSE_LINE_BYTES,
+            max_event_bytes: MAX_SSE_EVENT_BYTES,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_limits(max_line_bytes: usize, max_event_bytes: usize) -> Self {
+        Self {
+            max_line_bytes,
+            max_event_bytes,
+            ..Self::new()
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+        let mut events = Vec::new();
+        for &byte in chunk {
+            if self.skip_lf {
+                self.skip_lf = false;
+                if byte == b'\n' {
+                    continue;
+                }
+            }
+
+            match byte {
+                b'\r' => {
+                    self.process_current_line(&mut events)?;
+                    self.skip_lf = true;
+                }
+                b'\n' => self.process_current_line(&mut events)?,
+                _ => {
+                    if self.line.len() >= self.max_line_bytes {
+                        return Err(format!(
+                            "SSE line exceeds the {}-byte limit",
+                            self.max_line_bytes
+                        ));
+                    }
+                    self.line.push(byte);
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    fn finish(&mut self) -> Result<Vec<Vec<u8>>, String> {
+        let mut events = Vec::new();
+        if !self.line.is_empty() {
+            self.process_current_line(&mut events)?;
+        }
+        self.dispatch_event(&mut events);
+        Ok(events)
+    }
+
+    fn process_current_line(&mut self, events: &mut Vec<Vec<u8>>) -> Result<(), String> {
+        let mut line = std::mem::take(&mut self.line);
+        if self.first_line {
+            self.first_line = false;
+            if line.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                line.drain(..3);
+            }
+        }
+
+        if line.is_empty() {
+            self.dispatch_event(events);
+            return Ok(());
+        }
+        if line[0] == b':' {
+            return Ok(());
+        }
+
+        let (field, mut value) = match line.iter().position(|byte| *byte == b':') {
+            Some(index) => (&line[..index], &line[index + 1..]),
+            None => (line.as_slice(), &[][..]),
+        };
+        if value.first() == Some(&b' ') {
+            value = &value[1..];
+        }
+        if field != b"data" {
+            return Ok(());
+        }
+
+        let projected = self
+            .data
+            .len()
+            .checked_add(value.len())
+            .and_then(|length| length.checked_add(1))
+            .ok_or_else(|| "SSE event size overflow".to_string())?;
+        if projected > self.max_event_bytes {
+            return Err(format!(
+                "SSE event exceeds the {}-byte limit",
+                self.max_event_bytes
+            ));
+        }
+        self.data.extend_from_slice(value);
+        self.data.push(b'\n');
+        Ok(())
+    }
+
+    fn dispatch_event(&mut self, events: &mut Vec<Vec<u8>>) {
+        if self.data.is_empty() {
+            return;
+        }
+        self.data.pop(); // Remove the final newline inserted for the last data field.
+        events.push(std::mem::take(&mut self.data));
+    }
+}
+
+fn has_event_stream_content_type(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+}
 
 impl RemoteGatewayProxy {
     /// Subscribe to the remote gateway's SSE event stream and re-emit
@@ -19,21 +155,20 @@ impl RemoteGatewayProxy {
     /// between local and remote agent events.
     ///
     /// Auto-reconnects on disconnect (exponential backoff, max 30s).
-    pub async fn start_sse_subscription(
-        &self,
-        app_handle: tauri::AppHandle,
-    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-        // Stop existing subscription first
-        self.stop_sse_subscription().await;
+    pub async fn start_sse_subscription(&self, app_handle: tauri::AppHandle) -> Result<(), String> {
+        let mut handle_slot = self.inner.sse_handle.lock().await;
+        if let Some(handle) = handle_slot.take() {
+            handle.abort();
+        }
 
-        *self.inner.state.write().await = ConnectionState::Reconnecting;
+        *self.inner.state.write().await = ConnectionState::Connected;
 
         let proxy = self.clone();
         let handle = tokio::spawn(async move {
             proxy.sse_loop(app_handle).await;
         });
 
-        *self.inner.sse_handle.write().await = Some(handle);
+        *handle_slot = Some(handle);
         info!(
             "[remote_proxy] SSE subscription started for {}",
             self.inner.base_url
@@ -43,15 +178,8 @@ impl RemoteGatewayProxy {
 
     /// Stop the background SSE subscription task.
     pub async fn stop_sse_subscription(&self) {
-        if let Some(handle) = self.inner.sse_handle.write().await.take() {
+        if let Some(handle) = self.inner.sse_handle.lock().await.take() {
             handle.abort();
-            // Await cancellation so shutdown cannot leave a reconnecting task
-            // racing a subsequent connection attempt.
-            if let Err(error) = handle.await {
-                if !error.is_cancelled() {
-                    warn!("[remote_proxy] SSE subscription exited during shutdown: {error}");
-                }
-            }
             info!("[remote_proxy] SSE subscription stopped");
         }
         *self.inner.state.write().await = ConnectionState::Disconnected;
@@ -66,80 +194,69 @@ impl RemoteGatewayProxy {
     async fn sse_loop(&self, app_handle: tauri::AppHandle) {
         use tauri::Emitter;
 
-        let mut backoff = Duration::from_secs(1);
+        let mut backoff_secs: u64 = 1;
+        const MAX_BACKOFF: u64 = 30;
 
         loop {
             *self.inner.state.write().await = ConnectionState::Reconnecting;
-            let mut wait = backoff;
 
             let url = self.url("/api/chat/events");
             info!("[remote_proxy] Connecting to SSE: {}", url);
 
             let result = self
                 .inner
-                .client
+                .sse_client
                 .get(&url)
-                .header(reqwest::header::AUTHORIZATION, self.auth_header())
+                .header(AUTHORIZATION, self.auth_header())
                 .header("Accept", "text/event-stream")
-                .header("Cache-Control", "no-cache")
-                // No global timeout — SSE is a long-lived connection
-                .timeout(Duration::MAX)
+                .header(CACHE_CONTROL, "no-cache")
                 .send()
                 .await;
 
             match result {
                 Err(e) => {
                     warn!(
-                        "[remote_proxy] SSE connection failed: {}. Retrying in {:?}",
-                        e, backoff
+                        "[remote_proxy] SSE connection failed: {}. Retrying in {}s",
+                        e, backoff_secs
                     );
-                    emit_reconnecting(
-                        &app_handle,
-                        format!(
-                            "Remote stream unavailable — retrying in {}s",
-                            backoff.as_secs()
-                        ),
+                }
+                Ok(response)
+                    if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                        || response.status() == reqwest::StatusCode::FORBIDDEN =>
+                {
+                    error!("[remote_proxy] SSE authorization was rejected; subscription stopped");
+                    *self.inner.state.write().await = ConnectionState::Disconnected;
+                    let _ = app_handle.emit(
+                        "thinclaw-event",
+                        &crate::thinclaw::ui_types::UiEvent::Disconnected {
+                            reason: "Remote gateway authorization was rejected".to_string(),
+                        },
                     );
+                    return;
                 }
                 Ok(response) if !response.status().is_success() => {
                     let status = response.status();
-                    let retry_after = response
-                        .headers()
-                        .get(reqwest::header::RETRY_AFTER)
-                        .and_then(|value| value.to_str().ok())
-                        .and_then(|value| value.trim().parse::<u64>().ok())
-                        .map(Duration::from_secs)
-                        .map(|duration| duration.min(MAX_SSE_BACKOFF));
-                    error!("[remote_proxy] SSE endpoint returned HTTP {}", status);
-                    if !sse_status_is_retryable(status) {
-                        *self.inner.state.write().await = ConnectionState::Disconnected;
-                        emit_reconnecting(
-                            &app_handle,
-                            format!("Remote event stream stopped: HTTP {status}. Check gateway configuration and credentials."),
-                        );
-                        return;
-                    }
-                    if let Some(retry_after) = retry_after {
-                        wait = retry_after;
-                    }
-                    emit_reconnecting(
-                        &app_handle,
-                        format!(
-                            "Remote stream returned HTTP {status} — retrying in {}s",
-                            wait.as_secs()
-                        ),
+                    error!(
+                        "[remote_proxy] SSE endpoint returned HTTP {}. Retrying in {}s",
+                        status, backoff_secs
+                    );
+                }
+                Ok(response) if !has_event_stream_content_type(&response) => {
+                    error!(
+                        "[remote_proxy] SSE endpoint returned a non-event-stream response. Retrying in {}s",
+                        backoff_secs
                     );
                 }
                 Ok(response) => {
                     *self.inner.state.write().await = ConnectionState::Connected;
-                    backoff = Duration::from_secs(1); // Reset backoff on successful connect
+                    backoff_secs = 1; // Reset backoff on successful connect
 
                     info!("[remote_proxy] SSE stream connected");
 
                     // Emit Connected event to frontend
                     let _ = app_handle.emit(
                         "thinclaw-event",
-                        &crate::thinclaw::ui_types::UiEvent::Connected { protocol: 2 },
+                        &crate::thinclaw::ui_types::UiEvent::Connected { protocol: 1 },
                     );
 
                     // Stream SSE events
@@ -155,16 +272,18 @@ impl RemoteGatewayProxy {
                     }
 
                     // Emit Disconnected to frontend on stream end
-                    emit_reconnecting(
-                        &app_handle,
-                        "Remote stream ended — reconnecting in 1s".to_string(),
+                    let _ = app_handle.emit(
+                        "thinclaw-event",
+                        &crate::thinclaw::ui_types::UiEvent::Disconnected {
+                            reason: "Remote stream ended — reconnecting".to_string(),
+                        },
                     );
                 }
             }
 
             *self.inner.state.write().await = ConnectionState::Reconnecting;
-            tokio::time::sleep(wait).await;
-            backoff = (backoff * 2).min(MAX_SSE_BACKOFF);
+            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+            backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
         }
     }
 
@@ -179,97 +298,106 @@ impl RemoteGatewayProxy {
         &self,
         response: reqwest::Response,
         app_handle: &tauri::AppHandle,
-    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    ) -> Result<(), String> {
         use futures_util::StreamExt;
 
         let mut stream = response.bytes_stream();
-        let mut buffer = Vec::new();
+        let mut decoder = SseDecoder::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| format!("SSE stream read error: {}", e))?;
-            // Split before appending so a large network chunk containing many
-            // small events never creates one large intermediate buffer. Bytes
-            // are decoded only after a complete line arrives, preserving UTF-8
-            // sequences that cross transport chunk boundaries.
-            for segment in chunk.split_inclusive(|byte| *byte == b'\n') {
-                if buffer.len().saturating_add(segment.len()) > MAX_SSE_LINE_BYTES {
-                    return Err((format!(
-                        "SSE event exceeded the {MAX_SSE_LINE_BYTES}-byte safety limit"
-                    ))
-                    .into());
-                }
-                buffer.extend_from_slice(segment);
-                if segment.ends_with(b"\n") {
-                    forward_sse_line(&buffer, app_handle)?;
-                    buffer.clear();
-                }
+            for data in decoder.push(&chunk)? {
+                emit_sse_data(&data, app_handle);
             }
         }
-
-        if !buffer.is_empty() {
-            forward_sse_line(&buffer, app_handle)?;
+        for data in decoder.finish()? {
+            emit_sse_data(&data, app_handle);
         }
 
         Ok(())
     }
 }
 
-fn sse_status_is_retryable(status: reqwest::StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504)
-}
-
-fn emit_reconnecting(app_handle: &tauri::AppHandle, reason: String) {
+fn emit_sse_data(data: &[u8], app_handle: &tauri::AppHandle) {
     use tauri::Emitter;
 
-    let _ = app_handle.emit(
-        "thinclaw-event",
-        &crate::thinclaw::ui_types::UiEvent::Disconnected { reason },
-    );
-}
-
-fn forward_sse_line(
-    line: &[u8],
-    app_handle: &tauri::AppHandle,
-) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    use tauri::Emitter;
-
-    let mut end = line.len();
-    if end > 0 && line[end - 1] == b'\n' {
-        end -= 1;
+    if data.is_empty() || data == b"[DONE]" {
+        return;
     }
-    if end > 0 && line[end - 1] == b'\r' {
-        end -= 1;
-    }
-    let line = std::str::from_utf8(&line[..end])
-        .map_err(|_| "Remote SSE stream contained invalid UTF-8".to_string())?;
-    let Some(data) = line.strip_prefix("data:").map(str::trim) else {
-        return Ok(());
+    let data = match std::str::from_utf8(data) {
+        Ok(data) => data,
+        Err(_) => {
+            warn!("[remote_proxy] Discarded a non-UTF-8 SSE event");
+            return;
+        }
     };
-    if data.is_empty() || data == "[DONE]" {
-        return Ok(());
-    }
 
     // Prefer UiEvent for remote gateways that already speak the desktop
-    // contract. Otherwise normalize root gateway (`type`) events.
+    // contract. Otherwise normalize gateway (`type`) events into the same bus.
     match serde_json::from_str::<crate::thinclaw::ui_types::UiEvent>(data) {
         Ok(event) => {
             if let Err(error) = app_handle.emit("thinclaw-event", &event) {
-                warn!("[remote_proxy] Failed to emit Tauri event: {}", error);
+                warn!("[remote_proxy] Failed to emit Tauri event: {error}");
             }
         }
         Err(_) => match serde_json::from_str::<serde_json::Value>(data) {
             Ok(raw_json) => {
                 for event in crate::thinclaw::event_mapping::gateway_sse_to_ui_events(raw_json) {
                     if let Err(error) = app_handle.emit("thinclaw-event", &event) {
-                        warn!(
-                            "[remote_proxy] Failed to emit mapped gateway event: {}",
-                            error
-                        );
+                        warn!("[remote_proxy] Failed to emit mapped gateway event: {error}");
                     }
                 }
             }
-            Err(error) => warn!("[remote_proxy] Failed to parse SSE data as JSON: {}", error),
+            Err(error) => warn!("[remote_proxy] Failed to parse SSE data as JSON: {error}"),
         },
     }
-    Ok(())
+}
+
+#[cfg(test)]
+mod decoder_tests {
+    use super::SseDecoder;
+
+    #[test]
+    fn preserves_utf8_split_across_transport_chunks() {
+        let input = "data: {\"content\":\"hello 🦀\"}\n\n".as_bytes();
+        let crab = input
+            .windows(4)
+            .position(|window| window == "🦀".as_bytes())
+            .expect("crab bytes");
+        let mut decoder = SseDecoder::new();
+        assert!(decoder.push(&input[..crab + 1]).unwrap().is_empty());
+        let events = decoder.push(&input[crab + 1..]).unwrap();
+        assert_eq!(events, vec!["{\"content\":\"hello 🦀\"}".as_bytes()]);
+    }
+
+    #[test]
+    fn combines_multiline_data_and_supports_all_line_endings() {
+        let mut decoder = SseDecoder::new();
+        let events = decoder
+            .push(b": keepalive\rdata: {\"value\":\r\ndata: 1}\n\r")
+            .unwrap();
+        assert_eq!(events, vec![b"{\"value\":\n1}".to_vec()]);
+    }
+
+    #[test]
+    fn strips_bom_and_dispatches_final_event_at_eof() {
+        let mut decoder = SseDecoder::new();
+        assert!(decoder
+            .push(b"\xEF\xBB\xBFdata:{\"ok\":true}")
+            .unwrap()
+            .is_empty());
+        assert_eq!(decoder.finish().unwrap(), vec![b"{\"ok\":true}".to_vec()]);
+    }
+
+    #[test]
+    fn enforces_line_and_event_limits() {
+        let mut line_limited = SseDecoder::with_limits(4, 32);
+        assert!(line_limited.push(b"12345").unwrap_err().contains("line"));
+
+        let mut event_limited = SseDecoder::with_limits(32, 5);
+        assert!(event_limited
+            .push(b"data: 12345\n")
+            .unwrap_err()
+            .contains("event"));
+    }
 }

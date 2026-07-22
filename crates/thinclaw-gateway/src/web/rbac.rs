@@ -41,6 +41,7 @@ const ADMIN_SURFACE_PREFIXES: &[&str] = &[
     "/api/mcp",
     "/api/hooks",
     "/api/principals",
+    "/api/learning",
 ];
 
 /// Non-admin path prefixes an `Operator` may issue *state-changing* requests to
@@ -120,6 +121,8 @@ mod tests {
             "/api/hooks",
             "/api/tool-policies",
             "/api/security/policy",
+            "/api/learning/candidates",
+            "/api/learning/artifact-versions",
         ] {
             assert_eq!(
                 capability_for_request(&Method::GET, path),

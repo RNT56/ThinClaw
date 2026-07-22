@@ -23,19 +23,24 @@
 #   --version <tag>          Release tag to install (default: latest)
 #   --static                 Prefer Linux musl/static-ish native artifacts
 #   --image <image>          Docker image for Compose
-#   --tailscale <auth-key>   Install Tailscale VPN and join the network
+#   --secrets-stdin          Read the gateway token and optional Tailscale key
+#                            as two lines from stdin (required)
+#   --allow-public-http      Explicitly allow the bearer-token gateway on a
+#                            public plaintext HTTP interface (unsafe)
 #   --systemd                Create a systemd service for ThinClaw
-#   --credentials-stdin      Read gateway token and Tailscale key from two stdin lines
 #
 # Usage:
-#   sudo bash setup.sh --token <gateway_token> [--mode auto|native|docker] [--tailscale <ts-key>] [--systemd]
+#   printf '%s\n%s\n' '<64-hex-gateway-token>' '<tailscale-key>' | \
+#     sudo bash setup.sh --secrets-stdin [--mode auto|native|docker] [--systemd]
 #
 # Examples:
-#   # Minimal (Docker only):
-#   sudo bash setup.sh --token abc123def456
+#   # Public HTTP requires an explicit unsafe opt-in:
+#   printf '%s\n\n' "$(openssl rand -hex 32)" | \
+#     sudo bash setup.sh --secrets-stdin --mode docker --allow-public-http
 #
 #   # Full production setup:
-#   sudo bash setup.sh --token abc123def456 --tailscale tskey-auth-xxx --systemd
+#   printf '%s\n%s\n' "$(openssl rand -hex 32)" 'tskey-auth-...' | \
+#     sudo bash setup.sh --secrets-stdin --systemd
 #
 # ============================================================================
 
@@ -45,8 +50,9 @@ set -euo pipefail
 
 TOKEN=""
 TAILSCALE_KEY=""
+READ_SECRETS_STDIN=false
+ALLOW_PUBLIC_HTTP=false
 ENABLE_SYSTEMD=false
-CREDENTIALS_STDIN=false
 MODE="auto"
 BINARY_PATH=""
 NATIVE_PROFILE="${THINCLAW_NATIVE_PROFILE:-edge}"
@@ -56,29 +62,47 @@ THINCLAW_IMAGE="${THINCLAW_IMAGE:-ghcr.io/rnt56/thinclaw:latest}"
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        --token) TOKEN="$2"; shift ;;
-        --mode) MODE="$2"; shift ;;
-        --binary) BINARY_PATH="$2"; shift ;;
-        --profile) NATIVE_PROFILE="$2"; shift ;;
-        --version) THINCLAW_VERSION="$2"; shift ;;
+        --token|--tailscale)
+            echo "ERROR: $1 is intentionally unsupported because command-line secrets are visible to other host processes." >&2
+            echo "Pass both secrets with --secrets-stdin; use an empty second line when Tailscale is not requested." >&2
+            exit 1
+            ;;
+        --mode|--binary|--profile|--version|--image)
+            option="$1"
+            if [[ "$#" -lt 2 ]]; then
+                echo "ERROR: $option requires a value" >&2
+                exit 1
+            fi
+            if [[ -z "$2" ]]; then
+                echo "ERROR: $option requires a non-empty value" >&2
+                exit 1
+            fi
+            case "$option" in
+                --mode) MODE="$2" ;;
+                --binary) BINARY_PATH="$2" ;;
+                --profile) NATIVE_PROFILE="$2" ;;
+                --version) THINCLAW_VERSION="$2" ;;
+                --image) THINCLAW_IMAGE="$2" ;;
+            esac
+            shift
+            ;;
         --static) PREFER_STATIC=true ;;
-        --image) THINCLAW_IMAGE="$2"; shift ;;
-        --tailscale) TAILSCALE_KEY="$2"; shift ;;
-        --credentials-stdin) CREDENTIALS_STDIN=true ;;
+        --secrets-stdin) READ_SECRETS_STDIN=true ;;
+        --allow-public-http) ALLOW_PUBLIC_HTTP=true ;;
         --systemd) ENABLE_SYSTEMD=true ;;
         --help|-h)
-            echo "Usage: sudo bash setup.sh --token <token> [--mode auto|native|docker] [--profile edge|full] [--version <tag>|latest] [--static] [--binary <path>] [--image <image>] [--tailscale <auth-key>] [--systemd]"
+            printf '%s\n' "Usage: printf '%s\\n%s\\n' '<64-hex-token>' '<tailscale-key>' | sudo bash setup.sh --secrets-stdin [options]"
+            printf '%s\n' "       printf '%s\\n\\n' '<64-hex-token>' | sudo bash setup.sh --secrets-stdin --allow-public-http [options]"
             echo ""
-            echo "  --token <token>         Gateway auth token (required)"
+            echo "  --secrets-stdin         Read the gateway token and optional Tailscale key from stdin"
             echo "  --mode <mode>           Install mode: auto, native, or docker (default: auto)"
             echo "  --binary <path>         Native install source binary (overrides release download)"
             echo "  --profile <profile>     Native release profile: edge or full (default: $NATIVE_PROFILE)"
             echo "  --version <tag>         GitHub release tag for native install (default: $THINCLAW_VERSION)"
             echo "  --static                Prefer Linux musl/static-ish native artifact"
             echo "  --image <image>         Docker image for Compose (default: $THINCLAW_IMAGE)"
-            echo "  --tailscale <auth-key>  Install Tailscale VPN and authenticate with this key"
+            echo "  --allow-public-http     Allow plaintext public HTTP without Tailscale (unsafe)"
             echo "  --systemd               In docker mode, create a systemd service for auto-start management"
-            echo "  --credentials-stdin     Read token and optional Tailscale key from two stdin lines"
             echo ""
             exit 0
             ;;
@@ -87,14 +111,40 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
-if [[ "$CREDENTIALS_STDIN" == true ]]; then
-    IFS= read -r TOKEN || { echo "ERROR: failed to read gateway token from stdin"; exit 1; }
-    IFS= read -r TAILSCALE_KEY || { echo "ERROR: failed to read Tailscale key from stdin"; exit 1; }
+if [[ "$READ_SECRETS_STDIN" != "true" ]]; then
+    echo "ERROR: --secrets-stdin is required; secrets must not be passed through process arguments" >&2
+    exit 1
+fi
+
+if ! IFS= read -r TOKEN; then
+    echo "ERROR: --secrets-stdin requires a gateway token on the first input line" >&2
+    exit 1
+fi
+if ! IFS= read -r TAILSCALE_KEY; then
+    echo "ERROR: --secrets-stdin requires a second input line (leave it empty to omit Tailscale)" >&2
+    exit 1
 fi
 
 if [[ -z "$TOKEN" ]]; then
-    echo "ERROR: --token parameter is required"
-    echo "Usage: sudo bash setup.sh --token <gateway_token> [--tailscale <ts-key>] [--systemd]"
+    echo "ERROR: gateway token is required on the first stdin line" >&2
+    exit 1
+fi
+
+if [[ ! "$TOKEN" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+    echo "ERROR: gateway token must be exactly 64 hexadecimal characters" >&2
+    exit 1
+fi
+
+if [[ -n "$TAILSCALE_KEY" ]]; then
+    if [[ ${#TAILSCALE_KEY} -gt 512 || ! "$TAILSCALE_KEY" =~ ^tskey-[A-Za-z0-9_-]+$ ]]; then
+        echo "ERROR: malformed Tailscale auth key" >&2
+        exit 1
+    fi
+fi
+
+if [[ -z "$TAILSCALE_KEY" && "$ALLOW_PUBLIC_HTTP" != "true" ]]; then
+    echo "ERROR: provide a Tailscale key or explicitly pass --allow-public-http" >&2
+    echo "Refusing to expose a bearer-token gateway over plaintext public HTTP by default." >&2
     exit 1
 fi
 
@@ -108,10 +158,25 @@ if [[ "$NATIVE_PROFILE" != "edge" && "$NATIVE_PROFILE" != "full" ]]; then
     exit 1
 fi
 
+if [[ "$THINCLAW_VERSION" != "latest" && ! "$THINCLAW_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+    echo "ERROR: --version must be 'latest' or a release tag containing only letters, digits, '.', '_' and '-'" >&2
+    exit 1
+fi
+
+if [[ ${#THINCLAW_IMAGE} -gt 512 || ! "$THINCLAW_IMAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@-]*$ ]]; then
+    echo "ERROR: malformed Docker image reference" >&2
+    exit 1
+fi
+
 # ── Detect environment ──────────────────────────────────────────────────────
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 THINCLAW_PORT="${GATEWAY_PORT:-3000}"
+
+if [[ ! "$THINCLAW_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$THINCLAW_PORT < 1 || 10#$THINCLAW_PORT > 65535 )); then
+    echo "ERROR: GATEWAY_PORT must be an integer from 1 through 65535" >&2
+    exit 1
+fi
 
 echo "============================================================"
 echo "  ThinClaw Remote Agent Setup"
@@ -135,6 +200,7 @@ fi
 ROLLBACK_DIR="$(mktemp -d /tmp/thinclaw-setup.XXXXXX)"
 SETUP_COMPLETE=false
 DOCKER_COMPOSE_TOUCHED=false
+DOCKER_COMPOSE_WAS_RUNNING=false
 THINCLAW_SERVICE_WAS_ACTIVE=false
 THINCLAW_USER_CREATED=false
 PACKAGE_ROLLBACK="${THINCLAW_ROLLBACK_PACKAGES:-true}"
@@ -144,7 +210,6 @@ DOCKER_WAS_ENABLED=false
 FAIL2BAN_WAS_ACTIVE=false
 FAIL2BAN_WAS_ENABLED=false
 UFW_WAS_ACTIVE=false
-TAILSCALE_WAS_INSTALLED=false
 TAILSCALE_WAS_RUNNING=false
 TAILSCALE_TOUCHED=false
 declare -a ROLLBACK_PATHS=()
@@ -205,6 +270,10 @@ rollback_setup() {
     fi
     rollback_installed_packages
     restore_backed_up_paths
+    if [[ "$DOCKER_COMPOSE_TOUCHED" == "true" && "$DOCKER_COMPOSE_WAS_RUNNING" == "true" ]]; then
+        (cd "$DEPLOY_DIR" && docker compose up -d >/dev/null 2>&1) || \
+            echo "WARNING: failed to restart the pre-existing ThinClaw Compose stack during rollback" >&2
+    fi
     systemctl daemon-reload >/dev/null 2>&1 || true
     restore_ufw_state
     restore_service_state docker "$DOCKER_WAS_ACTIVE" "$DOCKER_WAS_ENABLED" "$DOCKER_WAS_INSTALLED"
@@ -293,7 +362,7 @@ wait_for_health() {
     local delay="${2:-1}"
     local attempt=""
     for ((attempt=1; attempt<=attempts; attempt++)); do
-        if curl -fsS "http://localhost:$THINCLAW_PORT/api/health" >/dev/null 2>&1; then
+        if curl -fsS "http://${THINCLAW_HEALTH_HOST:-localhost}:$THINCLAW_PORT/api/health" >/dev/null 2>&1; then
             return 0
         fi
         sleep "$delay"
@@ -324,7 +393,6 @@ capture_initial_host_state() {
     FAIL2BAN_WAS_ACTIVE="$(service_active fail2ban)"
     FAIL2BAN_WAS_ENABLED="$(service_enabled fail2ban)"
     UFW_WAS_ACTIVE="$(ufw_active)"
-    command -v tailscale >/dev/null 2>&1 && TAILSCALE_WAS_INSTALLED=true || TAILSCALE_WAS_INSTALLED=false
     TAILSCALE_WAS_RUNNING="$(tailscale_running)"
 }
 
@@ -381,6 +449,128 @@ install_packages() {
             record_package_installed "$package"
         fi
     done
+}
+
+download_https_file() {
+    local url="$1"
+    local destination="$2"
+    local max_bytes="$3"
+    local temporary=""
+    temporary="$(mktemp "$ROLLBACK_DIR/download.XXXXXX")"
+    chmod 0600 "$temporary"
+    if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --fail --silent --show-error --location --max-time 600 \
+        --max-filesize "$max_bytes" --output "$temporary" -- "$url"; then
+        rm -f "$temporary"
+        echo "ERROR: secure download failed: $url" >&2
+        return 1
+    fi
+    if [[ ! -s "$temporary" || -L "$temporary" ]]; then
+        rm -f "$temporary"
+        echo "ERROR: secure download returned an empty or invalid file: $url" >&2
+        return 1
+    fi
+    rm -f -- "$destination"
+    install -m 0600 "$temporary" "$destination"
+    rm -f "$temporary"
+}
+
+install_tailscale_package() {
+    if command -v tailscale >/dev/null 2>&1; then
+        return 0
+    fi
+
+    command -v curl >/dev/null 2>&1 || install_packages ca-certificates curl
+    # shellcheck disable=SC1091
+    . /etc/os-release
+
+    if [[ "$PKG_MANAGER" == "apt" ]]; then
+        local repository_family="${ID:-}"
+        local codename="${VERSION_CODENAME:-}"
+        case "$repository_family" in
+            ubuntu|debian|raspbian) ;;
+            *)
+                echo "ERROR: unsupported apt distribution for automatic Tailscale installation: ${ID:-unknown}" >&2
+                return 1
+                ;;
+        esac
+        if [[ ! "$codename" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]; then
+            echo "ERROR: /etc/os-release does not contain a safe VERSION_CODENAME" >&2
+            return 1
+        fi
+
+        backup_path /etc/apt/sources.list.d/tailscale.list
+        backup_path /usr/share/keyrings/tailscale-archive-keyring.gpg
+        install -d -m 0755 /usr/share/keyrings
+        download_https_file \
+            "https://pkgs.tailscale.com/stable/$repository_family/$codename.noarmor.gpg" \
+            /usr/share/keyrings/tailscale-archive-keyring.gpg 1048576
+        download_https_file \
+            "https://pkgs.tailscale.com/stable/$repository_family/$codename.tailscale-keyring.list" \
+            /etc/apt/sources.list.d/tailscale.list 65536
+        chmod 0644 /usr/share/keyrings/tailscale-archive-keyring.gpg \
+            /etc/apt/sources.list.d/tailscale.list
+        if ! grep -Eq '^deb .*https://pkgs\.tailscale\.com/stable/' /etc/apt/sources.list.d/tailscale.list; then
+            echo "ERROR: downloaded Tailscale apt source is malformed" >&2
+            return 1
+        fi
+        apt-get update -y -qq
+        install_packages tailscale
+    else
+        local version_id="${VERSION_ID:-}"
+        local version_major="${version_id%%.*}"
+        local repository_family="${ID:-}"
+        case "$repository_family" in
+            rhel|centos|fedora|oracle) ;;
+            rocky|almalinux) repository_family="rhel" ;;
+            *)
+                echo "ERROR: unsupported RPM distribution for automatic Tailscale installation: ${ID:-unknown}" >&2
+                return 1
+                ;;
+        esac
+        if [[ ! "$version_major" =~ ^[0-9]{1,3}$ ]]; then
+            echo "ERROR: /etc/os-release does not contain a safe VERSION_ID" >&2
+            return 1
+        fi
+
+        backup_path /etc/yum.repos.d/tailscale.repo
+        install -d -m 0755 /etc/yum.repos.d
+        download_https_file \
+            "https://pkgs.tailscale.com/stable/$repository_family/$version_major/tailscale.repo" \
+            /etc/yum.repos.d/tailscale.repo 65536
+        chmod 0644 /etc/yum.repos.d/tailscale.repo
+        if ! grep -Eq '^baseurl=https://pkgs\.tailscale\.com/stable/' /etc/yum.repos.d/tailscale.repo \
+            || ! grep -Eq '^gpgcheck=1$' /etc/yum.repos.d/tailscale.repo; then
+            echo "ERROR: downloaded Tailscale RPM repository configuration is malformed" >&2
+            return 1
+        fi
+        install_packages tailscale
+    fi
+
+    systemctl enable --now tailscaled
+    command -v tailscale >/dev/null 2>&1
+}
+
+pull_and_pin_docker_image() {
+    local requested="$1"
+    local pinned=""
+
+    echo "    Pulling ThinClaw image: $requested" >&2
+    if ! docker pull -- "$requested" >&2; then
+        echo "ERROR: Docker could not pull the requested ThinClaw image" >&2
+        return 1
+    fi
+
+    while IFS= read -r pinned; do
+        if [[ "$pinned" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}$ ]]; then
+            printf '%s\n' "$pinned"
+            return 0
+        fi
+    done < <(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' -- "$requested")
+
+    echo "ERROR: Docker did not report an immutable repository digest for $requested" >&2
+    echo "Refusing to persist or start a mutable/unverifiable image reference." >&2
+    return 1
 }
 
 rollback_installed_packages() {
@@ -448,6 +638,19 @@ rollback_tailscale_state() {
     fi
 }
 
+tailscale_up_with_auth_key() {
+    local auth_file=""
+    local status=0
+    auth_file="$(mktemp "$ROLLBACK_DIR/tailscale-auth.XXXXXX")"
+    chmod 0600 "$auth_file"
+    printf '%s' "$TAILSCALE_KEY" > "$auth_file"
+    TAILSCALE_KEY=""
+    tailscale up --auth-key="file:$auth_file" --accept-routes --accept-dns=false || status=$?
+    : > "$auth_file"
+    rm -f "$auth_file"
+    return "$status"
+}
+
 configure_firewall() {
     echo ""
     echo "==> Configuring UFW Firewall..."
@@ -469,10 +672,10 @@ configure_firewall() {
             ufw default allow outgoing
         fi
         ufw allow ssh comment "SSH access"
-        ufw allow "$THINCLAW_PORT/tcp" comment "ThinClaw Gateway"
-
         if [[ -n "$TAILSCALE_KEY" ]]; then
-            ufw allow in on tailscale0 comment "Tailscale VPN"
+            ufw delete allow "$THINCLAW_PORT/tcp" 2>/dev/null || true
+        elif [[ "$ALLOW_PUBLIC_HTTP" == "true" ]]; then
+            ufw allow "$THINCLAW_PORT/tcp" comment "ThinClaw Gateway (explicit public HTTP)"
         fi
 
         echo "y" | ufw enable
@@ -528,26 +731,25 @@ FAIL2BAN_CONF
 install_tailscale_if_requested() {
     if [[ -z "$TAILSCALE_KEY" ]]; then
         echo ""
-        echo "==> Tailscale: Skipped (no --tailscale flag provided)"
+        echo "==> Tailscale: Skipped (no key provided on the second stdin line)"
         return 0
     fi
 
     echo ""
     echo "==> Installing Tailscale VPN..."
     if ! command -v tailscale &> /dev/null; then
-        backup_path /etc/apt/sources.list.d/tailscale.list
-        backup_path /usr/share/keyrings/tailscale-archive-keyring.gpg
-        backup_path /etc/yum.repos.d/tailscale.repo
-        curl -fsSL https://tailscale.com/install.sh | sh
-        if [[ "$TAILSCALE_WAS_INSTALLED" != "true" ]] && package_installed tailscale; then
-            record_package_installed tailscale
-        fi
+        install_tailscale_package
     fi
 
     if command -v tailscale &> /dev/null; then
         TAILSCALE_TOUCHED=true
-        tailscale up --authkey="$TAILSCALE_KEY" --accept-routes --accept-dns=false
+        tailscale_up_with_auth_key
         TS_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
+        if [[ ! "$TS_IP" =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            echo "ERROR: Tailscale did not return a usable IPv4 address." >&2
+            exit 1
+        fi
+        THINCLAW_HEALTH_HOST="$TS_IP"
         echo "    Tailscale installed and connected."
         echo "    Tailscale IPv4: $TS_IP"
         if command -v ufw &> /dev/null; then
@@ -609,6 +811,7 @@ native_target_triple() {
 
 download_native_binary() {
     local target archive checksums base_url download_dir archive_path checksums_path expected actual
+    local listing_path member_path binary_path
     target="$(native_target_triple)" || return 1
     if [[ "$NATIVE_PROFILE" == "edge" ]]; then
         archive="thinclaw-edge-${target}.tar.gz"
@@ -625,25 +828,45 @@ download_native_binary() {
     checksums_path="$download_dir/$checksums"
 
     echo "    Downloading ThinClaw $NATIVE_PROFILE release artifact: $archive" >&2
-    curl -fsSL "$base_url/$archive" -o "$archive_path"
-    curl -fsSL "$base_url/$checksums" -o "$checksums_path"
+    download_https_file "$base_url/$archive" "$archive_path" 536870912
+    download_https_file "$base_url/$checksums" "$checksums_path" 1048576
 
-    expected="$(awk -v file="$archive" '$2 == file {print $1; exit}' "$checksums_path")"
-    if [[ -z "$expected" ]]; then
-        echo "ERROR: No checksum entry for $archive in $checksums" >&2
+    expected="$(awk -v file="$archive" '$2 == file || $2 == "*" file {value=$1; count++} END {if (count == 1) print value}' "$checksums_path")"
+    if [[ ! "$expected" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+        echo "ERROR: $checksums must contain exactly one valid SHA256 entry for $archive" >&2
         return 1
     fi
     actual="$(sha256sum "$archive_path" | awk '{print $1}')"
-    if [[ "$actual" != "$expected" ]]; then
+    if [[ "${actual,,}" != "${expected,,}" ]]; then
         echo "ERROR: SHA256 mismatch for $archive" >&2
-        echo "Expected: $expected" >&2
-        echo "Actual:   $actual" >&2
         return 1
     fi
 
-    tar -xzf "$archive_path" -C "$download_dir" thinclaw
-    chmod +x "$download_dir/thinclaw"
-    echo "$download_dir/thinclaw"
+    listing_path="$download_dir/archive.list"
+    if ! (ulimit -f 4096; timeout 60 tar -tzf "$archive_path" > "$listing_path"); then
+        echo "ERROR: release archive could not be listed safely" >&2
+        return 1
+    fi
+    member_path="$(awk '/^(\.\/)?([A-Za-z0-9._-]+\/)*thinclaw$/ {value=$0; count++} END {if (count == 1) print value}' "$listing_path")"
+    if [[ -z "$member_path" ]]; then
+        echo "ERROR: release archive must contain exactly one safely named thinclaw binary" >&2
+        return 1
+    fi
+
+    binary_path="$download_dir/thinclaw"
+    rm -f -- "$binary_path"
+    if ! (umask 077; ulimit -f 1048576; timeout 120 tar -xOzf "$archive_path" -- "$member_path" > "$binary_path"); then
+        rm -f -- "$binary_path"
+        echo "ERROR: release binary could not be extracted safely" >&2
+        return 1
+    fi
+    if [[ ! -f "$binary_path" || -L "$binary_path" || ! -s "$binary_path" ]]; then
+        rm -f -- "$binary_path"
+        echo "ERROR: extracted release binary is not a non-empty regular file" >&2
+        return 1
+    fi
+    chmod 0700 "$binary_path"
+    echo "$binary_path"
 }
 
 install_native_pi() {
@@ -681,14 +904,20 @@ install_native_pi() {
     install -d -m 0750 -o thinclaw -g thinclaw /var/lib/thinclaw/.thinclaw
     install -d -m 0750 -o thinclaw -g thinclaw /var/lib/thinclaw/.thinclaw/logs
 
+    configure_firewall
+    install_fail2ban
+    install_tailscale_if_requested
+
     local master_key=""
     master_key="$(generate_hex_32)"
     local quoted_token=""
     local quoted_port=""
     local quoted_master_key=""
+    local quoted_bind_host=""
     quoted_token="$(dotenv_quote "$TOKEN")"
     quoted_port="$(dotenv_quote "$THINCLAW_PORT")"
     quoted_master_key="$(dotenv_quote "$master_key")"
+    quoted_bind_host="$(dotenv_quote "${TS_IP:-0.0.0.0}")"
     backup_path /var/lib/thinclaw/.thinclaw/.env
     cat > /var/lib/thinclaw/.thinclaw/.env <<ENV
 ONBOARD_COMPLETED=true
@@ -698,7 +927,7 @@ THINCLAW_HEADLESS=true
 DATABASE_BACKEND=libsql
 LIBSQL_PATH=/var/lib/thinclaw/.thinclaw/thinclaw.db
 GATEWAY_ENABLED=true
-GATEWAY_HOST=0.0.0.0
+GATEWAY_HOST=${quoted_bind_host}
 GATEWAY_PORT=${quoted_port}
 GATEWAY_AUTH_TOKEN=${quoted_token}
 THINCLAW_ALLOW_ENV_MASTER_KEY=1
@@ -711,8 +940,10 @@ CLI_ENABLED=false
 HEARTBEAT_ENABLED=false
 SANDBOX_ENABLED=false
 ROUTINES_ENABLED=true
-BROWSER_DOCKER=auto
-CHROMIUM_IMAGE=chromedp/headless-shell:latest
+BROWSER_DOCKER=never
+CHROMIUM_IMAGE=chromedp/headless-shell:150.0.7871.125@sha256:7f8ec4782f1b138c30900e65ae53795d5966fbf52168b8fc062843db3e6d5be5
+# Docker browser fallback additionally requires BROWSER_RELAY_IMAGE to name a
+# trusted local or digest-pinned ThinClaw image with the network-relay command.
 SCREEN_CAPTURE_ENABLED=false
 CAMERA_CAPTURE_ENABLED=false
 TALK_MODE_ENABLED=false
@@ -751,16 +982,12 @@ SYSTEMD_UNIT
     systemctl enable thinclaw.service
     systemctl restart thinclaw.service || true
 
-    configure_firewall
-    install_fail2ban
-    install_tailscale_if_requested
-
     echo ""
     echo "==> Verifying native ThinClaw health..."
     if wait_for_health 90 1; then
-        echo "    Health endpoint responded on http://localhost:$THINCLAW_PORT/api/health"
+        echo "    Health endpoint responded on the configured private gateway interface"
     else
-        echo "ERROR: Native ThinClaw service did not respond on http://localhost:$THINCLAW_PORT/api/health"
+        echo "ERROR: Native ThinClaw service did not respond on its configured gateway interface"
         journalctl -u thinclaw -n 120 --no-pager || true
         exit 1
     fi
@@ -772,8 +999,8 @@ SYSTEMD_UNIT
     echo "  Binary:       /usr/local/bin/thinclaw"
     echo "  Config:       /var/lib/thinclaw/.thinclaw/.env"
     echo "  Service:      systemctl status thinclaw"
-    echo "  Gateway URL:  http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo '<pi-ip>'):$THINCLAW_PORT"
-    echo "  Token:        stored in /var/lib/thinclaw/.thinclaw/.env"
+    echo "  Gateway URL:  http://${TS_IP:-<server-ip>}:$THINCLAW_PORT"
+    echo "  Token:        [generated securely; returned only to the deployment client]"
     echo ""
     echo "  Next:"
     echo "    1. Edit /var/lib/thinclaw/.thinclaw/.env and replace OPENROUTER_API_KEY=CHANGE_ME or configure another LLM."
@@ -810,34 +1037,77 @@ if ! command -v docker &> /dev/null; then
     if [ "$PKG_MANAGER" = "apt" ]; then
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -y -qq
-        install_packages ca-certificates curl gnupg lsb-release
+        install_packages ca-certificates curl
+
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        DOCKER_REPOSITORY_ID="${ID:-}"
+        case "$DOCKER_REPOSITORY_ID" in
+            ubuntu|debian) ;;
+            raspbian) DOCKER_REPOSITORY_ID="debian" ;;
+            *)
+                echo "ERROR: unsupported apt distribution for Docker CE: ${ID:-unknown}" >&2
+                exit 1
+                ;;
+        esac
+        DOCKER_REPOSITORY_CODENAME="${VERSION_CODENAME:-}"
+        DOCKER_REPOSITORY_ARCH="$(dpkg --print-architecture)"
+        if [[ ! "$DOCKER_REPOSITORY_CODENAME" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ \
+            || ! "$DOCKER_REPOSITORY_ARCH" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]; then
+            echo "ERROR: unsafe Docker repository distribution metadata" >&2
+            exit 1
+        fi
 
         # Add Docker's official GPG key
         backup_path /etc/apt/keyrings/docker.asc
         backup_path /etc/apt/sources.list.d/docker.list
+        backup_path /etc/apt/sources.list.d/docker.sources
         install -m 0755 -d /etc/apt/keyrings
-        if [ -f /etc/apt/keyrings/docker.asc ]; then
-            rm /etc/apt/keyrings/docker.asc
-        fi
-        curl -fsSL "https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg" \
-            -o /etc/apt/keyrings/docker.asc
-        chmod a+r /etc/apt/keyrings/docker.asc
+        download_https_file \
+            "https://download.docker.com/linux/$DOCKER_REPOSITORY_ID/gpg" \
+            /etc/apt/keyrings/docker.asc 1048576
+        chmod 0644 /etc/apt/keyrings/docker.asc
 
         # Add Docker apt repository
-        echo \
-          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
-          https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") \
-          $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-          tee /etc/apt/sources.list.d/docker.list > /dev/null
+        DOCKER_SOURCES_TEMP="$(mktemp "$ROLLBACK_DIR/docker-sources.XXXXXX")"
+        printf '%s\n' \
+            'Types: deb' \
+            "URIs: https://download.docker.com/linux/$DOCKER_REPOSITORY_ID" \
+            "Suites: $DOCKER_REPOSITORY_CODENAME" \
+            'Components: stable' \
+            "Architectures: $DOCKER_REPOSITORY_ARCH" \
+            'Signed-By: /etc/apt/keyrings/docker.asc' > "$DOCKER_SOURCES_TEMP"
+        rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources
+        install -m 0644 "$DOCKER_SOURCES_TEMP" /etc/apt/sources.list.d/docker.sources
+        rm -f "$DOCKER_SOURCES_TEMP"
 
         apt-get update -y -qq
         install_packages docker-ce docker-ce-cli containerd.io \
             docker-buildx-plugin docker-compose-plugin
 
     elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
-        install_packages yum-utils
+        command -v curl >/dev/null 2>&1 || install_packages ca-certificates curl
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        DOCKER_REPOSITORY_ID="${ID:-}"
+        case "$DOCKER_REPOSITORY_ID" in
+            centos|fedora|rhel) ;;
+            rocky|almalinux) DOCKER_REPOSITORY_ID="centos" ;;
+            *)
+                echo "ERROR: unsupported RPM distribution for Docker CE: ${ID:-unknown}" >&2
+                exit 1
+                ;;
+        esac
         backup_path /etc/yum.repos.d/docker-ce.repo
-        yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+        download_https_file \
+            "https://download.docker.com/linux/$DOCKER_REPOSITORY_ID/docker-ce.repo" \
+            /etc/yum.repos.d/docker-ce.repo 1048576
+        chmod 0644 /etc/yum.repos.d/docker-ce.repo
+        if ! grep -Eq '^baseurl=https://download\.docker\.com/linux/' /etc/yum.repos.d/docker-ce.repo \
+            || ! grep -Eq '^gpgcheck=1$' /etc/yum.repos.d/docker-ce.repo; then
+            echo "ERROR: downloaded Docker RPM repository configuration is malformed" >&2
+            exit 1
+        fi
         install_packages docker-ce docker-ce-cli containerd.io \
             docker-buildx-plugin docker-compose-plugin
     fi
@@ -888,12 +1158,10 @@ if command -v ufw &> /dev/null; then
     # Allow SSH (critical — don't lock yourself out!)
     ufw allow ssh comment "SSH access"
 
-    # Allow ThinClaw gateway port
-    ufw allow "$THINCLAW_PORT/tcp" comment "ThinClaw Gateway"
-
-    # If Tailscale is being installed, allow Tailscale traffic
     if [[ -n "$TAILSCALE_KEY" ]]; then
-        ufw allow in on tailscale0 comment "Tailscale VPN"
+        ufw delete allow "$THINCLAW_PORT/tcp" 2>/dev/null || true
+    elif [[ "$ALLOW_PUBLIC_HTTP" == "true" ]]; then
+        ufw allow "$THINCLAW_PORT/tcp" comment "ThinClaw Gateway (explicit public HTTP)"
     fi
 
     # Enable firewall (non-interactive)
@@ -962,30 +1230,27 @@ if [[ -n "$TAILSCALE_KEY" ]]; then
     echo "==> [4/6] Installing Tailscale VPN..."
 
     if ! command -v tailscale &> /dev/null; then
-        # Official Tailscale install script
-        backup_path /etc/apt/sources.list.d/tailscale.list
-        backup_path /usr/share/keyrings/tailscale-archive-keyring.gpg
-        backup_path /etc/yum.repos.d/tailscale.repo
-        curl -fsSL https://tailscale.com/install.sh | sh
-        if [[ "$TAILSCALE_WAS_INSTALLED" != "true" ]] && package_installed tailscale; then
-            record_package_installed tailscale
-        fi
+        install_tailscale_package
     fi
 
     if command -v tailscale &> /dev/null; then
         # Authenticate and connect
         TAILSCALE_TOUCHED=true
-        tailscale up --authkey="$TAILSCALE_KEY" --accept-routes --accept-dns=false
+        tailscale_up_with_auth_key
 
         # Get Tailscale IP
         TS_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
+        if [[ ! "$TS_IP" =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            echo "ERROR: Tailscale did not return a usable IPv4 address." >&2
+            exit 1
+        fi
+        THINCLAW_HEALTH_HOST="$TS_IP"
         echo "    Tailscale installed and connected."
         echo "    Tailscale IPv4: $TS_IP"
         echo ""
         echo "    ┌──────────────────────────────────────────────────────┐"
         echo "    │  SECURE CONNECTION:                                  │"
-        echo "    │  Open in ThinClaw Desktop:                           │"
-        printf '    │    %-50s│\n' "http://$TS_IP:$THINCLAW_PORT"
+        echo "    │  Use http://$TS_IP:$THINCLAW_PORT in Scrappy        │"
         echo "    │  (encrypted via Tailscale — no public port needed)  │"
         echo "    └──────────────────────────────────────────────────────┘"
 
@@ -1002,7 +1267,7 @@ if [[ -n "$TAILSCALE_KEY" ]]; then
     fi
 else
     echo ""
-    echo "==> [4/6] Tailscale: Skipped (no --tailscale flag provided)"
+    echo "==> [4/6] Tailscale: Skipped (no key provided on the second stdin line)"
 fi
 
 # ============================================================================
@@ -1014,22 +1279,43 @@ echo "==> [5/6] Configuring ThinClaw environment..."
 
 cd "$DEPLOY_DIR"
 
+if ! THINCLAW_IMAGE="$(pull_and_pin_docker_image "$THINCLAW_IMAGE")"; then
+    exit 1
+fi
+echo "    Pinned ThinClaw image: $THINCLAW_IMAGE"
+if docker compose ps --status running --services 2>/dev/null | grep -qx 'thinclaw'; then
+    DOCKER_COMPOSE_WAS_RUNNING=true
+fi
+
 # Backup existing config
+if [[ -L .env || ( -e .env && ! -f .env ) ]]; then
+    echo "ERROR: $DEPLOY_DIR/.env must be a regular file, never a symlink" >&2
+    exit 1
+fi
 if [[ -f .env ]]; then
+    chmod 0600 .env
     backup_path "$DEPLOY_DIR/.env"
-    cp .env ".env.bak.$(date +%Y%m%d%H%M%S)"
-    echo "    Backed up existing .env"
+    echo "    Preserving existing .env values while rotating managed settings"
 else
     backup_path "$DEPLOY_DIR/.env"
 fi
 
-# Create .env from template
-cp env.example .env
+# Create .env from the template only on first install. Redeployments preserve
+# provider credentials and operator choices while rotating managed values.
+if [[ ! -f .env ]]; then
+    if [[ -L env.example || ! -f env.example ]]; then
+        echo "ERROR: $DEPLOY_DIR/env.example must be a regular file" >&2
+        exit 1
+    fi
+    install -m 0600 env.example .env
+fi
 
 # Inject the gateway auth token
 set_env_value .env GATEWAY_AUTH_TOKEN "$TOKEN"
 set_env_value .env GATEWAY_PORT "$THINCLAW_PORT"
 set_env_value .env THINCLAW_IMAGE "$THINCLAW_IMAGE"
+set_env_value .env GATEWAY_BIND_IP "${TS_IP:-0.0.0.0}"
+chmod 0600 .env
 
 echo "    .env configured with gateway token."
 
@@ -1037,10 +1323,8 @@ echo "    .env configured with gateway token."
 echo ""
 echo "==> Starting ThinClaw Docker Compose stack..."
 
-docker compose down 2>/dev/null || true
-docker compose pull thinclaw 2>/dev/null || true
-docker compose up -d
 DOCKER_COMPOSE_TOUCHED=true
+docker compose up -d
 
 echo "    Docker Compose stack started."
 
@@ -1111,9 +1395,9 @@ sleep 5
 CONTAINER_STATUS=$(docker ps --filter "name=thinclaw-remote" --format "{{.Status}}" 2>/dev/null || echo "unknown")
 echo "  Container status: $CONTAINER_STATUS"
 if wait_for_health 60 1; then
-    echo "  Health endpoint:  http://localhost:$THINCLAW_PORT/api/health OK"
+    echo "  Health endpoint: configured gateway interface OK"
 else
-    echo "  ERROR: Health endpoint did not respond on http://localhost:$THINCLAW_PORT/api/health"
+    echo "  ERROR: Health endpoint did not respond on the configured gateway interface"
     echo "         Check: docker compose ps && docker compose logs thinclaw"
     docker compose ps || true
     docker compose logs thinclaw || true
@@ -1127,21 +1411,19 @@ if [[ -n "$TAILSCALE_KEY" ]] && command -v tailscale &> /dev/null; then
     echo "  ┌────────────────────────────────────────────────────────┐"
     echo "  │  Connect via Tailscale (recommended, encrypted):       │"
     echo "  │    URL:   http://$TS_IP:$THINCLAW_PORT                │"
-    echo "  │    Token: stored in the ThinClaw environment file      │"
+    echo "  │    Token: [returned only to the deployment client]     │"
     echo "  └────────────────────────────────────────────────────────┘"
 fi
 
-# Get public IP for fallback display
-PUBLIC_IP=$(curl -s -4 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo "<server-ip>")
-echo ""
-echo "  ┌────────────────────────────────────────────────────────┐"
-echo "  │  Connect via public IP:                                │"
-echo "  │    URL:   http://$PUBLIC_IP:$THINCLAW_PORT             │"
-echo "  │    Token: stored in the ThinClaw environment file      │"
-echo "  └────────────────────────────────────────────────────────┘"
+if [[ "$ALLOW_PUBLIC_HTTP" == "true" ]]; then
+    PUBLIC_IP=$(curl -fsS -4 --max-time 5 https://ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo "<server-ip>")
+    echo ""
+    echo "  WARNING: public plaintext HTTP access was explicitly enabled."
+    echo "  URL: http://$PUBLIC_IP:$THINCLAW_PORT"
+fi
 echo ""
 echo "  Verify:"
-echo "    curl http://localhost:$THINCLAW_PORT/api/health"
+echo "    curl http://${THINCLAW_HEALTH_HOST:-localhost}:$THINCLAW_PORT/api/health"
 echo "    docker logs thinclaw-remote"
 echo ""
 if [ "$ENABLE_SYSTEMD" = true ]; then

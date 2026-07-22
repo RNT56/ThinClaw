@@ -32,6 +32,7 @@ use thinclaw_tools::ports::{
 };
 
 const SKILL_FILE_NAME: &str = learning_policy::SKILL_FILE_NAME;
+const MAX_MANAGED_SKILL_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub struct RootLearningToolHost {
     orchestrator: Arc<LearningOrchestrator>,
@@ -297,30 +298,35 @@ fn artifact_name_for_skill(skill_name: &str, path: &Path) -> String {
 }
 
 async fn read_text(path: &Path) -> Result<Option<String>, ToolError> {
-    match tokio::fs::read_to_string(path).await {
-        Ok(content) => Ok(Some(content)),
+    match thinclaw_platform::read_regular_file_bounded_single_link_async(
+        path.to_path_buf(),
+        MAX_MANAGED_SKILL_FILE_BYTES,
+    )
+    .await
+    {
+        Ok(bytes) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|err| ToolError::ExecutionFailed(format!("skill file is not UTF-8: {err}"))),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(ToolError::ExecutionFailed(format!(
-            "failed to read '{}': {}",
-            path.display(),
-            err
+            "failed to read skill file: {err}"
         ))),
     }
 }
 
 async fn write_text(path: &Path, content: &str) -> Result<(), ToolError> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|err| {
-            ToolError::ExecutionFailed(format!(
-                "failed to create directories for '{}': {}",
-                path.display(),
-                err
-            ))
-        })?;
+    if content.len() as u64 > MAX_MANAGED_SKILL_FILE_BYTES {
+        return Err(ToolError::InvalidParameters(format!(
+            "skill file exceeds the {MAX_MANAGED_SKILL_FILE_BYTES}-byte limit"
+        )));
     }
-    tokio::fs::write(path, content).await.map_err(|err| {
-        ToolError::ExecutionFailed(format!("failed to write '{}': {}", path.display(), err))
-    })
+    thinclaw_platform::write_private_file_atomic_async(
+        path.to_path_buf(),
+        content.as_bytes().to_vec(),
+        true,
+    )
+    .await
+    .map_err(|err| ToolError::ExecutionFailed(format!("failed to write skill file: {err}")))
 }
 
 async fn remove_path(path: &Path) -> Result<(), ToolError> {
@@ -336,6 +342,65 @@ async fn remove_path(path: &Path) -> Result<(), ToolError> {
     tokio::fs::remove_file(path).await.map_err(|err| {
         ToolError::ExecutionFailed(format!("failed to remove '{}': {}", path.display(), err))
     })
+}
+
+async fn resolve_managed_skill_target(
+    root: &Path,
+    relative: &Path,
+    create_parents: bool,
+) -> Result<PathBuf, ToolError> {
+    let root_metadata = tokio::fs::symlink_metadata(root).await.map_err(|err| {
+        ToolError::ExecutionFailed(format!("failed to inspect skill root: {err}"))
+    })?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(ToolError::ExecutionFailed(
+            "skill root is not a real directory".to_string(),
+        ));
+    }
+    let canonical_root = tokio::fs::canonicalize(root).await.map_err(|err| {
+        ToolError::ExecutionFailed(format!("failed to resolve skill root: {err}"))
+    })?;
+    let components = relative.components().collect::<Vec<_>>();
+    let Some((filename, parents)) = components.split_last() else {
+        return Err(ToolError::InvalidParameters(
+            "skill file path cannot be empty".to_string(),
+        ));
+    };
+    let std::path::Component::Normal(filename) = filename else {
+        return Err(ToolError::InvalidParameters(
+            "skill file path is invalid".to_string(),
+        ));
+    };
+    let mut parent = canonical_root;
+    for component in parents {
+        let std::path::Component::Normal(component) = component else {
+            return Err(ToolError::InvalidParameters(
+                "skill file path is invalid".to_string(),
+            ));
+        };
+        parent.push(component);
+        match tokio::fs::symlink_metadata(&parent).await {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(ToolError::ExecutionFailed(
+                    "skill file path traverses a non-directory or symlink".to_string(),
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound && create_parents => {
+                tokio::fs::create_dir(&parent).await.map_err(|err| {
+                    ToolError::ExecutionFailed(format!(
+                        "failed to create skill file directory: {err}"
+                    ))
+                })?;
+            }
+            Err(err) => {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "failed to inspect skill file directory: {err}"
+                )));
+            }
+        }
+    }
+    Ok(parent.join(filename))
 }
 
 async fn record_artifact_version(
@@ -461,12 +526,22 @@ impl Tool for PromptManageTool {
             target,
             &scope,
             &ctx.metadata,
-            ctx.actor_id.as_deref(),
+            Some(ctx.owner_actor_id()),
             &ctx.user_id,
         )?;
         let resolved_target = target_resolution.resolved_target;
         let timezone_sync_target = target_resolution.timezone_sync_target;
-        let before = read_prompt_target_content(&self.workspace, &resolved_target).await?;
+        let timezone_actor_id = target_resolution.timezone_actor_id;
+        let agent_id = ctx
+            .metadata
+            .get("agent_workspace_id")
+            .and_then(|value| value.as_str())
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .or(self.workspace.agent_id());
+        let principal_workspace = self
+            .workspace
+            .scoped_clone(ctx.principal_id.clone(), agent_id);
+        let before = read_prompt_target_content(&principal_workspace, &resolved_target).await?;
         let before_timezone = if timezone_sync_target {
             crate::timezone::extract_markdown_timezone(&before)
         } else {
@@ -482,27 +557,36 @@ impl Tool for PromptManageTool {
                 .map_err(ToolError::InvalidParameters)?;
         }
 
-        write_prompt_target_content(&self.workspace, &resolved_target, &next_content).await?;
-        let after = read_prompt_target_content(&self.workspace, &resolved_target).await?;
+        write_prompt_target_content(&principal_workspace, &resolved_target, &next_content).await?;
+        let after = read_prompt_target_content(&principal_workspace, &resolved_target).await?;
         let after_timezone = if timezone_sync_target {
             crate::timezone::extract_markdown_timezone(&after)
         } else {
             None
         };
-        let orchestrator = Arc::clone(&self.orchestrator);
-        let user_id = ctx.user_id.clone();
-        let mirror_payload = learning_policy::prompt_manage_mirror_payload(
-            target,
-            &resolved_target,
-            &scope,
-            &operation,
-            &after,
-        );
-        tokio::spawn(async move {
-            orchestrator
-                .mirror_workspace_write(&user_id, &mirror_payload)
-                .await;
-        });
+        let actor_private = resolved_target.starts_with(&format!("{}/", paths::ACTORS_DIR));
+        if !actor_private {
+            let provider_access =
+                crate::agent::learning::provider_access_context_from_job(ctx).ok();
+            let mirror_payload = learning_policy::prompt_manage_mirror_payload(
+                target,
+                &resolved_target,
+                &scope,
+                &operation,
+                &after,
+            );
+            if let Some(access) = provider_access
+                && tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    self.orchestrator
+                        .mirror_workspace_write(&access, &mirror_payload),
+                )
+                .await
+                .is_err()
+            {
+                tracing::warn!(target = %resolved_target, "Learning-provider prompt mirror timed out");
+            }
+        }
 
         let version_label = Some(Utc::now().to_rfc3339());
         let provenance = learning_policy::prompt_manage_provenance(
@@ -519,20 +603,31 @@ impl Tool for PromptManageTool {
             version_label.clone(),
             "applied",
             Some(format!("prompt {} via prompt_manage", operation)),
-            Some(before),
-            Some(after),
+            (!actor_private).then_some(before.clone()),
+            (!actor_private).then_some(after.clone()),
             provenance,
         )
         .await;
 
         if timezone_sync_target && before_timezone != after_timezone {
-            crate::timezone::apply_user_timezone_change(
-                &self.store,
-                Some(self.workspace.as_ref()),
-                &ctx.user_id,
-                after_timezone.as_deref(),
-            )
-            .await
+            if let Some(actor_id) = timezone_actor_id.as_deref() {
+                crate::timezone::apply_actor_timezone_change(
+                    &self.store,
+                    &ctx.principal_id,
+                    actor_id,
+                    after_timezone.as_deref(),
+                )
+                .await
+            } else {
+                crate::timezone::apply_user_timezone_change(
+                    &self.store,
+                    Some(&principal_workspace),
+                    &ctx.principal_id,
+                    after_timezone.as_deref(),
+                )
+                .await
+                .map(|_| ())
+            }
             .map_err(|err| {
                 ToolError::ExecutionFailed(format!("failed to apply timezone update: {}", err))
             })?;
@@ -695,7 +790,7 @@ impl Tool for SkillManageTool {
                 };
                 if let Err(err) = commit_result {
                     let cleanup_path = install_dir.join(&name);
-                    let _ = SkillRegistry::delete_skill_files(&cleanup_path).await;
+                    let _ = SkillRegistry::delete_skill_files(&cleanup_path, &name).await;
                     return Err(tool_error_from_skill(err));
                 }
 
@@ -728,10 +823,11 @@ impl Tool for SkillManageTool {
                     .validate_remove(&name)
                     .map_err(tool_error_from_skill)?;
                 let before_content = read_text(&skill_path.join(SKILL_FILE_NAME)).await?;
-                SkillRegistry::delete_skill_files(&skill_path)
+                SkillRegistry::delete_skill_files(&skill_path, &name)
                     .await
                     .map_err(tool_error_from_skill)?;
                 guard.commit_remove(&name).map_err(tool_error_from_skill)?;
+                drop(guard);
 
                 let version_result = record_artifact_version(
                     &self.store,
@@ -769,7 +865,7 @@ impl Tool for SkillManageTool {
                 }
 
                 let root = loaded_skill_root(&self.registry, &name).await?;
-                let target = root.0.join(&relative);
+                let target = resolve_managed_skill_target(&root.0, &relative, false).await?;
                 let before = read_text(&target).await?.ok_or_else(|| {
                     ToolError::ExecutionFailed(format!(
                         "skill file '{}' does not exist",
@@ -806,7 +902,7 @@ impl Tool for SkillManageTool {
                 let content = require_str(&params, "content")?;
                 let relative = validate_relative_skill_path(&path_value)?;
                 let root = loaded_skill_root(&self.registry, &name).await?;
-                let target = root.0.join(&relative);
+                let target = resolve_managed_skill_target(&root.0, &relative, true).await?;
 
                 if relative
                     .to_string_lossy()
@@ -846,12 +942,25 @@ impl Tool for SkillManageTool {
                     let before = read_text(&target).await?.unwrap_or_default();
                     write_text(&target, &normalized).await?;
                     let mut guard = self.registry.write().await;
-                    let reloaded = guard.reload_skill(&name).await.map_err(|err| {
-                        ToolError::ExecutionFailed(format!(
-                            "failed to reload skill after writing SKILL.md: {}",
-                            err
-                        ))
-                    })?;
+                    let reloaded = match guard.reload_skill(&name).await {
+                        Ok(reloaded) => reloaded,
+                        Err(err) => {
+                            drop(guard);
+                            let rollback = write_text(&target, &before).await;
+                            if rollback.is_ok() {
+                                let _ = self.registry.write().await.reload_skill(&name).await;
+                            }
+                            return Err(ToolError::ExecutionFailed(format!(
+                                "failed to reload skill after writing SKILL.md: {err}; rollback {}",
+                                if rollback.is_ok() {
+                                    "succeeded"
+                                } else {
+                                    "failed"
+                                }
+                            )));
+                        }
+                    };
+                    drop(guard);
                     let after = read_text(&target).await?.unwrap_or_default();
 
                     let version_result = record_artifact_version(

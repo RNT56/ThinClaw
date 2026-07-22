@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use libsql::params;
+use libsql::{TransactionBehavior, params};
 use uuid::Uuid;
 
 use super::{
@@ -33,20 +33,6 @@ impl SandboxStore for LibSqlBackend {
                     project_dir, job_mode, metadata, success, failure_reason,
                     created_at, started_at, completed_at, credential_grants
                 ) VALUES (?1, ?2, ?3, ?4, 'sandbox', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
-                ON CONFLICT (id) DO UPDATE SET
-                    title = excluded.title,
-                    description = excluded.description,
-                    status = excluded.status,
-                    principal_id = excluded.principal_id,
-                    success = excluded.success,
-                    failure_reason = excluded.failure_reason,
-                    actor_id = excluded.actor_id,
-                    project_dir = excluded.project_dir,
-                    job_mode = excluded.job_mode,
-                    metadata = excluded.metadata,
-                    started_at = excluded.started_at,
-                    completed_at = excluded.completed_at,
-                    credential_grants = excluded.credential_grants
                 "#,
             params![
                 job.id.to_string(),
@@ -178,7 +164,9 @@ impl SandboxStore for LibSqlBackend {
                     failure_reason = COALESCE(?4, failure_reason),
                     started_at = COALESCE(?5, started_at),
                     completed_at = COALESCE(?6, completed_at)
-                WHERE id = ?1 AND source = 'sandbox'
+                WHERE id = ?1
+                  AND source = 'sandbox'
+                  AND status IN ('creating', 'running')
                 "#,
             params![
                 id.to_string(),
@@ -194,7 +182,89 @@ impl SandboxStore for LibSqlBackend {
         Ok(())
     }
 
-    async fn cleanup_stale_sandbox_jobs(&self) -> Result<u64, DatabaseError> {
+    async fn finalize_sandbox_job_status(
+        &self,
+        id: Uuid,
+        status: &str,
+        success: bool,
+        message: Option<&str>,
+        completed_at: DateTime<Utc>,
+        event_data: &serde_json::Value,
+    ) -> Result<bool, DatabaseError> {
+        if !thinclaw_types::sandbox::is_terminal_sandbox_status(status) {
+            return Err(DatabaseError::Constraint(format!(
+                "sandbox final status must be canonical and terminal, got {status}"
+            )));
+        }
+
+        let _transaction_guard = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.transaction_lock.lock(),
+        )
+        .await
+        .map_err(|_| {
+            DatabaseError::Pool(
+                "timed out waiting for the sandbox finalization transaction lock".to_string(),
+            )
+        })?;
+        let conn = self.connect().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|error| DatabaseError::Query(error.to_string()))?;
+
+        let result = async {
+            let changed = tx
+                .execute(
+                    r#"
+                        UPDATE agent_jobs SET
+                            status = ?2,
+                            success = ?3,
+                            failure_reason = COALESCE(?4, failure_reason),
+                            completed_at = ?5
+                        WHERE id = ?1
+                          AND source = 'sandbox'
+                          AND status IN ('creating', 'running')
+                    "#,
+                    params![
+                        id.to_string(),
+                        status,
+                        success as i64,
+                        message,
+                        fmt_ts(&completed_at),
+                    ],
+                )
+                .await
+                .map_err(|error| DatabaseError::Query(error.to_string()))?;
+            if changed == 0 {
+                return Ok(false);
+            }
+
+            tx.execute(
+                "INSERT INTO job_events (job_id, event_type, data) VALUES (?1, 'result', ?2)",
+                params![id.to_string(), event_data.to_string()],
+            )
+            .await
+            .map_err(|error| DatabaseError::Query(error.to_string()))?;
+            Ok(true)
+        }
+        .await;
+
+        match result {
+            Ok(won) => {
+                tx.commit()
+                    .await
+                    .map_err(|error| DatabaseError::Query(error.to_string()))?;
+                Ok(won)
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn cleanup_stale_sandbox_jobs(&self, runtime_scope: &str) -> Result<u64, DatabaseError> {
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         let count = conn
@@ -204,14 +274,16 @@ impl SandboxStore for LibSqlBackend {
                     status = 'interrupted',
                     failure_reason = 'Process restarted',
                     completed_at = ?1
-                WHERE source = 'sandbox' AND status IN ('running', 'creating')
+                WHERE source = 'sandbox'
+                  AND status IN ('running', 'creating')
+                  AND json_extract(metadata, '$._sandbox.runtime_scope') = ?2
                 "#,
-                params![now],
+                params![now, runtime_scope],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         if count > 0 {
-            tracing::info!("Marked {} stale sandbox jobs as interrupted", count);
+            tracing::info!(%runtime_scope, "Marked {} owned stale sandbox jobs as interrupted", count);
         }
         Ok(count)
     }

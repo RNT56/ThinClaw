@@ -45,7 +45,7 @@ pub enum RuntimeReadiness {
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -59,6 +59,19 @@ pub struct LocalRuntimeEndpoint {
     pub context_size: Option<u32>,
     #[serde(default)]
     pub model_family: Option<String>,
+}
+
+impl std::fmt::Debug for LocalRuntimeEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalRuntimeEndpoint")
+            .field("base_url", &"[REDACTED URL]")
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("model_id", &self.model_id)
+            .field("context_size", &self.context_size)
+            .field("model_family", &self.model_family)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

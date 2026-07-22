@@ -12,6 +12,65 @@ use super::remote_source::{RemoteSkill, RemoteSkillSource};
 
 const GITHUB_API: &str = "https://api.github.com";
 const CACHE_TTL: Duration = Duration::from_secs(300);
+const MAX_GITHUB_METADATA_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SKILL_CONTENT_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DISCOVERED_SKILLS_PER_TAP: usize = 512;
+const MAX_DISCOVERED_SKILLS_TOTAL: usize = 2048;
+const MAX_GITHUB_SKILL_TAPS: usize = 64;
+const MAX_GITHUB_TREE_ENTRIES: usize = 100_000;
+const MAX_GITHUB_PATH_BYTES: usize = 1024;
+const MAX_GITHUB_SHA_BYTES: usize = 128;
+const MAX_GITHUB_DOWNLOAD_URL_BYTES: usize = 16 * 1024;
+const MAX_GITHUB_DISCOVERY_DURATION: Duration = Duration::from_secs(120);
+const MAX_GITHUB_TAP_DURATION: Duration = Duration::from_secs(30);
+
+fn validate_tap_config(tap: &SkillTapConfig) -> anyhow::Result<()> {
+    let repo_parts = tap.repo.split('/').collect::<Vec<_>>();
+    let valid_repo = repo_parts.len() == 2
+        && repo_parts.iter().all(|part| {
+            !part.is_empty()
+                && !matches!(*part, "." | "..")
+                && part.len() <= 100
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        });
+    let normalized_path = tap.path.trim_matches('/');
+    let valid_path = tap.path.len() <= 1024
+        && !tap.path.contains('\\')
+        && !tap.path.chars().any(char::is_control)
+        && normalized_path
+            .split('/')
+            .all(|segment| !matches!(segment, "." | ".."));
+    let valid_branch = tap.branch.as_deref().is_none_or(valid_git_ref);
+    if !valid_repo || !valid_path || !valid_branch {
+        anyhow::bail!("invalid GitHub skill tap configuration for {:?}", tap.repo);
+    }
+    Ok(())
+}
+
+fn valid_git_ref(branch: &str) -> bool {
+    !branch.is_empty()
+        && branch.len() <= 255
+        && !branch.chars().any(char::is_control)
+        && !["..", "\\", "~", "^", ":", "?", "*", "[", "@{"]
+            .iter()
+            .any(|forbidden| branch.contains(forbidden))
+        && !branch.starts_with('/')
+        && !branch.ends_with('/')
+        && !branch.ends_with('.')
+}
+
+fn valid_repo_path(path: &str) -> bool {
+    let normalized = path.trim_matches('/');
+    !normalized.is_empty()
+        && path.len() <= MAX_GITHUB_PATH_BYTES
+        && !path.contains('\\')
+        && !path.chars().any(char::is_control)
+        && normalized
+            .split('/')
+            .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
+}
 
 #[derive(Debug, Clone)]
 pub struct SkillTap {
@@ -45,6 +104,8 @@ struct RepoMeta {
 #[derive(Deserialize)]
 struct TreeResponse {
     tree: Vec<TreeEntry>,
+    #[serde(default)]
+    truncated: bool,
 }
 
 #[derive(Deserialize)]
@@ -69,8 +130,20 @@ pub struct GitHubSkillSource {
 
 impl GitHubSkillSource {
     pub fn new(taps: Vec<SkillTapConfig>) -> anyhow::Result<Self> {
+        if taps.len() > MAX_GITHUB_SKILL_TAPS {
+            anyhow::bail!(
+                "GitHub skill tap count exceeds the {}-tap limit",
+                MAX_GITHUB_SKILL_TAPS
+            );
+        }
+        for tap in &taps {
+            validate_tap_config(tap)?;
+        }
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
+            .connect_timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .user_agent(concat!("thinclaw/", env!("CARGO_PKG_VERSION")))
             .build()?;
 
@@ -85,23 +158,30 @@ impl GitHubSkillSource {
         !self.taps.is_empty()
     }
 
-    async fn maybe_sleep_for_rate_limit(&self, headers: &reqwest::header::HeaderMap) {
+    fn check_rate_limit(headers: &reqwest::header::HeaderMap) -> anyhow::Result<()> {
         let remaining = headers
             .get("x-ratelimit-remaining")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
-        let reset = headers
-            .get("x-ratelimit-reset")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<i64>().ok());
-
-        if matches!(remaining, Some(0))
-            && let Some(reset) = reset
-        {
-            let now = chrono::Utc::now().timestamp();
-            let wait = (reset - now).max(1) as u64;
-            tokio::time::sleep(Duration::from_secs(wait.min(60))).await;
+        if matches!(remaining, Some(0)) {
+            anyhow::bail!("GitHub API rate limit is exhausted");
         }
+        Ok(())
+    }
+
+    async fn send_github(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> anyhow::Result<reqwest::Response> {
+        let response = request
+            .send()
+            .await
+            .map_err(|error| anyhow::anyhow!(error.without_url().to_string()))?;
+        Self::check_rate_limit(response.headers())?;
+        if !response.status().is_success() {
+            anyhow::bail!("GitHub API returned HTTP {}", response.status());
+        }
+        Ok(response)
     }
 
     async fn resolve_branch(&self, tap: &SkillTap) -> anyhow::Result<String> {
@@ -109,11 +189,12 @@ impl GitHubSkillSource {
             return Ok(branch);
         }
 
-        let url = format!("{GITHUB_API}/repos/{}", tap.repo);
-        let response = self.client.get(url).send().await?;
-        self.maybe_sleep_for_rate_limit(response.headers()).await;
-        let response = response.error_for_status()?;
-        let meta: RepoMeta = response.json().await?;
+        let url = github_api_url(&tap.repo, &[])?;
+        let response = self.send_github(self.client.get(url)).await?;
+        let meta: RepoMeta = crate::http_response::bounded_json(response, 1024 * 1024).await?;
+        if !valid_git_ref(&meta.default_branch) {
+            anyhow::bail!("GitHub returned an invalid default branch");
+        }
         Ok(meta.default_branch)
     }
 
@@ -123,16 +204,14 @@ impl GitHubSkillSource {
         path: &str,
         branch: &str,
     ) -> anyhow::Result<(crate::skills::SkillManifest, String)> {
-        let url = format!("{GITHUB_API}/repos/{repo}/contents/{path}");
-        let response = self
-            .client
-            .get(url)
-            .query(&[("ref", branch)])
-            .send()
-            .await?;
-        self.maybe_sleep_for_rate_limit(response.headers()).await;
-        let response = response.error_for_status()?;
-        let payload: ContentsResponse = response.json().await?;
+        if !valid_repo_path(path) || !valid_git_ref(branch) {
+            anyhow::bail!("GitHub skill manifest path or branch is invalid");
+        }
+        let url = github_contents_url(repo, path, branch)?;
+        let response = self.send_github(self.client.get(url)).await?;
+        let payload: ContentsResponse =
+            crate::http_response::bounded_json(response, MAX_SKILL_CONTENT_RESPONSE_BYTES).await?;
+        validate_contents_response(&payload)?;
         let content = payload.content.replace('\n', "");
         let decoded = base64::engine::general_purpose::STANDARD.decode(content)?;
         let raw = String::from_utf8(decoded)?;
@@ -143,14 +222,26 @@ impl GitHubSkillSource {
 
     pub async fn discover_skills(&self, tap: &SkillTap) -> anyhow::Result<Vec<RemoteSkill>> {
         let branch = self.resolve_branch(tap).await?;
-        let url = format!(
-            "{GITHUB_API}/repos/{}/git/trees/{}?recursive=1",
-            tap.repo, branch
-        );
-        let response = self.client.get(url).send().await?;
-        self.maybe_sleep_for_rate_limit(response.headers()).await;
-        let response = response.error_for_status()?;
-        let tree: TreeResponse = response.json().await?;
+        let mut url = github_api_url(&tap.repo, &["git", "trees", &branch])?;
+        url.query_pairs_mut().append_pair("recursive", "1");
+        let response = self.send_github(self.client.get(url)).await?;
+        let tree: TreeResponse =
+            crate::http_response::bounded_json(response, MAX_GITHUB_METADATA_BYTES).await?;
+        if tree.truncated {
+            anyhow::bail!(
+                "GitHub returned a truncated repository tree for {}",
+                tap.repo
+            );
+        }
+        if tree.tree.len() > MAX_GITHUB_TREE_ENTRIES
+            || tree.tree.iter().any(|entry| {
+                !valid_repo_path(&entry.path)
+                    || entry.kind.len() > 16
+                    || entry.kind.chars().any(char::is_control)
+            })
+        {
+            anyhow::bail!("GitHub returned malformed or excessive repository metadata");
+        }
 
         let mut discovered = Vec::new();
         let prefix = tap.path.trim_matches('/');
@@ -158,7 +249,13 @@ impl GitHubSkillSource {
             if entry.kind != "blob" || !entry.path.ends_with("SKILL.md") {
                 continue;
             }
-            if !prefix.is_empty() && !entry.path.starts_with(prefix) {
+            if !prefix.is_empty()
+                && entry.path != prefix
+                && !entry
+                    .path
+                    .strip_prefix(prefix)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+            {
                 continue;
             }
 
@@ -173,16 +270,21 @@ impl GitHubSkillSource {
                 source_adapter: "github_tap".to_string(),
                 source_label: tap.repo.clone(),
                 source_ref: format!("github:{}/{}@{}", tap.repo, entry.path, branch),
-                manifest_url: Some(format!(
-                    "https://raw.githubusercontent.com/{}/{}/{}",
-                    tap.repo, branch, entry.path
-                )),
+                manifest_url: Some(raw_manifest_url(&tap.repo, &branch, &entry.path)?.to_string()),
                 manifest_digest: None,
                 repo: Some(tap.repo.clone()),
                 path: Some(entry.path),
                 branch: Some(branch.clone()),
                 trust_level: tap.trust_level,
             });
+            if discovered.len() >= MAX_DISCOVERED_SKILLS_PER_TAP {
+                tracing::warn!(
+                    repo = %tap.repo,
+                    limit = MAX_DISCOVERED_SKILLS_PER_TAP,
+                    "GitHub skill discovery reached its per-tap limit"
+                );
+                break;
+            }
         }
 
         Ok(discovered)
@@ -198,12 +300,37 @@ impl GitHubSkillSource {
             }
         }
 
+        let started = Instant::now();
         let mut all = Vec::new();
         for tap in &self.taps {
-            match self.discover_skills(tap).await {
-                Ok(mut skills) => all.append(&mut skills),
-                Err(error) => {
+            let Some(remaining) = MAX_GITHUB_DISCOVERY_DURATION.checked_sub(started.elapsed())
+            else {
+                tracing::warn!("GitHub skill discovery reached its total deadline");
+                break;
+            };
+            match tokio::time::timeout(
+                remaining.min(MAX_GITHUB_TAP_DURATION),
+                self.discover_skills(tap),
+            )
+            .await
+            {
+                Ok(Ok(mut skills)) => {
+                    let remaining_capacity = MAX_DISCOVERED_SKILLS_TOTAL.saturating_sub(all.len());
+                    skills.truncate(remaining_capacity);
+                    all.append(&mut skills);
+                    if all.len() >= MAX_DISCOVERED_SKILLS_TOTAL {
+                        tracing::warn!(
+                            limit = MAX_DISCOVERED_SKILLS_TOTAL,
+                            "GitHub skill discovery reached its total result limit"
+                        );
+                        break;
+                    }
+                }
+                Ok(Err(error)) => {
                     tracing::warn!(repo = %tap.repo, error = %error, "Failed to discover GitHub skills");
+                }
+                Err(_) => {
+                    tracing::warn!(repo = %tap.repo, "GitHub skill discovery timed out for tap")
                 }
             }
         }
@@ -217,6 +344,110 @@ impl GitHubSkillSource {
     }
 }
 
+fn valid_repo_parts(repo: &str) -> anyhow::Result<(&str, &str)> {
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("GitHub repository must be owner/name"))?;
+    if name.contains('/')
+        || [owner, name].iter().any(|part| {
+            part.is_empty()
+                || matches!(*part, "." | "..")
+                || part.len() > 100
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+    {
+        anyhow::bail!("GitHub repository identifier is invalid");
+    }
+    Ok((owner, name))
+}
+
+fn github_api_url(repo: &str, tail: &[&str]) -> anyhow::Result<reqwest::Url> {
+    let (owner, name) = valid_repo_parts(repo)?;
+    let mut url = reqwest::Url::parse(GITHUB_API)?;
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("GitHub API URL is not a valid base URL"))?;
+        path.pop_if_empty();
+        path.extend(["repos", owner, name]);
+        for segment in tail {
+            if segment.is_empty() || segment.chars().any(char::is_control) {
+                anyhow::bail!("GitHub API path segment is invalid");
+            }
+            path.push(segment);
+        }
+    }
+    Ok(url)
+}
+
+fn github_contents_url(repo: &str, path: &str, branch: &str) -> anyhow::Result<reqwest::Url> {
+    if !valid_repo_path(path) || !valid_git_ref(branch) {
+        anyhow::bail!("GitHub content path or branch is invalid");
+    }
+    let mut url = github_api_url(repo, &["contents"])?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("GitHub contents URL is not a valid base URL"))?;
+        for segment in path.trim_matches('/').split('/') {
+            segments.push(segment);
+        }
+    }
+    url.query_pairs_mut().append_pair("ref", branch);
+    Ok(url)
+}
+
+fn raw_manifest_url(repo: &str, branch: &str, path: &str) -> anyhow::Result<reqwest::Url> {
+    let (owner, name) = valid_repo_parts(repo)?;
+    if !valid_git_ref(branch) || !valid_repo_path(path) {
+        anyhow::bail!("GitHub raw manifest path or branch is invalid");
+    }
+    let mut url = reqwest::Url::parse("https://raw.githubusercontent.com")?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("GitHub raw URL is not a valid base URL"))?;
+        segments.pop_if_empty();
+        segments.extend([owner, name, branch]);
+        for segment in path.trim_matches('/').split('/') {
+            segments.push(segment);
+        }
+    }
+    Ok(url)
+}
+
+fn validate_contents_response(payload: &ContentsResponse) -> anyhow::Result<()> {
+    if payload.content.len() > MAX_SKILL_CONTENT_RESPONSE_BYTES
+        || payload.sha.is_empty()
+        || payload.sha.len() > MAX_GITHUB_SHA_BYTES
+        || !payload.sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        anyhow::bail!("GitHub returned malformed skill content metadata");
+    }
+    if let Some(download_url) = &payload.download_url {
+        if download_url.is_empty()
+            || download_url.len() > MAX_GITHUB_DOWNLOAD_URL_BYTES
+            || download_url.chars().any(char::is_control)
+        {
+            anyhow::bail!("GitHub returned an invalid skill download URL");
+        }
+        let url = reqwest::Url::parse(download_url)?;
+        if url.scheme() != "https"
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+            || url
+                .host_str()
+                .is_none_or(|host| !host.eq_ignore_ascii_case("raw.githubusercontent.com"))
+        {
+            anyhow::bail!("GitHub returned an untrusted skill download URL");
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl RemoteSkillSource for GitHubSkillSource {
     fn adapter_name(&self) -> &'static str {
@@ -224,6 +455,9 @@ impl RemoteSkillSource for GitHubSkillSource {
     }
 
     async fn search(&self, query: &str) -> anyhow::Result<Vec<RemoteSkill>> {
+        if query.len() > 1024 || query.chars().any(char::is_control) {
+            anyhow::bail!("GitHub skill search query is malformed or exceeds its size limit");
+        }
         let query_lower = query.to_lowercase();
         let all = self.discover_all().await?;
         Ok(all
@@ -237,6 +471,9 @@ impl RemoteSkillSource for GitHubSkillSource {
     }
 
     async fn resolve_skill(&self, name_or_slug: &str) -> anyhow::Result<Option<RemoteSkill>> {
+        if name_or_slug.len() > 1024 || name_or_slug.chars().any(char::is_control) {
+            anyhow::bail!("GitHub skill identifier is malformed or exceeds its size limit");
+        }
         let all = self.discover_all().await?;
         Ok(all.into_iter().find(|skill| {
             skill.slug.eq_ignore_ascii_case(name_or_slug)
@@ -261,16 +498,14 @@ impl RemoteSkillSource for GitHubSkillSource {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("GitHub remote skill is missing branch metadata"))?;
 
-        let url = format!("{GITHUB_API}/repos/{repo}/contents/{path}");
-        let response = self
-            .client
-            .get(url)
-            .query(&[("ref", branch)])
-            .send()
-            .await?;
-        self.maybe_sleep_for_rate_limit(response.headers()).await;
-        let response = response.error_for_status()?;
-        let payload: ContentsResponse = response.json().await?;
+        if !valid_repo_path(path) || !valid_git_ref(branch) {
+            anyhow::bail!("GitHub remote skill path or branch is invalid");
+        }
+        let url = github_contents_url(repo, path, branch)?;
+        let response = self.send_github(self.client.get(url)).await?;
+        let payload: ContentsResponse =
+            crate::http_response::bounded_json(response, MAX_SKILL_CONTENT_RESPONSE_BYTES).await?;
+        validate_contents_response(&payload)?;
         let content = payload.content.replace('\n', "");
         let decoded = base64::engine::general_purpose::STANDARD.decode(content)?;
         Ok(SkillContent {
@@ -307,5 +542,37 @@ mod tests {
         assert_eq!(tap.path, "skills");
         assert_eq!(tap.branch.as_deref(), Some("main"));
         assert_eq!(tap.trust_level, SkillTapTrustLevel::Trusted);
+    }
+
+    #[test]
+    fn tap_validation_rejects_ambiguous_repo_paths_and_refs() {
+        let base = SkillTapConfig {
+            repo: "owner/repo".to_string(),
+            path: "skills".to_string(),
+            branch: Some("main".to_string()),
+            trust_level: SkillTapTrustLevel::Community,
+        };
+        assert!(validate_tap_config(&base).is_ok());
+        assert!(
+            validate_tap_config(&SkillTapConfig {
+                repo: "owner/repo/extra".to_string(),
+                ..base.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_tap_config(&SkillTapConfig {
+                path: "skills/../secrets".to_string(),
+                ..base.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_tap_config(&SkillTapConfig {
+                branch: Some("main..other".to_string()),
+                ..base
+            })
+            .is_err()
+        );
     }
 }

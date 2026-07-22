@@ -102,7 +102,13 @@ impl std::fmt::Display for SyncStrategy {
 /// Sends a lightweight HTTP HEAD request to measure latency.
 /// If the probe fails, returns offline status.
 pub async fn detect_quality(probe_url: Option<&str>) -> NetworkQuality {
-    let url = probe_url.unwrap_or("https://www.google.com/generate_204");
+    let Some(url) = probe_url else {
+        // A third-party connectivity probe says nothing reliable about the
+        // configured provider and leaks a request on every upload. Callers
+        // without a provider-specific health URL optimistically attempt the
+        // real operation; normal provider errors drive retry/backoff.
+        return NetworkQuality::default();
+    };
 
     debug!("[cloud/network] Probing: {}", url);
 
@@ -204,6 +210,14 @@ fn detect_connection_type() -> ConnectionType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn no_probe_url_uses_optimistic_provider_attempt() {
+        let quality = detect_quality(None).await;
+        assert!(quality.is_online);
+        assert_eq!(quality.latency_ms, 0);
+        assert_eq!(recommend_strategy(&quality), SyncStrategy::FullSync);
+    }
 
     #[test]
     fn test_recommend_strategy_fast() {

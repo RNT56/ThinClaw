@@ -62,7 +62,8 @@ impl SkillInstallTool {
         }
 
         let download_url =
-            crate::skills::catalog::skill_download_url(self.catalog.registry_url(), name);
+            crate::skills::catalog::skill_download_url(self.catalog.registry_url(), name)
+                .map_err(ToolError::ExecutionFailed)?;
         let content = fetch_skill_content(&download_url).await?;
         Ok(Some(SkillContent {
             raw_content: content,
@@ -70,11 +71,8 @@ impl SkillInstallTool {
             source_adapter: "clawhub_catalog".to_string(),
             source_ref: name.to_string(),
             source_repo: None,
-            source_url: Some(download_url),
-            manifest_url: Some(crate::skills::catalog::skill_download_url(
-                self.catalog.registry_url(),
-                name,
-            )),
+            source_url: Some(download_url.clone()),
+            manifest_url: Some(download_url),
             manifest_digest: None,
             path: None,
             branch: None,
@@ -147,7 +145,11 @@ impl Tool for SkillInstallTool {
             if guard.has(&skill_name_from_parse)
                 && let Ok(path) = guard.validate_remove(&skill_name_from_parse)
             {
-                let _ = crate::skills::registry::SkillRegistry::delete_skill_files(&path).await;
+                let _ = crate::skills::registry::SkillRegistry::delete_skill_files(
+                    &path,
+                    &skill_name_from_parse,
+                )
+                .await;
                 let _ = guard.commit_remove(&skill_name_from_parse);
                 tracing::info!(
                     skill = %skill_name_from_parse,
@@ -250,9 +252,11 @@ impl Tool for SkillInstallTool {
                             skill = %skill_name,
                             "Cleaning up orphaned skill files after failed commit"
                         );
-                        let _ =
-                            crate::skills::registry::SkillRegistry::delete_skill_files(&orphan_dir)
-                                .await;
+                        let _ = crate::skills::registry::SkillRegistry::delete_skill_files(
+                            &orphan_dir,
+                            &skill_name,
+                        )
+                        .await;
                     }
                     return Err(ToolError::ExecutionFailed(e.to_string()));
                 }

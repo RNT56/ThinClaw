@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::post,
@@ -27,6 +27,12 @@ use thinclaw_channels_core::{
     Channel, ConfigSchema, IncomingMessage, MessageStream, OutgoingResponse,
 };
 use thinclaw_types::error::ChannelError;
+
+const MAX_NATIVE_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
+const MAX_NATIVE_WEBHOOK_CONCURRENCY: usize = 16;
+const MAX_NATIVE_WEBHOOK_EVENTS: usize = 256;
+const MAX_NATIVE_EVENT_TEXT_BYTES: usize = 256 * 1024;
+const MAX_NATIVE_IDENTIFIER_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -120,10 +126,19 @@ pub struct NativeLifecycleIngress {
 
 impl NativeLifecycleIngress {
     pub async fn ingest_event(&self, event: NativeLifecycleEvent) -> Result<(), ChannelError> {
+        if !valid_native_lifecycle_event(&event) {
+            return Err(ChannelError::Disconnected {
+                name: self.kind.channel_name().to_string(),
+                reason: "native lifecycle event is malformed or oversized".to_string(),
+            });
+        }
         let message = normalize_incoming_event(event.into_incoming_event(self.kind));
-        self.tx
-            .send(message)
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.tx.send(message))
             .await
+            .map_err(|_| ChannelError::Disconnected {
+                name: self.kind.channel_name().to_string(),
+                reason: "native lifecycle event receiver is saturated".to_string(),
+            })?
             .map_err(|_| ChannelError::Disconnected {
                 name: self.kind.channel_name().to_string(),
                 reason: "native lifecycle event receiver is closed".to_string(),
@@ -241,7 +256,12 @@ pub fn native_lifecycle_webhook_routes(config: NativeLifecycleWebhookConfig) -> 
             post(browser_push_register_handler).delete(browser_push_unregister_handler),
         );
     }
-    router.with_state(Arc::new(config))
+    router
+        .with_state(Arc::new(config))
+        .layer(DefaultBodyLimit::max(MAX_NATIVE_WEBHOOK_BODY_BYTES))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            MAX_NATIVE_WEBHOOK_CONCURRENCY,
+        ))
 }
 
 async fn matrix_webhook_handler(
@@ -268,7 +288,8 @@ async fn matrix_webhook_handler(
     }
     for event in events {
         if let Err(error) = ingress.ingest_event(event).await {
-            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+            tracing::warn!(error = %error, "Matrix native lifecycle ingress unavailable");
+            return (StatusCode::SERVICE_UNAVAILABLE, "ingress unavailable").into_response();
         }
     }
     (StatusCode::ACCEPTED, "accepted").into_response()
@@ -306,7 +327,10 @@ async fn voice_call_webhook_handler(
     };
     match ingress.ingest_event(event).await {
         Ok(()) => (StatusCode::ACCEPTED, "accepted").into_response(),
-        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+        Err(error) => {
+            tracing::warn!(error = %error, "Voice-call native lifecycle ingress unavailable");
+            (StatusCode::SERVICE_UNAVAILABLE, "ingress unavailable").into_response()
+        }
     }
 }
 
@@ -342,7 +366,10 @@ async fn browser_push_webhook_handler(
     };
     match ingress.ingest_event(event).await {
         Ok(()) => (StatusCode::ACCEPTED, "accepted").into_response(),
-        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+        Err(error) => {
+            tracing::warn!(error = %error, "Browser-push native lifecycle ingress unavailable");
+            (StatusCode::SERVICE_UNAVAILABLE, "ingress unavailable").into_response()
+        }
     }
 }
 
@@ -370,8 +397,16 @@ async fn apns_register_handler(
     else {
         return (StatusCode::BAD_REQUEST, "invalid APNs registration payload").into_response();
     };
-    registry.register(user_id, device_token).await;
-    (StatusCode::ACCEPTED, "registered").into_response()
+    if !valid_native_identifier(&user_id)
+        || device_token.len() > 512
+        || device_token.chars().any(char::is_control)
+    {
+        return (StatusCode::BAD_REQUEST, "invalid APNs registration payload").into_response();
+    }
+    match registry.register(user_id, device_token).await {
+        Ok(()) => (StatusCode::ACCEPTED, "registered").into_response(),
+        Err(_) => (StatusCode::BAD_REQUEST, "registration rejected").into_response(),
+    }
 }
 
 async fn apns_unregister_handler(
@@ -398,6 +433,12 @@ async fn apns_unregister_handler(
     else {
         return (StatusCode::BAD_REQUEST, "invalid APNs registration payload").into_response();
     };
+    if !valid_native_identifier(&user_id)
+        || device_token.len() > 512
+        || device_token.chars().any(char::is_control)
+    {
+        return (StatusCode::BAD_REQUEST, "invalid APNs registration payload").into_response();
+    }
     if registry.unregister(&user_id, &device_token).await {
         (StatusCode::OK, "unregistered").into_response()
     } else {
@@ -437,8 +478,17 @@ async fn browser_push_register_handler(
         )
             .into_response();
     };
-    registry.register(user_id, endpoint).await;
-    (StatusCode::ACCEPTED, "registered").into_response()
+    if !valid_native_identifier(&user_id) || !valid_browser_push_endpoint(&endpoint) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "invalid browser-push registration payload",
+        )
+            .into_response();
+    }
+    match registry.register(user_id, endpoint).await {
+        Ok(()) => (StatusCode::ACCEPTED, "registered").into_response(),
+        Err(_) => (StatusCode::BAD_REQUEST, "registration rejected").into_response(),
+    }
 }
 
 async fn browser_push_unregister_handler(
@@ -473,6 +523,13 @@ async fn browser_push_unregister_handler(
         )
             .into_response();
     };
+    if !valid_native_identifier(&user_id) || !valid_browser_push_endpoint(&endpoint) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "invalid browser-push registration payload",
+        )
+            .into_response();
+    }
     if registry.unregister(&user_id, &endpoint).await {
         (StatusCode::OK, "unregistered").into_response()
     } else {
@@ -481,13 +538,7 @@ async fn browser_push_unregister_handler(
 }
 
 fn header_secret_matches(headers: &HeaderMap, name: &str, expected: &Option<String>) -> bool {
-    let Some(expected) = expected.as_ref().filter(|secret| !secret.is_empty()) else {
-        return true;
-    };
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|actual| bool::from(actual.as_bytes().ct_eq(expected.as_bytes())))
+    header_secret_matches_required(headers, name, expected)
 }
 
 fn header_secret_matches_required(
@@ -533,6 +584,7 @@ pub fn matrix_events_from_payload(payload: &Value) -> Vec<NativeLifecycleEvent> 
             }
         }
     }
+    events.truncate(MAX_NATIVE_WEBHOOK_EVENTS);
     events
 }
 
@@ -550,21 +602,25 @@ fn matrix_event_from_payload(event: &Value) -> Option<NativeLifecycleEvent> {
         .and_then(Value::as_str)?
         .trim()
         .to_string();
-    if text.is_empty() {
+    let chat_id = event
+        .get("room_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let user_id = event
+        .get("sender")
+        .or_else(|| event.get("user_id"))
+        .and_then(Value::as_str)?;
+    if text.is_empty()
+        || text.len() > MAX_NATIVE_EVENT_TEXT_BYTES
+        || (!chat_id.is_empty() && !valid_native_identifier(chat_id))
+        || !valid_native_identifier(user_id)
+    {
         return None;
     }
     Some(NativeLifecycleEvent {
-        chat_id: event
-            .get("room_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        chat_id: chat_id.to_string(),
         chat_type: Some("room".to_string()),
-        user_id: event
-            .get("sender")
-            .or_else(|| event.get("user_id"))
-            .and_then(Value::as_str)?
-            .to_string(),
+        user_id: user_id.to_string(),
         user_name: None,
         text,
         metadata: serde_json::json!({
@@ -578,12 +634,15 @@ pub fn voice_call_event_from_payload(payload: &Value) -> Option<NativeLifecycleE
     let text = first_payload_string(payload, &["text", "transcript", "speech"])?
         .trim()
         .to_string();
-    if text.is_empty() {
+    if text.is_empty() || text.len() > MAX_NATIVE_EVENT_TEXT_BYTES {
         return None;
     }
     let call_id = first_payload_string(payload, &["call_id", "CallSid", "callSid"])?;
     let user_id = first_payload_string(payload, &["user_id", "from", "From", "caller"])
         .unwrap_or_else(|| call_id.clone());
+    if !valid_native_identifier(&call_id) || !valid_native_identifier(&user_id) {
+        return None;
+    }
     Some(NativeLifecycleEvent {
         chat_id: call_id,
         chat_type: Some("call".to_string()),
@@ -601,13 +660,16 @@ pub fn browser_push_event_from_payload(payload: &Value) -> Option<NativeLifecycl
     let text = first_payload_string(payload, &["text", "message", "action"])?
         .trim()
         .to_string();
-    if text.is_empty() {
+    if text.is_empty() || text.len() > MAX_NATIVE_EVENT_TEXT_BYTES {
         return None;
     }
     let endpoint =
         first_payload_string(payload, &["endpoint", "subscription.endpoint", "chat_id"])?;
     let user_id = first_payload_string(payload, &["user_id", "device_id"])
         .unwrap_or_else(|| endpoint.clone());
+    if !valid_browser_push_endpoint(&endpoint) || !valid_native_identifier(&user_id) {
+        return None;
+    }
     Some(NativeLifecycleEvent {
         chat_id: endpoint,
         chat_type: Some("subscription".to_string()),
@@ -631,11 +693,58 @@ fn value_at_path(payload: &Value, path: &str) -> Option<String> {
         current = current.get(part)?;
     }
     match current {
-        Value::String(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
+        Value::String(value)
+            if !value.trim().is_empty()
+                && value.len() <= MAX_NATIVE_EVENT_TEXT_BYTES
+                && !value.chars().any(|character| character == '\0') =>
+        {
+            Some(value.trim().to_string())
+        }
         Value::Number(value) => Some(value.to_string()),
         Value::Bool(value) => Some(value.to_string()),
         _ => None,
     }
+}
+
+fn valid_native_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_NATIVE_IDENTIFIER_BYTES
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_browser_push_endpoint(value: &str) -> bool {
+    if value.len() > 16 * 1024 {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
+        && url
+            .host_str()
+            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+            .is_none_or(thinclaw_tools_core::is_public_outbound_ip)
+}
+
+fn valid_native_lifecycle_event(event: &NativeLifecycleEvent) -> bool {
+    valid_native_identifier(&event.chat_id)
+        && valid_native_identifier(&event.user_id)
+        && event
+            .chat_type
+            .as_deref()
+            .is_none_or(valid_native_identifier)
+        && event
+            .user_name
+            .as_deref()
+            .is_none_or(valid_native_identifier)
+        && !event.text.trim().is_empty()
+        && event.text.len() <= MAX_NATIVE_EVENT_TEXT_BYTES
+        && serde_json::to_vec(&event.metadata)
+            .is_ok_and(|encoded| encoded.len() <= MAX_NATIVE_WEBHOOK_BODY_BYTES)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -955,6 +1064,7 @@ mod tests {
         let mut stream = channel.start().await.expect("start should pass");
         let app = native_lifecycle_webhook_routes(NativeLifecycleWebhookConfig {
             matrix: Some(channel.ingress()),
+            matrix_secret: Some("matrix-secret".to_string()),
             ..Default::default()
         });
 
@@ -964,6 +1074,7 @@ mod tests {
                     .method("POST")
                     .uri("/webhook/native/matrix")
                     .header("content-type", "application/json")
+                    .header("x-thinclaw-matrix-secret", "matrix-secret")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
                             "room_id": "!room:example.org",
@@ -1319,14 +1430,14 @@ mod tests {
     }
 
     #[test]
-    fn header_secret_matches_allows_when_no_secret_configured() {
+    fn header_secret_matches_rejects_when_no_secret_configured() {
         let headers = HeaderMap::new();
-        assert!(header_secret_matches(
+        assert!(!header_secret_matches(
             &headers,
             "x-thinclaw-browser-push-secret",
             &None
         ));
-        assert!(header_secret_matches(
+        assert!(!header_secret_matches(
             &headers,
             "x-thinclaw-browser-push-secret",
             &Some(String::new())

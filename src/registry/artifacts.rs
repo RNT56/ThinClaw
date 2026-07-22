@@ -15,7 +15,27 @@
 
 use std::path::{Path, PathBuf};
 
-use tokio::fs;
+/// Failure modes while compiling a source extension into a WASM component.
+#[derive(Debug, thiserror::Error)]
+pub enum WasmBuildError {
+    #[error("cargo-component is not available")]
+    ToolchainUnavailable,
+
+    #[error("failed to probe cargo-component: {0}")]
+    ToolchainProbe(String),
+
+    #[error("WASM component build failed: {0}")]
+    Build(String),
+
+    #[error("built WASM artifact was not found: {0}")]
+    ArtifactNotFound(String),
+
+    #[error("WASM component build worker panicked")]
+    WorkerPanicked,
+
+    #[error("failed to initialize the WASM build runtime: {0}")]
+    Runtime(#[from] std::io::Error),
+}
 
 /// WASM target triples to search, in priority order.
 const WASM_TRIPLES: &[&str] = &[
@@ -59,7 +79,9 @@ pub fn find_wasm_artifact(crate_dir: &Path, crate_name: &str, profile: &str) -> 
             dir.join(format!("{}.wasm", snake_name)),
         ];
         for candidate in &candidates {
-            if candidate.exists() {
+            if std::fs::symlink_metadata(candidate)
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+            {
                 return Some(candidate.clone());
             }
         }
@@ -70,7 +92,10 @@ pub fn find_wasm_artifact(crate_dir: &Path, crate_name: &str, profile: &str) -> 
 
 /// Find any `.wasm` file in the target dirs (fallback when crate name is unknown).
 ///
-/// Returns the first `.wasm` found across target triples.
+/// Returns the artifact only when exactly one regular, non-symlink `.wasm`
+/// exists in the first target triple containing any candidates. Ambiguous
+/// build output is rejected rather than installing an arbitrary workspace
+/// member based on filesystem iteration order.
 pub fn find_any_wasm_artifact(crate_dir: &Path, profile: &str) -> Option<PathBuf> {
     let target_base = resolve_target_dir(crate_dir);
 
@@ -79,13 +104,23 @@ pub fn find_any_wasm_artifact(crate_dir: &Path, profile: &str) -> Option<PathBuf
         if !dir.is_dir() {
             continue;
         }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
+        let mut candidates = std::fs::read_dir(&dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
                 let path = entry.path();
-                if path.extension().map(|ext| ext == "wasm").unwrap_or(false) {
-                    return Some(path);
-                }
-            }
+                let file_type = entry.file_type().ok()?;
+                (path.extension().is_some_and(|ext| ext == "wasm")
+                    && file_type.is_file()
+                    && !file_type.is_symlink())
+                .then_some(path)
+            })
+            .collect::<Vec<_>>();
+        candidates.sort();
+        match candidates.as_slice() {
+            [] => {}
+            [only] => return Some(only.clone()),
+            _ => return None,
         }
     }
 
@@ -94,39 +129,14 @@ pub fn find_any_wasm_artifact(crate_dir: &Path, profile: &str) -> Option<PathBuf
 
 /// Build a WASM component using `cargo-component` (async).
 ///
-/// Streams build output to the terminal. Returns the path to the built artifact.
+/// Runs in an owned descendant process group with bounded output and a hard
+/// deadline. Returns the path to the built artifact.
 pub async fn build_wasm_component(
     source_dir: &Path,
     crate_name: &str,
     release: bool,
-) -> anyhow::Result<PathBuf> {
-    use tokio::process::Command;
-
-    // Check cargo-component availability
-    let check = Command::new("cargo")
-        .args(["component", "--version"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
-
-    if check.is_err() || !check.as_ref().map(|s| s.success()).unwrap_or(false) {
-        anyhow::bail!("cargo-component not found. Install with: cargo install cargo-component");
-    }
-
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(source_dir).args(["component", "build"]);
-
-    if release {
-        cmd.arg("--release");
-    }
-
-    // Use status() with inherited stdio so build output streams to the terminal.
-    let status = cmd.status().await?;
-
-    if !status.success() {
-        anyhow::bail!("Build failed (exit code: {})", status);
-    }
+) -> Result<PathBuf, WasmBuildError> {
+    run_component_build(source_dir, release).await?;
 
     let profile = if release { "release" } else { "debug" };
     let wasm_filename = format!("{}.wasm", crate_name.replace('-', "_"));
@@ -137,66 +147,115 @@ pub async fn build_wasm_component(
             // Fall back: search by crate_name directly
             find_wasm_artifact(source_dir, crate_name, profile)
         })
-        .or_else(|| find_any_wasm_artifact(source_dir, profile))
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not find {} in {}/target/*/{}/ after build",
+            WasmBuildError::ArtifactNotFound(format!(
+                "could not find {} in {}/target/*/{}/ after build",
                 wasm_filename,
                 source_dir.display(),
                 profile,
-            )
+            ))
         })
 }
 
 /// Build a WASM component using `cargo-component` (sync, for CLI use).
 ///
 /// Returns the path to the built artifact.
-pub fn build_wasm_component_sync(source_dir: &Path, release: bool) -> anyhow::Result<PathBuf> {
-    use std::process::Command;
-
+pub fn build_wasm_component_sync(
+    source_dir: &Path,
+    release: bool,
+) -> Result<PathBuf, WasmBuildError> {
     println!("Building WASM component in {}...", source_dir.display());
-
-    // Check if cargo-component is available
-    let check = Command::new("cargo")
-        .args(["component", "--version"])
-        .output();
-
-    if check.is_err() || !check.as_ref().map(|o| o.status.success()).unwrap_or(false) {
-        anyhow::bail!(
-            "cargo-component not found. Install with: cargo install cargo-component\n\
-             Or use --skip-build with an existing .wasm file."
-        );
-    }
-
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(source_dir).args(["component", "build"]);
-
-    if release {
-        cmd.arg("--release");
-    }
 
     println!(
         "  Running: cargo component build{}",
         if release { " --release" } else { "" }
     );
 
-    let output = cmd.output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Build failed:\n{}", stderr);
-    }
+    // Run the async owned-process implementation on a dedicated thread. This
+    // remains safe even if a legacy caller invokes the sync API from a Tokio
+    // worker, and it never blocks that runtime's reactor with child I/O.
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(WasmBuildError::Runtime)?;
+                runtime.block_on(run_component_build(source_dir, release))
+            })
+            .join()
+            .map_err(|_| WasmBuildError::WorkerPanicked)?
+    })?;
 
     let profile = if release { "release" } else { "debug" };
 
     // Find the built artifact
     find_any_wasm_artifact(source_dir, profile).ok_or_else(|| {
-        anyhow::anyhow!(
-            "No .wasm file found after build in {}/target/*/{}",
+        WasmBuildError::ArtifactNotFound(format!(
+            "no unique .wasm file found after build in {}/target/*/{}",
             source_dir.display(),
             profile,
-        )
+        ))
     })
+}
+
+async fn run_component_build(source_dir: &Path, release: bool) -> Result<(), WasmBuildError> {
+    use tokio::process::Command;
+
+    const TOOLCHAIN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+    const BUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+    const PROBE_OUTPUT_LIMIT: usize = 64 * 1024;
+    const BUILD_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+
+    let mut check_command = Command::new("cargo");
+    check_command.args(["component", "--version"]);
+    let check = thinclaw_platform::bounded_command_output(
+        &mut check_command,
+        TOOLCHAIN_PROBE_TIMEOUT,
+        PROBE_OUTPUT_LIMIT,
+        PROBE_OUTPUT_LIMIT,
+    )
+    .await
+    .map_err(|error| match error {
+        thinclaw_platform::BoundedProcessError::Spawn(_) => WasmBuildError::ToolchainUnavailable,
+        other => WasmBuildError::ToolchainProbe(other.to_string()),
+    })?;
+    if !check.status.success() {
+        return Err(WasmBuildError::ToolchainUnavailable);
+    }
+
+    let mut command = Command::new("cargo");
+    command.current_dir(source_dir).args(["component", "build"]);
+    if release {
+        command.arg("--release");
+    }
+    let output = thinclaw_platform::bounded_command_output(
+        &mut command,
+        BUILD_TIMEOUT,
+        BUILD_OUTPUT_LIMIT,
+        BUILD_OUTPUT_LIMIT,
+    )
+    .await
+    .map_err(|error| WasmBuildError::Build(error.to_string()))?;
+    if !output.status.success() {
+        let stderr = bounded_output_preview(&output.stderr, 16 * 1024);
+        return Err(WasmBuildError::Build(format!(
+            "process exited with {}: {}",
+            output.status, stderr
+        )));
+    }
+    Ok(())
+}
+
+fn bounded_output_preview(bytes: &[u8], limit: usize) -> String {
+    if bytes.len() <= limit {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let retained = &bytes[..limit];
+    format!(
+        "{}\n[build output truncated after {limit} bytes]",
+        String::from_utf8_lossy(retained)
+    )
 }
 
 /// Copy WASM binary + optional `capabilities.json` sidecar to an install directory.
@@ -208,23 +267,45 @@ pub async fn install_wasm_files(
     source_dir: &Path,
     name: &str,
     target_dir: &Path,
+    kind: crate::registry::manifest::ManifestKind,
     force: bool,
 ) -> anyhow::Result<PathBuf> {
-    fs::create_dir_all(target_dir).await?;
+    const MAX_WASM_BYTES: usize = 50 * 1024 * 1024;
+    const MAX_CAPABILITIES_BYTES: usize = 1024 * 1024;
+    if name.is_empty()
+        || name.len() > 128
+        || matches!(name, "." | "..")
+        || name.contains("..")
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        anyhow::bail!("invalid WASM extension name");
+    }
 
     let wasm_dst = target_dir.join(format!("{}.wasm", name));
     let caps_dst = target_dir.join(format!("{}.capabilities.json", name));
 
-    if wasm_dst.exists() && !force {
-        anyhow::bail!(
-            "Tool '{}' already exists at {}. Use --force to overwrite.",
-            name,
-            wasm_dst.display()
-        );
+    match tokio::fs::symlink_metadata(&wasm_dst).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            anyhow::bail!("existing WASM destination is not a regular file");
+        }
+        Ok(_) if !force => {
+            anyhow::bail!(
+                "Tool '{}' already exists at {}. Use --force to overwrite.",
+                name,
+                wasm_dst.display()
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
 
-    // Copy WASM binary
-    fs::copy(wasm_src, &wasm_dst).await?;
+    let wasm = super::installer::read_regular_file_bounded(wasm_src.to_path_buf(), MAX_WASM_BYTES)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("WASM build artifact does not exist"))?;
+    super::installer::validate_wasm_payload(&wasm, &wasm_src.display().to_string())?;
 
     // Look for capabilities.json sidecar in the source directory.
     // Prefer manifest-name variants first, then fall back to wasm artifact stem
@@ -243,22 +324,37 @@ pub async fn install_wasm_files(
         caps_candidates.push(source_dir.join(format!("{}-tool.capabilities.json", wasm_stem)));
     }
     caps_candidates.push(source_dir.join("capabilities.json"));
+    let mut capabilities = None;
     for caps_src in caps_candidates {
         if caps_src == caps_dst {
             continue;
         }
-        if caps_src.exists() {
-            if let Err(e) = fs::copy(&caps_src, &caps_dst).await {
-                tracing::warn!(
-                    "Failed to copy capabilities sidecar {} -> {}: {}",
-                    caps_src.display(),
-                    caps_dst.display(),
-                    e,
-                );
+        match super::installer::read_regular_file_bounded(caps_src.clone(), MAX_CAPABILITIES_BYTES)
+            .await
+        {
+            Ok(Some(bytes)) => {
+                super::installer::validate_capabilities_payload(
+                    kind,
+                    name,
+                    &bytes,
+                    &caps_src.display().to_string(),
+                )?;
+                capabilities = Some(bytes);
+                break;
             }
-            break;
+            Ok(None) => {}
+            Err(error) => return Err(error.into()),
         }
     }
+
+    super::installer::publish_extension_files(
+        wasm_dst.clone(),
+        caps_dst,
+        wasm,
+        capabilities,
+        force,
+    )
+    .await?;
 
     Ok(wasm_dst)
 }
@@ -348,6 +444,37 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_find_any_wasm_artifact_rejects_ambiguous_output() {
+        with_default_target_dir(|| {
+            let dir = TempDir::new().unwrap();
+            let wasm_dir = resolve_target_dir(dir.path()).join("wasm32-wasip2/release");
+            std::fs::create_dir_all(&wasm_dir).unwrap();
+            std::fs::write(wasm_dir.join("first.wasm"), b"wasm").unwrap();
+            std::fs::write(wasm_dir.join("second.wasm"), b"wasm").unwrap();
+
+            assert!(find_any_wasm_artifact(dir.path(), "release").is_none());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_artifact_discovery_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        with_default_target_dir(|| {
+            let dir = TempDir::new().unwrap();
+            let wasm_dir = resolve_target_dir(dir.path()).join("wasm32-wasip2/release");
+            std::fs::create_dir_all(&wasm_dir).unwrap();
+            let outside = dir.path().join("outside.wasm");
+            std::fs::write(&outside, b"wasm").unwrap();
+            symlink(&outside, wasm_dir.join("linked.wasm")).unwrap();
+
+            assert!(find_wasm_artifact(dir.path(), "linked", "release").is_none());
+            assert!(find_any_wasm_artifact(dir.path(), "release").is_none());
+        });
+    }
+
     #[tokio::test]
     async fn test_install_wasm_files_copies() {
         let src_dir = TempDir::new().unwrap();
@@ -367,6 +494,7 @@ mod tests {
             src_dir.path(),
             "mytool",
             target_dir.path(),
+            crate::registry::manifest::ManifestKind::Tool,
             false,
         )
         .await;
@@ -394,6 +522,7 @@ mod tests {
             src_dir.path(),
             "mytool",
             target_dir.path(),
+            crate::registry::manifest::ManifestKind::Tool,
             false,
         )
         .await;

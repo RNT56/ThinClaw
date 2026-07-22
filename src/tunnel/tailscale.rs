@@ -4,8 +4,8 @@ use anyhow::{Result, bail};
 use tokio::process::Command;
 
 use crate::tunnel::{
-    SharedProcess, SharedUrl, Tunnel, TunnelProcess, kill_shared, new_shared_process,
-    new_shared_url,
+    SharedProcess, SharedUrl, Tunnel, TunnelProcess, drain_tunnel_output, kill_shared,
+    new_shared_process, new_shared_url, read_tunnel_output_bounded,
 };
 
 /// Uses `tailscale serve` (tailnet-only) or `tailscale funnel` (public).
@@ -41,15 +41,15 @@ impl Tunnel for TailscaleTunnel {
         let hostname = if let Some(ref h) = self.hostname {
             h.clone()
         } else {
-            let output = tokio::time::timeout(
+            let mut command = Command::new(crate::tunnel::resolve_binary("tailscale"));
+            command.args(["status", "--json"]);
+            let output = thinclaw_platform::bounded_command_output(
+                &mut command,
                 tokio::time::Duration::from_secs(10),
-                Command::new(crate::tunnel::resolve_binary("tailscale"))
-                    .args(["status", "--json"])
-                    .kill_on_drop(true)
-                    .output(),
+                2 * 1024 * 1024,
+                64 * 1024,
             )
-            .await
-            .map_err(|_| anyhow::anyhow!("tailscale status --json timed out after 10s"))??;
+            .await?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -90,6 +90,7 @@ impl Tunnel for TailscaleTunnel {
 
             dns_name
         };
+        validate_tailscale_hostname(&hostname)?;
 
         let target = format!("http://{local_host}:{local_port}");
 
@@ -98,41 +99,29 @@ impl Tunnel for TailscaleTunnel {
         // for port 443" if ThinClaw was killed without a clean shutdown.
         let ts_bin = crate::tunnel::resolve_binary("tailscale");
         tracing::debug!("Resetting stale tailscale {subcommand} config before start");
-        let reset_output = tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            Command::new(&ts_bin)
-                .args([subcommand, "reset"])
-                .kill_on_drop(true)
-                .output(),
+        let mut reset_command = Command::new(&ts_bin);
+        reset_command.args([subcommand, "reset"]);
+        let reset_output = thinclaw_platform::bounded_command_output(
+            &mut reset_command,
+            tokio::time::Duration::from_secs(30),
+            64 * 1024,
+            64 * 1024,
         )
         .await;
-        match reset_output {
-            Ok(Ok(out)) if out.status.success() => {}
-            Ok(Ok(out)) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                // Version warnings are harmless, but a real reset failure means
-                // we cannot safely replace an existing listener on port 443.
-                let real_errors: Vec<&str> = stderr
-                    .lines()
-                    .filter(|line| !line.contains("client version") && !line.contains("Warning:"))
-                    .collect();
-                if !real_errors.is_empty() || stderr.trim().is_empty() {
-                    let detail = if real_errors.is_empty() {
-                        format!("exit status {}", out.status)
-                    } else {
-                        real_errors.join("; ")
-                    };
-                    bail!("tailscale {subcommand} reset failed: {}", detail);
-                }
+        if let Ok(ref out) = reset_output
+            && !out.status.success()
+        {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // version warnings are harmless — only log real failures
+            let real_errors: Vec<&str> = stderr
+                .lines()
+                .filter(|l| !l.contains("client version") && !l.contains("Warning:"))
+                .collect();
+            if !real_errors.is_empty() {
                 tracing::warn!(
-                    "Tailscale client/server version mismatch detected while resetting {subcommand}"
+                    "tailscale {subcommand} reset returned non-zero: {}",
+                    real_errors.join("; ")
                 );
-            }
-            Ok(Err(error)) => {
-                bail!("could not run tailscale {subcommand} reset: {error}");
-            }
-            Err(_) => {
-                bail!("tailscale {subcommand} reset timed out after 10s");
             }
         }
 
@@ -140,12 +129,18 @@ impl Tunnel for TailscaleTunnel {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         // Spawn the tailscale serve/funnel process
-        let mut child = Command::new(&ts_bin)
+        let mut command = Command::new(&ts_bin);
+        command
             .args([subcommand, &target])
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .stderr(std::process::Stdio::piped());
+        let mut child = thinclaw_platform::OwnedChild::spawn(&mut command)?;
+        let stdout = child
+            .take_stdout()
+            .ok_or_else(|| anyhow::anyhow!("failed to capture tailscale stdout"))?;
+        let stderr = child
+            .take_stderr()
+            .ok_or_else(|| anyhow::anyhow!("failed to capture tailscale stderr"))?;
 
         // Wait briefly to detect early exit (e.g., "Funnel is not enabled",
         // auth errors, permission denied, etc.). A successful `tailscale funnel`
@@ -155,25 +150,19 @@ impl Tunnel for TailscaleTunnel {
         // Check if the process has exited (which means failure)
         match child.try_wait() {
             Ok(Some(exit_status)) => {
-                // Process already exited — read stderr for the error message
-                let mut stderr_msg = String::new();
-                if let Some(mut stderr) = child.stderr.take() {
-                    use tokio::io::AsyncReadExt;
-                    let mut buf = Vec::new();
-                    let _ = stderr.read_to_end(&mut buf).await;
-                    stderr_msg = String::from_utf8_lossy(&buf).trim().to_string();
-                }
+                let ((stdout, stdout_exceeded), (stderr, stderr_exceeded)) = tokio::join!(
+                    read_tunnel_output_bounded(stdout, 64 * 1024),
+                    read_tunnel_output_bounded(stderr, 64 * 1024),
+                );
+                let mut stderr_msg = String::from_utf8_lossy(&stderr).trim().to_string();
                 if stderr_msg.is_empty() {
-                    let mut stdout_msg = String::new();
-                    if let Some(mut stdout) = child.stdout.take() {
-                        use tokio::io::AsyncReadExt;
-                        let mut buf = Vec::new();
-                        let _ = stdout.read_to_end(&mut buf).await;
-                        stdout_msg = String::from_utf8_lossy(&buf).trim().to_string();
-                    }
+                    let stdout_msg = String::from_utf8_lossy(&stdout).trim().to_string();
                     if !stdout_msg.is_empty() {
                         stderr_msg = stdout_msg;
                     }
+                }
+                if stdout_exceeded || stderr_exceeded {
+                    stderr_msg.push_str(" [output truncated]");
                 }
 
                 // Filter out version mismatch warnings (non-fatal, noisy)
@@ -221,26 +210,10 @@ impl Tunnel for TailscaleTunnel {
                     hostname = %hostname,
                     "Tailscale {subcommand} process started and still running"
                 );
-
-                // Long-running CLI processes must have their output drained;
-                // otherwise a full pipe can deadlock an otherwise healthy
-                // Serve/Funnel listener. Early-exit diagnostics were already
-                // collected above.
-                if let Some(mut stdout) = child.stdout.take() {
-                    tokio::spawn(async move {
-                        let mut sink = tokio::io::sink();
-                        let _ = tokio::io::copy(&mut stdout, &mut sink).await;
-                    });
-                }
-                if let Some(mut stderr) = child.stderr.take() {
-                    tokio::spawn(async move {
-                        let mut sink = tokio::io::sink();
-                        let _ = tokio::io::copy(&mut stderr, &mut sink).await;
-                    });
-                }
             }
             Err(e) => {
-                tracing::warn!("Could not check tailscale {subcommand} status: {e}");
+                child.kill().await.ok();
+                bail!("could not inspect tailscale {subcommand} startup: {e}");
             }
         }
 
@@ -250,70 +223,62 @@ impl Tunnel for TailscaleTunnel {
             *guard = Some(public_url.clone());
         }
 
+        let output_tasks = vec![drain_tunnel_output(stdout), drain_tunnel_output(stderr)];
         let mut guard = self.proc.lock().await;
-        *guard = Some(TunnelProcess { child });
+        *guard = Some(TunnelProcess {
+            child,
+            _output_tasks: output_tasks,
+        });
 
         Ok(public_url)
     }
 
     async fn stop(&self) -> Result<()> {
-        // A newly constructed tunnel has never changed Tailscale state. This
-        // also keeps stop-before-start deterministic when the CLI is absent.
-        if self.proc.lock().await.is_none() {
-            if let Ok(mut guard) = self.url.write() {
-                *guard = None;
-            }
-            return Ok(());
-        }
-
         let subcommand = if self.funnel { "funnel" } else { "serve" };
-        let reset_error = match tokio::time::timeout(
-            tokio::time::Duration::from_secs(10),
-            Command::new(crate::tunnel::resolve_binary("tailscale"))
-                .args([subcommand, "reset"])
-                .kill_on_drop(true)
-                .output(),
+        let mut command = Command::new(crate::tunnel::resolve_binary("tailscale"));
+        command.args([subcommand, "reset"]);
+        if let Err(e) = thinclaw_platform::bounded_command_output(
+            &mut command,
+            tokio::time::Duration::from_secs(30),
+            64 * 1024,
+            64 * 1024,
         )
         .await
         {
-            Ok(Ok(output)) if !output.status.success() => {
-                let detail = String::from_utf8_lossy(&output.stderr)
-                    .trim()
-                    .chars()
-                    .take(1_000)
-                    .collect::<String>();
-                Some(if detail.is_empty() {
-                    format!("tailscale {subcommand} reset returned {}", output.status)
-                } else {
-                    format!("tailscale {subcommand} reset failed: {detail}")
-                })
-            }
-            Ok(Err(error)) => Some(format!("tailscale {subcommand} reset failed: {error}")),
-            Err(_) => Some(format!("tailscale {subcommand} reset timed out after 10s")),
-            Ok(Ok(_)) => None,
-        };
+            tracing::warn!("tailscale {subcommand} reset failed: {e}");
+        }
 
         if let Ok(mut guard) = self.url.write() {
             *guard = None;
         }
-        kill_shared(&self.proc).await?;
-        if let Some(error) = reset_error {
-            bail!(error);
-        }
-        Ok(())
+        kill_shared(&self.proc).await
     }
 
     async fn health_check(&self) -> bool {
         let mut guard = self.proc.lock().await;
-        let Some(process) = guard.as_mut() else {
-            return false;
-        };
-        matches!(process.child.try_wait(), Ok(None))
+        guard
+            .as_mut()
+            .is_some_and(|tp| matches!(tp.child.try_wait(), Ok(None)))
     }
 
     fn public_url(&self) -> Option<String> {
         self.url.read().ok().and_then(|guard| guard.clone())
     }
+}
+
+fn validate_tailscale_hostname(hostname: &str) -> Result<()> {
+    if hostname.is_empty() || hostname.len() > 253 || hostname.chars().any(char::is_control) {
+        bail!("tailscale returned an invalid hostname");
+    }
+    let parsed = url::Url::parse(&format!("https://{hostname}"))?;
+    if parsed.host_str() != Some(hostname)
+        || !parsed.path().is_empty() && parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        bail!("tailscale returned an invalid hostname");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

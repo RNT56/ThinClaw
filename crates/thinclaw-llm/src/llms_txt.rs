@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+const MAX_LLMS_TXT_BYTES: usize = 1024 * 1024;
+
 /// Parsed llms.txt content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmsTxt {
@@ -43,20 +45,55 @@ pub struct LlmsTxtLink {
 
 /// Discover llms.txt from a domain.
 pub async fn discover(domain: &str) -> Result<LlmsTxt, LlmsDiscoveryError> {
+    if domain.is_empty()
+        || domain.len() > 253
+        || domain.trim() != domain
+        || !domain.is_ascii()
+        || domain.contains(['/', '\\', '@', ':', '?', '#'])
+        || domain.chars().any(char::is_control)
+    {
+        return Err(LlmsDiscoveryError::ParseError(
+            "domain is empty, oversized, or malformed".to_string(),
+        ));
+    }
     let urls = [
         format!("https://{}/.well-known/llms.txt", domain),
         format!("https://{}/llms.txt", domain),
     ];
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| LlmsDiscoveryError::Network(e.to_string()))?;
-
     for url in &urls {
-        match client.get(url).send().await {
+        let guarded = match thinclaw_tools_core::validate_outbound_url_pinned_async(
+            url,
+            &thinclaw_tools_core::OutboundUrlGuardOptions {
+                require_https: true,
+                upgrade_http_to_https: false,
+                allowlist: vec![domain.to_string()],
+            },
+        )
+        .await
+        {
+            Ok(guarded) => guarded,
+            Err(_) => continue,
+        };
+        let Some(host) = guarded.url.host_str() else {
+            continue;
+        };
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if !guarded.pinned_addrs.is_empty() {
+            builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+        }
+        let client = builder
+            .build()
+            .map_err(|error| LlmsDiscoveryError::Network(error.to_string()))?;
+        match client.get(guarded.url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                if let Ok(text) = resp.text().await {
+                if let Ok(text) =
+                    thinclaw_types::http_response::bounded_text(resp, MAX_LLMS_TXT_BYTES).await
+                {
                     return Ok(parse_llms_txt(&text, url));
                 }
             }

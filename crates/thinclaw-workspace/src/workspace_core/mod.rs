@@ -6,8 +6,8 @@
 //!
 //! - [`files`]: DB-backed file ops (read/write/append/exists/delete/list) and
 //!   memory convenience accessors (MEMORY.md, daily logs, HEARTBEAT.md).
-//! - [`prompt`]: system prompt assembly (soul + identity + instructions +
-//!   profile + actor overlay + linked recall + context manifest).
+//! - [`prompt`]: trusted system prompt assembly plus separately typed
+//!   actor/group evidence and a scope-aware context manifest.
 //! - [`search`]: hybrid search, document re-indexing, and embedding backfill.
 //! - [`seed`]: workspace seeding (default file templates + `seed_if_empty`).
 //! - [`timezone`]: timezone <-> `USER.md` synchronization.
@@ -56,6 +56,9 @@ pub struct Workspace {
     pub(super) storage: WorkspaceBackend,
     /// Embedding provider for semantic search.
     pub(super) embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    /// Process-local fast path for completed compatibility migrations. The DB
+    /// marker remains authoritative across restarts/processes.
+    pub(super) migration_cache: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Workspace {
@@ -73,6 +76,7 @@ impl Workspace {
             agent_id: None,
             storage: store,
             embeddings: None,
+            migration_cache: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -130,6 +134,7 @@ impl Workspace {
             agent_id,
             storage: self.storage.clone(),
             embeddings: self.embeddings.clone(),
+            migration_cache: Arc::clone(&self.migration_cache),
         }
     }
 

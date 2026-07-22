@@ -233,11 +233,22 @@ async fn resolve_secret(
 
 /// Fixed-endpoint provider used by integration tests to point the real
 /// [`GitHubApiClient`] at an in-process fake GitHub server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FixedTokenGitHubClientProvider {
     api_base_url: String,
     token: String,
     resilience: GitHubApiResilience,
+}
+
+impl std::fmt::Debug for FixedTokenGitHubClientProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FixedTokenGitHubClientProvider")
+            .field("api_base_url", &"[REDACTED URL]")
+            .field("token", &"[REDACTED]")
+            .field("resilience", &self.resilience)
+            .finish()
+    }
 }
 
 impl FixedTokenGitHubClientProvider {

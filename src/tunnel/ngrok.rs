@@ -1,13 +1,13 @@
 //! ngrok tunnel via the `ngrok` binary.
 
 use anyhow::{Result, bail};
-use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
 use crate::tunnel::{
-    SharedProcess, SharedUrl, Tunnel, TunnelProcess, kill_shared, new_shared_process,
-    new_shared_url,
+    SharedProcess, SharedUrl, Tunnel, TunnelProcess, drain_tunnel_output, kill_shared,
+    new_shared_process, new_shared_url,
 };
+use thinclaw_platform::read_bounded_line;
 
 /// Wraps `ngrok` with optional custom domain support (paid plan).
 pub struct NgrokTunnel {
@@ -42,29 +42,36 @@ impl Tunnel for NgrokTunnel {
         }
         args.extend(["--log", "stdout", "--log-format", "logfmt"].map(String::from));
 
-        let mut child = Command::new(crate::tunnel::resolve_binary("ngrok"))
+        let mut command = Command::new(crate::tunnel::resolve_binary("ngrok"));
+        command
             .args(&args)
             .env("NGROK_AUTHTOKEN", &self.auth_token)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .stderr(std::process::Stdio::piped());
+        let mut child = thinclaw_platform::OwnedChild::spawn(&mut command)?;
 
         let stdout = child
-            .stdout
-            .take()
+            .take_stdout()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture ngrok stdout"))?;
+        let stderr = child
+            .take_stderr()
+            .ok_or_else(|| anyhow::anyhow!("Failed to capture ngrok stderr"))?;
+        let stderr_task = drain_tunnel_output(stderr);
 
-        let mut reader = tokio::io::BufReader::new(stdout).lines();
+        let mut reader = tokio::io::BufReader::new(stdout);
         let mut public_url = String::new();
 
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
         while tokio::time::Instant::now() < deadline {
-            let line =
-                tokio::time::timeout(tokio::time::Duration::from_secs(3), reader.next_line()).await;
+            let line = tokio::time::timeout(
+                tokio::time::Duration::from_secs(3),
+                read_bounded_line(&mut reader, 64 * 1024),
+            )
+            .await;
 
             match line {
-                Ok(Ok(Some(l))) => {
+                Ok(Ok(Some(line))) => {
+                    let l = line.into_lossy_text();
                     tracing::debug!("ngrok: {l}");
                     // ngrok logfmt: url=https://xxxx.ngrok-free.app
                     if let Some(idx) = l.find("url=https://") {
@@ -87,13 +94,30 @@ impl Tunnel for NgrokTunnel {
             child.kill().await.ok();
             bail!("ngrok did not produce a public URL within 15s. Is the auth token valid?");
         }
+        let parsed = url::Url::parse(&public_url)?;
+        if parsed.scheme() != "https"
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            child.kill().await.ok();
+            bail!("ngrok produced an invalid public HTTPS URL");
+        }
+        if !matches!(child.try_wait(), Ok(None)) {
+            child.kill().await.ok();
+            bail!("ngrok exited during startup");
+        }
+        let stdout_task = drain_tunnel_output(reader);
 
         if let Ok(mut guard) = self.url.write() {
             *guard = Some(public_url.clone());
         }
 
         let mut guard = self.proc.lock().await;
-        *guard = Some(TunnelProcess { child });
+        *guard = Some(TunnelProcess {
+            child,
+            _output_tasks: vec![stdout_task, stderr_task],
+        });
 
         Ok(public_url)
     }
@@ -106,8 +130,10 @@ impl Tunnel for NgrokTunnel {
     }
 
     async fn health_check(&self) -> bool {
-        let guard = self.proc.lock().await;
-        guard.as_ref().is_some_and(|tp| tp.child.id().is_some())
+        let mut guard = self.proc.lock().await;
+        guard
+            .as_mut()
+            .is_some_and(|tp| matches!(tp.child.try_wait(), Ok(None)))
     }
 
     fn public_url(&self) -> Option<String> {

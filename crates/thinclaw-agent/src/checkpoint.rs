@@ -6,17 +6,23 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thinclaw_tools::execution::{BoundedProcessOutput, bounded_command_output};
 use thinclaw_types::JobContext;
+use tokio::process::Command;
 
 const DEFAULT_MAX_CHECKPOINTS: usize = 50;
 const GIT_AUTHOR_NAME: &str = "ThinClaw";
 const GIT_AUTHOR_EMAIL: &str = "thinclaw@localhost";
+const GIT_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_GIT_STDOUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_GIT_STDERR_BYTES: usize = 1024 * 1024;
+const MAX_CHECKPOINT_REASON_CHARS: usize = 4096;
 const ROOT_MARKERS: &[&str] = &[
     ".git",
     "Cargo.toml",
@@ -140,6 +146,32 @@ fn sanitize_reason(reason: &str) -> String {
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_CHECKPOINT_REASON_CHARS)
+        .collect()
+}
+
+fn git_command_label(args: &[&str]) -> String {
+    let subcommand = args
+        .iter()
+        .copied()
+        .find(|argument| !argument.starts_with('-'))
+        .unwrap_or("command");
+    format!("git {subcommand}")
+}
+
+fn sanitized_git_stderr(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .map(|character| {
+            if character == '\n' || character == '\t' || !character.is_control() {
+                character
+            } else {
+                '�'
+            }
+        })
+        .collect()
 }
 
 fn git_output(
@@ -147,7 +179,7 @@ fn git_output(
     git_dir: Option<&Path>,
     work_tree: Option<&Path>,
     current_dir: Option<&Path>,
-) -> Result<Output, CheckpointError> {
+) -> Result<BoundedProcessOutput, CheckpointError> {
     let mut command = Command::new("git");
     command.args(args);
     command.env("GIT_AUTHOR_NAME", GIT_AUTHOR_NAME);
@@ -155,6 +187,13 @@ fn git_output(
     command.env("GIT_COMMITTER_NAME", GIT_AUTHOR_NAME);
     command.env("GIT_COMMITTER_EMAIL", GIT_AUTHOR_EMAIL);
     command.env("LC_ALL", "C");
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env("GIT_PAGER", "cat");
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    command.env(
+        "GIT_CONFIG_GLOBAL",
+        if cfg!(windows) { "NUL" } else { "/dev/null" },
+    );
     if let Some(dir) = git_dir {
         command.env("GIT_DIR", dir);
     }
@@ -165,7 +204,22 @@ fn git_output(
         command.current_dir(dir);
     }
 
-    command.output().map_err(CheckpointError::Io)
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(CheckpointError::Io)?;
+    runtime
+        .block_on(bounded_command_output(
+            &mut command,
+            GIT_TIMEOUT,
+            MAX_GIT_STDOUT_BYTES,
+            MAX_GIT_STDERR_BYTES,
+            "checkpoint git command",
+        ))
+        .map_err(|error| CheckpointError::Git {
+            command: git_command_label(args),
+            stderr: error.to_string(),
+        })
 }
 
 fn git_ok(
@@ -174,33 +228,52 @@ fn git_ok(
     work_tree: Option<&Path>,
     current_dir: Option<&Path>,
 ) -> Result<(), CheckpointError> {
-    let command = format!("git {}", args.join(" "));
+    let command = git_command_label(args);
     let output = git_output(args, git_dir, work_tree, current_dir)?;
     if output.status.success() {
         Ok(())
     } else {
         Err(CheckpointError::Git {
             command,
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            stderr: sanitized_git_stderr(&output.stderr),
         })
     }
 }
 
-fn git_stdout(
+fn git_path_list(
     args: &[&str],
     git_dir: Option<&Path>,
     work_tree: Option<&Path>,
     current_dir: Option<&Path>,
-) -> Result<String, CheckpointError> {
-    let command = format!("git {}", args.join(" "));
+) -> Result<Vec<PathBuf>, CheckpointError> {
+    let command = git_command_label(args);
     let output = git_output(args, git_dir, work_tree, current_dir)?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(git_path_from_bytes)
+            .collect()
     } else {
         Err(CheckpointError::Git {
             command,
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            stderr: sanitized_git_stderr(&output.stderr),
         })
+    }
+}
+
+fn git_path_from_bytes(bytes: &[u8]) -> Result<PathBuf, CheckpointError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec())))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(bytes.to_vec())
+            .map(PathBuf::from)
+            .map_err(|_| CheckpointError::Parse("git returned a non-UTF-8 path".to_string()))
     }
 }
 
@@ -234,9 +307,10 @@ fn thread_scope_from_context(ctx: &JobContext) -> String {
 }
 
 fn validate_commit_hash(commit_hash: &str) -> Result<(), CheckpointError> {
-    if regex::Regex::new(r"^[0-9a-f]{7,40}$")
-        .expect("valid regex")
-        .is_match(commit_hash)
+    if (7..=40).contains(&commit_hash.len())
+        && commit_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         Ok(())
     } else {
@@ -264,6 +338,58 @@ fn validate_relative_path(path: &str) -> Result<PathBuf, CheckpointError> {
     } else {
         Ok(normalized)
     }
+}
+
+fn safe_checkpoint_target(root: &Path, relative: &Path) -> Result<PathBuf, CheckpointError> {
+    let canonical_root = root.canonicalize()?;
+    let components = relative.components().collect::<Vec<_>>();
+    if components.is_empty() {
+        return Err(CheckpointError::InvalidPath(relative.display().to_string()));
+    }
+    let mut current = canonical_root.clone();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(part) = component else {
+            return Err(CheckpointError::InvalidPath(relative.display().to_string()));
+        };
+        current.push(part);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if index + 1 != components.len() {
+                    return Err(CheckpointError::InvalidPath(format!(
+                        "{} traverses a symbolic-link ancestor",
+                        relative.display()
+                    )));
+                }
+            }
+            Ok(_) => {
+                let canonical = current.canonicalize()?;
+                if !canonical.starts_with(&canonical_root) {
+                    return Err(CheckpointError::InvalidPath(relative.display().to_string()));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(CheckpointError::Io(error)),
+        }
+    }
+    if !current.starts_with(&canonical_root) {
+        return Err(CheckpointError::InvalidPath(relative.display().to_string()));
+    }
+    Ok(current)
+}
+
+fn remove_checkpoint_target(root: &Path, relative: &Path) -> Result<(), CheckpointError> {
+    let target = safe_checkpoint_target(root, relative)?;
+    let metadata = match std::fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(CheckpointError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        std::fs::remove_file(target)?;
+    } else if metadata.is_dir() {
+        std::fs::remove_dir_all(target)?;
+    }
+    Ok(())
 }
 
 impl CheckpointManager {
@@ -315,7 +441,12 @@ impl CheckpointManager {
             return Ok(());
         }
 
-        git_ok(&["init", "--bare"], None, None, Some(repo_dir))?;
+        git_ok(
+            &["init", "--bare", "--template="],
+            None,
+            None,
+            Some(repo_dir),
+        )?;
 
         // A bare repo created in-place should now be ready.
         if !repo_dir.join("HEAD").exists() {
@@ -363,17 +494,14 @@ impl CheckpointManager {
         )?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stderr = sanitized_git_stderr(&output.stderr);
             if stderr.contains("does not have any commits yet")
                 || stderr.contains("unknown revision")
             {
                 return Ok(Vec::new());
             }
             return Err(CheckpointError::Git {
-                command: format!(
-                    "git --no-pager log --pretty=format:%H\\t%ct\\t%s -n {}",
-                    limit
-                ),
+                command: "git log".to_string(),
                 stderr,
             });
         }
@@ -441,25 +569,33 @@ impl CheckpointManager {
             Some(turn) => format!("[thinclaw][t{turn}] {reason}"),
             None => format!("[thinclaw] {reason}"),
         };
-        git_ok(
-            &[
-                "add",
-                "-A",
-                "--",
-                ".",
-                ":(exclude).git",
-                ":(exclude)**/.git",
-            ],
-            Some(&repo_dir),
-            Some(&root),
-            Some(&root),
-        )?;
-        git_ok(
-            &["commit", "--allow-empty", "-m", &commit_message],
-            Some(&repo_dir),
-            Some(&root),
-            Some(&root),
-        )?;
+        let result = (|| {
+            git_ok(
+                &[
+                    "add",
+                    "-A",
+                    "--",
+                    ".",
+                    ":(exclude).git",
+                    ":(exclude)**/.git",
+                ],
+                Some(&repo_dir),
+                Some(&root),
+                Some(&root),
+            )?;
+            git_ok(
+                &["commit", "--allow-empty", "-m", &commit_message],
+                Some(&repo_dir),
+                Some(&root),
+                Some(&root),
+            )
+        })();
+        if let Err(error) = result {
+            if let Some(bucket) = self.per_turn_dirs.get_mut(scope) {
+                bucket.remove(&root);
+            }
+            return Err(error);
+        }
 
         self.record_thread_root(scope, &root);
         Ok(true)
@@ -484,11 +620,12 @@ impl CheckpointManager {
         }
 
         let safety_reason = format!("pre-rollback snapshot before restoring {commit_hash}");
-        let _ = self.create_checkpoint_inner(scope, &root, &safety_reason, true);
+        self.create_checkpoint_inner(scope, &root, &safety_reason, true)?;
 
         if let Some(file) = file {
             let rel = validate_relative_path(file)?;
             let rel_str = rel.to_string_lossy().to_string();
+            let _ = safe_checkpoint_target(&root, &rel)?;
             let exists_in_checkpoint =
                 self.tracked_path_exists_at_commit(&repo_dir, &root, commit_hash, &rel_str)?;
             if exists_in_checkpoint {
@@ -499,16 +636,23 @@ impl CheckpointManager {
                     Some(&root),
                 )?;
             } else {
-                let target = root.join(&rel);
-                if target.exists() {
-                    if target.is_dir() {
-                        std::fs::remove_dir_all(&target)?;
-                    } else {
-                        std::fs::remove_file(&target)?;
-                    }
-                }
+                remove_checkpoint_target(&root, &rel)?;
             }
         } else {
+            let current_paths = git_path_list(
+                &["ls-files", "-z"],
+                Some(&repo_dir),
+                Some(&root),
+                Some(&root),
+            )?;
+            let target_paths = git_path_list(
+                &["ls-tree", "-r", "--name-only", "-z", commit_hash],
+                Some(&repo_dir),
+                Some(&root),
+                Some(&root),
+            )?
+            .into_iter()
+            .collect::<HashSet<_>>();
             git_ok(
                 &[
                     "checkout",
@@ -523,29 +667,30 @@ impl CheckpointManager {
                 Some(&root),
             )?;
 
-            let untracked = git_stdout(
-                &["ls-files", "--others", "--exclude-standard"],
+            // `git checkout <tree> -- .` does not remove paths that exist in
+            // the current index but not in the target tree. The safety
+            // checkpoint above gives us an exact current-path set, so delete
+            // that difference explicitly without ever traversing symlinks.
+            for rel in current_paths {
+                if !target_paths.contains(&rel) {
+                    remove_checkpoint_target(&root, &rel)?;
+                }
+            }
+
+            let untracked = git_path_list(
+                &["ls-files", "--others", "--exclude-standard", "-z"],
                 Some(&repo_dir),
                 Some(&root),
                 Some(&root),
             )?;
-            for rel in untracked
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-            {
-                if Path::new(rel)
+            for rel in untracked {
+                if rel
                     .components()
                     .any(|component| matches!(component, Component::Normal(part) if part == ".git"))
                 {
                     continue;
                 }
-                let target = root.join(rel);
-                if target.is_dir() {
-                    std::fs::remove_dir_all(&target)?;
-                } else if target.exists() {
-                    std::fs::remove_file(&target)?;
-                }
+                remove_checkpoint_target(&root, &rel)?;
             }
         }
 
@@ -584,8 +729,8 @@ impl CheckpointManager {
 
         if !output.status.success() {
             return Err(CheckpointError::Git {
-                command: format!("git --no-pager diff --no-ext-diff --no-color {commit_hash}"),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                command: "git diff".to_string(),
+                stderr: sanitized_git_stderr(&output.stderr),
             });
         }
 
@@ -607,8 +752,8 @@ impl CheckpointManager {
         )?;
         if !output.status.success() {
             return Err(CheckpointError::Git {
-                command: format!("git ls-tree --name-only -r {commit_hash} -- {rel_path}"),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                command: "git ls-tree".to_string(),
+                stderr: sanitized_git_stderr(&output.stderr),
             });
         }
         Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
@@ -628,12 +773,13 @@ pub fn new_turn(scope: impl Into<String>, turn_number: Option<usize>) {
 }
 
 pub fn resolve_thread_root(scope: &str, fallback: Option<&Path>) -> Option<PathBuf> {
-    global_manager().lock().ok().and_then(|guard| {
-        guard
-            .latest_thread_root(scope)
-            .or_else(|| fallback.map(canonicalize_or_lexical))
-            .or_else(|| std::env::current_dir().ok())
-    })
+    let guard = global_manager()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard
+        .latest_thread_root(scope)
+        .or_else(|| fallback.map(canonicalize_or_lexical))
+        .or_else(|| std::env::current_dir().ok())
 }
 
 pub fn detect_project_root(path: &Path) -> Option<PathBuf> {
@@ -672,7 +818,9 @@ pub async fn ensure_checkpoint(
     let project_root = project_root_from_target(target_path, fallback_root);
     let reason = reason.to_string();
     tokio::task::spawn_blocking(move || {
-        let mut guard = global_manager().lock().expect("checkpoint mutex poisoned");
+        let mut guard = global_manager()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.create_checkpoint_inner(&scope, &project_root, &reason, false)
     })
     .await
@@ -682,7 +830,9 @@ pub async fn ensure_checkpoint(
 pub async fn list_checkpoints(project_dir: &Path) -> Result<Vec<CheckpointEntry>, CheckpointError> {
     let project_dir = project_dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let guard = global_manager().lock().expect("checkpoint mutex poisoned");
+        let guard = global_manager()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.list_inner(&project_dir)
     })
     .await
@@ -708,7 +858,9 @@ pub async fn restore_with_scope(
     let commit_hash = commit_hash.to_string();
     let file = file.map(str::to_string);
     tokio::task::spawn_blocking(move || {
-        let mut guard = global_manager().lock().expect("checkpoint mutex poisoned");
+        let mut guard = global_manager()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.restore_inner(&scope, &project_dir, &commit_hash, file.as_deref())
     })
     .await
@@ -719,7 +871,9 @@ pub async fn diff(project_dir: &Path, commit_hash: &str) -> Result<String, Check
     let project_dir = project_dir.to_path_buf();
     let commit_hash = commit_hash.to_string();
     tokio::task::spawn_blocking(move || {
-        let guard = global_manager().lock().expect("checkpoint mutex poisoned");
+        let guard = global_manager()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.diff_inner(&project_dir, &commit_hash)
     })
     .await
@@ -813,6 +967,76 @@ mod tests {
 
         assert!(first);
         assert!(!second);
+    }
+
+    #[tokio::test]
+    async fn whole_restore_removes_paths_absent_from_target_checkpoint() {
+        configure(true, 10);
+        new_turn("thread-delete", Some(0));
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .unwrap();
+        let original = dir.path().join("original.txt");
+        std::fs::write(&original, "original").unwrap();
+        let ctx = ctx_with_thread("thread-delete");
+        ensure_checkpoint(&ctx, &original, Some(dir.path()), "initial")
+            .await
+            .unwrap();
+        let checkpoint = list_checkpoints(dir.path()).await.unwrap()[0]
+            .commit_hash
+            .clone();
+
+        let later = dir.path().join("later.txt");
+        std::fs::write(&later, "must disappear").unwrap();
+        restore_with_scope("thread-delete", dir.path(), &checkpoint, None)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(original).unwrap(), "original");
+        assert!(!later.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_refuses_symbolic_link_ancestor_escape() {
+        use std::os::unix::fs::symlink;
+
+        configure(true, 10);
+        new_turn("thread-symlink", Some(0));
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .unwrap();
+        let original = dir.path().join("original.txt");
+        std::fs::write(&original, "original").unwrap();
+        let ctx = ctx_with_thread("thread-symlink");
+        ensure_checkpoint(&ctx, &original, Some(dir.path()), "initial")
+            .await
+            .unwrap();
+        let checkpoint = list_checkpoints(dir.path()).await.unwrap()[0]
+            .commit_hash
+            .clone();
+
+        let outside_file = outside.path().join("outside.txt");
+        std::fs::write(&outside_file, "keep").unwrap();
+        symlink(outside.path(), dir.path().join("escape")).unwrap();
+        let error = restore_with_scope(
+            "thread-symlink",
+            dir.path(),
+            &checkpoint,
+            Some("escape/outside.txt"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, CheckpointError::InvalidPath(_)));
+        assert_eq!(std::fs::read_to_string(outside_file).unwrap(), "keep");
     }
 
     #[test]

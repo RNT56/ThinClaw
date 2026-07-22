@@ -1,10 +1,40 @@
 //! Root-independent helpers for thread runtime metadata envelopes.
 
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, Weak};
+
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thinclaw_types::error::DatabaseError;
+use tokio::sync::{Mutex, OwnedMutexGuard};
+use uuid::Uuid;
 
 pub const THREAD_RUNTIME_METADATA_KEY: &str = "runtime";
+
+static RUNTIME_MUTATION_LOCKS: OnceLock<Mutex<HashMap<Uuid, Weak<Mutex<()>>>>> = OnceLock::new();
+
+/// Acquire the process-wide mutation lock for one thread runtime envelope.
+///
+/// The desktop runtime has several root and portable adapters that all update
+/// different fields of the same JSON object. Serializing their read/modify/
+/// write cycles prevents a late writer from silently clobbering another
+/// subsystem's approval, prompt, history, or subagent state.
+pub async fn acquire_runtime_mutation_lock(thread_id: Uuid) -> OwnedMutexGuard<()> {
+    let locks = RUNTIME_MUTATION_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let lock = {
+        let mut locks = locks.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        match locks.get(&thread_id).and_then(Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(thread_id, Arc::downgrade(&lock));
+                lock
+            }
+        }
+    };
+    lock.lock_owned().await
+}
 
 pub fn decode_thread_runtime<T>(metadata: &serde_json::Value) -> Result<Option<T>, DatabaseError>
 where

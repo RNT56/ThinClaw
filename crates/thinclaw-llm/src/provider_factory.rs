@@ -6,11 +6,13 @@
 //! routing, and response caching decorators.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rig::client::CompletionClient;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::RigAdapter;
+use crate::bounded_http_client::BoundedHttpClient;
 use crate::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 use crate::failover::{
     CooldownConfig, FailoverProvider, LeaseConfig, LeaseSelectionStrategy, ProviderLeaseEntry,
@@ -24,6 +26,108 @@ use thinclaw_settings::{
     normalize_credential_max_concurrent,
 };
 use thinclaw_types::error::LlmError;
+
+const MAX_PROVIDER_URL_BYTES: usize = 16 * 1024;
+const MAX_PROVIDER_SECRET_BYTES: usize = 64 * 1024;
+const MAX_PROVIDER_CREDENTIALS: usize = 32;
+const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
+
+fn request_failed(provider: &str, reason: impl Into<String>) -> LlmError {
+    LlmError::RequestFailed {
+        provider: provider.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn validate_provider_secret(provider: &str, value: &str) -> Result<(), LlmError> {
+    if value.is_empty()
+        || value.len() > MAX_PROVIDER_SECRET_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(request_failed(
+            provider,
+            "provider credential is empty, oversized, or malformed",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_model_id(provider: &str, model: &str) -> Result<(), LlmError> {
+    if model.is_empty() || model.len() > 1024 || model.chars().any(char::is_control) {
+        return Err(request_failed(
+            provider,
+            "model identifier is empty, oversized, or malformed",
+        ));
+    }
+    Ok(())
+}
+
+fn is_explicit_local_host(host: &str) -> bool {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    if normalized == "localhost"
+        || normalized.ends_with(".localhost")
+        || normalized.ends_with(".local")
+        || normalized.ends_with(".internal")
+    {
+        return true;
+    }
+    normalized.parse::<std::net::IpAddr>().is_ok_and(|address| {
+        !address.is_unspecified()
+            && !address.is_multicast()
+            && !thinclaw_tools_core::is_public_outbound_ip(address)
+    })
+}
+
+fn hardened_http_client(
+    provider: &str,
+    base_url: &str,
+    allow_local_http: bool,
+) -> Result<BoundedHttpClient, LlmError> {
+    if base_url.is_empty() || base_url.len() > MAX_PROVIDER_URL_BYTES {
+        return Err(request_failed(
+            provider,
+            "provider base URL is empty or oversized",
+        ));
+    }
+    let parsed = reqwest::Url::parse(base_url)
+        .map_err(|error| request_failed(provider, format!("invalid provider base URL: {error}")))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| request_failed(provider, "provider base URL has no host"))?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(request_failed(
+            provider,
+            "provider base URL cannot contain credentials, a query, or a fragment",
+        ));
+    }
+    let valid_scheme = parsed.scheme() == "https"
+        || parsed.scheme() == "http" && allow_local_http && is_explicit_local_host(host);
+    if !valid_scheme {
+        return Err(request_failed(
+            provider,
+            "provider base URL must use HTTPS; HTTP is allowed only for explicit local endpoints",
+        ));
+    }
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .pool_idle_timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|error| {
+            request_failed(
+                provider,
+                format!("failed to build provider HTTP client: {error}"),
+            )
+        })?;
+    Ok(BoundedHttpClient::new(client))
+}
 
 /// Create an LLM provider based on configuration.
 pub fn create_llm_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -81,10 +185,12 @@ fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
     let oai = config.openai.as_ref().ok_or_else(|| LlmError::AuthFailed {
         provider: "openai".to_string(),
     })?;
+    validate_model_id("openai", &oai.model)?;
 
     let api_key = oai.api_key.as_ref().ok_or_else(|| LlmError::AuthFailed {
         provider: "openai (OPENAI_API_KEY not set)".to_string(),
     })?;
+    validate_provider_secret("openai", api_key.expose_secret())?;
 
     use rig::providers::openai;
 
@@ -92,28 +198,30 @@ fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
     // (Responses API). The Responses API path in rig-core panics when tool results
     // are sent back because thinclaw doesn't thread `call_id` through its ToolCall
     // type. The Chat Completions API works correctly with the existing code.
-    let client: openai::CompletionsClient = if let Some(ref base_url) = oai.base_url {
+    let base_url = oai.base_url.as_deref().unwrap_or(OPENAI_BASE_URL);
+    let http = hardened_http_client("openai", base_url, oai.base_url.is_some())?;
+    if oai.base_url.is_some() {
         tracing::info!(
             "Using OpenAI direct API (chat completions, model: {}, base_url: {})",
             oai.model,
             base_url,
         );
-        openai::Client::builder()
-            .base_url(base_url)
-            .api_key(api_key.expose_secret())
-            .build()
     } else {
         tracing::info!(
             "Using OpenAI direct API (chat completions, model: {}, base_url: default)",
             oai.model,
         );
-        openai::Client::new(api_key.expose_secret())
     }
-    .map_err(|e| LlmError::RequestFailed {
-        provider: "openai".to_string(),
-        reason: format!("Failed to create OpenAI client: {}", e),
-    })?
-    .completions_api();
+    let client: openai::CompletionsClient<BoundedHttpClient> = openai::Client::builder()
+        .base_url(base_url)
+        .api_key(api_key.expose_secret())
+        .http_client(http)
+        .build()
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "openai".to_string(),
+            reason: format!("Failed to create OpenAI client: {}", e),
+        })?
+        .completions_api();
 
     let model = client.completion_model(&oai.model);
     Ok(Arc::new(
@@ -133,25 +241,26 @@ fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
         .ok_or_else(|| LlmError::AuthFailed {
             provider: "anthropic".to_string(),
         })?;
+    validate_model_id("anthropic", &anth.model)?;
 
     let api_key = anth.api_key.as_ref().ok_or_else(|| LlmError::AuthFailed {
         provider: "anthropic (ANTHROPIC_API_KEY not set)".to_string(),
     })?;
+    validate_provider_secret("anthropic", api_key.expose_secret())?;
 
     use rig::providers::anthropic;
 
-    let client: anthropic::Client = if let Some(ref base_url) = anth.base_url {
-        anthropic::Client::builder()
-            .api_key(api_key.expose_secret())
-            .base_url(base_url)
-            .build()
-    } else {
-        anthropic::Client::new(api_key.expose_secret())
-    }
-    .map_err(|e| LlmError::RequestFailed {
-        provider: "anthropic".to_string(),
-        reason: format!("Failed to create Anthropic client: {}", e),
-    })?;
+    let base_url = anth.base_url.as_deref().unwrap_or(ANTHROPIC_BASE_URL);
+    let http = hardened_http_client("anthropic", base_url, anth.base_url.is_some())?;
+    let client: anthropic::Client<BoundedHttpClient> = anthropic::Client::builder()
+        .api_key(api_key.expose_secret())
+        .base_url(base_url)
+        .http_client(http)
+        .build()
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "anthropic".to_string(),
+            reason: format!("Failed to create Anthropic client: {}", e),
+        })?;
 
     let model = client.completion_model(&anth.model).with_prompt_caching();
     tracing::info!(
@@ -169,13 +278,16 @@ fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
     let oll = config.ollama.as_ref().ok_or_else(|| LlmError::AuthFailed {
         provider: "ollama".to_string(),
     })?;
+    validate_model_id("ollama", &oll.model)?;
 
     use rig::client::Nothing;
     use rig::providers::ollama;
 
-    let client: ollama::Client = ollama::Client::builder()
+    let http = hardened_http_client("ollama", &oll.base_url, true)?;
+    let client: ollama::Client<BoundedHttpClient> = ollama::Client::builder()
         .base_url(&oll.base_url)
         .api_key(Nothing)
+        .http_client(http)
         .build()
         .map_err(|e| LlmError::RequestFailed {
             provider: "ollama".to_string(),
@@ -202,16 +314,20 @@ fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
         .ok_or_else(|| LlmError::AuthFailed {
             provider: "tinfoil".to_string(),
         })?;
+    validate_model_id("tinfoil", &tf.model)?;
 
     let api_key = tf.api_key.as_ref().ok_or_else(|| LlmError::AuthFailed {
         provider: "tinfoil (TINFOIL_API_KEY not set)".to_string(),
     })?;
+    validate_provider_secret("tinfoil", api_key.expose_secret())?;
 
     use rig::providers::openai;
 
-    let client: openai::Client = openai::Client::builder()
+    let http = hardened_http_client("tinfoil", TINFOIL_BASE_URL, false)?;
+    let client: openai::Client<BoundedHttpClient> = openai::Client::builder()
         .base_url(TINFOIL_BASE_URL)
         .api_key(api_key.expose_secret())
+        .http_client(http)
         .build()
         .map_err(|e| LlmError::RequestFailed {
             provider: "tinfoil".to_string(),
@@ -235,29 +351,44 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
         .ok_or_else(|| LlmError::AuthFailed {
             provider: "openai_compatible".to_string(),
         })?;
+    validate_model_id("openai_compatible", &compat.model)?;
 
     use rig::providers::openai;
 
+    if compat.extra_headers.len() > 64 {
+        return Err(request_failed(
+            "openai_compatible",
+            "too many provider headers",
+        ));
+    }
     let mut extra_headers = reqwest::header::HeaderMap::new();
+    let mut header_bytes = 0usize;
     for (key, value) in &compat.extra_headers {
-        let name = match reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(header = %key, error = %e, "Skipping LLM_EXTRA_HEADERS entry: invalid header name");
-                continue;
-            }
-        };
-        let val = match reqwest::header::HeaderValue::from_str(value) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(header = %key, error = %e, "Skipping LLM_EXTRA_HEADERS entry: invalid header value");
-                continue;
-            }
-        };
+        header_bytes = header_bytes
+            .checked_add(key.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or_else(|| request_failed("openai_compatible", "provider headers are oversized"))?;
+        if header_bytes > MAX_PROVIDER_SECRET_BYTES {
+            return Err(request_failed(
+                "openai_compatible",
+                "provider headers are oversized",
+            ));
+        }
+        let name = reqwest::header::HeaderName::from_bytes(key.as_bytes()).map_err(|_| {
+            request_failed("openai_compatible", "provider header name is malformed")
+        })?;
+        let val = reqwest::header::HeaderValue::from_str(value).map_err(|_| {
+            request_failed("openai_compatible", "provider header value is malformed")
+        })?;
         extra_headers.insert(name, val);
     }
 
-    let client: openai::CompletionsClient = openai::Client::builder()
+    if let Some(api_key) = compat.api_key.as_ref() {
+        validate_provider_secret("openai_compatible", api_key.expose_secret())?;
+    }
+    let http = hardened_http_client("openai_compatible", &compat.base_url, true)?;
+
+    let client: openai::CompletionsClient<BoundedHttpClient> = openai::Client::builder()
         .base_url(&compat.base_url)
         .api_key(
             compat
@@ -267,6 +398,7 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
                 .unwrap_or_else(|| "no-key".to_string()),
         )
         .http_headers(extra_headers)
+        .http_client(http)
         .build()
         .map_err(|e| LlmError::RequestFailed {
             provider: "openai_compatible".to_string(),
@@ -290,41 +422,46 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
     ))
 }
 
-fn runtime_extra_headers() -> reqwest::header::HeaderMap {
+fn runtime_extra_headers() -> Result<reqwest::header::HeaderMap, LlmError> {
     let mut headers = reqwest::header::HeaderMap::new();
     let raw = thinclaw_config::helpers::optional_env("LLM_EXTRA_HEADERS")
-        .ok()
-        .flatten()
+        .map_err(|error| request_failed("provider_headers", error.to_string()))?
         .unwrap_or_default();
+    if raw.len() > MAX_PROVIDER_SECRET_BYTES {
+        return Err(request_failed(
+            "provider_headers",
+            "LLM_EXTRA_HEADERS is oversized",
+        ));
+    }
 
-    for part in raw
+    for (index, part) in raw
         .split(',')
         .map(str::trim)
         .filter(|part| !part.is_empty())
+        .enumerate()
     {
+        if index >= 64 {
+            return Err(request_failed(
+                "provider_headers",
+                "LLM_EXTRA_HEADERS contains too many entries",
+            ));
+        }
         let Some((key, value)) = part.split_once(':') else {
-            tracing::warn!(entry = %part, "Skipping malformed LLM_EXTRA_HEADERS entry");
-            continue;
+            return Err(request_failed(
+                "provider_headers",
+                "LLM_EXTRA_HEADERS contains an entry without a colon",
+            ));
         };
 
-        let name = match reqwest::header::HeaderName::from_bytes(key.trim().as_bytes()) {
-            Ok(name) => name,
-            Err(err) => {
-                tracing::warn!(header = %key, error = %err, "Skipping invalid header name");
-                continue;
-            }
-        };
-        let value = match reqwest::header::HeaderValue::from_str(value.trim()) {
-            Ok(value) => value,
-            Err(err) => {
-                tracing::warn!(header = %key, error = %err, "Skipping invalid header value");
-                continue;
-            }
-        };
+        let name = reqwest::header::HeaderName::from_bytes(key.trim().as_bytes())
+            .map_err(|_| request_failed("provider_headers", "provider header name is malformed"))?;
+        let value = reqwest::header::HeaderValue::from_str(value.trim()).map_err(|_| {
+            request_failed("provider_headers", "provider header value is malformed")
+        })?;
         headers.insert(name, value);
     }
 
-    headers
+    Ok(headers)
 }
 
 /// Create an LLM provider from a catalog entry.
@@ -369,10 +506,23 @@ fn create_provider_for_catalog_entry_with_api_key(
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     use thinclaw_config::provider_catalog::{ApiStyle, endpoint_for};
 
+    if provider_slug.is_empty()
+        || provider_slug.len() > 64
+        || !provider_slug
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(request_failed(
+            "provider",
+            "provider identifier is empty, oversized, or malformed",
+        ));
+    }
+
     let endpoint = endpoint_for(provider_slug).ok_or_else(|| LlmError::RequestFailed {
         provider: provider_slug.to_string(),
         reason: format!("Unknown provider '{}' in catalog", provider_slug),
     })?;
+    validate_model_id(provider_slug, model)?;
     let stream_support = if endpoint.supports_streaming {
         StreamSupport::Native
     } else {
@@ -405,12 +555,15 @@ fn create_provider_for_catalog_entry_with_api_key(
             let key = api_key_str.ok_or_else(|| LlmError::AuthFailed {
                 provider: format!("{} ({} not set)", provider_slug, endpoint.env_key_name),
             })?;
+            validate_provider_secret(provider_slug, &key)?;
+            let http = hardened_http_client(provider_slug, &endpoint.base_url, false)?;
 
             use rig::providers::openai;
-            let client: openai::CompletionsClient = openai::Client::builder()
+            let client: openai::CompletionsClient<BoundedHttpClient> = openai::Client::builder()
                 .base_url(&endpoint.base_url)
                 .api_key(&key)
-                .http_headers(runtime_extra_headers())
+                .http_headers(runtime_extra_headers()?)
+                .http_client(http)
                 .build()
                 .map_err(|e| LlmError::RequestFailed {
                     provider: provider_slug.to_string(),
@@ -438,10 +591,16 @@ fn create_provider_for_catalog_entry_with_api_key(
             let key = api_key_str.ok_or_else(|| LlmError::AuthFailed {
                 provider: format!("{} ({} not set)", provider_slug, endpoint.env_key_name),
             })?;
+            validate_provider_secret(provider_slug, &key)?;
+            let http = hardened_http_client(provider_slug, &endpoint.base_url, false)?;
 
             use rig::providers::anthropic;
-            let client: anthropic::Client =
-                anthropic::Client::new(&key).map_err(|e| LlmError::RequestFailed {
+            let client: anthropic::Client<BoundedHttpClient> = anthropic::Client::builder()
+                .base_url(&endpoint.base_url)
+                .api_key(&key)
+                .http_client(http)
+                .build()
+                .map_err(|e| LlmError::RequestFailed {
                     provider: provider_slug.to_string(),
                     reason: format!("Failed to create Anthropic client: {}", e),
                 })?;
@@ -465,12 +624,17 @@ fn create_provider_for_catalog_entry_with_api_key(
         ApiStyle::OpenAiCompatible => {
             // OpenAI-compatible endpoint (groq, gemini, mistral, xai, etc.)
             let key = api_key_str.unwrap_or_else(|| "no-key".to_string());
+            if key != "no-key" {
+                validate_provider_secret(provider_slug, &key)?;
+            }
+            let http = hardened_http_client(provider_slug, &endpoint.base_url, false)?;
 
             use rig::providers::openai;
-            let client: openai::CompletionsClient = openai::Client::builder()
+            let client: openai::CompletionsClient<BoundedHttpClient> = openai::Client::builder()
                 .base_url(&endpoint.base_url)
                 .api_key(&key)
-                .http_headers(runtime_extra_headers())
+                .http_headers(runtime_extra_headers()?)
+                .http_client(http)
                 .build()
                 .map_err(|e| LlmError::RequestFailed {
                     provider: provider_slug.to_string(),
@@ -502,10 +666,12 @@ fn create_provider_for_catalog_entry_with_api_key(
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| endpoint.base_url.to_string());
+            let http = hardened_http_client(provider_slug, &base_url, true)?;
 
-            let client: ollama::Client = ollama::Client::builder()
+            let client: ollama::Client<BoundedHttpClient> = ollama::Client::builder()
                 .base_url(&base_url)
                 .api_key(Nothing)
+                .http_client(http)
                 .build()
                 .map_err(|e| LlmError::RequestFailed {
                     provider: provider_slug.to_string(),
@@ -543,6 +709,15 @@ fn resolve_catalog_api_keys(
         .and_then(|settings| settings.resolved_provider_api_keys.get(provider_slug))
         .filter(|values| !values.is_empty())
     {
+        if values.len() > MAX_PROVIDER_CREDENTIALS {
+            return Err(request_failed(
+                provider_slug,
+                format!(
+                    "provider has {} credentials; maximum is {MAX_PROVIDER_CREDENTIALS}",
+                    values.len()
+                ),
+            ));
+        }
         return Ok(values
             .iter()
             .map(|value| value.expose_secret().trim().to_string())
@@ -559,6 +734,12 @@ fn resolve_catalog_api_keys(
         })? && !value.trim().is_empty()
             && !target.iter().any(|existing| existing == value.trim())
         {
+            if target.len() >= MAX_PROVIDER_CREDENTIALS {
+                return Err(request_failed(
+                    env_name,
+                    format!("provider credential count exceeds {MAX_PROVIDER_CREDENTIALS}"),
+                ));
+            }
             target.push(value.trim().to_string());
         }
         Ok(())
@@ -577,6 +758,12 @@ fn resolve_catalog_api_keys(
                 .filter(|value| !value.is_empty())
             {
                 if !target.iter().any(|existing| existing == value) {
+                    if target.len() >= MAX_PROVIDER_CREDENTIALS {
+                        return Err(request_failed(
+                            env_name,
+                            format!("provider credential count exceeds {MAX_PROVIDER_CREDENTIALS}"),
+                        ));
+                    }
                     target.push(value.to_string());
                 }
             }
@@ -703,16 +890,20 @@ fn create_gemini_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
     let gem = config.gemini.as_ref().ok_or_else(|| LlmError::AuthFailed {
         provider: "gemini".to_string(),
     })?;
+    validate_model_id("gemini", &gem.model)?;
 
     let api_key = gem.api_key.as_ref().ok_or_else(|| LlmError::AuthFailed {
         provider: "gemini (GEMINI_API_KEY not set)".to_string(),
     })?;
+    validate_provider_secret("gemini", api_key.expose_secret())?;
 
     use rig::providers::openai;
 
-    let client: openai::CompletionsClient = openai::Client::builder()
+    let http = hardened_http_client("gemini", &gem.base_url, false)?;
+    let client: openai::CompletionsClient<BoundedHttpClient> = openai::Client::builder()
         .base_url(&gem.base_url)
         .api_key(api_key.expose_secret())
+        .http_client(http)
         .build()
         .map_err(|e| LlmError::RequestFailed {
             provider: "gemini".to_string(),
@@ -747,14 +938,28 @@ fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
         .ok_or_else(|| LlmError::AuthFailed {
             provider: "bedrock".to_string(),
         })?;
+    validate_model_id("bedrock", &br.model_id)?;
 
     use rig::providers::openai;
 
     if let Some(api_key) = br.api_key.as_ref() {
-        let base_url = crate::discovery::bedrock_mantle_base_url(&br.region);
-        let client: openai::CompletionsClient = openai::Client::builder()
+        validate_provider_secret("bedrock", api_key.expose_secret())?;
+        if br.region.is_empty()
+            || br.region.len() > 64
+            || !br
+                .region
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(request_failed("bedrock", "AWS region is malformed"));
+        }
+        let base_url = crate::discovery::bedrock_mantle_base_url(&br.region)
+            .map_err(|reason| request_failed("bedrock", reason))?;
+        let http = hardened_http_client("bedrock", &base_url, false)?;
+        let client: openai::CompletionsClient<BoundedHttpClient> = openai::Client::builder()
             .base_url(&base_url)
             .api_key(api_key.expose_secret())
+            .http_client(http)
             .build()
             .map_err(|e| LlmError::RequestFailed {
                 provider: "bedrock".to_string(),
@@ -778,9 +983,14 @@ fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
             .as_ref()
             .map(|secret| secret.expose_secret().to_string())
             .unwrap_or_else(|| "no-key".to_string());
-        let client: openai::CompletionsClient = openai::Client::builder()
+        if key != "no-key" {
+            validate_provider_secret("bedrock", &key)?;
+        }
+        let http = hardened_http_client("bedrock", &proxy, true)?;
+        let client: openai::CompletionsClient<BoundedHttpClient> = openai::Client::builder()
             .base_url(&proxy)
             .api_key(&key)
+            .http_client(http)
             .build()
             .map_err(|e| LlmError::RequestFailed {
                 provider: "bedrock".to_string(),
@@ -821,13 +1031,16 @@ fn create_llama_cpp_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
         .ok_or_else(|| LlmError::AuthFailed {
             provider: "llama_cpp".to_string(),
         })?;
+    validate_model_id("llama_cpp", &lc.model)?;
 
     use rig::providers::openai;
 
     // llama.cpp server uses OpenAI-compatible endpoint, no API key required.
-    let client: openai::CompletionsClient = openai::Client::builder()
+    let http = hardened_http_client("llama_cpp", &lc.server_url, true)?;
+    let client: openai::CompletionsClient<BoundedHttpClient> = openai::Client::builder()
         .base_url(&lc.server_url)
         .api_key("no-key") // llama.cpp server doesn't require auth
+        .http_client(http)
         .build()
         .map_err(|e| LlmError::RequestFailed {
             provider: "llama_cpp".to_string(),

@@ -197,6 +197,7 @@ async fn load_workflow(
     name_or_path: &str,
     allow_untrusted: bool,
 ) -> anyhow::Result<serde_json::Value> {
+    const MAX_WORKFLOW_BYTES: u64 = 8 * 1024 * 1024;
     if let Some(workflow) = thinclaw_media::bundled_workflow(name_or_path) {
         return Ok(workflow);
     }
@@ -206,7 +207,12 @@ async fn load_workflow(
             name_or_path
         );
     }
-    let content = tokio::fs::read_to_string(name_or_path).await?;
+    let bytes = thinclaw_platform::read_regular_file_bounded_async(
+        std::path::PathBuf::from(name_or_path),
+        MAX_WORKFLOW_BYTES,
+    )
+    .await?;
+    let content = String::from_utf8(bytes)?;
     let workflow = serde_json::from_str(&content)?;
     thinclaw_media::validate_api_workflow(&workflow)?;
     Ok(workflow)
@@ -243,7 +249,13 @@ async fn run_command(
         tokio::fs::create_dir_all(cwd).await?;
         command.current_dir(cwd);
     }
-    let output = command.output().await?;
+    let output = thinclaw_platform::bounded_command_output(
+        &mut command,
+        std::time::Duration::from_secs(10 * 60),
+        1024 * 1024,
+        1024 * 1024,
+    )
+    .await?;
     Ok(json!({
         "program": program,
         "args": args,

@@ -6,10 +6,16 @@
 //! - `logs show`     — show logs for a time range
 //! - `logs levels`   — list available log levels and targets
 
-use std::path::PathBuf;
+use std::io::{Read as _, Seek as _};
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::Subcommand;
+
+const MAX_LOG_QUERY_ENTRIES: usize = 50_000;
+const MAX_LOG_DIRECTORY_ENTRIES: usize = 4096;
+const MAX_LOG_TAIL_BYTES_PER_FILE: u64 = 16 * 1024 * 1024;
+const MAX_LOG_FILTER_BYTES: usize = 4096;
 
 /// Default log directory.
 fn default_log_dir() -> PathBuf {
@@ -210,17 +216,20 @@ pub fn parse_relative_time(s: &str) -> Option<DateTime<Utc>> {
     // Relative format: "1h", "30m", "1d"
     let (num_str, unit) = s.split_at(s.len().saturating_sub(1));
     let num: i64 = num_str.parse().ok()?;
+    if num < 0 {
+        return None;
+    }
 
     let duration = match unit {
-        "s" => chrono::Duration::seconds(num),
-        "m" => chrono::Duration::minutes(num),
-        "h" => chrono::Duration::hours(num),
-        "d" => chrono::Duration::days(num),
-        "w" => chrono::Duration::weeks(num),
+        "s" => chrono::Duration::try_seconds(num)?,
+        "m" => chrono::Duration::try_minutes(num)?,
+        "h" => chrono::Duration::try_hours(num)?,
+        "d" => chrono::Duration::try_days(num)?,
+        "w" => chrono::Duration::try_weeks(num)?,
         _ => return None,
     };
 
-    Some(Utc::now() - duration)
+    Utc::now().checked_sub_signed(duration)
 }
 
 /// Run a log CLI command.
@@ -233,7 +242,8 @@ pub async fn run_log_command(cmd: LogCommand) -> anyhow::Result<()> {
             log_dir,
         } => {
             let dir = log_dir.unwrap_or_else(default_log_dir);
-            let entries = read_log_entries(&dir, lines * 2)?; // read extra for filtering
+            let lines = lines.min(MAX_LOG_QUERY_ENTRIES);
+            let entries = read_log_entries(&dir, lines.saturating_mul(2))?;
 
             let filtered: Vec<&LogEntry> = entries
                 .iter()
@@ -262,6 +272,9 @@ pub async fn run_log_command(cmd: LogCommand) -> anyhow::Result<()> {
             until,
             log_dir,
         } => {
+            if pattern.len() > MAX_LOG_FILTER_BYTES {
+                anyhow::bail!("log search pattern exceeds the size limit");
+            }
             let dir = log_dir.unwrap_or_else(default_log_dir);
             let entries = read_log_entries(&dir, 10_000)?;
 
@@ -364,42 +377,92 @@ pub async fn run_log_command(cmd: LogCommand) -> anyhow::Result<()> {
 
 /// Read log entries from a log directory. Returns up to `max` entries.
 fn read_log_entries(dir: &std::path::Path, max: usize) -> anyhow::Result<Vec<LogEntry>> {
-    if !dir.exists() {
-        // No log directory yet — that's OK, just return empty
+    let max = max.min(MAX_LOG_QUERY_ENTRIES);
+    if max == 0 {
         return Ok(Vec::new());
+    }
+    let directory_metadata = match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        anyhow::bail!("log path is not a real directory");
     }
 
     // Find log files, sorted by name (newest last)
-    let mut log_files: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
+    let mut log_files = Vec::new();
+    for (index, entry) in std::fs::read_dir(dir)?.enumerate() {
+        if index >= MAX_LOG_DIRECTORY_ENTRIES {
+            anyhow::bail!("log directory contains too many entries");
+        }
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_file()
+            && path
+                .extension()
                 .is_some_and(|ext| ext == "log" || ext == "txt" || ext == "jsonl")
-        })
-        .collect();
+        {
+            log_files.push(path);
+        }
+    }
     log_files.sort();
 
     let mut entries = Vec::new();
 
     // Read files in reverse order (newest first) until we have enough
     for file in log_files.iter().rev() {
-        let content = std::fs::read_to_string(file)?;
-        let file_entries: Vec<LogEntry> = content
+        let content = read_log_tail(file, MAX_LOG_TAIL_BYTES_PER_FILE)?;
+        let file_entries = content
             .lines()
+            .rev()
             .filter(|line| !line.trim().is_empty())
-            .map(LogEntry::parse)
-            .collect();
+            .map(LogEntry::parse);
 
-        entries.extend(file_entries);
+        entries.extend(file_entries.take(max.saturating_sub(entries.len())));
 
         if entries.len() >= max {
-            entries.truncate(max);
             break;
         }
     }
 
+    entries.reverse();
     Ok(entries)
+}
+
+fn read_log_tail(path: &Path, max_bytes: u64) -> anyhow::Result<String> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("log entry is not a regular file");
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options.open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() {
+        anyhow::bail!("log entry is not a regular file");
+    }
+    let start = opened.len().saturating_sub(max_bytes);
+    file.seek(std::io::SeekFrom::Start(start))?;
+    let capacity = usize::try_from(opened.len().saturating_sub(start)).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(max_bytes).read_to_end(&mut bytes)?;
+    if start > 0
+        && let Some(newline) = bytes.iter().position(|byte| *byte == b'\n')
+    {
+        bytes.drain(..=newline);
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(test)]
@@ -475,6 +538,8 @@ mod tests {
 
         // Invalid
         assert!(parse_relative_time("abc").is_none());
+        assert!(parse_relative_time("-1h").is_none());
+        assert!(parse_relative_time("9223372036854775807w").is_none());
     }
 
     #[test]
@@ -483,5 +548,28 @@ mod tests {
         let entries = read_log_entries(std::path::Path::new("/tmp/nonexistent_thinclaw_logs"), 100);
         assert!(entries.is_ok());
         assert!(entries.unwrap().is_empty());
+    }
+
+    #[test]
+    fn log_reader_returns_the_most_recent_lines_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("agent.log"), "one\ntwo\nthree\nfour\n").unwrap();
+
+        let entries = read_log_entries(dir.path(), 2).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].raw, "three");
+        assert_eq!(entries[1].raw, "four");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_reader_does_not_follow_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), "secret\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked.log")).unwrap();
+
+        assert!(read_log_entries(dir.path(), 10).unwrap().is_empty());
     }
 }

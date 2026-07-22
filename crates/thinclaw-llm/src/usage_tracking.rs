@@ -38,9 +38,20 @@ pub const USAGE_TRACKING_EXPERIMENT_TRIAL_ID_KEY: &str =
 pub const USAGE_TRACKING_EXPERIMENT_ROLE_KEY: &str = "thinclaw.usage_tracking.experiment_role";
 pub const USAGE_TRACKING_EXPERIMENT_TARGET_IDS_KEY: &str =
     "thinclaw.usage_tracking.experiment_target_ids";
+const ABANDONED_STREAM_USAGE_TIMEOUT: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(100)
+} else {
+    std::time::Duration::from_secs(5)
+};
 
 #[async_trait]
 pub trait LlmBudgetRecorder: Send + Sync {
+    /// Reject a call before any provider request is made. The default keeps
+    /// lightweight record-only implementations source-compatible.
+    async fn check_allowed(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     async fn record_llm_call_with_cost(
         &self,
         model: &str,
@@ -323,7 +334,18 @@ impl Drop for StreamUsageRecorder {
             return;
         };
         handle.spawn(async move {
-            mode.record(None, None, 0, 0, None, latency_ms, false).await;
+            if tokio::time::timeout(
+                ABANDONED_STREAM_USAGE_TIMEOUT,
+                mode.record(None, None, 0, 0, None, latency_ms, false),
+            )
+            .await
+            .is_err()
+            {
+                tracing::debug!(
+                    timeout_ms = ABANDONED_STREAM_USAGE_TIMEOUT.as_millis() as u64,
+                    "Timed out recording abandoned LLM stream usage"
+                );
+            }
         });
     }
 }
@@ -435,6 +457,19 @@ impl UsageTrackingProvider {
         }
     }
 
+    async fn enforce_budget(&self) -> Result<(), LlmError> {
+        if let Some(ref guard) = self.guard {
+            guard
+                .check_allowed()
+                .await
+                .map_err(|reason| LlmError::InvalidResponse {
+                    provider: "cost_guard".to_string(),
+                    reason,
+                })?;
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn track_completion(
         &self,
@@ -492,6 +527,7 @@ impl LlmProvider for UsageTrackingProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.enforce_budget().await?;
         let metadata = request.metadata.clone();
         let started = std::time::Instant::now();
         let response = self.inner.complete(request).await;
@@ -531,6 +567,7 @@ impl LlmProvider for UsageTrackingProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        self.enforce_budget().await?;
         let metadata = request.metadata.clone();
         let started = std::time::Instant::now();
         let response = self.inner.complete_with_tools(request).await;
@@ -570,6 +607,7 @@ impl LlmProvider for UsageTrackingProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
+        self.enforce_budget().await?;
         let metadata = request.metadata.clone();
         let started = Instant::now();
         let mut stream = match self.inner.complete_stream(request).await {
@@ -698,6 +736,7 @@ impl LlmProvider for UsageTrackingProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
+        self.enforce_budget().await?;
         let metadata = request.metadata.clone();
         let started = Instant::now();
         let mut stream = match self.inner.complete_stream_with_tools(request).await {
@@ -882,6 +921,7 @@ mod tests {
     struct StubLlm {
         content: String,
         model: String,
+        calls: Arc<AtomicU64>,
     }
 
     impl StubLlm {
@@ -889,6 +929,7 @@ mod tests {
             Self {
                 content: content.into(),
                 model: "test-model".to_string(),
+                calls: Arc::new(AtomicU64::new(0)),
             }
         }
 
@@ -912,6 +953,7 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> Result<CompletionResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(CompletionResponse {
                 content: self.content.clone(),
                 provider_model: Some(self.model.clone()),
@@ -928,6 +970,7 @@ mod tests {
             &self,
             _request: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(ToolCompletionResponse {
                 content: Some(self.content.clone()),
                 provider_model: Some(self.model.clone()),
@@ -939,6 +982,24 @@ mod tests {
                 finish_reason: FinishReason::Stop,
                 token_capture: None,
             })
+        }
+    }
+
+    struct RejectingBudgetRecorder;
+
+    #[async_trait]
+    impl LlmBudgetRecorder for RejectingBudgetRecorder {
+        async fn check_allowed(&self) -> Result<(), String> {
+            Err("daily budget exhausted".to_string())
+        }
+
+        async fn record_llm_call_with_cost(
+            &self,
+            _model: &str,
+            _input_tokens: u32,
+            _output_tokens: u32,
+            _cost: Decimal,
+        ) {
         }
     }
 
@@ -1052,5 +1113,46 @@ mod tests {
         let summary = tracker.lock().await.summary("2026-04-05", "2026-04");
         assert_eq!(summary.total_requests, 1);
         assert_eq!(summary.model_details[0].model, "openai/gpt-5.4-mini");
+    }
+
+    #[tokio::test]
+    async fn rejected_budget_blocks_every_provider_entry_point() {
+        let tracker = Arc::new(tokio::sync::Mutex::new(
+            CostTracker::new(Default::default()),
+        ));
+        let inner = Arc::new(StubLlm::new("must not run"));
+        let calls = Arc::clone(&inner.calls);
+        let provider = UsageTrackingProvider::new(
+            inner,
+            tracker,
+            None,
+            Some(Arc::new(RejectingBudgetRecorder)),
+        );
+
+        assert!(
+            provider
+                .complete(CompletionRequest::new(vec![]))
+                .await
+                .is_err()
+        );
+        assert!(
+            provider
+                .complete_with_tools(ToolCompletionRequest::new(vec![], vec![]))
+                .await
+                .is_err()
+        );
+        assert!(
+            provider
+                .complete_stream(CompletionRequest::new(vec![]))
+                .await
+                .is_err()
+        );
+        assert!(
+            provider
+                .complete_stream_with_tools(ToolCompletionRequest::new(vec![], vec![]))
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

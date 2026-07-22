@@ -13,9 +13,16 @@ use serde::{Deserialize, Serialize};
 
 use thinclaw_secrets::SecretsStore;
 use thinclaw_tools_core::{
-    ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str,
+    ApprovalRequirement, OutboundUrlGuardOptions, Tool, ToolError, ToolOutput, ToolRateLimitConfig,
+    require_str, validate_outbound_url_pinned_async,
 };
 use thinclaw_types::JobContext;
+
+const OPENAI_TTS_URL: &str = "https://api.openai.com/v1/audio/speech";
+const MAX_TTS_ERROR_BYTES: usize = 64 * 1024;
+const MAX_TTS_AUDIO_BYTES: usize = 64 * 1024 * 1024;
+const MAX_TTS_TEXT_CHARS: usize = 4096;
+const MAX_TTS_INSTRUCTION_CHARS: usize = 4096;
 
 /// Available TTS voices.
 const VOICES: &[&str] = &[
@@ -40,7 +47,6 @@ struct TtsResponse {
 /// Uses the OpenAI TTS API to convert text into spoken audio.
 /// Requires an OpenAI API key via SecretsStore or environment variable.
 pub struct TtsTool {
-    client: reqwest::Client,
     secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
     output_dir: PathBuf,
 }
@@ -49,7 +55,6 @@ impl TtsTool {
     /// Create a new TTS tool with a secrets store for API key retrieval.
     pub fn new(secrets: Option<Arc<dyn SecretsStore + Send + Sync>>, output_dir: PathBuf) -> Self {
         Self {
-            client: reqwest::Client::new(),
             secrets,
             output_dir,
         }
@@ -90,6 +95,37 @@ impl TtsTool {
         instructions: Option<&str>,
     ) -> Result<TtsResponse, ToolError> {
         let api_key = self.resolve_api_key().await?;
+        if api_key.is_empty() || api_key.len() > 64 * 1024 || api_key.chars().any(char::is_control)
+        {
+            return Err(ToolError::ExecutionFailed(
+                "OpenAI API key is empty, oversized, or malformed".to_string(),
+            ));
+        }
+
+        let guarded = validate_outbound_url_pinned_async(
+            OPENAI_TTS_URL,
+            &OutboundUrlGuardOptions {
+                require_https: true,
+                upgrade_http_to_https: false,
+                allowlist: vec!["api.openai.com".to_string()],
+            },
+        )
+        .await?;
+        let host = guarded
+            .url
+            .host_str()
+            .ok_or_else(|| ToolError::ExecutionFailed("TTS URL has no host".to_string()))?;
+        let mut client_builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if !guarded.pinned_addrs.is_empty() {
+            client_builder = client_builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+        }
+        let client = client_builder
+            .build()
+            .map_err(|e| ToolError::ExternalService(format!("TTS client setup failed: {e}")))?;
 
         let mut body = serde_json::json!({
             "model": model,
@@ -106,29 +142,41 @@ impl TtsTool {
             body["instructions"] = serde_json::Value::String(inst.to_string());
         }
 
-        let response = self
-            .client
-            .post("https://api.openai.com/v1/audio/speech")
+        let response = client
+            .post(guarded.url)
             .bearer_auth(&api_key)
             .json(&body)
             .timeout(Duration::from_secs(120))
             .send()
             .await
-            .map_err(|e| ToolError::ExternalService(format!("TTS request failed: {e}")))?;
+            .map_err(|e| {
+                ToolError::ExternalService(format!("TTS request failed: {}", e.without_url()))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = thinclaw_types::http_response::bounded_text(response, MAX_TTS_ERROR_BYTES)
+                .await
+                .unwrap_or_else(|error| format!("unreadable error response: {error}"));
+            let preview = body
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(512)
+                .collect::<String>();
             return Err(ToolError::ExternalService(format!(
-                "TTS API error {status}: {body}"
+                "TTS API error {status}: {preview}"
             )));
         }
 
-        let audio_bytes = response
-            .bytes()
-            .await
-            .map_err(|e| ToolError::ExternalService(format!("Failed to read audio: {e}")))?
-            .to_vec();
+        let audio_bytes =
+            thinclaw_types::http_response::bounded_bytes(response, MAX_TTS_AUDIO_BYTES)
+                .await
+                .map_err(|e| ToolError::ExternalService(format!("Failed to read audio: {e}")))?;
+        if audio_bytes.is_empty() {
+            return Err(ToolError::ExternalService(
+                "TTS API returned an empty audio response".to_string(),
+            ));
+        }
 
         Ok(TtsResponse {
             audio_bytes,
@@ -217,10 +265,10 @@ impl Tool for TtsTool {
             ));
         }
 
-        if text.len() > 4096 {
+        let character_count = text.chars().count();
+        if character_count > MAX_TTS_TEXT_CHARS {
             return Err(ToolError::InvalidParameters(format!(
-                "text too long ({} chars, max 4096)",
-                text.len()
+                "text too long ({character_count} chars, max {MAX_TTS_TEXT_CHARS})"
             )));
         }
 
@@ -260,13 +308,21 @@ impl Tool for TtsTool {
             )));
         }
 
-        let speed = params
-            .get("speed")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(1.0)
-            .clamp(0.25, 4.0);
+        let speed = params.get("speed").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        if !speed.is_finite() || !(0.25..=4.0).contains(&speed) {
+            return Err(ToolError::InvalidParameters(
+                "speed must be between 0.25 and 4.0".to_string(),
+            ));
+        }
 
         let instructions = params.get("instructions").and_then(|v| v.as_str());
+        if instructions
+            .is_some_and(|instructions| instructions.chars().count() > MAX_TTS_INSTRUCTION_CHARS)
+        {
+            return Err(ToolError::InvalidParameters(format!(
+                "instructions exceed the {MAX_TTS_INSTRUCTION_CHARS}-character limit"
+            )));
+        }
 
         // Call TTS API
         let response = self
@@ -282,17 +338,22 @@ impl Tool for TtsTool {
         let filename = format!("tts_{}.{}", uuid::Uuid::new_v4(), format);
         let file_path = self.output_dir.join(&filename);
 
-        tokio::fs::write(&file_path, &response.audio_bytes)
+        let TtsResponse {
+            audio_bytes,
+            format: response_format,
+        } = response;
+        let size_bytes = audio_bytes.len();
+        thinclaw_platform::write_private_file_atomic_async(file_path.clone(), audio_bytes, false)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write audio file: {e}")))?;
 
         let result = TtsResult {
             file_path: file_path.to_string_lossy().to_string(),
-            format: response.format,
-            size_bytes: response.audio_bytes.len(),
+            format: response_format,
+            size_bytes,
             voice: voice.to_string(),
             model: model.to_string(),
-            characters: text.len(),
+            characters: character_count,
         };
 
         let result_json = serde_json::to_value(&result)
@@ -304,7 +365,7 @@ impl Tool for TtsTool {
             "tts-1-hd" | "gpt-4o-mini-tts" => dec!(0.000030),
             _ => dec!(0.000015),
         };
-        let cost = cost_per_char * rust_decimal::Decimal::from(text.len() as u64);
+        let cost = cost_per_char * rust_decimal::Decimal::from(character_count as u64);
 
         Ok(ToolOutput::success(result_json, start.elapsed()).with_cost(cost))
     }

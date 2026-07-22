@@ -165,15 +165,19 @@ impl ClaudeCodeConfig {
     pub fn extract_oauth_token() -> Option<String> {
         // macOS: extract from Keychain
         if cfg!(target_os = "macos") {
-            match std::process::Command::new("security")
-                .args([
-                    "find-generic-password",
-                    "-s",
-                    "Claude Code-credentials",
-                    "-w",
-                ])
-                .output()
-            {
+            let mut command = std::process::Command::new("security");
+            command.args([
+                "find-generic-password",
+                "-s",
+                "Claude Code-credentials",
+                "-w",
+            ]);
+            match thinclaw_platform::bounded_std_command_output(
+                &mut command,
+                Duration::from_secs(10),
+                4 * 1024 * 1024,
+                64 * 1024,
+            ) {
                 Ok(output) if output.status.success() => {
                     if let Ok(json) = String::from_utf8(output.stdout) {
                         return parse_oauth_access_token(json.trim());
@@ -191,8 +195,11 @@ impl ClaudeCodeConfig {
         // Linux / fallback: read from ~/.claude/.credentials.json
         if let Some(home) = dirs::home_dir() {
             let creds_path = home.join(".claude").join(".credentials.json");
-            if let Ok(json) = std::fs::read_to_string(&creds_path) {
-                return parse_oauth_access_token(&json);
+            if let Ok(bytes) =
+                thinclaw_platform::read_regular_file_bounded(&creds_path, 4 * 1024 * 1024)
+                && let Ok(json) = std::str::from_utf8(&bytes)
+            {
+                return parse_oauth_access_token(json);
             }
         }
 
@@ -352,6 +359,9 @@ fn parse_oauth_access_token(json: &str) -> Option<String> {
     let creds: serde_json::Value = serde_json::from_str(json).ok()?;
     creds["claudeAiOauth"]["accessToken"]
         .as_str()
+        .filter(|token| {
+            !token.is_empty() && token.len() <= 64 * 1024 && !token.chars().any(char::is_control)
+        })
         .map(String::from)
 }
 

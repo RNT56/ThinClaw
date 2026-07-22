@@ -5,6 +5,9 @@
 //! ensuring the agent retains workspace-specific knowledge.
 
 use serde::{Deserialize, Serialize};
+use std::path::{Component, Path};
+
+const MAX_RULE_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Configuration for the read audit layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,20 +85,50 @@ impl ReadAuditor {
 
     /// Scan workspace paths for rules.
     pub fn scan_rules(&mut self, workspace_root: &str) {
-        for rule_path in &self.config.rule_paths {
-            let full_path = format!("{}/{}", workspace_root, rule_path);
+        let Ok(canonical_root) = Path::new(workspace_root).canonicalize() else {
+            return;
+        };
 
-            if let Ok(content) = std::fs::read_to_string(&full_path)
-                && !content.trim().is_empty()
+        for rule_path in &self.config.rule_paths {
+            let relative = Path::new(rule_path);
+            if relative.is_absolute()
+                || relative.components().any(|component| {
+                    matches!(
+                        component,
+                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                    )
+                })
             {
-                let estimated_tokens = estimate_tokens(&content);
-                self.rules.push(WorkspaceRule {
-                    source: rule_path.clone(),
-                    content,
-                    scope: RuleScope::Global,
-                    estimated_tokens,
-                });
+                continue;
             }
+
+            let joined = canonical_root.join(relative);
+            let Ok(canonical_rule) = joined.canonicalize() else {
+                continue;
+            };
+            if !canonical_rule.starts_with(&canonical_root) {
+                continue;
+            }
+            let Ok(bytes) = thinclaw_platform::read_regular_file_bounded_single_link(
+                &canonical_rule,
+                MAX_RULE_FILE_BYTES,
+            ) else {
+                continue;
+            };
+            let Ok(content) = String::from_utf8(bytes) else {
+                continue;
+            };
+            if content.trim().is_empty() {
+                continue;
+            }
+
+            let estimated_tokens = estimate_tokens(&content);
+            self.rules.push(WorkspaceRule {
+                source: rule_path.clone(),
+                content,
+                scope: RuleScope::Global,
+                estimated_tokens,
+            });
         }
     }
 
@@ -113,12 +146,14 @@ impl ReadAuditor {
                 continue;
             }
 
-            if total_tokens + rule.estimated_tokens > self.config.max_rule_tokens {
+            if total_tokens.saturating_add(rule.estimated_tokens) > self.config.max_rule_tokens {
                 // Truncate remaining rules
                 let remaining = self.config.max_rule_tokens.saturating_sub(total_tokens);
                 if remaining > 10 {
-                    let truncated: String =
-                        rule.content.chars().take(remaining as usize * 4).collect();
+                    let character_limit = usize::try_from(remaining)
+                        .unwrap_or(usize::MAX)
+                        .saturating_mul(4);
+                    let truncated: String = rule.content.chars().take(character_limit).collect();
                     body.push_str(&format!("\n[{}]:\n{}", rule.source, truncated));
                     body.push_str("\n[... truncated]");
                 }
@@ -126,7 +161,7 @@ impl ReadAuditor {
             }
 
             body.push_str(&format!("\n[{}]:\n{}", rule.source, rule.content));
-            total_tokens += rule.estimated_tokens;
+            total_tokens = total_tokens.saturating_add(rule.estimated_tokens);
         }
 
         if body.is_empty() {
@@ -152,13 +187,15 @@ impl ReadAuditor {
 
     /// Total estimated tokens across all rules.
     pub fn total_tokens(&self) -> u32 {
-        self.rules.iter().map(|r| r.estimated_tokens).sum()
+        self.rules.iter().fold(0_u32, |total, rule| {
+            total.saturating_add(rule.estimated_tokens)
+        })
     }
 }
 
 /// Simple token estimation (~4 chars per token).
 fn estimate_tokens(text: &str) -> u32 {
-    (text.len() as u32 / 4).max(1)
+    (u32::try_from(text.len()).unwrap_or(u32::MAX) / 4).max(1)
 }
 
 #[cfg(test)]
@@ -259,5 +296,58 @@ mod tests {
     fn test_estimate_tokens() {
         assert_eq!(estimate_tokens("hello world!"), 3);
         assert_eq!(estimate_tokens(""), 1);
+    }
+
+    #[test]
+    fn scan_rules_rejects_paths_outside_workspace() {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let workspace = parent.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        std::fs::write(parent.path().join("outside.md"), "outside rule")
+            .expect("write outside rule");
+
+        let mut auditor = ReadAuditor::new(ReadAuditConfig {
+            rule_paths: vec!["../outside.md".to_string()],
+            ..Default::default()
+        });
+        auditor.scan_rules(workspace.to_str().expect("utf-8 workspace"));
+
+        assert_eq!(auditor.rule_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_rules_rejects_symlinks_that_escape_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let workspace = parent.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        let outside = parent.path().join("outside.md");
+        std::fs::write(&outside, "outside rule").expect("write outside rule");
+        symlink(&outside, workspace.join("RULES.md")).expect("create symlink");
+
+        let mut auditor = ReadAuditor::new(ReadAuditConfig {
+            rule_paths: vec!["RULES.md".to_string()],
+            ..Default::default()
+        });
+        auditor.scan_rules(workspace.to_str().expect("utf-8 workspace"));
+
+        assert_eq!(auditor.rule_count(), 0);
+    }
+
+    #[test]
+    fn total_tokens_saturates() {
+        let mut auditor = ReadAuditor::new(ReadAuditConfig::default());
+        for _ in 0..2 {
+            auditor.add_rule(WorkspaceRule {
+                source: "rules.md".to_string(),
+                content: "rule".to_string(),
+                scope: RuleScope::Global,
+                estimated_tokens: u32::MAX,
+            });
+        }
+
+        assert_eq!(auditor.total_tokens(), u32::MAX);
     }
 }

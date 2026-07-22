@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -29,10 +28,10 @@ use thinclaw_gateway::web::chat::{
     extension_manager_unavailable_error, history_response, normalize_chat_history_query,
     parse_approval_request_id, parse_chat_thread_delete_id, parse_chat_thread_path_id,
     pending_approvals_response, resolve_chat_history_thread_id, send_message_response,
-    session_manager_unavailable_error, thread_command_response, thread_export_content,
-    thread_export_response, thread_info, thread_list_response, thread_list_response_from_summaries,
-    thread_not_found_error, too_many_chat_connections_error, turn_info_from_session_turn,
-    turns_from_history_messages, unknown_approval_action_error,
+    session_manager_unavailable_error, supported_thread_export_format, thread_command_response,
+    thread_export_content, thread_export_response, thread_info, thread_list_response,
+    thread_list_response_from_summaries, thread_not_found_error, too_many_chat_connections_error,
+    turn_info_from_session_turn, turns_from_history_messages, unknown_approval_action_error,
 };
 use thinclaw_gateway::web::identity::DeviceContext;
 use thinclaw_gateway::web::ports::{
@@ -41,86 +40,8 @@ use thinclaw_gateway::web::ports::{
 pub(crate) use thinclaw_gateway::web::submission::gateway_submission_error;
 use thinclaw_gateway::web::submission::{build_gateway_message, submit_gateway_message};
 
-#[derive(serde::Deserialize, serde::Serialize)]
-struct AcceptedClientMessage {
-    message_id: Uuid,
-    accepted_at: chrono::DateTime<chrono::Utc>,
-}
-
-type AcceptedClientMessages = HashMap<String, AcceptedClientMessage>;
-static ACCEPTED_CLIENT_MESSAGES: OnceLock<Mutex<AcceptedClientMessages>> = OnceLock::new();
-const CLIENT_MESSAGE_TTL_HOURS: i64 = 24;
-const MAX_CLIENT_MESSAGE_IDS: usize = 4096;
-
-fn accepted_client_messages() -> &'static Mutex<AcceptedClientMessages> {
-    ACCEPTED_CLIENT_MESSAGES.get_or_init(|| {
-        #[cfg(test)]
-        let cache = HashMap::new();
-        #[cfg(not(test))]
-        let cache = {
-            let path =
-                crate::platform::resolve_data_dir("mobile").join("accepted-client-messages.json");
-            let mut loaded: AcceptedClientMessages = std::fs::read(path)
-                .ok()
-                .and_then(|data| serde_json::from_slice(&data).ok())
-                .unwrap_or_default();
-            prune_accepted_client_messages(&mut loaded);
-            loaded
-        };
-        Mutex::new(cache)
-    })
-}
-
-fn prune_accepted_client_messages(cache: &mut AcceptedClientMessages) {
-    let cutoff = chrono::Utc::now() - chrono::Duration::hours(CLIENT_MESSAGE_TTL_HOURS);
-    cache.retain(|_, accepted| accepted.accepted_at > cutoff);
-}
-
-fn accepted_client_message(key: &str) -> Option<Uuid> {
-    let mut cache = accepted_client_messages().lock().ok()?;
-    prune_accepted_client_messages(&mut cache);
-    cache.get(key).map(|accepted| accepted.message_id)
-}
-
-fn remember_client_message(key: String, id: Uuid) {
-    let Ok(mut cache) = accepted_client_messages().lock() else {
-        return;
-    };
-    prune_accepted_client_messages(&mut cache);
-    if cache.len() >= MAX_CLIENT_MESSAGE_IDS
-        && let Some(oldest) = cache
-            .iter()
-            .min_by_key(|(_, accepted)| accepted.accepted_at.timestamp_millis())
-            .map(|(key, _)| key.clone())
-    {
-        cache.remove(&oldest);
-    }
-    cache.insert(
-        key,
-        AcceptedClientMessage {
-            message_id: id,
-            accepted_at: chrono::Utc::now(),
-        },
-    );
-    #[cfg(not(test))]
-    persist_accepted_client_messages(&cache);
-}
-
-#[cfg(not(test))]
-fn persist_accepted_client_messages(cache: &AcceptedClientMessages) {
-    let path = crate::platform::resolve_data_dir("mobile").join("accepted-client-messages.json");
-    let Some(parent) = path.parent() else { return };
-    let result = (|| -> std::io::Result<()> {
-        std::fs::create_dir_all(parent)?;
-        let data = serde_json::to_vec(cache).map_err(std::io::Error::other)?;
-        let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, data)?;
-        std::fs::rename(temporary, &path)
-    })();
-    if let Err(error) = result {
-        tracing::warn!(%error, "failed to persist accepted client message ids");
-    }
-}
+const MAX_THREAD_EXPORT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_THREAD_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 
 #[utoipa::path(
     post,
@@ -139,8 +60,19 @@ pub(crate) async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
     request_identity: GatewayRequestIdentity,
+    device_ctx: Option<axum::Extension<DeviceContext>>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
+    thinclaw_gateway::web::chat::validate_gateway_chat_content(&req.content)?;
+    if let Some(thread_id) = req.thread_id.as_deref() {
+        thinclaw_gateway::web::chat::parse_chat_thread_query_id(thread_id)?;
+    }
+
+    let rate_limit_key = request_identity.rate_limit_key(device_ctx.as_ref().map(|ctx| &ctx.0));
+    if !state.chat_rate_limiter.check_for(&rate_limit_key) {
+        return Err(chat_rate_limit_error());
+    }
+
     let request_identity = request_identity_with_overrides(
         &state,
         &request_identity,
@@ -148,54 +80,17 @@ pub(crate) async fn chat_send_handler(
         req.actor_id.as_deref(),
     )
     .await;
-    let client_message_id = req
-        .client_message_id
-        .as_deref()
-        .map(Uuid::parse_str)
-        .transpose()
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                "client_message_id must be a UUID".to_string(),
-            )
-        })?;
-    let idempotency_key = client_message_id.map(|id| {
-        format!(
-            "{}:{}:{}",
-            request_identity.principal_id,
-            req.thread_id.as_deref().unwrap_or_default(),
-            id
-        )
-    });
-    if let Some(key) = idempotency_key.as_deref()
-        && let Some(message_id) = accepted_client_message(key)
-    {
-        return Ok((
-            StatusCode::ACCEPTED,
-            Json(send_message_response(message_id)),
-        ));
-    }
-    if !state.chat_rate_limiter.check() {
-        return Err(chat_rate_limit_error());
-    }
-
     let browser_origin = request_origin_from_headers(&headers);
-    let mut msg = build_gateway_message(
+    let msg = build_gateway_message(
         "gateway",
         &request_identity,
         req.content.as_str(),
         req.thread_id.as_deref(),
         browser_origin.as_deref(),
     );
-    if let Some(client_message_id) = client_message_id {
-        msg.id = client_message_id;
-    }
     let msg_id = submit_gateway_message(state.as_ref(), msg)
         .await
         .map_err(gateway_submission_error)?;
-    if let Some(key) = idempotency_key {
-        remember_client_message(key, msg_id);
-    }
 
     Ok((StatusCode::ACCEPTED, Json(send_message_response(msg_id))))
 }
@@ -220,6 +115,9 @@ pub(crate) async fn chat_approval_handler(
     device_ctx: Option<axum::Extension<DeviceContext>>,
     Json(req): Json<ApprovalRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
+    if let Some(thread_id) = req.thread_id.as_deref() {
+        thinclaw_gateway::web::chat::parse_chat_thread_query_id(thread_id)?;
+    }
     let (approved, always) = match req.action.as_str() {
         "approve" => (true, false),
         "always" => (true, true),
@@ -234,7 +132,7 @@ pub(crate) async fn chat_approval_handler(
     // all, but the gateway enforces the rule server-side so a compromised or
     // spoofed watch client cannot approve a destructive action from the wrist.
     // The risk tier is the gateway-side single source of truth carried in the
-    // Durable pending-approvals registry populated at the central
+    // durable pending-approvals registry populated at the central
     // `ApprovalNeeded` broadcast boundary.
     // Only an *approve* is gated — a companion may always DENY. The check runs
     // before the registry entry is dropped below. `always` implies approve, so it
@@ -425,6 +323,18 @@ pub(crate) async fn chat_auth_token_handler(
     request_identity: GatewayRequestIdentity,
     Json(req): Json<AuthTokenRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    if req.extension_name.trim().is_empty()
+        || req.extension_name.len() > 128
+        || req.extension_name.chars().any(char::is_control)
+        || req.token.trim().is_empty()
+        || req.token.len() > 1024 * 1024
+        || req.token.contains('\0')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Extension authentication input is malformed or oversized".to_string(),
+        ));
+    }
     let ext_mgr = state
         .extension_manager
         .as_ref()
@@ -633,15 +543,20 @@ pub(crate) async fn chat_ws_handler(
         return Err((error.status_code(), error.to_string()));
     }
     let device_ctx = device_ctx.map(|ext| ext.0);
-    Ok(ws.on_upgrade(move |socket| {
-        crate::channels::web::ws::handle_ws_connection(
-            socket,
-            state,
-            request_identity,
-            browser_origin,
-            device_ctx,
-        )
-    }))
+    const MAX_WS_MESSAGE_BYTES: usize =
+        thinclaw_gateway::web::chat::MAX_GATEWAY_CHAT_CONTENT_BYTES + 64 * 1024;
+    Ok(ws
+        .max_message_size(MAX_WS_MESSAGE_BYTES)
+        .max_frame_size(MAX_WS_MESSAGE_BYTES)
+        .on_upgrade(move |socket| {
+            crate::channels::web::ws::handle_ws_connection(
+                socket,
+                state,
+                request_identity,
+                browser_origin,
+                device_ctx,
+            )
+        }))
 }
 
 #[utoipa::path(
@@ -722,9 +637,12 @@ pub(crate) async fn chat_history_handler(
     if let Some(thread) = sess.threads.get(&thread_id)
         && !thread.turns.is_empty()
     {
+        let first_turn = thread.turns.len().saturating_sub(history_options.limit);
+        let oldest_timestamp = thread.turns.get(first_turn).map(|turn| turn.started_at);
         let turns: Vec<TurnInfo> = thread
             .turns
             .iter()
+            .skip(first_turn)
             .map(|t| {
                 turn_info_from_session_turn(GatewaySessionTurnInfo {
                     turn_number: t.turn_number,
@@ -747,7 +665,12 @@ pub(crate) async fn chat_history_handler(
             })
             .collect();
 
-        return Ok(Json(history_response(thread_id, turns, false, None)));
+        return Ok(Json(history_response(
+            thread_id,
+            turns,
+            first_turn > 0,
+            oldest_timestamp,
+        )));
     }
 
     if let Some(ref store) = state.store {
@@ -896,6 +819,12 @@ pub(crate) async fn chat_thread_export_handler(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let format = query.format.unwrap_or_else(|| "markdown".to_string());
+        if !supported_thread_export_format(&format) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "unsupported export format".to_string(),
+            ));
+        }
         let export_messages = messages
             .into_iter()
             .map(|message| GatewayThreadExportMessage {
@@ -909,9 +838,45 @@ pub(crate) async fn chat_thread_export_handler(
                 created_at: message.created_at,
             })
             .collect::<Vec<_>>();
+        let source_bytes = export_messages.iter().try_fold(
+            0_usize,
+            |total, message| -> Result<usize, (StatusCode, String)> {
+                let metadata_bytes = serde_json::to_vec(&message.metadata)
+                    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+                    .len();
+                total
+                    .checked_add(message.role.len())
+                    .and_then(|value| value.checked_add(message.content.len()))
+                    .and_then(|value| value.checked_add(metadata_bytes))
+                    .ok_or_else(|| {
+                        (
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "session export size overflow".to_string(),
+                        )
+                    })
+            },
+        )?;
+        if source_bytes > MAX_THREAD_EXPORT_SOURCE_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "session is too large to export safely".to_string(),
+            ));
+        }
+        let message_count = export_messages.len();
         let content = thread_export_content(&format, &export_messages)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        return Ok(Json(thread_export_response(thread_id, format, content)));
+        if content.len() > MAX_THREAD_EXPORT_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "rendered session export is too large".to_string(),
+            ));
+        }
+        return Ok(Json(thread_export_response(
+            thread_id,
+            format,
+            content,
+            message_count,
+        )));
     }
 
     Err(chat_store_unavailable_error())
@@ -997,16 +962,19 @@ async fn persist_gateway_side_thread(
         .ensure_conversation(thread_id, "gateway", user_id, None)
         .await?;
 
+    let thread_key = thread_id.to_string();
     let stable_external_conversation_key =
-        format!("gateway://direct/{user_id}/actor/{actor_id}/thread/{thread_id}");
+        thinclaw_gateway::web::identity::gateway_direct_conversation_key(
+            user_id,
+            actor_id,
+            Some(("thread", &thread_key)),
+        );
     store
         .update_conversation_identity(
             thread_id,
             Some(user_id),
             Some(actor_id),
-            Some(crate::identity::scope_id_from_key(&format!(
-                "principal:{user_id}"
-            ))),
+            Some(crate::identity::direct_scope_id(user_id, actor_id)),
             crate::history::ConversationKind::Direct,
             Some(&stable_external_conversation_key),
         )
@@ -1115,16 +1083,6 @@ mod tests {
     use super::*;
     use futures::StreamExt;
 
-    #[test]
-    fn accepted_client_message_ids_are_idempotent() {
-        let key = format!("test-principal:test-thread:{}", Uuid::new_v4());
-        let gateway_message_id = Uuid::new_v4();
-
-        assert_eq!(accepted_client_message(&key), None);
-        remember_client_message(key.clone(), gateway_message_id);
-        assert_eq!(accepted_client_message(&key), Some(gateway_message_id));
-    }
-
     fn test_gateway_state(
         session_manager: Arc<crate::agent::SessionManager>,
         store: Option<Arc<dyn crate::db::Database>>,
@@ -1168,7 +1126,7 @@ mod tests {
             channel_manager: None,
             hooks: None,
             device_registry: crate::channels::web::server::test_device_registry(),
-            pending_approvals: std::sync::Arc::new(
+            pending_approvals: Arc::new(
                 crate::channels::web::server::PendingApprovalsStore::in_memory(),
             ),
         })
@@ -1224,57 +1182,6 @@ mod tests {
             crate::channels::web::identity_helpers::GatewayAuthSource::DeviceToken,
             true,
         )
-    }
-
-    fn send_message_request(client_message_id: Option<String>) -> SendMessageRequest {
-        SendMessageRequest {
-            content: "hello from a retry-safe client".to_string(),
-            thread_id: None,
-            user_id: None,
-            actor_id: None,
-            client_message_id,
-        }
-    }
-
-    #[tokio::test]
-    async fn chat_send_rejects_malformed_client_message_id_before_submission() {
-        let session_manager = Arc::new(crate::agent::SessionManager::new());
-        let state = test_gateway_state(session_manager, None);
-
-        let error = chat_send_handler(
-            State(state),
-            HeaderMap::new(),
-            device_identity(),
-            Json(send_message_request(Some("not-a-uuid".to_string()))),
-        )
-        .await
-        .expect_err("malformed client message IDs must be rejected");
-
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert_eq!(error.1, "client_message_id must be a UUID");
-    }
-
-    #[tokio::test]
-    async fn chat_send_returns_the_original_acceptance_for_an_idempotent_retry() {
-        let session_manager = Arc::new(crate::agent::SessionManager::new());
-        let state = test_gateway_state(session_manager, None);
-        let client_message_id = Uuid::new_v4();
-        let accepted_message_id = Uuid::new_v4();
-        let key = format!("gateway-user::{client_message_id}");
-        remember_client_message(key, accepted_message_id);
-
-        let (status, Json(response)) = chat_send_handler(
-            State(state),
-            HeaderMap::new(),
-            device_identity(),
-            Json(send_message_request(Some(client_message_id.to_string()))),
-        )
-        .await
-        .expect("an idempotent retry should return the first acceptance");
-
-        assert_eq!(status, StatusCode::ACCEPTED);
-        assert_eq!(response.message_id, accepted_message_id);
-        assert_eq!(response.status, "accepted");
     }
 
     #[tokio::test]
@@ -1414,7 +1321,14 @@ mod tests {
             .expect("metadata query should succeed")
             .expect("thread metadata should exist");
 
-        assert!(summaries.iter().any(|summary| summary.id == info.id));
+        let persisted = summaries
+            .iter()
+            .find(|summary| summary.id == info.id)
+            .expect("created thread summary");
+        assert_eq!(
+            persisted.conversation_scope_id,
+            Some(crate::identity::direct_scope_id("user-1", "actor-1"))
+        );
         assert_eq!(
             metadata.get("thread_type"),
             Some(&serde_json::json!("thread"))

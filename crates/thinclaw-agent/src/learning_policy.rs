@@ -199,9 +199,12 @@ pub fn updated_generated_skill_proposal(
         artifact_version_id,
         transition_at,
     );
-    let obj = proposal
-        .as_object_mut()
-        .expect("generated skill proposal should be object");
+    let Some(obj) = proposal.as_object_mut() else {
+        // The normalization above makes this branch unreachable, but keeping
+        // the helper total prevents malformed future refactors from taking
+        // down the learning worker.
+        return serde_json::json!({});
+    };
     obj.insert("provenance".to_string(), serde_json::json!("generated"));
     obj.insert(
         "lifecycle_status".to_string(),
@@ -254,10 +257,9 @@ pub fn updated_generated_skill_proposal(
     if !history.is_array() {
         *history = serde_json::json!([]);
     }
-    history
-        .as_array_mut()
-        .expect("state_history should be array")
-        .push(entry);
+    if let Some(history) = history.as_array_mut() {
+        history.push(entry);
+    }
     proposal
 }
 
@@ -1057,12 +1059,14 @@ mod tests {
     fn generated_skill_triggers_detect_workflow_signals() {
         let mut turn = Turn::new(0, "Actually use the browser then write memory", false);
         turn.tool_calls.push(TurnToolCall {
+            id: "call-browser".to_string(),
             name: "browser_open".to_string(),
             parameters: serde_json::json!({}),
             result: Some(serde_json::json!({"ok": true})),
             error: None,
         });
         turn.tool_calls.push(TurnToolCall {
+            id: "call-memory".to_string(),
             name: "memory_write".to_string(),
             parameters: serde_json::json!({}),
             result: Some(serde_json::json!({"ok": true})),
@@ -1354,12 +1358,14 @@ mod tests {
     #[test]
     fn generated_workflow_digest_distinguishes_parameters_and_outcomes() {
         let first = vec![TurnToolCall {
+            id: "call-1".to_string(),
             name: "shell".to_string(),
             parameters: serde_json::json!({"cmd": "echo one"}),
             result: Some(serde_json::json!({"stdout": "one"})),
             error: None,
         }];
         let second = vec![TurnToolCall {
+            id: "call-2".to_string(),
             name: "shell".to_string(),
             parameters: serde_json::json!({"cmd": "echo two"}),
             result: Some(serde_json::json!({"stdout": "two"})),
@@ -1375,12 +1381,14 @@ mod tests {
     #[test]
     fn generated_workflow_digest_is_stable_for_reordered_object_keys() {
         let first = vec![TurnToolCall {
+            id: "call-1".to_string(),
             name: "http".to_string(),
             parameters: serde_json::json!({"url": "https://example.com", "method": "GET"}),
             result: Some(serde_json::json!({"status": 200, "ok": true})),
             error: None,
         }];
         let second = vec![TurnToolCall {
+            id: "call-2".to_string(),
             name: "http".to_string(),
             parameters: serde_json::json!({"method": "GET", "url": "https://example.com"}),
             result: Some(serde_json::json!({"ok": true, "status": 200})),
@@ -1399,6 +1407,7 @@ mod tests {
             "generated-summary",
             "Help the user collect a file summary and write it down.",
             &[TurnToolCall {
+                id: "call-shell".to_string(),
                 name: "shell".to_string(),
                 parameters: serde_json::json!({"cmd": "echo hi"}),
                 result: Some(serde_json::json!({"stdout": "hi"})),

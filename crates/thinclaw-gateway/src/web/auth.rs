@@ -28,7 +28,9 @@ use subtle::ConstantTimeEq;
 use thinclaw_settings::{GatewayPrincipalConfig, GatewayRole};
 
 use crate::web::devices::{DEVICE_TOKEN_PREFIX, DeviceRegistry, required_scope, store::now_iso};
-use crate::web::identity::{DeviceContext, GatewayAuthSource, GatewayRequestIdentity};
+use crate::web::identity::{
+    DeviceContext, GatewayAuthSource, GatewayRequestIdentity, valid_gateway_identity_component,
+};
 use crate::web::ports::IdentityLookupPort;
 use crate::web::rbac::role_allows_request;
 
@@ -148,8 +150,11 @@ pub async fn auth_middleware(
             && let Ok(principal_id) = user_header.to_str()
         {
             let principal_id = principal_id.trim();
-            if principal_id.is_empty() {
-                return (StatusCode::UNAUTHORIZED, "Trusted proxy identity was empty")
+            if !valid_gateway_identity_component(principal_id) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    "Trusted proxy identity was malformed",
+                )
                     .into_response();
             }
             let actor_id = principal_id.to_string();
@@ -343,17 +348,22 @@ async fn fallback_request_identity(
     auth: &AuthState,
     auth_source: GatewayAuthSource,
 ) -> GatewayRequestIdentity {
-    let principal_id = if !auth.fallback_principal_id.trim().is_empty()
+    let principal_id = if valid_gateway_identity_component(&auth.fallback_principal_id)
         && auth.fallback_principal_id != "default"
     {
         auth.fallback_principal_id.clone()
     } else if let Some(store) = auth.store.as_ref() {
         match store.infer_primary_user_id_for_channel("gateway").await {
-            Ok(Some(inferred)) if !inferred.trim().is_empty() => inferred,
+            Ok(Some(inferred)) if valid_gateway_identity_component(&inferred) => inferred,
             Ok(_) | Err(_) => auth.fallback_principal_id.clone(),
         }
     } else {
         auth.fallback_principal_id.clone()
+    };
+    let principal_id = if valid_gateway_identity_component(&principal_id) {
+        principal_id
+    } else {
+        "default".to_string()
     };
     let actor_id = default_gateway_actor_id_from_auth(auth, &principal_id);
     // The primary gateway token is the admin credential.
@@ -362,7 +372,7 @@ async fn fallback_request_identity(
 }
 
 fn default_gateway_actor_id_from_auth(auth: &AuthState, principal_id: &str) -> String {
-    if auth.fallback_actor_id.trim().is_empty()
+    if !valid_gateway_identity_component(&auth.fallback_actor_id)
         || auth.fallback_actor_id == auth.fallback_principal_id
     {
         principal_id.to_string()

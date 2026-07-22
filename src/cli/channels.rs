@@ -163,8 +163,13 @@ async fn list_channels(format: &str) -> anyhow::Result<()> {
     if wasm_dir.exists()
         && let Ok(entries) = std::fs::read_dir(&wasm_dir)
     {
-        for entry in entries.flatten() {
+        for entry in entries.take(4_096).flatten() {
             if entry.path().extension().is_some_and(|e| e == "wasm") {
+                if !std::fs::symlink_metadata(entry.path())
+                    .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+                {
+                    continue;
+                }
                 let name = entry
                     .path()
                     .file_stem()
@@ -468,17 +473,26 @@ fn validate_wasm_channel_installation(
     channel: &str,
     wasm_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
+    if channel.is_empty()
+        || channel.len() > 128
+        || !channel.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        anyhow::bail!("channel name is not a bounded lowercase ASCII identifier");
+    }
     let wasm_path = wasm_dir.join(format!("{channel}.wasm"));
     let caps_path = wasm_dir.join(format!("{channel}.capabilities.json"));
-    if !wasm_path.exists() {
-        anyhow::bail!("WASM artifact missing: {}", wasm_path.display());
-    }
-    if !caps_path.exists() {
-        anyhow::bail!("Capabilities file missing: {}", caps_path.display());
+    let wasm =
+        thinclaw_platform::read_regular_file_bounded_single_link(&wasm_path, 64 * 1024 * 1024)
+            .map_err(|_| anyhow::anyhow!("WASM artifact is missing or invalid"))?;
+    if wasm.len() < 8 || !wasm.starts_with(b"\0asm") {
+        anyhow::bail!("WASM artifact has an invalid module header");
     }
 
-    let raw = std::fs::read_to_string(&caps_path)?;
-    let caps = crate::channels::wasm::ChannelCapabilitiesFile::from_json(&raw)?;
+    let raw = thinclaw_platform::read_regular_file_bounded_single_link(&caps_path, 1024 * 1024)
+        .map_err(|_| anyhow::anyhow!("capabilities file is missing or invalid"))?;
+    let caps = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&raw)?;
     let missing: Vec<String> = caps
         .setup
         .required_secrets
@@ -637,13 +651,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let err = validate_wasm_channel_installation("missing", temp.path())
             .expect_err("missing artifact should fail");
-        assert!(err.to_string().contains("WASM artifact missing"));
+        assert!(err.to_string().contains("WASM artifact"));
     }
 
     #[test]
     fn wasm_channel_validation_reports_missing_required_secrets() {
         let temp = tempfile::tempdir().expect("temp dir");
-        std::fs::write(temp.path().join("demo.wasm"), b"\0asm").expect("write wasm");
+        std::fs::write(temp.path().join("demo.wasm"), b"\0asm\x01\0\0\0").expect("write wasm");
         std::fs::write(
             temp.path().join("demo.capabilities.json"),
             r#"{
@@ -670,7 +684,7 @@ mod tests {
     #[test]
     fn wasm_channel_validation_accepts_env_secret() {
         let temp = tempfile::tempdir().expect("temp dir");
-        std::fs::write(temp.path().join("demo.wasm"), b"\0asm").expect("write wasm");
+        std::fs::write(temp.path().join("demo.wasm"), b"\0asm\x01\0\0\0").expect("write wasm");
         std::fs::write(
             temp.path().join("demo.capabilities.json"),
             r#"{
@@ -691,5 +705,11 @@ mod tests {
         unsafe {
             std::env::remove_var("DEMO_ENV_TOKEN");
         }
+    }
+
+    #[test]
+    fn wasm_channel_validation_rejects_path_like_names() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        assert!(validate_wasm_channel_installation("../../outside", temp.path()).is_err());
     }
 }

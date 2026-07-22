@@ -172,6 +172,17 @@ impl HookRegistry {
         hooks.iter().map(|e| e.hook.name().to_string()).collect()
     }
 
+    /// Whether at least one currently enabled hook observes this lifecycle
+    /// point. Dispatchers use this to avoid releasing progressive output
+    /// before a policy hook has had a chance to inspect or transform it.
+    pub async fn has_enabled_hook(&self, point: crate::hooks::HookPoint) -> bool {
+        self.hooks
+            .read()
+            .await
+            .iter()
+            .any(|entry| !entry.is_disabled() && entry.hook.hook_points().contains(&point))
+    }
+
     /// List all registered hooks with detailed information.
     pub async fn list_with_details(&self) -> Vec<HookInfo> {
         let hooks = self.hooks.read().await;

@@ -193,7 +193,7 @@ fn force_service_install() -> bool {
 
 fn onboarding_blocker() -> Option<String> {
     let _ = dotenvy::dotenv();
-    let _ = dotenvy::from_path(crate::platform::state_paths().env_file);
+    crate::bootstrap::load_thinclaw_env();
 
     #[cfg(any(feature = "postgres", feature = "libsql"))]
     {
@@ -212,7 +212,7 @@ fn service_run_args(_force_no_onboard: bool) -> Vec<&'static str> {
 
 fn guard_remote_gateway_install(force_install: bool) -> Result<()> {
     let _ = dotenvy::dotenv();
-    let _ = dotenvy::from_path(crate::platform::state_paths().env_file);
+    crate::bootstrap::load_thinclaw_env();
 
     let settings = crate::settings::Settings::load();
     let access =
@@ -334,7 +334,7 @@ fn install_macos(force_no_onboard: bool) -> Result<()> {
         stderr = xml_escape(&stderr.display().to_string()),
     );
 
-    std::fs::write(&file, plist)?;
+    thinclaw_platform::write_regular_file_atomic(&file, plist.as_bytes(), true)?;
     println!("Installed launchd service: {}", file.display());
     println!("  Start with: thinclaw service start");
     Ok(())
@@ -368,7 +368,7 @@ fn install_linux(force_no_onboard: bool) -> Result<()> {
         exec_args = exec_args,
     );
 
-    std::fs::write(&file, unit)?;
+    thinclaw_platform::write_regular_file_atomic(&file, unit.as_bytes(), true)?;
     run_checked(Command::new("systemctl").args(["--user", "daemon-reload"])).ok();
     run_checked(Command::new("systemctl").args(["--user", "enable", SYSTEMD_UNIT])).ok();
     println!("Installed systemd user service: {}", file.display());
@@ -503,7 +503,13 @@ fn thinclaw_logs_dir() -> Result<PathBuf> {
 }
 
 fn run_checked(command: &mut Command) -> Result<()> {
-    let output = command.output().context("failed to spawn command")?;
+    let output = thinclaw_platform::bounded_std_command_output(
+        command,
+        std::time::Duration::from_secs(30),
+        1024 * 1024,
+        1024 * 1024,
+    )
+    .context("failed to run service command")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("command failed: {}", stderr.trim());
@@ -512,7 +518,13 @@ fn run_checked(command: &mut Command) -> Result<()> {
 }
 
 fn run_capture(command: &mut Command) -> Result<String> {
-    let output = command.output().context("failed to spawn command")?;
+    let output = thinclaw_platform::bounded_std_command_output(
+        command,
+        std::time::Duration::from_secs(30),
+        1024 * 1024,
+        1024 * 1024,
+    )
+    .context("failed to run service command")?;
     let mut text = String::from_utf8_lossy(&output.stdout).to_string();
     if text.trim().is_empty() {
         text = String::from_utf8_lossy(&output.stderr).to_string();
@@ -532,8 +544,7 @@ fn xml_escape(raw: &str) -> String {
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use std::ffi::OsString;
-    use std::fs::OpenOptions;
-    use std::io::Write;
+    use std::fs::{File, OpenOptions};
     use std::path::PathBuf;
     use std::process::{Child, Command, Stdio};
     use std::sync::mpsc;
@@ -881,14 +892,8 @@ mod windows_impl {
         let logs_dir = crate::platform::state_paths().logs_dir;
         std::fs::create_dir_all(&logs_dir)?;
 
-        let stdout = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(logs_dir.join("service.stdout.log"))?;
-        let stderr = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(logs_dir.join("service.stderr.log"))?;
+        let stdout = open_service_log(&logs_dir.join("service.stdout.log"))?;
+        let stderr = open_service_log(&logs_dir.join("service.stderr.log"))?;
 
         let mut cmd = Command::new(exe);
         for arg in super::service_run_args(false) {
@@ -905,6 +910,30 @@ mod windows_impl {
         }
 
         cmd.spawn()
+    }
+
+    fn open_service_log(path: &std::path::Path) -> std::io::Result<File> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(std::io::Error::other(
+                    "service log target is not a regular file",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::other(
+                "service log target is not a regular file",
+            ));
+        }
+        Ok(file)
     }
 
     fn terminate_child(child: &mut Child) {
@@ -989,14 +1018,10 @@ mod windows_impl {
             return;
         }
         let path = logs_dir.join("service.manager.log");
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(
-                file,
-                "[{}] {}",
-                chrono::Utc::now().to_rfc3339(),
-                message.trim()
-            );
-        }
+        let message = message.trim().chars().take(4096).collect::<String>();
+        let line = format!("[{}] {}\n", chrono::Utc::now().to_rfc3339(), message);
+        let _ =
+            thinclaw_platform::append_private_file_locked(&path, line.as_bytes(), 64 * 1024 * 1024);
     }
 }
 

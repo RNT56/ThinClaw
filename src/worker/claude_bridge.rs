@@ -30,14 +30,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::BufReader;
 use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::error::WorkerError;
 use crate::worker::api::{CompletionReport, JobEventPayload, PromptResponse, WorkerHttpClient};
 use crate::worker::bridge_common::{
-    copy_auth_dir_from_mount, poll_for_prompt, post_job_event, truncate,
+    MAX_BRIDGE_SESSION_ID_BYTES, MAX_BRIDGE_STATUS_LINE_BYTES, MAX_BRIDGE_STDOUT_LINE_BYTES,
+    OwnedBridgeChild, OwnedBridgeTask, bridge_secret_values, copy_auth_dir_from_mount,
+    poll_for_prompt, post_job_event, read_bounded_line, sanitize_bridge_status,
 };
 
 /// Configuration for the Claude bridge runtime.
@@ -141,6 +143,7 @@ impl ClaudeBridgeRuntime {
     ///
     /// Reads `THINCLAW_WORKER_TOKEN` from the environment for auth.
     pub fn new(config: ClaudeBridgeConfig) -> Result<Self, WorkerError> {
+        validate_allowed_tools(&config.allowed_tools)?;
         let client = Arc::new(WorkerHttpClient::from_env(
             config.orchestrator_url.clone(),
             config.job_id,
@@ -155,16 +158,12 @@ impl ClaudeBridgeRuntime {
     /// auto-approved tools. The Docker container is still the primary security
     /// boundary; this is defense-in-depth.
     fn write_permission_settings(&self) -> Result<(), WorkerError> {
-        let settings_json = build_permission_settings(&self.config.allowed_tools);
-        let settings_dir = std::path::Path::new("/workspace/.claude");
-        std::fs::create_dir_all(settings_dir).map_err(|e| WorkerError::ExecutionFailed {
-            reason: format!("failed to create /workspace/.claude/: {e}"),
-        })?;
-        std::fs::write(settings_dir.join("settings.json"), &settings_json).map_err(|e| {
+        let settings_json = build_permission_settings(&self.config.allowed_tools).map_err(|e| {
             WorkerError::ExecutionFailed {
-                reason: format!("failed to write settings.json: {e}"),
+                reason: format!("failed to serialize Claude permission settings: {e}"),
             }
         })?;
+        write_permission_settings_at(std::path::Path::new("/workspace"), &settings_json)?;
         tracing::info!(
             job_id = %self.config.job_id,
             tools = ?self.config.allowed_tools,
@@ -215,8 +214,8 @@ impl ClaudeBridgeRuntime {
 
         tracing::info!(
             job_id = %self.config.job_id,
-            "Starting Claude Code bridge for: {}",
-            truncate(&job.description, 100)
+            description_bytes = job.description.len(),
+            "Starting Claude Code bridge"
         );
 
         // Fetch credentials for injection into the spawned Command via .envs()
@@ -403,6 +402,13 @@ impl ClaudeBridgeRuntime {
         resume_session_id: Option<&str>,
         extra_env: &std::collections::HashMap<String, String>,
     ) -> Result<Option<String>, WorkerError> {
+        if resume_session_id.is_some_and(|session_id| {
+            session_id.is_empty() || session_id.len() > MAX_BRIDGE_SESSION_ID_BYTES
+        }) {
+            return Err(WorkerError::ExecutionFailed {
+                reason: "refusing invalid Claude resume session ID".to_string(),
+            });
+        }
         let mut cmd = Command::new("claude");
         cmd.arg("-p")
             .arg(prompt)
@@ -426,20 +432,19 @@ impl ClaudeBridgeRuntime {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|e| WorkerError::ExecutionFailed {
-            reason: format!("failed to spawn claude: {}", e),
-        })?;
+        let mut child =
+            OwnedBridgeChild::spawn(&mut cmd).map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to spawn claude: {}", e),
+            })?;
 
         let stdout = child
-            .stdout
-            .take()
+            .take_stdout()
             .ok_or_else(|| WorkerError::ExecutionFailed {
                 reason: "failed to capture claude stdout".to_string(),
             })?;
 
         let stderr = child
-            .stderr
-            .take()
+            .take_stderr()
             .ok_or_else(|| WorkerError::ExecutionFailed {
                 reason: "failed to capture claude stderr".to_string(),
             })?;
@@ -447,72 +452,123 @@ impl ClaudeBridgeRuntime {
         // Spawn stderr reader that forwards lines as log events
         let client_for_stderr = Arc::clone(&self.client);
         let job_id = self.config.job_id;
-        let stderr_handle = tokio::spawn(async move {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(job_id = %job_id, "claude stderr: {}", line);
+        let stderr_secrets =
+            bridge_secret_values(extra_env, &["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]);
+        let mut stderr_task = OwnedBridgeTask::new(tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            loop {
+                let line = match read_bounded_line(&mut reader, MAX_BRIDGE_STATUS_LINE_BYTES).await
+                {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::debug!(job_id = %job_id, %error, "Failed to read claude stderr");
+                        break;
+                    }
+                };
+                let truncated = line.truncated;
+                let text = line.into_lossy_text();
+                let message = if truncated {
+                    format!("{text} [truncated]")
+                } else {
+                    text
+                };
+                let message = sanitize_bridge_status(&message, &stderr_secrets);
+                tracing::debug!(job_id = %job_id, message_bytes = message.len(), "Claude CLI wrote stderr");
                 let payload = JobEventPayload {
                     event_type: "status".to_string(),
-                    data: serde_json::json!({ "message": line }),
+                    data: serde_json::json!({ "message": message }),
                 };
                 client_for_stderr.post_event(&payload).await;
             }
-        });
+        }));
 
         // Read stdout NDJSON line by line
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
+        let mut reader = BufReader::new(stdout);
         let mut session_id: Option<String> = None;
+        let session = async {
+            loop {
+                let Some(line) = read_bounded_line(&mut reader, MAX_BRIDGE_STDOUT_LINE_BYTES)
+                    .await
+                    .map_err(|error| WorkerError::ExecutionFailed {
+                        reason: format!("failed reading claude stdout: {error}"),
+                    })?
+                else {
+                    break;
+                };
+                if line.truncated {
+                    self.report_event(
+                        "status",
+                        &serde_json::json!({
+                            "message": "Claude emitted an oversized output record; record discarded"
+                        }),
+                    )
+                    .await;
+                    continue;
+                }
+                let line_text = line.into_lossy_text();
+                let line = line_text.trim();
+                if line.is_empty() {
+                    continue;
+                }
 
-        while let Ok(Some(line)) = lines.next_line().await {
-            let line = line.trim().to_string();
-            if line.is_empty() {
-                continue;
-            }
+                match serde_json::from_str::<ClaudeStreamEvent>(line) {
+                    Ok(event) => {
+                        // Capture session_id from system init
+                        if event.event_type == "system"
+                            && let Some(ref sid) = event.session_id
+                        {
+                            if sid.is_empty() || sid.len() > MAX_BRIDGE_SESSION_ID_BYTES {
+                                return Err(WorkerError::ExecutionFailed {
+                                    reason: "claude emitted an invalid session ID".to_string(),
+                                });
+                            }
+                            session_id = Some(sid.clone());
+                            tracing::info!(
+                                job_id = %self.config.job_id,
+                                session_id = %sid,
+                                "Captured Claude session ID"
+                            );
+                        }
 
-            match serde_json::from_str::<ClaudeStreamEvent>(&line) {
-                Ok(event) => {
-                    // Capture session_id from system init
-                    if event.event_type == "system"
-                        && let Some(ref sid) = event.session_id
-                    {
-                        session_id = Some(sid.clone());
-                        tracing::info!(
+                        // Convert to our event payload and forward
+                        let payloads = stream_event_to_payloads(&event);
+                        for payload in payloads {
+                            self.report_event(&payload.event_type, &payload.data).await;
+                        }
+                    }
+                    Err(e) => {
+                        // Not valid JSON, forward as a status message
+                        tracing::debug!(
                             job_id = %self.config.job_id,
-                            session_id = %sid,
-                            "Captured Claude session ID"
+                            "Non-JSON claude output: {} (parse error: {})", line, e
                         );
+                        self.report_event("status", &serde_json::json!({ "message": line }))
+                            .await;
                     }
-
-                    // Convert to our event payload and forward
-                    let payloads = stream_event_to_payloads(&event);
-                    for payload in payloads {
-                        self.report_event(&payload.event_type, &payload.data).await;
-                    }
-                }
-                Err(e) => {
-                    // Not valid JSON, forward as a status message
-                    tracing::debug!(
-                        job_id = %self.config.job_id,
-                        "Non-JSON claude output: {} (parse error: {})", line, e
-                    );
-                    self.report_event("status", &serde_json::json!({ "message": line }))
-                        .await;
                 }
             }
-        }
-
-        // Wait for the process to exit
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| WorkerError::ExecutionFailed {
-                reason: format!("failed waiting for claude: {}", e),
-            })?;
-
-        // Wait for stderr reader to finish
-        let _ = stderr_handle.await;
+            child
+                .wait()
+                .await
+                .map_err(|e| WorkerError::ExecutionFailed {
+                    reason: format!("failed waiting for claude: {}", e),
+                })
+        };
+        let status = match tokio::time::timeout(self.config.timeout, session).await {
+            Ok(result) => result?,
+            Err(_) => {
+                child.terminate().await;
+                stderr_task.finish().await;
+                return Err(WorkerError::ExecutionFailed {
+                    reason: format!(
+                        "claude session timed out after {} seconds",
+                        self.config.timeout.as_secs()
+                    ),
+                });
+            }
+        };
+        stderr_task.finish().await;
 
         if !status.success() {
             let code = status.code().unwrap_or(-1);
@@ -570,13 +626,99 @@ impl ClaudeBridgeRuntime {
 ///
 /// Produces a Claude Code project settings file that auto-approves the listed
 /// tools while leaving any unknown/future tools unapproved (defense-in-depth).
-fn build_permission_settings(allowed_tools: &[String]) -> String {
+fn build_permission_settings(allowed_tools: &[String]) -> Result<String, serde_json::Error> {
     let settings = serde_json::json!({
         "permissions": {
             "allow": allowed_tools,
         }
     });
-    serde_json::to_string_pretty(&settings).expect("static JSON structure is always valid")
+    serde_json::to_string_pretty(&settings)
+}
+
+fn validate_allowed_tools(allowed_tools: &[String]) -> Result<(), WorkerError> {
+    const MAX_ALLOWED_TOOLS: usize = 128;
+    const MAX_TOOL_PATTERN_BYTES: usize = 512;
+    const MAX_ALLOWED_TOOL_BYTES: usize = 32 * 1024;
+    let total = allowed_tools
+        .iter()
+        .try_fold(0_usize, |total, tool| total.checked_add(tool.len()))
+        .ok_or_else(|| WorkerError::ExecutionFailed {
+            reason: "Claude tool allowlist length overflowed".to_string(),
+        })?;
+    if allowed_tools.len() > MAX_ALLOWED_TOOLS
+        || total > MAX_ALLOWED_TOOL_BYTES
+        || allowed_tools.iter().any(|tool| {
+            tool.is_empty()
+                || tool.len() > MAX_TOOL_PATTERN_BYTES
+                || tool.chars().any(char::is_control)
+        })
+    {
+        return Err(WorkerError::ExecutionFailed {
+            reason: "Claude tool allowlist is oversized or malformed".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn write_permission_settings_at(
+    workspace: &std::path::Path,
+    settings_json: &str,
+) -> Result<(), WorkerError> {
+    let workspace_metadata =
+        std::fs::symlink_metadata(workspace).map_err(|e| WorkerError::ExecutionFailed {
+            reason: format!("failed to inspect worker workspace: {e}"),
+        })?;
+    if workspace_metadata.file_type().is_symlink() || !workspace_metadata.is_dir() {
+        return Err(WorkerError::ExecutionFailed {
+            reason: "worker workspace is not a real directory".to_string(),
+        });
+    }
+    let settings_dir = workspace.join(".claude");
+    match std::fs::symlink_metadata(&settings_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(WorkerError::ExecutionFailed {
+                reason: "worker .claude path is not a real directory".to_string(),
+            });
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&settings_dir).map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to create worker .claude directory: {e}"),
+            })?;
+        }
+        Err(error) => {
+            return Err(WorkerError::ExecutionFailed {
+                reason: format!("failed to inspect worker .claude directory: {error}"),
+            });
+        }
+    }
+    let canonical_workspace =
+        workspace
+            .canonicalize()
+            .map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to resolve worker workspace: {e}"),
+            })?;
+    let canonical_settings_dir =
+        settings_dir
+            .canonicalize()
+            .map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to resolve worker .claude directory: {e}"),
+            })?;
+    if canonical_settings_dir.parent() != Some(canonical_workspace.as_path()) {
+        return Err(WorkerError::ExecutionFailed {
+            reason: "worker .claude directory escaped the workspace".to_string(),
+        });
+    }
+    thinclaw_platform::publish_file_pair_sync(
+        &canonical_settings_dir.join("settings.json"),
+        &canonical_settings_dir.join(".settings.state-sidecar"),
+        settings_json.as_bytes(),
+        None,
+        thinclaw_platform::ExistingPairPolicy::Replace,
+    )
+    .map_err(|e| WorkerError::ExecutionFailed {
+        reason: format!("failed to publish Claude permission settings: {e}"),
+    })
 }
 
 /// Convert a Claude stream event into one or more event payloads for the orchestrator.
@@ -945,9 +1087,12 @@ mod tests {
 
     #[test]
     fn test_truncate() {
-        assert_eq!(truncate("hello", 10), "hello");
-        assert_eq!(truncate("hello world", 5), "hello");
-        assert_eq!(truncate("", 5), "");
+        assert_eq!(crate::worker::bridge_common::truncate("hello", 10), "hello");
+        assert_eq!(
+            crate::worker::bridge_common::truncate("hello world", 5),
+            "hello"
+        );
+        assert_eq!(crate::worker::bridge_common::truncate("", 5), "");
     }
 
     #[test]
@@ -956,7 +1101,7 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        let json_str = build_permission_settings(&tools);
+        let json_str = build_permission_settings(&tools).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let allow = parsed["permissions"]["allow"].as_array().unwrap();
         assert_eq!(allow.len(), 5);
@@ -967,7 +1112,7 @@ mod tests {
 
     #[test]
     fn test_build_permission_settings_empty_tools() {
-        let json_str = build_permission_settings(&[]);
+        let json_str = build_permission_settings(&[]).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let allow = parsed["permissions"]["allow"].as_array().unwrap();
         assert!(allow.is_empty());
@@ -976,7 +1121,7 @@ mod tests {
     #[test]
     fn test_build_permission_settings_is_valid_json() {
         let tools = vec!["Bash(npm run *)".to_string(), "Read".to_string()];
-        let json_str = build_permission_settings(&tools);
+        let json_str = build_permission_settings(&tools).unwrap();
         // Must be valid JSON
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         // Must have the expected structure
@@ -1025,5 +1170,35 @@ mod tests {
         // Should gracefully return 0 instead of failing
         let copied = copy_dir_recursive(nonexistent, dst.path()).unwrap();
         assert_eq!(copied, 0);
+    }
+
+    #[test]
+    fn permission_settings_are_published_atomically() {
+        let workspace = tempfile::tempdir().unwrap();
+        write_permission_settings_at(workspace.path(), r#"{"permissions":{"allow":[]}}"#).unwrap();
+        let bytes = thinclaw_platform::read_regular_file_bounded(
+            &workspace.path().join(".claude/settings.json"),
+            4096,
+        )
+        .unwrap();
+        assert_eq!(bytes, br#"{"permissions":{"allow":[]}}"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_settings_reject_symlink_directory() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join(".claude")).unwrap();
+        let error = write_permission_settings_at(workspace.path(), "{}")
+            .expect_err("symlinked settings directory must be rejected");
+        assert!(error.to_string().contains("not a real directory"));
+        assert!(!outside.path().join("settings.json").exists());
+    }
+
+    #[test]
+    fn permission_settings_reject_oversized_allowlist() {
+        let tools = vec!["Read".to_string(); 129];
+        assert!(validate_allowed_tools(&tools).is_err());
     }
 }

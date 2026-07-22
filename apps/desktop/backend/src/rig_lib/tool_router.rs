@@ -23,21 +23,26 @@ impl<'a> ToolRouter<'a> {
     }
 
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
-        info!("[router] calling tool '{}' with args: {}", name, args);
+        info!("[router] calling tool '{}'", name);
 
         // 1. Check if it's a Skill
         if let Some(mgr) = self.skill_manager {
             if mgr.get_skill(name).is_ok() {
                 info!("[router] routing '{}' to Skills System", name);
                 if let Some(sb) = self.sandbox {
-                    let args_json = serde_json::to_string(&args).unwrap_or_default();
-                    let script = format!(
-                        "run_skill(\"{}\", '{}')",
-                        name,
-                        args_json.replace("'", "\\'")
-                    );
+                    let args_json = serde_json::to_string(&args)
+                        .map_err(|_| "Skill arguments could not be encoded".to_string())?;
+                    if args_json.len() > 1024 * 1024 {
+                        return Err("Skill arguments exceed the size limit".to_string());
+                    }
+                    let skill_literal = serde_json::to_string(name)
+                        .map_err(|_| "Skill name could not be encoded".to_string())?;
+                    let args_literal = serde_json::to_string(&args_json)
+                        .map_err(|_| "Skill arguments could not be quoted".to_string())?;
+                    let script = format!("run_skill({skill_literal}, {args_literal})");
                     let res = sb
-                        .execute(&script)
+                        .execute_async(script)
+                        .await
                         .map_err(|e| format!("Skill execution failed: {:?}", e))?;
                     return Ok(json!({
                         "content": [{ "type": "text", "text": res.output }],
@@ -64,12 +69,15 @@ impl<'a> ToolRouter<'a> {
                     })
                     .unwrap_or_default();
 
-                // Escape backslashes first, then double quotes, to prevent Rhai injection.
-                // Order matters: escaping " before \ would break on inputs like: hello\"world
-                let escaped = arg_value.replace('\\', "\\\\").replace('"', "\\\"");
-                let script = format!("{}(\"{}\")", name, escaped);
+                if arg_value.len() > 1024 * 1024 || arg_value.contains('\0') {
+                    return Err("Host tool argument is malformed or oversized".to_string());
+                }
+                let literal = serde_json::to_string(&arg_value)
+                    .map_err(|_| "Host tool argument could not be quoted".to_string())?;
+                let script = format!("{name}({literal})");
                 let res = sb
-                    .execute(&script)
+                    .execute_async(script)
+                    .await
                     .map_err(|e| format!("Host tool execution failed: {:?}", e))?;
                 return Ok(json!({
                     "content": [{ "type": "text", "text": res.output }],
@@ -98,8 +106,8 @@ impl<'a> ToolRouter<'a> {
 pub fn summarize_result(mut result: Value, max_chars: usize) -> Value {
     if let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) {
         for item in content {
-            if let Some(text) = item.get_mut("text").and_then(|t| t.as_str()) {
-                if text.len() > max_chars {
+            if let Some(text_slot) = item.get_mut("text") {
+                if let Some(text) = text_slot.as_str().filter(|text| text.len() > max_chars) {
                     // Find a safe byte boundary to avoid panicking on multi-byte UTF-8
                     let safe_end = safe_char_boundary(text, max_chars);
                     let truncated = format!(
@@ -107,7 +115,7 @@ pub fn summarize_result(mut result: Value, max_chars: usize) -> Value {
                         &text[..safe_end],
                         text.len() - safe_end
                     );
-                    *item.get_mut("text").unwrap() = Value::String(truncated);
+                    *text_slot = Value::String(truncated);
                 }
             }
         }

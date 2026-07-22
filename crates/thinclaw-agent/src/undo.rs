@@ -12,6 +12,10 @@ use thinclaw_llm_core::ChatMessage;
 
 /// Maximum number of checkpoints to keep by default.
 const DEFAULT_MAX_CHECKPOINTS: usize = 20;
+/// Hard cap for full-history snapshots retained in memory per thread.
+const MAX_IN_MEMORY_CHECKPOINT_BYTES: usize = 8 * 1024 * 1024;
+/// Hard cap for checkpoints embedded in the durable runtime JSON envelope.
+const MAX_PERSISTED_CHECKPOINT_BYTES: usize = 2 * 1024 * 1024;
 
 /// Maximum number of checkpoints persisted into the durable thread runtime
 /// envelope. Checkpoints carry full message history, so persistence keeps
@@ -81,9 +85,38 @@ impl UndoManager {
 
     /// Push a checkpoint onto the undo stack, trimming oldest entries if over limit.
     fn push_undo(&mut self, checkpoint: Checkpoint) {
+        let checkpoint = checkpoint_for_storage(checkpoint);
+        if checkpoint_bytes(&checkpoint) > MAX_IN_MEMORY_CHECKPOINT_BYTES {
+            tracing::warn!(
+                turn = checkpoint.turn_number,
+                "Skipping oversized conversation undo checkpoint"
+            );
+            return;
+        }
         self.undo_stack.push_back(checkpoint);
-        while self.undo_stack.len() > self.max_checkpoints {
+        while self.undo_stack.len() > self.max_checkpoints
+            || (self.undo_stack.len() > 1
+                && checkpoint_stack_bytes(&self.undo_stack) > MAX_IN_MEMORY_CHECKPOINT_BYTES)
+        {
             self.undo_stack.pop_front();
+        }
+    }
+
+    fn push_redo(&mut self, checkpoint: Checkpoint) {
+        let checkpoint = checkpoint_for_storage(checkpoint);
+        if checkpoint_bytes(&checkpoint) > MAX_IN_MEMORY_CHECKPOINT_BYTES {
+            tracing::warn!(
+                turn = checkpoint.turn_number,
+                "Skipping oversized conversation redo checkpoint"
+            );
+            return;
+        }
+        self.redo_stack.push(checkpoint);
+        while self.redo_stack.len() > self.max_checkpoints
+            || (self.redo_stack.len() > 1
+                && checkpoint_slice_bytes(&self.redo_stack) > MAX_IN_MEMORY_CHECKPOINT_BYTES)
+        {
+            self.redo_stack.remove(0);
         }
     }
 
@@ -126,7 +159,7 @@ impl UndoManager {
             current_messages,
             format!("Turn {}", current_turn),
         );
-        self.redo_stack.push(current);
+        self.push_redo(current);
 
         // Pop and return the most recent checkpoint
         self.undo_stack.pop_back()
@@ -211,16 +244,47 @@ impl UndoManager {
     /// it represents speculative future state that is safe to drop across a
     /// restart, whereas the undo stack is what `/undo` needs to keep working.
     pub fn persisted_checkpoints(&self, max: usize) -> Vec<Checkpoint> {
-        let skip = self.undo_stack.len().saturating_sub(max);
-        self.undo_stack.iter().skip(skip).cloned().collect()
+        let mut bytes = 0usize;
+        let mut newest_first = Vec::new();
+        for checkpoint in self.undo_stack.iter().rev() {
+            if newest_first.len() >= max {
+                break;
+            }
+            let checkpoint = checkpoint_for_storage(checkpoint.clone());
+            let checkpoint_bytes = checkpoint_bytes(&checkpoint);
+            if checkpoint_bytes > MAX_PERSISTED_CHECKPOINT_BYTES
+                || bytes.saturating_add(checkpoint_bytes) > MAX_PERSISTED_CHECKPOINT_BYTES
+            {
+                continue;
+            }
+            bytes = bytes.saturating_add(checkpoint_bytes);
+            newest_first.push(checkpoint);
+        }
+        newest_first.reverse();
+        newest_first
     }
 
     /// Rebuild an undo manager from a persisted (already capped) checkpoint
     /// list, preserving this manager's configured checkpoint limit.
     pub fn restore_from_checkpoints(&mut self, checkpoints: Vec<Checkpoint>) {
-        self.undo_stack = checkpoints.into_iter().collect();
-        while self.undo_stack.len() > self.max_checkpoints {
-            self.undo_stack.pop_front();
+        // Re-sanitize on read as well as write so runtime envelopes created by
+        // older versions cannot reintroduce raw tool arguments into memory and
+        // then be copied into a later snapshot.
+        self.undo_stack.clear();
+        let mut bytes = 0usize;
+        for checkpoint in checkpoints.into_iter().rev() {
+            if self.undo_stack.len() >= self.max_checkpoints {
+                break;
+            }
+            let checkpoint = checkpoint_for_storage(checkpoint);
+            let checkpoint_bytes = checkpoint_bytes(&checkpoint);
+            if checkpoint_bytes > MAX_PERSISTED_CHECKPOINT_BYTES
+                || bytes.saturating_add(checkpoint_bytes) > MAX_PERSISTED_CHECKPOINT_BYTES
+            {
+                continue;
+            }
+            bytes = bytes.saturating_add(checkpoint_bytes);
+            self.undo_stack.push_front(checkpoint);
         }
         self.redo_stack.clear();
     }
@@ -274,6 +338,36 @@ impl UndoManager {
     }
 }
 
+fn checkpoint_bytes(checkpoint: &Checkpoint) -> usize {
+    serde_json::to_vec(checkpoint)
+        .map(|encoded| encoded.len())
+        .unwrap_or(usize::MAX)
+}
+
+fn checkpoint_stack_bytes(checkpoints: &VecDeque<Checkpoint>) -> usize {
+    checkpoints.iter().fold(0usize, |total, checkpoint| {
+        total.saturating_add(checkpoint_bytes(checkpoint))
+    })
+}
+
+fn checkpoint_slice_bytes(checkpoints: &[Checkpoint]) -> usize {
+    checkpoints.iter().fold(0usize, |total, checkpoint| {
+        total.saturating_add(checkpoint_bytes(checkpoint))
+    })
+}
+
+fn checkpoint_for_storage(mut checkpoint: Checkpoint) -> Checkpoint {
+    for message in &mut checkpoint.messages {
+        if let Some(tool_calls) = message.tool_calls.as_mut() {
+            for tool_call in tool_calls {
+                tool_call.arguments =
+                    crate::session::summarized_tool_parameters(&tool_call.arguments);
+            }
+        }
+    }
+    checkpoint
+}
+
 impl Default for UndoManager {
     fn default() -> Self {
         Self::new()
@@ -283,6 +377,7 @@ impl Default for UndoManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use thinclaw_llm_core::ToolCall;
 
     #[test]
     fn test_checkpoint_creation() {
@@ -492,6 +587,95 @@ mod tests {
         manager.restore_from_checkpoints(checkpoints);
 
         assert_eq!(manager.undo_count(), 3);
+    }
+
+    #[test]
+    fn persisted_checkpoints_redact_tool_argument_values() {
+        let secret = "super-secret-token";
+        let tool_message = ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "http".to_string(),
+                arguments: serde_json::json!({
+                    "authorization": secret,
+                    "url": "https://example.test/private"
+                }),
+            }],
+        );
+        let mut manager = UndoManager::new();
+        manager.checkpoint(1, vec![tool_message], "secret-bearing tool call");
+
+        let persisted = manager.persisted_checkpoints(MAX_PERSISTED_CHECKPOINTS);
+        let encoded = serde_json::to_string(&persisted).expect("serialize checkpoints");
+
+        assert!(!encoded.contains(secret));
+        assert!(!encoded.contains("https://example.test/private"));
+        let summary = &persisted[0].messages[0].tool_calls.as_ref().unwrap()[0].arguments;
+        assert_eq!(summary["_thinclaw_parameter_values_redacted"], true);
+        assert_eq!(summary["keys"], serde_json::json!(["authorization", "url"]));
+    }
+
+    #[test]
+    fn restoring_legacy_checkpoints_sanitizes_raw_tool_arguments() {
+        let checkpoint = Checkpoint::new(
+            1,
+            vec![ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "call-legacy".to_string(),
+                    name: "form_input".to_string(),
+                    arguments: serde_json::json!({"password": "legacy-secret"}),
+                }],
+            )],
+            "legacy",
+        );
+        let mut manager = UndoManager::new();
+
+        manager.restore_from_checkpoints(vec![checkpoint]);
+
+        let restored = manager.list_checkpoints()[0];
+        let arguments = &restored.messages[0].tool_calls.as_ref().unwrap()[0].arguments;
+        assert_eq!(arguments["_thinclaw_parameter_values_redacted"], true);
+        assert!(!arguments.to_string().contains("legacy-secret"));
+    }
+
+    #[test]
+    fn persisted_checkpoint_byte_budget_skips_oversized_entries() {
+        let mut manager = UndoManager::new();
+        manager.checkpoint(
+            1,
+            vec![ChatMessage::user(
+                "x".repeat(MAX_PERSISTED_CHECKPOINT_BYTES + 1),
+            )],
+            "oversized",
+        );
+        manager.checkpoint(2, vec![ChatMessage::user("small")], "small");
+
+        let persisted = manager.persisted_checkpoints(MAX_PERSISTED_CHECKPOINTS);
+
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].turn_number, 2);
+        assert!(checkpoint_slice_bytes(&persisted) <= MAX_PERSISTED_CHECKPOINT_BYTES);
+    }
+
+    #[test]
+    fn restore_skips_oversized_persisted_entries() {
+        let oversized = Checkpoint::new(
+            1,
+            vec![ChatMessage::user(
+                "x".repeat(MAX_PERSISTED_CHECKPOINT_BYTES + 1),
+            )],
+            "oversized",
+        );
+        let small = Checkpoint::new(2, vec![ChatMessage::user("small")], "small");
+        let mut manager = UndoManager::new();
+
+        manager.restore_from_checkpoints(vec![oversized, small]);
+
+        assert_eq!(manager.undo_count(), 1);
+        assert_eq!(manager.list_checkpoints()[0].turn_number, 2);
+        assert!(checkpoint_stack_bytes(&manager.undo_stack) <= MAX_PERSISTED_CHECKPOINT_BYTES);
     }
 
     #[test]

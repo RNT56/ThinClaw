@@ -24,6 +24,9 @@ use crate::worker::api::{
 };
 use crate::worker::proxy_llm::ProxyLlmProvider;
 
+const MAX_WORKER_CONTEXT_MESSAGES: usize = 384;
+const MAX_WORKER_CONTEXT_BYTES: usize = 1536 * 1024;
+
 /// Configuration for the worker runtime.
 pub struct WorkerConfig {
     pub job_id: Uuid,
@@ -62,19 +65,6 @@ pub struct WorkerRuntime {
     job: Option<JobDescription>,
 }
 
-fn worker_safety_config() -> SafetyConfig {
-    SafetyConfig {
-        max_output_length: 100_000,
-        injection_check_enabled: true,
-        redact_pii_in_prompts: true,
-        smart_approval_mode: "off".to_string(),
-        external_scanner_mode: "off".to_string(),
-        external_scanner_path: None,
-        external_scanner_require_verified: false,
-        allow_temp_paths: false,
-    }
-}
-
 impl WorkerRuntime {
     /// Create a new worker runtime.
     ///
@@ -90,7 +80,16 @@ impl WorkerRuntime {
             "proxied".to_string(),
         ));
 
-        let safety = Arc::new(SafetyLayer::new(&worker_safety_config()));
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+            redact_pii_in_prompts: true,
+            smart_approval_mode: "off".to_string(),
+            external_scanner_mode: "off".to_string(),
+            external_scanner_path: None,
+            external_scanner_require_verified: false,
+            allow_temp_paths: false,
+        }));
 
         let tools = Arc::new(ToolRegistry::new());
         // Register only container-safe tools
@@ -308,6 +307,8 @@ impl WorkerRuntime {
                     )
                     .await;
             }
+
+            trim_worker_context(reason_ctx);
 
             // Ask the LLM what to do next
             let selections = reasoning.select_tools(reason_ctx).await.map_err(|e| {
@@ -573,7 +574,7 @@ impl WorkerRuntime {
                     "Please wrap up now, summarize what you completed, and finish this job."
                         .to_string()
                 });
-                tracing::info!("Received follow-up prompt: {}", truncate(&content, 100));
+                tracing::info!(content_bytes = content.len(), "Received follow-up prompt");
                 self.post_event(
                     "message",
                     serde_json::json!({
@@ -647,6 +648,48 @@ impl WorkerRuntime {
     }
 }
 
+fn trim_worker_context(context: &mut ReasoningContext) {
+    const PINNED_MESSAGES: usize = 2;
+    let mut estimated_bytes = context
+        .messages
+        .iter()
+        .map(ChatMessage::estimated_chars)
+        .sum::<usize>();
+    let mut removed = 0usize;
+
+    while context.messages.len() > PINNED_MESSAGES
+        && (context.messages.len() > MAX_WORKER_CONTEXT_MESSAGES
+            || estimated_bytes > MAX_WORKER_CONTEXT_BYTES)
+    {
+        let start = PINNED_MESSAGES;
+        let mut end = start + 1;
+        if context.messages[start].tool_calls.is_some()
+            || context.messages[start].role == crate::llm::Role::Tool
+        {
+            while end < context.messages.len()
+                && context.messages[end].role == crate::llm::Role::Tool
+            {
+                end += 1;
+            }
+        }
+        estimated_bytes = estimated_bytes.saturating_sub(
+            context.messages[start..end]
+                .iter()
+                .map(ChatMessage::estimated_chars)
+                .sum::<usize>(),
+        );
+        removed += end - start;
+        context.messages.drain(start..end);
+    }
+
+    if removed > 0 {
+        tracing::debug!(
+            removed,
+            "Pruned old worker context before LLM proxy request"
+        );
+    }
+}
+
 fn parse_tool_profile(raw: &str) -> ToolProfile {
     match raw.trim().to_ascii_lowercase().as_str() {
         "standard" | "default" | "main" => ToolProfile::Standard,
@@ -667,15 +710,8 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::worker::runtime::{truncate, worker_safety_config};
-
-    #[test]
-    fn worker_shell_policy_denies_temp_paths() {
-        let config = worker_safety_config();
-
-        assert!(!config.allow_temp_paths);
-        assert_eq!(config.external_scanner_mode, "off");
-    }
+    use super::*;
+    use crate::llm::ToolCall;
 
     #[test]
     fn test_truncate_within_limit() {
@@ -699,5 +735,51 @@ mod tests {
         let result = truncate("é is fancy", 1);
         // Should truncate to 0 chars (can't fit "é" in 1 byte)
         assert_eq!(result, "...");
+    }
+
+    #[test]
+    fn worker_context_pruning_preserves_preamble_and_tool_protocol_groups() {
+        let mut context = ReasoningContext::new();
+        context.messages.push(ChatMessage::system("policy"));
+        context.messages.push(ChatMessage::user("job"));
+        context
+            .messages
+            .push(ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "call-1".to_string(),
+                    name: "shell".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+            ));
+        context.messages.push(ChatMessage::tool_result(
+            "call-1",
+            "shell",
+            "x".repeat(MAX_WORKER_CONTEXT_BYTES + 1),
+        ));
+
+        trim_worker_context(&mut context);
+
+        assert_eq!(context.messages.len(), 2);
+        assert_eq!(context.messages[0].content, "policy");
+        assert_eq!(context.messages[1].content, "job");
+    }
+
+    #[test]
+    fn worker_context_pruning_caps_message_count() {
+        let mut context = ReasoningContext::new();
+        context.messages.push(ChatMessage::system("policy"));
+        context.messages.push(ChatMessage::user("job"));
+        for index in 0..(MAX_WORKER_CONTEXT_MESSAGES + 50) {
+            context
+                .messages
+                .push(ChatMessage::user(format!("message {index}")));
+        }
+
+        trim_worker_context(&mut context);
+
+        assert_eq!(context.messages.len(), MAX_WORKER_CONTEXT_MESSAGES);
+        assert_eq!(context.messages[0].content, "policy");
+        assert_eq!(context.messages[1].content, "job");
     }
 }

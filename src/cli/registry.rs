@@ -492,10 +492,11 @@ fn cmd_validate(
             continue;
         }
 
-        let raw = std::fs::read_to_string(&caps_path)?;
+        let raw =
+            thinclaw_platform::read_regular_file_bounded_single_link(&caps_path, 1024 * 1024)?;
         let parse_result = match manifest.kind {
             ManifestKind::Channel => {
-                match crate::channels::wasm::ChannelCapabilitiesFile::from_json(&raw) {
+                match crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&raw) {
                     Ok(caps) => {
                         if let Some(auth) = &manifest.auth_summary {
                             let summarized: std::collections::HashSet<&str> =
@@ -514,7 +515,7 @@ fn cmd_validate(
                     Err(err) => Err(err.to_string()),
                 }
             }
-            ManifestKind::Tool => match crate::tools::wasm::CapabilitiesFile::from_json(&raw) {
+            ManifestKind::Tool => match crate::tools::wasm::CapabilitiesFile::from_bytes(&raw) {
                 Ok(caps) => {
                     if let (Some(auth), Some(tool_auth)) = (&manifest.auth_summary, caps.auth)
                         && !auth

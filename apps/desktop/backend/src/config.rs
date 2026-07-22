@@ -1,12 +1,147 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
-const SETTINGS_USER_ID: &str = "local_user";
-const WORKBENCH_CONFIG_KEY: &str = "desktop.workbench";
-const SETTINGS_SCHEMA_VERSION_KEY: &str = "desktop.schema_version";
-pub(crate) const SETTINGS_SCHEMA_VERSION: u64 = 1;
+const MAX_USER_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_KNOWLEDGE_BITS: usize = 256;
+const MAX_CUSTOM_PERSONAS: usize = 64;
+const MAX_PERSONALIZATION_BYTES: usize = 256 * 1024;
+
+fn bounded_config_text(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
+    (allow_empty || !value.is_empty())
+        && value.len() <= max_bytes
+        && !value.contains('\0')
+        && !value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+}
+
+fn valid_mcp_auth_token(token: &str) -> bool {
+    token.trim() == token && token.len() <= 16 * 1024 && !token.chars().any(char::is_control)
+}
+
+fn validate_user_config(config: &UserConfig) -> Result<(), String> {
+    if !(1..=8).contains(&config.search_concurrency_limit)
+        || !(1..=8).contains(&config.scrape_concurrency_limit)
+        || !(1..=20).contains(&config.max_search_results)
+        || !(1_000..=200_000).contains(&config.max_scrape_chars)
+        || !(1..=120).contains(&config.scrape_timeout_secs)
+        || !(1_024..=2_000_000).contains(&config.default_context_window)
+        || !(1_000..=32_000).contains(&config.summarization_chunk_size)
+        || !config.llm_temperature.is_finite()
+        || !(0.0..=2.0).contains(&config.llm_temperature)
+        || !config.llm_top_p.is_finite()
+        || !(0.0..=1.0).contains(&config.llm_top_p)
+        || config.vector_dimensions == 0
+        || config.vector_dimensions
+            > u32::try_from(crate::inference::embedding::MAX_EMBEDDING_DIMENSIONS)
+                .unwrap_or(u32::MAX)
+        || config.sd_threads > 128
+        || config.memory_reservation_gb > 1_024
+        || !(1..=86_400).contains(&config.mcp_cache_ttl_secs)
+        || !(1_000..=1_000_000).contains(&config.mcp_tool_result_max_chars)
+        || config
+            .selected_model_context_size
+            .is_some_and(|value| !(1_024..=2_000_000).contains(&value))
+    {
+        return Err("User configuration contains an out-of-range numeric setting".to_string());
+    }
+
+    if !bounded_config_text(&config.selected_persona, 256, false)
+        || !bounded_config_text(&config.spotlight_shortcut, 128, false)
+        || !bounded_config_text(&config.ptt_shortcut, 128, false)
+        || config.disabled_providers.len() > 128
+        || config
+            .disabled_providers
+            .iter()
+            .any(|provider| !bounded_config_text(provider, 128, false))
+    {
+        return Err("User configuration contains invalid identifiers or shortcuts".to_string());
+    }
+
+    let mut personalization_bytes = 0usize;
+    let mut knowledge_ids = std::collections::HashSet::new();
+    if config.knowledge_bits.len() > MAX_KNOWLEDGE_BITS {
+        return Err("User configuration contains too many knowledge entries".to_string());
+    }
+    for bit in &config.knowledge_bits {
+        if !bounded_config_text(&bit.id, 256, false)
+            || !bounded_config_text(&bit.label, 1_024, false)
+            || !bounded_config_text(&bit.content, 64 * 1024, true)
+            || !knowledge_ids.insert(&bit.id)
+        {
+            return Err("User configuration contains an invalid knowledge entry".to_string());
+        }
+        personalization_bytes = personalization_bytes
+            .saturating_add(bit.label.len())
+            .saturating_add(bit.content.len());
+    }
+    let mut persona_ids = std::collections::HashSet::new();
+    if config.custom_personas.len() > MAX_CUSTOM_PERSONAS {
+        return Err("User configuration contains too many custom personas".to_string());
+    }
+    for persona in &config.custom_personas {
+        if !bounded_config_text(&persona.id, 256, false)
+            || !bounded_config_text(&persona.name, 1_024, false)
+            || !bounded_config_text(&persona.description, 16 * 1024, true)
+            || !bounded_config_text(&persona.instructions, 128 * 1024, false)
+            || !persona_ids.insert(&persona.id)
+        {
+            return Err("User configuration contains an invalid custom persona".to_string());
+        }
+        personalization_bytes = personalization_bytes
+            .saturating_add(persona.name.len())
+            .saturating_add(persona.description.len())
+            .saturating_add(persona.instructions.len());
+    }
+    if personalization_bytes > MAX_PERSONALIZATION_BYTES {
+        return Err("User personalization exceeds the aggregate size limit".to_string());
+    }
+
+    for backend in [
+        config.selected_chat_provider.as_deref(),
+        config.chat_backend.as_deref(),
+        config.embedding_backend.as_deref(),
+        config.tts_backend.as_deref(),
+        config.stt_backend.as_deref(),
+        config.diffusion_backend.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !bounded_config_text(backend, 128, false) {
+            return Err("User configuration contains an invalid backend identifier".to_string());
+        }
+    }
+    if config.inference_models.as_ref().is_some_and(|models| {
+        models.len() > 32
+            || models.iter().any(|(modality, model)| {
+                !bounded_config_text(modality, 64, false) || !bounded_config_text(model, 512, false)
+            })
+    }) {
+        return Err("User configuration contains invalid inference models".to_string());
+    }
+
+    if config
+        .mcp_auth_token
+        .as_deref()
+        .is_some_and(|token| !valid_mcp_auth_token(token))
+    {
+        return Err("MCP authentication token is invalid".to_string());
+    }
+    if let Some(base_url) = config.mcp_base_url.as_deref() {
+        thinclaw_desktop_tools::McpClient::new(thinclaw_desktop_tools::McpConfig {
+            base_url: base_url.to_string(),
+            auth_token: config.mcp_auth_token.clone().unwrap_or_default(),
+            timeout_ms: 30_000,
+        })
+        .map_err(|_| "MCP endpoint configuration is invalid".to_string())?;
+    } else if config.mcp_sandbox_enabled {
+        return Err("MCP sandbox mode requires an MCP endpoint".to_string());
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct KnowledgeBit {
@@ -24,7 +159,7 @@ pub struct CustomPersona {
     pub instructions: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+#[derive(Clone, Serialize, Deserialize, specta::Type)]
 pub struct UserConfig {
     // --- Web Search & Scraping ---
     #[serde(default = "default_search_concurrency")]
@@ -161,14 +296,9 @@ pub struct UserConfig {
     pub selected_model_context_size: Option<u32>,
 }
 
-/// Presence-aware patch for [`UserConfig`].
-///
-/// `UserConfig` fields use Serde defaults so older recovery snapshots can be
-/// upgraded safely. That same behavior is wrong for a command patch: a field
-/// omitted by the caller would be replaced with its default before the command
-/// could tell that it was absent. `PatchField` preserves that distinction,
-/// including the difference between an omitted nullable field and an explicit
-/// `null` used to clear it.
+/// Presence-aware update payload for [`UserConfig`]. Missing fields retain
+/// their latest backend value; `PatchField<Option<T>>` also preserves the
+/// distinction between omission and an explicit `null` clear operation.
 #[derive(Debug, Default)]
 enum PatchField<T> {
     #[default]
@@ -363,6 +493,36 @@ impl Serialize for UserConfigPatch {
     }
 }
 
+impl std::fmt::Debug for UserConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UserConfig")
+            .field("search_concurrency_limit", &self.search_concurrency_limit)
+            .field("scrape_concurrency_limit", &self.scrape_concurrency_limit)
+            .field("max_search_results", &self.max_search_results)
+            .field("max_scrape_chars", &self.max_scrape_chars)
+            .field("default_context_window", &self.default_context_window)
+            .field("knowledge_bit_count", &self.knowledge_bits.len())
+            .field("custom_persona_count", &self.custom_personas.len())
+            .field("selected_persona", &self.selected_persona)
+            .field("selected_chat_provider", &self.selected_chat_provider)
+            .field("mcp_base_url_configured", &self.mcp_base_url.is_some())
+            .field(
+                "mcp_auth_token",
+                &crate::debug_redaction::RedactedOption(&self.mcp_auth_token),
+            )
+            .field("mcp_sandbox_enabled", &self.mcp_sandbox_enabled)
+            .field("mcp_cache_ttl_secs", &self.mcp_cache_ttl_secs)
+            .field("mcp_tool_result_max_chars", &self.mcp_tool_result_max_chars)
+            .field("chat_backend", &self.chat_backend)
+            .field("embedding_backend", &self.embedding_backend)
+            .field("tts_backend", &self.tts_backend)
+            .field("stt_backend", &self.stt_backend)
+            .field("diffusion_backend", &self.diffusion_backend)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
@@ -473,14 +633,50 @@ fn default_mcp_base_url() -> Option<String> {
     std::env::var("THINCLAW_MCP_URL")
         .or_else(|_| std::env::var("SCRAPPY_MCP_URL"))
         .ok()
-        .filter(|s| !s.is_empty())
+        .filter(|value| {
+            !value.is_empty()
+                && thinclaw_desktop_tools::McpClient::new(thinclaw_desktop_tools::McpConfig {
+                    base_url: value.clone(),
+                    auth_token: String::new(),
+                    timeout_ms: 30_000,
+                })
+                .is_ok()
+        })
 }
 
 fn default_mcp_auth_token() -> Option<String> {
     std::env::var("THINCLAW_MCP_TOKEN")
         .or_else(|_| std::env::var("SCRAPPY_MCP_TOKEN"))
         .ok()
-        .filter(|s| !s.is_empty())
+        .filter(|value| !value.is_empty() && valid_mcp_auth_token(value))
+}
+
+pub(crate) const MCP_AUTH_TOKEN_SECRET_KEY: &str = "desktop_mcp_auth_token";
+
+fn config_json_for_persistence(config: &UserConfig) -> Result<String, serde_json::Error> {
+    let mut value = serde_json::to_value(config)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("mcp_auth_token");
+    }
+    serde_json::to_string_pretty(&value)
+}
+
+pub(crate) fn write_config_file(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    if contents.len() > MAX_USER_CONFIG_BYTES as usize {
+        return Err("user configuration exceeds the size limit".to_string());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "user config path has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create user config directory: {error}"))?;
+    let metadata = std::fs::symlink_metadata(parent)
+        .map_err(|error| format!("failed to inspect user config directory: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("user config directory is not a real directory".to_string());
+    }
+    thinclaw_platform::write_private_file_atomic(path, contents.as_bytes(), true)
+        .map_err(|error| format!("failed to atomically publish user config: {error}"))
 }
 
 fn normalize_user_config(mut config: UserConfig) -> UserConfig {
@@ -493,8 +689,7 @@ fn normalize_user_config(mut config: UserConfig) -> UserConfig {
 pub struct ConfigManager {
     config: Mutex<UserConfig>,
     config_path: PathBuf,
-    database: RwLock<Option<Arc<dyn thinclaw_core::db::Database>>>,
-    write_lock: tokio::sync::Mutex<()>,
+    mutation_lock: Mutex<()>,
 }
 
 impl ConfigManager {
@@ -505,28 +700,113 @@ impl ConfigManager {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("user_config.json");
 
-        let config = if config_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&config_path) {
-                let loaded: UserConfig = serde_json::from_str(&content).unwrap_or_default();
-                normalize_user_config(loaded)
-            } else {
+        let mut legacy_mcp_token = None;
+        let mut legacy_scrubbed_json = None;
+        let metadata = std::fs::symlink_metadata(&config_path);
+        let should_create_default = metadata
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        let mut config = match metadata {
+            Ok(_) => match thinclaw_platform::read_regular_file_bounded_single_link(
+                &config_path,
+                MAX_USER_CONFIG_BYTES,
+            ) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(content) => {
+                        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&content) {
+                            legacy_mcp_token = value
+                                .get("mcp_auth_token")
+                                .and_then(serde_json::Value::as_str)
+                                .filter(|token| !token.is_empty() && valid_mcp_auth_token(token))
+                                .map(str::to_owned);
+                            if legacy_mcp_token.is_some() {
+                                if let Some(object) = value.as_object_mut() {
+                                    object.remove("mcp_auth_token");
+                                }
+                                legacy_scrubbed_json = serde_json::to_string_pretty(&value).ok();
+                            }
+                        }
+                        match serde_json::from_str::<UserConfig>(&content)
+                            .map(normalize_user_config)
+                        {
+                            Ok(loaded) if validate_user_config(&loaded).is_ok() => loaded,
+                            Ok(_) => {
+                                tracing::warn!(
+                                    "User configuration failed validation; using defaults"
+                                );
+                                UserConfig::default()
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    "User configuration could not be decoded; using defaults: {error}"
+                                );
+                                UserConfig::default()
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!("User configuration is not valid UTF-8; using defaults");
+                        UserConfig::default()
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!("User configuration could not be read safely: {error}");
+                    UserConfig::default()
+                }
+            },
+            Err(error) => {
+                if !should_create_default {
+                    tracing::warn!("User configuration could not be inspected: {error}");
+                }
                 UserConfig::default()
             }
-        } else {
-            let default = UserConfig::default();
-            // Try to create the file
-            if let Ok(json) = serde_json::to_string_pretty(&default) {
-                let _ = std::fs::create_dir_all(config_path.parent().unwrap());
-                let _ = std::fs::write(&config_path, json);
-            }
-            default
         };
+
+        if should_create_default {
+            match config_json_for_persistence(&config) {
+                Ok(json) => {
+                    if let Err(error) = write_config_file(&config_path, &json) {
+                        tracing::warn!("Failed to persist default user configuration: {error}");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("Failed to encode default user configuration: {error}")
+                }
+            }
+        }
+
+        let mut migrated_legacy_token = false;
+        if let Some(token) = legacy_mcp_token.as_deref() {
+            match crate::thinclaw::config::keychain::set_key(MCP_AUTH_TOKEN_SECRET_KEY, Some(token))
+            {
+                Ok(()) => migrated_legacy_token = true,
+                Err(error) => tracing::warn!(
+                    "Failed to migrate legacy MCP credential to secure storage: {error}"
+                ),
+            }
+            if migrated_legacy_token {
+                if let Some(json) = legacy_scrubbed_json.as_deref() {
+                    if let Err(error) = write_config_file(&config_path, json) {
+                        tracing::warn!(
+                            "MCP credential was secured but legacy config could not be scrubbed: {error}"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        "MCP credential was secured but the legacy config could not be scrubbed safely"
+                    );
+                }
+            }
+        }
+        config.mcp_auth_token =
+            crate::thinclaw::config::keychain::get_key(MCP_AUTH_TOKEN_SECRET_KEY)
+                .or_else(|| legacy_mcp_token.filter(|_| !migrated_legacy_token))
+                .or_else(default_mcp_auth_token);
 
         Self {
             config: Mutex::new(config),
             config_path,
-            database: RwLock::new(None),
-            write_lock: tokio::sync::Mutex::new(()),
+            mutation_lock: Mutex::new(()),
         }
     }
 
@@ -537,257 +817,35 @@ impl ConfigManager {
             .clone()
     }
 
-    /// Attach the canonical app-wide settings database and perform the one-time
-    /// `user_config.json` merge. The database wins once a Workbench value has
-    /// been written; the JSON file remains a recovery mirror for downgrades.
-    pub async fn attach_database(
-        &self,
-        database: Arc<dyn thinclaw_core::db::Database>,
-    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-        let _write = self.write_lock.lock().await;
-        let canonical = database
-            .get_setting(SETTINGS_USER_ID, WORKBENCH_CONFIG_KEY)
-            .await
-            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
-
-        let config = if let Some(value) = canonical {
-            normalize_user_config(
-                serde_json::from_value(value)
-                    .map_err(|error| format!("invalid canonical Workbench config: {error}"))?,
-            )
-        } else {
-            let config = self.get_config();
-            database
-                .set_setting(
-                    SETTINGS_USER_ID,
-                    WORKBENCH_CONFIG_KEY,
-                    &serde_json::to_value(&config).map_err(|error| {
-                        crate::thinclaw::bridge::BridgeError::from(error.to_string())
-                    })?,
-                )
-                .await
-                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
-            config
-        };
-
-        database
-            .set_setting(
-                SETTINGS_USER_ID,
-                SETTINGS_SCHEMA_VERSION_KEY,
-                &serde_json::json!(SETTINGS_SCHEMA_VERSION),
-            )
-            .await
-            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
-        *self
-            .database
-            .write()
-            .unwrap_or_else(|error| error.into_inner()) = Some(database);
-        *self
+    pub fn save_config(&self, new_config: &UserConfig) -> Result<(), String> {
+        let normalized = normalize_user_config(new_config.clone());
+        validate_user_config(&normalized)?;
+        let json = config_json_for_persistence(&normalized).map_err(|error| error.to_string())?;
+        let mut config = self
             .config
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = config.clone();
-        if let Err(error) = self.write_recovery_file(&config).await {
-            tracing::warn!(%error, "Failed to refresh legacy Workbench config recovery file");
-        }
+            .unwrap_or_else(|error| error.into_inner());
+        write_config_file(&self.config_path, &json)?;
+        *config = normalized;
         Ok(())
     }
 
-    pub async fn save_config(
-        &self,
-        new_config: &UserConfig,
-    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-        let _write = self.write_lock.lock().await;
-        let normalized = normalize_user_config(new_config.clone());
-        let database = self
-            .database
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        if let Some(database) = database {
-            database
-                .set_setting(
-                    SETTINGS_USER_ID,
-                    WORKBENCH_CONFIG_KEY,
-                    &serde_json::to_value(&normalized).map_err(|error| {
-                        crate::thinclaw::bridge::BridgeError::from(error.to_string())
-                    })?,
-                )
-                .await
-                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
-        }
-        *self.config.lock().unwrap_or_else(|e| e.into_inner()) = normalized.clone();
-        if let Err(error) = self.write_recovery_file(&normalized).await {
-            tracing::warn!(%error, "Failed to update legacy Workbench config recovery file");
-        }
-        Ok(())
-    }
-
-    async fn write_recovery_file(
-        &self,
-        config: &UserConfig,
-    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-        let json = serde_json::to_string_pretty(config)
-            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
-        if let Some(parent) = self.config_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
-        }
-        tokio::fs::write(&self.config_path, json)
-            .await
-            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
-    }
-
-    pub async fn reload(&self) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-        let _write = self.write_lock.lock().await;
-        let database = self
-            .database
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let config = if let Some(database) = database {
-            database
-                .get_setting(SETTINGS_USER_ID, WORKBENCH_CONFIG_KEY)
-                .await
-                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?
-        } else {
-            tokio::fs::read_to_string(&self.config_path)
-                .await
-                .ok()
-                .and_then(|content| serde_json::from_str(&content).ok())
-        };
-        if let Some(config) = config {
-            *self
-                .config
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = normalize_user_config(config);
-        }
-        Ok(())
-    }
-
-    fn canonical_database(
-        &self,
-    ) -> Result<Arc<dyn thinclaw_core::db::Database>, crate::thinclaw::bridge::BridgeError> {
-        Ok(self
-            .database
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
-            .ok_or_else(|| "Canonical settings database is not initialized".to_string())?)
-    }
-
-    pub async fn agent_settings(
-        &self,
-    ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
-        let database = self.canonical_database()?;
-        let response = thinclaw_core::api::config::list_settings(&database, SETTINGS_USER_ID)
-            .await
-            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
-        let mut value = serde_json::to_value(response)
-            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
-        if let Some(settings) = value
-            .get_mut("settings")
-            .and_then(serde_json::Value::as_array_mut)
-        {
-            settings.retain(|setting| {
-                setting
-                    .get("key")
-                    .and_then(serde_json::Value::as_str)
-                    .is_none_or(|key| !key.starts_with("desktop."))
-            });
-        }
-        Ok(value)
-    }
-
-    pub async fn set_agent_setting(
-        &self,
-        key: &str,
-        value: &serde_json::Value,
-    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-        if key.starts_with("desktop.") {
-            return Err(
-                ("desktop.* settings are reserved for the Workbench view".to_string()).into(),
-            );
-        }
-        let database = self.canonical_database()?;
-        thinclaw_core::api::config::set_setting(&database, SETTINGS_USER_ID, key, value)
-            .await
-            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))
-    }
-
-    pub async fn patch_workbench(
-        &self,
-        patch: &serde_json::Value,
-    ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-        let patch = patch
-            .as_object()
-            .ok_or_else(|| "Workbench settings patch must be an object".to_string())?;
-        let mut merged = serde_json::to_value(self.get_config())
-            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
-        let target = merged
-            .as_object_mut()
-            .ok_or_else(|| "Workbench settings must serialize as an object".to_string())?;
-        for (key, value) in patch {
-            if !target.contains_key(key) {
-                return Err((format!("Unknown Workbench setting: {key}")).into());
-            }
-            target.insert(key.clone(), value.clone());
-        }
-        let config: UserConfig = serde_json::from_value(merged)
-            .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
-        self.save_config(&config).await
-    }
-}
-
-fn schema_for_default(value: &serde_json::Value) -> serde_json::Value {
-    let type_name = match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    };
-    let mut schema = serde_json::json!({ "type": type_name, "default": value });
-    if let Some(object) = value.as_object() {
-        schema["properties"] = serde_json::Value::Object(
-            object
-                .iter()
-                .map(|(key, value)| (key.clone(), schema_for_default(value)))
-                .collect(),
-        );
-    }
-    schema
-}
-
-pub fn unified_settings_schema() -> serde_json::Value {
-    let mut workbench =
-        serde_json::to_value(UserConfig::default()).unwrap_or_else(|_| serde_json::json!({}));
-    // Secret values are managed by the dedicated keychain surface and must
-    // never be reflected into a generic settings schema/default payload.
-    if let Some(workbench) = workbench.as_object_mut() {
-        workbench.remove("mcp_auth_token");
-    }
-    serde_json::json!({
-        "version": SETTINGS_SCHEMA_VERSION,
-        "type": "object",
-        "views": {
-            "workbench": {
-                "title": "Direct AI Workbench",
-                "description": "Direct chat, inference, RAG, media, and local engine preferences.",
-                "storageKey": WORKBENCH_CONFIG_KEY,
-                "schema": schema_for_default(&workbench),
-            },
-            "agent": {
-                "title": "ThinClaw Agent Cockpit",
-                "description": "Agent-runtime settings stored in the same canonical settings table.",
-                "schema": { "type": "object", "additionalProperties": true },
+    pub fn reload(&self) {
+        if let Ok(bytes) = thinclaw_platform::read_regular_file_bounded_single_link(
+            &self.config_path,
+            MAX_USER_CONFIG_BYTES,
+        ) {
+            if let Ok(new_config) = serde_json::from_slice(&bytes) {
+                let mut normalized = normalize_user_config(new_config);
+                normalized.mcp_auth_token =
+                    crate::thinclaw::config::keychain::get_key(MCP_AUTH_TOKEN_SECRET_KEY)
+                        .or_else(default_mcp_auth_token);
+                if validate_user_config(&normalized).is_ok() {
+                    *self.config.lock().unwrap_or_else(|e| e.into_inner()) = normalized;
+                }
             }
         }
-    })
+    }
 }
 
 #[tauri::command]
@@ -796,23 +854,21 @@ pub fn open_config_file(app: AppHandle) -> Result<(), crate::thinclaw::bridge::B
     let config_path = app
         .path()
         .app_config_dir()
-        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?
+        .map_err(|e| e.to_string())?
         .join("user_config.json");
 
-    if !config_path.exists() {
-        return Err(("Config file does not exist yet".to_string()).into());
-    }
+    thinclaw_platform::read_regular_file_bounded_single_link(&config_path, MAX_USER_CONFIG_BYTES)
+        .map_err(|error| format!("Config file cannot be opened safely: {error}"))?;
 
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open")
-            .arg("-R")
+        std::process::Command::new("open")
             .arg(&config_path)
-            .spawn();
+            .spawn()
+            .map_err(|error| format!("Failed to open config file: {error}"))?;
     }
     #[cfg(not(target_os = "macos"))]
-    open::that(config_path.parent().unwrap_or(&config_path))
-        .map_err(|e| crate::thinclaw::bridge::BridgeError::from(e.to_string()))?;
+    open::that(&config_path).map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -845,17 +901,76 @@ pub async fn get_hf_token(
 
 #[tauri::command]
 #[specta::specta]
-pub fn get_user_config(state: tauri::State<ConfigManager>) -> UserConfig {
-    state.get_config()
+pub fn get_user_config(
+    state: tauri::State<ConfigManager>,
+    secret_store: tauri::State<crate::secret_store::SecretStore>,
+) -> UserConfig {
+    let mut config = state.get_config();
+    config.mcp_auth_token = secret_store
+        .get(MCP_AUTH_TOKEN_SECRET_KEY)
+        .or_else(default_mcp_auth_token);
+    config
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn update_user_config(
-    state: tauri::State<'_, ConfigManager>,
+pub fn update_user_config(
+    state: tauri::State<ConfigManager>,
+    secret_store: tauri::State<crate::secret_store::SecretStore>,
     config: UserConfigPatch,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    state.patch_workbench(&config.into_json()?).await
+    let _mutation = state
+        .mutation_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let patch = config.into_json()?;
+    let patch = patch
+        .as_object()
+        .ok_or_else(|| "User configuration patch must be an object".to_string())?;
+    let token_change = patch.get("mcp_auth_token").map(|value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned)
+    });
+
+    let mut merged = serde_json::to_value(state.get_config())
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+    let target = merged
+        .as_object_mut()
+        .ok_or_else(|| "User configuration must serialize as an object".to_string())?;
+    for (key, value) in patch {
+        if !target.contains_key(key) {
+            return Err(format!("Unknown user configuration field: {key}").into());
+        }
+        target.insert(key.clone(), value.clone());
+    }
+
+    let mut merged: UserConfig = serde_json::from_value(merged)
+        .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
+    if let Some(value) = &token_change {
+        merged.mcp_auth_token = value.clone().or_else(default_mcp_auth_token);
+    }
+    validate_user_config(&normalize_user_config(merged.clone()))?;
+
+    let previous_mcp_token = secret_store.get(MCP_AUTH_TOKEN_SECRET_KEY);
+    if let Some(value) = &token_change {
+        secret_store.set(MCP_AUTH_TOKEN_SECRET_KEY, value.as_deref())?;
+    }
+    if let Err(save_error) = state.save_config(&merged) {
+        if token_change.is_none() {
+            return Err(save_error.into());
+        }
+        return match secret_store.set(MCP_AUTH_TOKEN_SECRET_KEY, previous_mcp_token.as_deref()) {
+            Ok(()) => Err(save_error.into()),
+            Err(rollback_error) => Err(format!(
+                "{save_error}; additionally failed to restore the previous MCP credential: {rollback_error}"
+            )
+            .into()),
+        };
+    }
+    Ok(())
 }
 
 // =============================================================================
@@ -967,6 +1082,26 @@ mod tests {
     }
 
     #[test]
+    fn invalid_mcp_environment_defaults_are_ignored() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("THINCLAW_MCP_URL", "http://public.example.com");
+            std::env::set_var("THINCLAW_MCP_TOKEN", "bad\ntoken");
+            std::env::remove_var("SCRAPPY_MCP_URL");
+            std::env::remove_var("SCRAPPY_MCP_TOKEN");
+        }
+        let config = UserConfig::default();
+        unsafe {
+            std::env::remove_var("THINCLAW_MCP_URL");
+            std::env::remove_var("THINCLAW_MCP_TOKEN");
+        }
+
+        assert!(config.mcp_base_url.is_none());
+        assert!(config.mcp_auth_token.is_none());
+        assert!(validate_user_config(&config).is_ok());
+    }
+
+    #[test]
     fn legacy_scrappy_persona_is_normalized_for_new_writes() {
         let cfg = UserConfig {
             selected_persona: "scrappy".to_string(),
@@ -1007,6 +1142,62 @@ mod tests {
     }
 
     #[test]
+    fn persisted_user_config_omits_mcp_token_and_debug_redacts_private_content() {
+        let config = UserConfig {
+            mcp_auth_token: Some("mcp-live-secret".into()),
+            knowledge_bits: vec![KnowledgeBit {
+                id: "private".into(),
+                label: "Private".into(),
+                content: "private-knowledge-content".into(),
+                enabled: true,
+            }],
+            ..UserConfig::default()
+        };
+
+        let persisted = config_json_for_persistence(&config).unwrap();
+        assert!(!persisted.contains("mcp-live-secret"));
+        assert!(!persisted.contains("mcp_auth_token"));
+
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("mcp-live-secret"));
+        assert!(!debug.contains("private-knowledge-content"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn user_config_validation_rejects_unsafe_endpoints_and_oversized_personalization() {
+        let remote_http = UserConfig {
+            mcp_base_url: Some("http://public.example.com".into()),
+            ..UserConfig::default()
+        };
+        assert!(validate_user_config(&remote_http).is_err());
+
+        let oversized = UserConfig {
+            knowledge_bits: (0..5)
+                .map(|index| KnowledgeBit {
+                    id: format!("knowledge-{index}"),
+                    label: "label".into(),
+                    content: "x".repeat(64 * 1024),
+                    enabled: true,
+                })
+                .collect(),
+            ..UserConfig::default()
+        };
+        assert!(validate_user_config(&oversized).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_writer_rejects_a_symlink_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let target = directory.path().join("user_config.json");
+        std::os::unix::fs::symlink(outside.path(), &target).unwrap();
+        assert!(write_config_file(&target, "{}").is_err());
+        assert_eq!(std::fs::read(outside.path()).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
     fn partial_json_with_missing_fields_uses_serde_defaults() {
         // Simulate a config file that predates the new mcp_cache_ttl_secs field.
         let minimal_json = r#"{ "selected_persona": "thinclaw" }"#;
@@ -1026,20 +1217,8 @@ mod tests {
         ConfigManager {
             config: Mutex::new(cfg),
             config_path: std::path::PathBuf::from("/tmp/thinclaw_desktop_test_config.json"),
-            database: RwLock::new(None),
-            write_lock: tokio::sync::Mutex::new(()),
+            mutation_lock: Mutex::new(()),
         }
-    }
-
-    #[cfg(feature = "runtime-libsql")]
-    async fn canonical_database(temp: &tempfile::TempDir) -> Arc<dyn thinclaw_core::db::Database> {
-        use thinclaw_core::db::Database as _;
-        let path = temp.path().join("settings.db");
-        let backend = thinclaw_core::db::libsql::LibSqlBackend::new_local(&path)
-            .await
-            .expect("open canonical settings database");
-        backend.run_migrations().await.expect("run migrations");
-        Arc::new(backend)
     }
 
     #[test]
@@ -1052,168 +1231,34 @@ mod tests {
         assert_eq!(mgr.get_config().selected_persona, "custom");
     }
 
-    #[tokio::test]
-    async fn config_manager_save_updates_in_memory_immediately() {
-        let mgr = make_manager_from_config(UserConfig::default());
+    #[test]
+    fn config_manager_save_updates_in_memory_after_durable_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let mgr = ConfigManager {
+            config: Mutex::new(UserConfig::default()),
+            config_path: directory.path().join("user_config.json"),
+            mutation_lock: Mutex::new(()),
+        };
 
         let mut updated = mgr.get_config();
-        updated.max_search_results = 99;
+        updated.max_search_results = 19;
         updated.mcp_cache_ttl_secs = 120;
-        mgr.save_config(&updated).await.expect("save config");
+        updated.mcp_auth_token = Some("not-persisted".into());
+        mgr.save_config(&updated).unwrap();
 
-        // The in-memory state must be updated synchronously (disk write is async)
         let read_back = mgr.get_config();
-        assert_eq!(read_back.max_search_results, 99);
+        assert_eq!(read_back.max_search_results, 19);
         assert_eq!(read_back.mcp_cache_ttl_secs, 120);
-    }
+        assert_eq!(read_back.mcp_auth_token.as_deref(), Some("not-persisted"));
 
-    #[cfg(feature = "runtime-libsql")]
-    #[tokio::test]
-    async fn canonical_database_migrates_file_config_and_wins_on_restart() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let database = canonical_database(&temp).await;
-        let original = UserConfig {
-            max_search_results: 17,
-            selected_persona: "migrated".to_string(),
-            ..UserConfig::default()
-        };
-        let manager = ConfigManager {
-            config: Mutex::new(original),
-            config_path: temp.path().join("user_config.json"),
-            database: RwLock::new(None),
-            write_lock: tokio::sync::Mutex::new(()),
-        };
-        manager
-            .attach_database(Arc::clone(&database))
-            .await
-            .expect("attach canonical database");
-
-        let persisted = database
-            .get_setting(SETTINGS_USER_ID, WORKBENCH_CONFIG_KEY)
-            .await
-            .expect("read canonical config")
-            .expect("canonical config exists");
-        assert_eq!(persisted["max_search_results"], 17);
-        assert_eq!(persisted["selected_persona"], "migrated");
-
-        let restarted = ConfigManager {
-            config: Mutex::new(UserConfig::default()),
-            config_path: temp.path().join("restarted-user_config.json"),
-            database: RwLock::new(None),
-            write_lock: tokio::sync::Mutex::new(()),
-        };
-        restarted
-            .attach_database(Arc::clone(&database))
-            .await
-            .expect("reattach canonical database");
-        assert_eq!(restarted.get_config().max_search_results, 17);
-        assert_eq!(restarted.get_config().selected_persona, "migrated");
-
-        let mut updated = restarted.get_config();
-        updated.max_search_results = 23;
-        restarted.save_config(&updated).await.expect("save update");
-        let persisted = database
-            .get_setting(SETTINGS_USER_ID, WORKBENCH_CONFIG_KEY)
-            .await
-            .expect("read updated config")
-            .expect("updated config exists");
-        assert_eq!(persisted["max_search_results"], 23);
-    }
-
-    #[cfg(feature = "runtime-libsql")]
-    #[tokio::test]
-    async fn agent_and_workbench_views_share_storage_without_leaking_reserved_rows() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let database = canonical_database(&temp).await;
-        let manager = ConfigManager {
-            config: Mutex::new(UserConfig::default()),
-            config_path: temp.path().join("user_config.json"),
-            database: RwLock::new(None),
-            write_lock: tokio::sync::Mutex::new(()),
-        };
-        manager
-            .attach_database(database)
-            .await
-            .expect("attach canonical database");
-        manager
-            .set_agent_setting("llm.backend", &serde_json::json!("anthropic"))
-            .await
-            .expect("set agent setting");
-
-        let response = manager.agent_settings().await.expect("list agent settings");
-        let rows = response["settings"].as_array().expect("settings rows");
-        assert!(rows.iter().any(|row| row["key"] == "llm.backend"));
-        assert!(!rows.iter().any(|row| {
-            row["key"]
-                .as_str()
-                .is_some_and(|key| key.starts_with("desktop."))
-        }));
-        assert!(manager
-            .set_agent_setting("desktop.workbench", &serde_json::json!({}))
-            .await
-            .is_err());
-    }
-
-    #[test]
-    fn unified_schema_is_derived_from_every_workbench_field() {
-        let schema = unified_settings_schema();
-        let properties = schema["views"]["workbench"]["schema"]["properties"]
-            .as_object()
-            .expect("workbench properties");
-        let defaults = serde_json::to_value(UserConfig::default())
-            .expect("serialize defaults")
-            .as_object()
-            .expect("default fields")
-            .clone();
-        assert_eq!(properties.len(), defaults.len() - 1);
-        assert!(!properties.contains_key("mcp_auth_token"));
-        assert!(defaults
-            .keys()
-            .filter(|key| key.as_str() != "mcp_auth_token")
-            .all(|key| properties.contains_key(key)));
+        let persisted = std::fs::read_to_string(&mgr.config_path).unwrap();
+        assert!(!persisted.contains("not-persisted"));
+        assert!(!persisted.contains("mcp_auth_token"));
     }
 
     // -------------------------------------------------------------------------
-    // Presence-aware command patch semantics
+    // JSON-level merge semantics (update_user_config logic)
     // -------------------------------------------------------------------------
-
-    #[test]
-    fn user_config_patch_serializes_only_fields_the_caller_supplied() {
-        let patch: UserConfigPatch = serde_json::from_value(serde_json::json!({
-            "max_search_results": 15,
-            "mcp_base_url": null
-        }))
-        .expect("deserialize patch");
-
-        assert_eq!(
-            patch.into_json().expect("serialize patch"),
-            serde_json::json!({
-                "max_search_results": 15,
-                "mcp_base_url": null
-            })
-        );
-    }
-
-    #[test]
-    fn user_config_patch_rejects_null_for_non_nullable_fields() {
-        let error = serde_json::from_value::<UserConfigPatch>(serde_json::json!({
-            "max_search_results": null
-        }))
-        .expect_err("non-nullable field must reject null");
-
-        assert!(error.to_string().contains("invalid type"));
-    }
-
-    #[test]
-    fn user_config_patch_rejects_unknown_fields() {
-        let error = serde_json::from_value::<UserConfigPatch>(serde_json::json!({
-            "raw": "legacy payload",
-            "baseHash": "stale hash"
-        }))
-        .expect_err("legacy wrapper must not be silently accepted");
-
-        assert!(error.to_string().contains("unknown field"));
-    }
 
     #[test]
     fn json_merge_last_write_wins_on_basic_field() {
@@ -1245,8 +1290,8 @@ mod tests {
         // The "incoming" patch only mentions max_search_results.
         // We build it as a raw JSON object so serde does NOT emit a null for
         // mcp_base_url (which would incorrectly overwrite the base value).
-        // This matches the presence-aware UserConfigPatch representation used
-        // by update_user_config.
+        // This matches how update_user_config actually receives data from the
+        // frontend — partial objects, not full UserConfig serialisations.
         let inc_val: serde_json::Value = serde_json::json!({
             "max_search_results": 15
         });

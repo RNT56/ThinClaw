@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, LazyLock, RwLock as StdRwLock};
 
 use chrono::{DateTime, Utc};
@@ -8,7 +7,6 @@ use rand::RngExt;
 use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use uuid::Uuid;
@@ -44,13 +42,14 @@ pub use global::*;
 pub use helpers::run_shadow_canary_entrypoint;
 pub use manager::DesktopAutonomyManager;
 pub use sessions::*;
+pub(crate) use source_sync::resolve_thinclaw_source_for_learning;
 pub use types::*;
 
 pub(super) use helpers::*;
 pub(super) use types::{
     ActionReadinessSnapshot, BuildManifest, DEFAULT_SESSION_ID, DedicatedUserBootstrap,
     DesktopBootstrapPrerequisites, DesktopBridgeBackend, DesktopBridgeSpec, GLOBAL_MANAGER,
-    RolloutState, RuntimeState,
+    PromotionJournal, RolloutState, RuntimeState,
 };
 #[cfg(test)]
 pub(super) use types::{LINUX_SIDECAR_FILENAME, MACOS_SIDECAR_FILENAME, WINDOWS_SIDECAR_FILENAME};

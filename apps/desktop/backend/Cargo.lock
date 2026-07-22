@@ -154,6 +154,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "ambient-authority"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9d4ee0d472d1cd2e28c97dfa124b3d8d992e10eb0a035f33f5d12e3a177ba3b"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1128,6 +1134,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f2d30e4173c4026932d51d31d6b0613b1fd3014bf3f9f8943d4ba139c437ba0"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "cap-fs-ext"
+version = "3.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5528f85b1e134ae811704e41ef80930f56e795923f866813255bc342cc20654"
+dependencies = [
+ "cap-primitives",
+ "cap-std",
+ "io-lifetimes",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "cap-primitives"
+version = "3.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6cf3aea8a5081171859ef57bc1606b1df6999df4f1110f8eef68b30098d1d3a"
+dependencies = [
+ "ambient-authority",
+ "fs-set-times",
+ "io-extras",
+ "io-lifetimes",
+ "ipnet",
+ "maybe-owned",
+ "rustix 1.1.4",
+ "rustix-linux-procfs",
+ "windows-sys 0.59.0",
+ "winx",
+]
+
+[[package]]
+name = "cap-std"
+version = "3.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6dc3090992a735d23219de5c204927163d922f42f575a0189b005c62d37549a"
+dependencies = [
+ "cap-primitives",
+ "io-extras",
+ "io-lifetimes",
+ "rustix 1.1.4",
 ]
 
 [[package]]
@@ -3096,6 +3144,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-set-times"
+version = "0.20.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
+dependencies = [
+ "io-lifetimes",
+ "rustix 1.1.4",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "fs4"
+version = "0.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2eeb4ed9e12f43b7fa0baae3f9cdda28352770132ef2e09a23760c29cae8bd47"
+dependencies = [
+ "rustix 0.38.44",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
 name = "fs4"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4411,6 +4480,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-extras"
+version = "0.18.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2285ddfe3054097ef4b2fe909ef8c3bcd1ea52a8f0d274416caebeef39f04a65"
+dependencies = [
+ "io-lifetimes",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "io-lifetimes"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06432fb54d3be7964ecd3649233cddf80db2832f47fec34c01f65b3d9d774983"
+
+[[package]]
 name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4683,6 +4768,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee0b351864e7ffbc5db9273daf7fa1b4d5177b0946713d667ca571b83c0b4045"
 dependencies = [
  "regex-syntax",
+]
+
+[[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64 0.22.1",
+ "js-sys",
+ "pem",
+ "ring",
+ "serde",
+ "serde_json",
+ "simple_asn1",
 ]
 
 [[package]]
@@ -5239,6 +5339,12 @@ dependencies = [
  "autocfg",
  "rawpointer",
 ]
+
+[[package]]
+name = "maybe-owned"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "maybe-rayon"
@@ -6037,8 +6143,7 @@ dependencies = [
 [[package]]
 name = "opendal"
 version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77d02c6564e376d3670aaf66ad886cd34f83c0aca407b6364777c624a63e0e2d"
+source = "git+https://github.com/apache/opendal.git?rev=e42589ad764db6f659e029fc41a83e12b7fb9a92#e42589ad764db6f659e029fc41a83e12b7fb9a92"
 dependencies = [
  "ctor 1.0.8",
  "opendal-core",
@@ -6055,8 +6160,7 @@ dependencies = [
 [[package]]
 name = "opendal-core"
 version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8564bd76b75d2aea59178cb5b6e9f770be1da73b1bca062720ec151cc56215a"
+source = "git+https://github.com/apache/opendal.git?rev=e42589ad764db6f659e029fc41a83e12b7fb9a92#e42589ad764db6f659e029fc41a83e12b7fb9a92"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6081,8 +6185,7 @@ dependencies = [
 [[package]]
 name = "opendal-http-transport-reqwest"
 version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b7fd001b204df76be5d2b3f7a81c48b5cf25b28e2cfb3b8a819bb89cdc0ea3a"
+source = "git+https://github.com/apache/opendal.git?rev=e42589ad764db6f659e029fc41a83e12b7fb9a92#e42589ad764db6f659e029fc41a83e12b7fb9a92"
 dependencies = [
  "bytes",
  "futures",
@@ -6095,8 +6198,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-concurrent-limit"
 version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "215341e41220815d7945e5b936323ead2248354d2d69573a1cd9d1a30aa09440"
+source = "git+https://github.com/apache/opendal.git?rev=e42589ad764db6f659e029fc41a83e12b7fb9a92#e42589ad764db6f659e029fc41a83e12b7fb9a92"
 dependencies = [
  "futures",
  "http 1.4.2",
@@ -6107,8 +6209,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-logging"
 version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed46bc88c1ea9b961c342a796ec790ee5a0ac5a02bf465aea6791684d72ca291"
+source = "git+https://github.com/apache/opendal.git?rev=e42589ad764db6f659e029fc41a83e12b7fb9a92#e42589ad764db6f659e029fc41a83e12b7fb9a92"
 dependencies = [
  "log",
  "opendal-core",
@@ -6117,8 +6218,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-retry"
 version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2df70875ab7fd6f80720d4787c49c70883cef0d81bfae947ecba88b8d1cd62e"
+source = "git+https://github.com/apache/opendal.git?rev=e42589ad764db6f659e029fc41a83e12b7fb9a92#e42589ad764db6f659e029fc41a83e12b7fb9a92"
 dependencies = [
  "backon",
  "log",
@@ -6128,8 +6228,7 @@ dependencies = [
 [[package]]
 name = "opendal-layer-timeout"
 version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18f1bb30ab396a617ef884863b27ae91fbe966e312ce69876fa41584ab0fc5c6"
+source = "git+https://github.com/apache/opendal.git?rev=e42589ad764db6f659e029fc41a83e12b7fb9a92#e42589ad764db6f659e029fc41a83e12b7fb9a92"
 dependencies = [
  "opendal-core",
  "tokio",
@@ -6138,8 +6237,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-s3"
 version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "750d9cc8588c19b27c4c2c5d06d7eb6f2bff62549c48652f1f9a7603cd872377"
+source = "git+https://github.com/apache/opendal.git?rev=e42589ad764db6f659e029fc41a83e12b7fb9a92#e42589ad764db6f659e029fc41a83e12b7fb9a92"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -6159,8 +6257,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-sftp"
 version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fccc22e524ca4a527dea52752aed9de8f6d19a52cc32057c52f04afa54260937"
+source = "git+https://github.com/apache/opendal.git?rev=e42589ad764db6f659e029fc41a83e12b7fb9a92#e42589ad764db6f659e029fc41a83e12b7fb9a92"
 dependencies = [
  "bytes",
  "fastpool",
@@ -6176,8 +6273,7 @@ dependencies = [
 [[package]]
 name = "opendal-service-webdav"
 version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48e7527c793412d4b129f334258af73689e144cb91610cabfbdb47d410248c08"
+source = "git+https://github.com/apache/opendal.git?rev=e42589ad764db6f659e029fc41a83e12b7fb9a92#e42589ad764db6f659e029fc41a83e12b7fb9a92"
 dependencies = [
  "anyhow",
  "bytes",
@@ -8229,6 +8325,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustix-linux-procfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fc84bf7e9aa16c4f2c758f27412dc9841341e16aa682d9c7ac308fe3ee12056"
+dependencies = [
+ "once_cell",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "rustls"
 version = "0.23.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10085,7 +10191,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -10257,7 +10363,7 @@ dependencies = [
  "dotenvy",
  "ed25519-dalek",
  "flate2",
- "fs4",
+ "fs4 1.1.0",
  "futures",
  "hex",
  "hkdf 0.13.0",
@@ -10267,7 +10373,8 @@ dependencies = [
  "hyper-util",
  "iana-time-zone",
  "jsonschema",
- "jsonwebtoken",
+ "jsonwebtoken 10.4.0",
+ "libc",
  "libloading 0.9.0",
  "libsql",
  "lru 0.18.1",
@@ -10292,10 +10399,12 @@ dependencies = [
  "secrecy",
  "secret-service",
  "security-framework",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.11.0",
+ "shlex 1.3.0",
  "subtle",
  "sysinfo",
  "tar",
@@ -10384,6 +10493,7 @@ dependencies = [
  "thinclaw-platform",
  "thinclaw-safety",
  "thinclaw-soul",
+ "thinclaw-tools",
  "thinclaw-tools-core",
  "thinclaw-types",
  "thinclaw-workspace",
@@ -10429,11 +10539,12 @@ dependencies = [
  "chrono",
  "dirs",
  "ed25519-dalek",
- "fs4",
+ "fs4 0.6.6",
  "futures",
  "hex",
  "hmac 0.13.0",
- "jsonwebtoken",
+ "jsonwebtoken 9.3.1",
+ "libc",
  "lru 0.18.1",
  "rand 0.10.2",
  "regex",
@@ -10445,6 +10556,7 @@ dependencies = [
  "sha2 0.11.0",
  "subtle",
  "thinclaw-channels-core",
+ "thinclaw-identity",
  "thinclaw-media",
  "thinclaw-platform",
  "thinclaw-safety",
@@ -10455,6 +10567,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.29.0",
+ "tower 0.5.3",
  "tracing",
  "url",
  "urlencoding",
@@ -10500,6 +10613,7 @@ dependencies = [
  "thinclaw-workspace",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -10507,6 +10621,7 @@ name = "thinclaw-context"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "thinclaw-platform",
  "thinclaw-types",
 ]
 
@@ -10547,6 +10662,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chromiumoxide",
  "chrono",
  "clawscan",
@@ -10559,6 +10675,7 @@ dependencies = [
  "hkdf 0.13.0",
  "html2text",
  "image",
+ "libc",
  "objc2",
  "objc2-foundation",
  "open",
@@ -10593,7 +10710,11 @@ dependencies = [
  "thinclaw",
  "thinclaw-config",
  "thinclaw-desktop-tools",
+ "thinclaw-platform",
  "thinclaw-runtime-contracts",
+ "thinclaw-secrets",
+ "thinclaw-tools",
+ "thinclaw-tools-core",
  "thiserror 2.0.18",
  "tokenizers",
  "tokio",
@@ -10624,6 +10745,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thinclaw-platform",
+ "thinclaw-tools-core",
  "thiserror 2.0.18",
  "tokio",
  "toml 1.1.3+spec-1.1.0",
@@ -10652,10 +10775,11 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "chrono",
- "fs4",
+ "fs4 1.1.0",
  "futures",
  "hex",
  "ipnet",
+ "libc",
  "rand 0.10.2",
  "serde",
  "serde_json",
@@ -10710,9 +10834,9 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "bytes",
  "chrono",
  "futures",
- "hex",
  "rand 0.10.2",
  "regex",
  "reqwest 0.12.28",
@@ -10722,11 +10846,11 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "thinclaw-config",
  "thinclaw-experiments",
  "thinclaw-llm-core",
  "thinclaw-settings",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "tokio",
  "tracing",
@@ -10756,6 +10880,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "hex",
+ "libc",
  "mime_guess",
  "pdf-extract",
  "regex",
@@ -10763,11 +10888,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tempfile",
  "thinclaw-platform",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite 0.29.0",
  "tracing",
  "url",
  "uuid",
@@ -10781,9 +10907,16 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dirs",
+ "fs4 0.6.6",
  "iana-time-zone",
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10791,6 +10924,8 @@ name = "thinclaw-portability"
 version = "0.1.0"
 dependencies = [
  "aead 0.5.2",
+ "cap-fs-ext",
+ "cap-std",
  "chacha20poly1305",
  "flate2",
  "rand 0.10.2",
@@ -10800,6 +10935,7 @@ dependencies = [
  "sha2 0.11.0",
  "tar",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -10836,6 +10972,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "thiserror 2.0.18",
  "tokio",
@@ -10907,6 +11044,7 @@ dependencies = [
  "futures",
  "hex",
  "html-to-markdown-rs",
+ "libc",
  "libsql",
  "mime_guess",
  "rand 0.10.2",
@@ -10996,6 +11134,7 @@ dependencies = [
  "thinclaw-platform",
  "thinclaw-safety",
  "thinclaw-soul",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "thiserror 2.0.18",
  "tokio-postgres",
@@ -11579,6 +11718,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper 1.0.2",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -13371,6 +13511,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb5a765337c50e9ec252c2069be9bf91c7df47afb103b642ba3a53bf8101be97"
 dependencies = [
  "cfg-if",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "winx"
+version = "0.36.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
+dependencies = [
+ "bitflags 2.13.0",
  "windows-sys 0.59.0",
 ]
 

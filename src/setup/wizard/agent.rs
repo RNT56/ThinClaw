@@ -29,12 +29,14 @@ impl SetupWizard {
                 if is_verified("telegram")
                     && self.settings.channels.telegram_owner_id.is_some() =>
             {
-                let owner_id = self
+                let Some(owner_id) = self
                     .settings
                     .channels
                     .telegram_owner_id
-                    .expect("guarded by is_some() in match arm")
-                    .to_string();
+                    .map(|id| id.to_string())
+                else {
+                    return;
+                };
                 self.settings.notifications.preferred_channel = Some("telegram".to_string());
                 self.settings.notifications.recipient = Some(owner_id.clone());
                 self.settings.heartbeat.enabled = true;
@@ -44,12 +46,9 @@ impl SetupWizard {
             "signal"
                 if is_verified("signal") && self.settings.channels.signal_account.is_some() =>
             {
-                let account = self
-                    .settings
-                    .channels
-                    .signal_account
-                    .clone()
-                    .expect("guarded by is_some() in match arm");
+                let Some(account) = self.settings.channels.signal_account.clone() else {
+                    return;
+                };
                 self.settings.notifications.preferred_channel = Some("signal".to_string());
                 self.settings.notifications.recipient = Some(account.clone());
                 self.settings.heartbeat.enabled = true;

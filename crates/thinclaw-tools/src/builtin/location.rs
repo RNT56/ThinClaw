@@ -7,7 +7,7 @@
 //!
 //! This replaces `LocationCommands.swift` from the companion app.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -15,7 +15,15 @@ use serde::Serialize;
 use tokio::process::Command;
 
 use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use thinclaw_tools_core::{OutboundUrlGuardOptions, validate_outbound_url_pinned_async};
 use thinclaw_types::JobContext;
+
+#[cfg(target_os = "macos")]
+use crate::execution::bounded_command_output;
+
+#[cfg(target_os = "macos")]
+const LOCATION_HELPER_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Location/GPS tool.
 pub struct LocationTool;
@@ -98,12 +106,16 @@ if let loc = delegate.location {
 }
 "#;
 
-    let output = Command::new("swift")
-        .arg("-e")
-        .arg(swift_code)
-        .output()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("swift: {e}")))?;
+    let mut command = Command::new("swift");
+    command.arg("-e").arg(swift_code);
+    let output = bounded_command_output(
+        &mut command,
+        LOCATION_HELPER_TIMEOUT,
+        64 * 1024,
+        64 * 1024,
+        "CoreLocation Swift helper",
+    )
+    .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -128,6 +140,17 @@ if let loc = delegate.location {
         .map_err(|_| ToolError::ExecutionFailed("Invalid longitude".to_string()))?;
     let accuracy: f64 = parts[2].parse().unwrap_or(-1.0);
     let altitude: f64 = parts[3].parse().unwrap_or(0.0);
+    if !latitude.is_finite()
+        || !longitude.is_finite()
+        || !accuracy.is_finite()
+        || !altitude.is_finite()
+        || !(-90.0..=90.0).contains(&latitude)
+        || !(-180.0..=180.0).contains(&longitude)
+    {
+        return Err(ToolError::ExecutionFailed(
+            "CoreLocation returned invalid coordinates".to_string(),
+        ));
+    }
 
     Ok(LocationResult {
         latitude,
@@ -144,28 +167,72 @@ if let loc = delegate.location {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 async fn get_ip_geolocation() -> Result<LocationResult, ToolError> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .get("http://ip-api.com/json/?fields=lat,lon")
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("IP geolocation: {e}")))?;
+    const ENDPOINT: &str = "https://ipapi.co/json/";
+    let guarded = validate_outbound_url_pinned_async(
+        ENDPOINT,
+        &OutboundUrlGuardOptions {
+            require_https: true,
+            upgrade_http_to_https: false,
+            allowlist: vec!["ipapi.co".to_string()],
+        },
+    )
+    .await?;
+    let host = guarded
+        .url
+        .host_str()
+        .ok_or_else(|| ToolError::ExecutionFailed("IP geolocation URL has no host".to_string()))?;
+    let mut client_builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy();
+    if !guarded.pinned_addrs.is_empty() {
+        client_builder = client_builder.resolve_to_addrs(host, &guarded.pinned_addrs);
+    }
+    let client = client_builder
+        .build()
+        .map_err(|e| ToolError::ExecutionFailed(format!("IP geolocation client: {e}")))?;
+    let resp =
+        client.get(guarded.url).send().await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("IP geolocation: {}", e.without_url()))
+        })?;
+    if !resp.status().is_success() {
+        return Err(ToolError::ExternalService(format!(
+            "IP geolocation returned HTTP {}",
+            resp.status()
+        )));
+    }
 
-    let body: serde_json::Value = resp
-        .json()
+    let body: serde_json::Value = thinclaw_types::http_response::bounded_json(resp, 1024 * 1024)
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Parse: {e}")))?;
 
-    let lat = body.get("lat").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let lon = body.get("lon").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let lat = body
+        .get("latitude")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| ToolError::ExternalService("IP geolocation omitted latitude".to_string()))?;
+    let lon = body
+        .get("longitude")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| {
+            ToolError::ExternalService("IP geolocation omitted longitude".to_string())
+        })?;
+    if !lat.is_finite()
+        || !lon.is_finite()
+        || !(-90.0..=90.0).contains(&lat)
+        || !(-180.0..=180.0).contains(&lon)
+    {
+        return Err(ToolError::ExternalService(
+            "IP geolocation returned invalid coordinates".to_string(),
+        ));
+    }
 
     Ok(LocationResult {
         latitude: lat,
         longitude: lon,
         accuracy_meters: None,
         altitude_meters: None,
-        source: "ip-geolocation".to_string(),
+        source: "ipapi.co".to_string(),
     })
 }
 

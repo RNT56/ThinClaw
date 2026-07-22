@@ -28,6 +28,10 @@ pub enum ClientError {
     #[error("decode error: {0}")]
     Decode(#[from] serde_json::Error),
 
+    /// A response body or streaming frame violated a protocol size/encoding limit.
+    #[error("invalid or oversized gateway response: {0}")]
+    Response(String),
+
     /// `send_and_wait` timed out before a matching response arrived.
     #[error("timed out waiting for a response after {0:?}")]
     Timeout(std::time::Duration),

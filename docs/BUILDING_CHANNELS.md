@@ -227,7 +227,13 @@ Create `my-channel.capabilities.json`:
         "auto_generate": { "length": 32 }
       }
     ],
-    "validation_endpoint": "https://api.my-platform.com/verify?token={my_channel_api_token}"
+    "validation_endpoint": {
+      "url": "https://api.my-platform.com/verify",
+      "method": "GET",
+      "success_status": 200,
+      "secret_name": "my_channel_api_token",
+      "credential": { "type": "bearer" }
+    }
   },
   "capabilities": {
     "http": {
@@ -264,6 +270,11 @@ Create `my-channel.capabilities.json`:
   }
 }
 ```
+
+The validation URL must be HTTPS and match the channel's HTTP allowlist. Keep
+credentials out of URL paths and query strings: validation only supports
+`bearer`, `basic`, or bounded custom-header injection, with redirects disabled
+and DNS pinned after the public-address check.
 
 ### Webhook Validation Modes
 

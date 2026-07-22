@@ -6,8 +6,10 @@
 //! matches when one is declared.
 
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use std::fs;
 
 use anyhow::{Context, Result, anyhow, bail};
 use libloading::Library;
@@ -21,6 +23,11 @@ use crate::extensions::manifest::{
 use crate::settings::ExtensionsSettings;
 
 const INVOKE_SYMBOL_V1: &[u8] = b"thinclaw_native_plugin_invoke_v1\0";
+const MAX_NATIVE_PLUGIN_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_NATIVE_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+const MAX_NATIVE_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_NATIVE_PLUGIN_ALLOWLIST_DIRS: usize = 64;
+const MAX_NATIVE_PLUGIN_ALLOWLIST_PATH_BYTES: usize = 4_096;
 
 type NativePluginInvokeV1 =
     unsafe extern "C" fn(*const u8, usize, *mut u8, usize, *mut usize) -> i32;
@@ -48,6 +55,7 @@ pub struct NativePluginRuntime {
     max_request_bytes: usize,
     max_response_bytes: usize,
     _library: Library,
+    _staged_library: tempfile::TempDir,
     invoke: NativePluginInvokeV1,
 }
 
@@ -91,6 +99,20 @@ impl NativePluginRuntime {
         if contribution.abi != NativePluginAbi::CAbiJsonV1 {
             bail!("native plugin '{}' uses unsupported ABI", contribution.id);
         }
+        let max_request_bytes = usize::try_from(contribution.max_request_bytes)
+            .map_err(|_| anyhow!("native plugin request byte limit is too large"))?;
+        let max_response_bytes = usize::try_from(contribution.max_response_bytes)
+            .map_err(|_| anyhow!("native plugin response byte limit is too large"))?;
+        if max_request_bytes > MAX_NATIVE_REQUEST_BYTES {
+            bail!(
+                "native plugin request byte limit exceeds host maximum of {MAX_NATIVE_REQUEST_BYTES}"
+            );
+        }
+        if max_response_bytes > MAX_NATIVE_RESPONSE_BYTES {
+            bail!(
+                "native plugin response byte limit exceeds host maximum of {MAX_NATIVE_RESPONSE_BYTES}"
+            );
+        }
 
         let artifact = manifest
             .artifacts
@@ -111,13 +133,18 @@ impl NativePluginRuntime {
 
         let library_path = resolve_plugin_artifact_path(plugin_root, &artifact.path)?;
         ensure_native_path_allowed(&library_path, settings)?;
-        if let Some(expected_sha256) = artifact.sha256.as_deref() {
-            verify_sha256(&library_path, expected_sha256)?;
-        }
+        let expected_sha256 = artifact.sha256.as_deref().ok_or_else(|| {
+            anyhow!(
+                "native plugin artifact '{}' must declare a SHA-256 digest",
+                artifact.id
+            )
+        })?;
+        let (staged_library, staged_library_path) =
+            stage_verified_library(&library_path, expected_sha256)?;
 
-        let library = unsafe { Library::new(&library_path) }.with_context(|| {
+        let library = unsafe { Library::new(&staged_library_path) }.with_context(|| {
             format!(
-                "failed to load native plugin library {}",
+                "failed to load verified native plugin library staged from {}",
                 library_path.display()
             )
         })?;
@@ -132,11 +159,10 @@ impl NativePluginRuntime {
 
         Ok(Self {
             plugin_id: contribution.id.clone(),
-            max_request_bytes: usize::try_from(contribution.max_request_bytes)
-                .map_err(|_| anyhow!("native plugin request byte limit is too large"))?,
-            max_response_bytes: usize::try_from(contribution.max_response_bytes)
-                .map_err(|_| anyhow!("native plugin response byte limit is too large"))?,
+            max_request_bytes,
+            max_response_bytes,
             _library: library,
+            _staged_library: staged_library,
             invoke,
         })
     }
@@ -202,22 +228,48 @@ pub fn resolve_plugin_artifact_path(plugin_root: &Path, artifact_path: &str) -> 
     {
         bail!("plugin artifact paths may not contain '..'");
     }
-    plugin_root.join(path).canonicalize().with_context(|| {
+    let canonical_root = plugin_root
+        .canonicalize()
+        .with_context(|| format!("failed to resolve plugin root {}", plugin_root.display()))?;
+    let unresolved = plugin_root.join(path);
+    let metadata = std::fs::symlink_metadata(&unresolved)
+        .with_context(|| format!("failed to inspect plugin artifact path {artifact_path}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("plugin artifacts must be regular files, not symlinks or directories");
+    }
+    let resolved = unresolved.canonicalize().with_context(|| {
         format!(
             "failed to resolve plugin artifact path {} under {}",
             artifact_path,
             plugin_root.display()
         )
-    })
+    })?;
+    if !resolved.starts_with(&canonical_root) {
+        bail!("plugin artifact path resolves outside the plugin root");
+    }
+    Ok(resolved)
 }
 
 pub fn ensure_native_path_allowed(path: &Path, settings: &ExtensionsSettings) -> Result<()> {
     if settings.native_plugin_allowlist_dirs.is_empty() {
         bail!("native plugin loading requires extensions.native_plugin_allowlist_dirs");
     }
+    if settings.native_plugin_allowlist_dirs.len() > MAX_NATIVE_PLUGIN_ALLOWLIST_DIRS {
+        bail!(
+            "native plugin loading supports at most {MAX_NATIVE_PLUGIN_ALLOWLIST_DIRS} allowlist directories"
+        );
+    }
     let allowed = settings
         .native_plugin_allowlist_dirs
         .iter()
+        .filter(|dir| {
+            !dir.is_empty()
+                && dir.len() <= MAX_NATIVE_PLUGIN_ALLOWLIST_PATH_BYTES
+                && !dir.contains('\0')
+                && Path::new(dir).is_absolute()
+                && std::fs::symlink_metadata(dir)
+                    .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        })
         .filter_map(|dir| Path::new(dir).canonicalize().ok())
         .any(|dir| path.starts_with(dir));
     if !allowed {
@@ -229,9 +281,10 @@ pub fn ensure_native_path_allowed(path: &Path, settings: &ExtensionsSettings) ->
     Ok(())
 }
 
-fn verify_sha256(path: &Path, expected_hex: &str) -> Result<()> {
-    let bytes = fs::read(path)
-        .with_context(|| format!("failed to read native plugin artifact {}", path.display()))?;
+fn stage_verified_library(path: &Path, expected_hex: &str) -> Result<(tempfile::TempDir, PathBuf)> {
+    let bytes =
+        thinclaw_platform::read_regular_file_bounded_single_link(path, MAX_NATIVE_PLUGIN_BYTES)
+            .with_context(|| format!("failed to read native plugin artifact {}", path.display()))?;
     let digest = Sha256::digest(&bytes);
     let actual = hex::encode(digest);
     if !actual.eq_ignore_ascii_case(expected_hex) {
@@ -242,7 +295,19 @@ fn verify_sha256(path: &Path, expected_hex: &str) -> Result<()> {
             actual
         );
     }
-    Ok(())
+
+    let staging = tempfile::Builder::new()
+        .prefix("thinclaw-native-plugin-")
+        .tempdir()
+        .context("failed to create native plugin staging directory")?;
+    let file_name = path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| std::ffi::OsStr::new("plugin-library"));
+    let staged_path = staging.path().join(file_name);
+    thinclaw_platform::write_private_file_atomic(&staged_path, &bytes, false)
+        .context("failed to stage verified native plugin")?;
+    Ok((staging, staged_path))
 }
 
 #[cfg(test)]
@@ -371,6 +436,23 @@ mod tests {
         assert!(err.to_string().contains(".."));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn native_artifact_paths_reject_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let plugin = tempdir().expect("plugin root");
+        let outside = tempdir().expect("outside root");
+        let outside_library = outside.path().join("libexample.dylib");
+        fs::write(&outside_library, b"not a real library").expect("write outside library");
+        symlink(&outside_library, plugin.path().join("libexample.dylib"))
+            .expect("create artifact symlink");
+
+        let error = resolve_plugin_artifact_path(plugin.path(), "libexample.dylib")
+            .expect_err("symlink artifacts must be rejected");
+        assert!(error.to_string().contains("symlink"));
+    }
+
     #[test]
     fn native_path_requires_allowlisted_directory() {
         let dir = tempdir().expect("tempdir");
@@ -407,6 +489,26 @@ mod tests {
             unsafe { NativePluginRuntime::load(&manifest, contribution, dir.path(), &settings) }
                 .expect_err("hash mismatch should reject before libloading");
         assert!(err.to_string().contains("hash mismatch"));
+    }
+
+    #[test]
+    fn native_artifact_requires_a_pinned_digest() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("libexample.dylib"), b"not a real library").expect("write");
+        let manifest = native_manifest("libexample.dylib", None);
+        let contribution = manifest.contributions.native_plugins.first().unwrap();
+        let settings = ExtensionsSettings {
+            allow_native_plugins: true,
+            require_plugin_signatures: false,
+            native_plugin_allowlist_dirs: vec![dir.path().display().to_string()],
+            ..ExtensionsSettings::default()
+        };
+
+        let error =
+            unsafe { NativePluginRuntime::load(&manifest, contribution, dir.path(), &settings) }
+                .expect_err("unpinned native library must be rejected");
+
+        assert!(error.to_string().contains("must declare a SHA-256"));
     }
 
     #[test]
@@ -464,7 +566,8 @@ int thinclaw_native_plugin_invoke_v1(
             return;
         }
 
-        let manifest = native_manifest(&library_name, None);
+        let library_sha = hex::encode(Sha256::digest(fs::read(&library).unwrap()));
+        let manifest = native_manifest(&library_name, Some(library_sha));
         let contribution = manifest.contributions.native_plugins.first().unwrap();
         let settings = ExtensionsSettings {
             allow_native_plugins: true,

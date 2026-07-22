@@ -27,7 +27,7 @@ use thinclaw::setup::{SetupConfig, UiMode};
 use main_helpers::*;
 
 fn main() -> anyhow::Result<()> {
-    run_async_entrypoint(async_main())
+    run_async_entrypoint(async_main)
 }
 
 fn runtime_command_intent(command: Option<&Command>) -> RuntimeCommandIntent {
@@ -38,7 +38,8 @@ fn runtime_command_intent(command: Option<&Command>) -> RuntimeCommandIntent {
         #[cfg(feature = "docker-sandbox")]
         Some(Command::Worker { .. })
         | Some(Command::ClaudeBridge { .. })
-        | Some(Command::CodexBridge { .. }) => RuntimeCommandIntent::WorkerRuntime,
+        | Some(Command::CodexBridge { .. })
+        | Some(Command::NetworkRelay { .. }) => RuntimeCommandIntent::WorkerRuntime,
         #[cfg(all(feature = "repl", target_os = "windows"))]
         Some(Command::WindowsServiceRuntime { .. }) => RuntimeCommandIntent::ServiceRuntime,
         _ => RuntimeCommandIntent::ImmediateCli,
@@ -363,9 +364,16 @@ fn env_value_or_file(value_key: &str, path_key: &str) -> Result<Option<String>, 
     let Some(path) = env_value(path_key) else {
         return Ok(None);
     };
-    std::fs::read_to_string(&path)
-        .map(|value| Some(value.replace("\\n", "\n")))
-        .map_err(|error| format!("failed to read {path_key}={path}: {error}"))
+    thinclaw_platform::read_regular_file_bounded_single_link(
+        std::path::Path::new(&path),
+        1024 * 1024,
+    )
+    .and_then(|bytes| {
+        String::from_utf8(bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    })
+    .map(|value| Some(value.replace("\\n", "\n")))
+    .map_err(|error| format!("failed to read the file configured by {path_key}: {error}"))
 }
 
 mod async_main;

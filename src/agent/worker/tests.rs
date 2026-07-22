@@ -147,6 +147,37 @@ async fn make_worker(tools: Vec<Arc<dyn Tool>>) -> Worker {
 }
 
 #[test]
+fn worker_identity_preserves_actor_and_group_scope() {
+    let scope_id = Uuid::new_v4();
+    let mut job = JobContext::with_identity("household", "alice", "group job", "test");
+    job.metadata = serde_json::json!({
+        "conversation_kind": "group",
+        "conversation_scope_id": scope_id.to_string(),
+        "stable_external_conversation_key": "discord:guild:channel"
+    });
+
+    let identity = worker_identity_from_job(&job).unwrap();
+    assert_eq!(identity.principal_id, "household");
+    assert_eq!(identity.actor_id, "alice");
+    assert_eq!(
+        identity.conversation_kind,
+        crate::identity::ConversationKind::Group
+    );
+    assert_eq!(identity.conversation_scope_id, scope_id);
+}
+
+#[test]
+fn worker_identity_rejects_group_job_without_scope() {
+    let mut job = JobContext::with_identity("household", "alice", "group job", "test");
+    job.metadata = serde_json::json!({ "conversation_kind": "group" });
+
+    assert_eq!(
+        worker_identity_from_job(&job),
+        Err(crate::identity::CarriedIdentityError::MissingGroupScope)
+    );
+}
+
+#[test]
 fn test_tool_selection_preserves_call_id() {
     let selection = ToolSelection {
         tool_name: "memory_search".to_string(),
@@ -390,7 +421,10 @@ async fn finalize_routine_run_resolves_routine_by_id_when_name_changes() {
         last_run_at: None,
         next_fire_at: Some(Utc::now()),
         run_count: 0,
-        consecutive_failures: 0,
+        // A non-zero streak makes the completion assertion prove that the
+        // terminal CAS resolved the parent by the durable run.routine_id,
+        // rather than succeeding vacuously with the stale display name.
+        consecutive_failures: 2,
         state: serde_json::json!({}),
         config_version: 1,
         created_at: Utc::now(),
@@ -412,7 +446,17 @@ async fn finalize_routine_run_resolves_routine_by_id_when_name_changes() {
         job_id: None,
         created_at: Utc::now(),
     };
-    db.create_routine_run(&run).await.unwrap();
+    let admission = db
+        .try_admit_routine_run(
+            &run,
+            1,
+            1,
+            run.started_at + chrono::Duration::minutes(5),
+            routine.next_fire_at,
+        )
+        .await
+        .unwrap();
+    assert_eq!(admission, crate::db::RoutineRunAdmission::Admitted);
 
     let deps = WorkerDeps {
         context_manager,

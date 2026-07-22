@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use wasmtime::Store;
 use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -20,7 +21,11 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 use thinclaw_secrets::{
     CreateSecretParams, CredentialLocation, SecretAccessContext, SecretError, SecretsStore,
 };
-use thinclaw_tools_core::{Tool, ToolError, ToolOutput};
+use thinclaw_tools_core::{
+    OutboundUrlGuardOptions, Tool, ToolError, ToolOutput, validate_outbound_url_pinned_async,
+};
+#[cfg(test)]
+use thinclaw_tools_core::{is_public_outbound_ip, validate_outbound_url_pinned};
 use thinclaw_types::JobContext;
 
 use crate::wasm::capabilities::Capabilities;
@@ -31,8 +36,58 @@ use crate::wasm::error::WasmError;
 use crate::wasm::host::{HostState, LogLevel};
 use crate::wasm::limits::{ResourceLimits, WasmResourceLimiter};
 pub use crate::wasm::oauth::OAuthRefreshConfig;
+use crate::wasm::oauth::{
+    bounded_oauth_error, decode_bounded_json, oauth_client_for, oauth_expiry_from_response,
+    validate_bearer_token_type, validate_oauth_refresh_config, validate_oauth_secret_value,
+};
 use crate::wasm::ports::{ExactValueLeakScanner, HostToolInvoker, LeakScan, LeakScanner};
 use crate::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolRuntime};
+
+const MAX_WASM_HTTP_METHOD_BYTES: usize = 16;
+const MAX_WASM_HTTP_URL_BYTES: usize = 16 * 1024;
+const MAX_WASM_HTTP_HEADERS_BYTES: usize = 64 * 1024;
+const MAX_WASM_HTTP_HEADER_COUNT: usize = 128;
+const MAX_WASM_HTTP_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const MAX_WASM_HTTP_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_WASM_HTTP_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn wasm_http_headers_are_valid(headers: &HashMap<String, String>) -> bool {
+    if headers.len() > MAX_WASM_HTTP_HEADER_COUNT {
+        return false;
+    }
+    let mut seen = HashSet::with_capacity(headers.len());
+    let mut total_bytes = 0usize;
+    headers.iter().all(|(name, value)| {
+        let normalized = name.to_ascii_lowercase();
+        let forbidden = matches!(
+            normalized.as_str(),
+            "host"
+                | "content-length"
+                | "transfer-encoding"
+                | "connection"
+                | "proxy-authorization"
+                | "proxy-authenticate"
+                | "te"
+                | "trailer"
+                | "upgrade"
+        );
+        let Some(next_total) = total_bytes
+            .checked_add(name.len())
+            .and_then(|total| total.checked_add(value.len()))
+        else {
+            return false;
+        };
+        total_bytes = next_total;
+        !name.is_empty()
+            && name.len() <= 256
+            && value.len() <= 16 * 1024
+            && total_bytes <= MAX_WASM_HTTP_HEADERS_BYTES
+            && !forbidden
+            && seen.insert(normalized)
+            && reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_ok()
+            && reqwest::header::HeaderValue::from_str(value).is_ok()
+    })
+}
 
 // Generate component model bindings from the WIT file.
 //
@@ -349,9 +404,40 @@ impl near::agent::host::Host for StoreData {
         body: Option<Vec<u8>>,
         timeout_ms: Option<u32>,
     ) -> Result<near::agent::host::HttpResponse, String> {
+        let http_capability = self
+            .host_state
+            .capabilities()
+            .http
+            .as_ref()
+            .ok_or_else(|| "HTTP capability is not granted".to_string())?;
+        let max_request_bytes = http_capability
+            .max_request_bytes
+            .min(MAX_WASM_HTTP_REQUEST_BYTES);
+        let max_response_bytes = http_capability
+            .max_response_bytes
+            .min(MAX_WASM_HTTP_RESPONSE_BYTES);
+        let capability_timeout = http_capability.timeout.min(MAX_WASM_HTTP_TIMEOUT);
+        if method.is_empty()
+            || method.len() > MAX_WASM_HTTP_METHOD_BYTES
+            || !method.bytes().all(|byte| byte.is_ascii_alphabetic())
+            || url.is_empty()
+            || url.len() > MAX_WASM_HTTP_URL_BYTES
+            || headers_json.len() > MAX_WASM_HTTP_HEADERS_BYTES
+            || body
+                .as_ref()
+                .is_some_and(|value| value.len() > max_request_bytes)
+        {
+            return Err(
+                "HTTP request fields are malformed or exceed configured limits".to_string(),
+            );
+        }
+
         let leak_values = self.exact_leak_values();
-        let raw_headers: HashMap<String, String> =
-            serde_json::from_str(&headers_json).unwrap_or_default();
+        let raw_headers: HashMap<String, String> = serde_json::from_str(&headers_json)
+            .map_err(|_| "HTTP headers must be a JSON object of strings".to_string())?;
+        if !wasm_http_headers_are_valid(&raw_headers) {
+            return Err("HTTP headers are malformed or exceed configured limits".to_string());
+        }
 
         // Check HTTP allowlist
         self.host_state
@@ -410,19 +496,16 @@ impl near::agent::host::Host for StoreData {
             self.inject_host_credentials(&host, &mut headers, &mut url);
         }
 
-        // Get the max response size from capabilities (default 10MB).
-        let max_response_bytes = self
-            .host_state
-            .capabilities()
-            .http
-            .as_ref()
-            .map(|h| h.max_response_bytes)
-            .unwrap_or(10 * 1024 * 1024);
+        if url.len() > MAX_WASM_HTTP_URL_BYTES || !wasm_http_headers_are_valid(&headers) {
+            return Err("Injected HTTP request fields exceed configured limits".to_string());
+        }
 
-        // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
-        // The returned addresses are pinned into the request client below so the
-        // connection targets an address that already passed the private-IP check.
-        let validated = reject_private_ip(&url)?;
+        // Re-check the effective URL after all substitutions and credential
+        // injection. Capability authorization must apply to the request that is
+        // actually sent, not merely to the guest-provided template.
+        self.host_state
+            .check_http_allowed(&url, &method)
+            .map_err(|e| format!("HTTP not allowed after credential injection: {e}"))?;
 
         // Make HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
@@ -437,11 +520,49 @@ impl near::agent::host::Host for StoreData {
                     .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?,
             );
         }
-        let rt = self.http_runtime.as_ref().expect("just initialized");
+        let rt = self
+            .http_runtime
+            .as_ref()
+            .ok_or_else(|| "HTTP runtime initialization failed".to_string())?;
         let result = rt.block_on(async {
+            // A request can shorten, but never extend, the declared capability
+            // timeout or the hard process-wide ceiling. DNS resolution is part
+            // of this same total deadline.
+            let requested_timeout = Duration::from_millis(
+                timeout_ms
+                    .map(u64::from)
+                    .unwrap_or(capability_timeout.as_millis().min(u128::from(u64::MAX)) as u64),
+            );
+            let timeout = requested_timeout
+                .min(capability_timeout)
+                .min(MAX_WASM_HTTP_TIMEOUT);
+            let deadline = tokio::time::Instant::now() + timeout;
+            let guarded = tokio::time::timeout_at(
+                deadline,
+                validate_outbound_url_pinned_async(
+                    &url,
+                    &OutboundUrlGuardOptions {
+                        require_https: true,
+                        upgrade_http_to_https: false,
+                        allowlist: Vec::new(),
+                    },
+                ),
+            )
+            .await
+            .map_err(|_| "HTTP request timed out during DNS validation".to_string())?
+            .map_err(|error| error.to_string())?;
+            let validated = ValidatedHost {
+                host: guarded
+                    .url
+                    .host_str()
+                    .ok_or_else(|| "Failed to parse host from URL".to_string())?
+                    .to_string(),
+                pinned_addrs: guarded.pinned_addrs,
+            };
             let mut client_builder = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
-                .redirect(reqwest::redirect::Policy::none());
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy();
             // Pin the connection to the validated addresses to close the
             // DNS-rebinding TOCTOU window. Empty for IP-literal hosts, where
             // reqwest connects to the literal directly and cannot rebind.
@@ -471,28 +592,25 @@ impl near::agent::host::Host for StoreData {
                 request = request.body(body_bytes);
             }
 
-            // Caller-specified timeout (default 30s, max 5min)
-            let timeout_ms = timeout_ms.unwrap_or(30_000).min(300_000) as u64;
-            let timeout = Duration::from_millis(timeout_ms);
-            let response = request.timeout(timeout).send().await.map_err(|e| {
-                // Walk the full error chain for the actual root cause
-                let mut chain = format!("HTTP request failed: {}", e);
-                let mut source = std::error::Error::source(&e);
-                while let Some(cause) = source {
-                    chain.push_str(&format!(" -> {}", cause));
-                    source = cause.source();
-                }
-                chain
-            })?;
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .ok_or_else(|| "HTTP request timed out before send".to_string())?;
+            let response = request
+                .timeout(remaining)
+                .send()
+                .await
+                .map_err(|error| format!("HTTP request failed: {}", error.without_url()))?;
 
             let status = response.status().as_u16();
             let response_headers: HashMap<String, String> = response
                 .headers()
                 .iter()
+                .take(MAX_WASM_HTTP_HEADER_COUNT)
                 .filter_map(|(k, v)| {
-                    v.to_str()
-                        .ok()
-                        .map(|v| (k.as_str().to_string(), v.to_string()))
+                    v.to_str().ok().and_then(|value| {
+                        (value.len() <= 16 * 1024)
+                            .then(|| (k.as_str().to_string(), value.to_string()))
+                    })
                 })
                 .collect();
             let headers_json = serde_json::to_string(&response_headers).unwrap_or_default();
@@ -508,19 +626,22 @@ impl near::agent::host::Host for StoreData {
                 ));
             }
 
-            // Read body with a size cap to prevent memory exhaustion.
-            let body = response
-                .bytes()
-                .await
-                .map_err(|e| format!("Failed to read response body: {}", e))?;
-            if body.len() > max_response {
-                return Err(format!(
-                    "Response body too large: {} bytes exceeds limit of {} bytes",
-                    body.len(),
-                    max_response
-                ));
+            // Stream with an in-flight cap. `Response::bytes()` would allocate
+            // the complete chunked body before this limit could be enforced.
+            let mut stream = response.bytes_stream();
+            let mut body = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|error| {
+                    format!("Failed to read response body: {}", error.without_url())
+                })?;
+                if body.len().saturating_add(chunk.len()) > max_response {
+                    return Err(format!(
+                        "Response body exceeds limit of {} bytes",
+                        max_response
+                    ));
+                }
+                body.extend_from_slice(&chunk);
             }
-            let mut body = body.to_vec();
 
             // Leak detection on response body
             let mut response_leak_events = Vec::new();
@@ -588,7 +709,10 @@ impl near::agent::host::Host for StoreData {
                     .map_err(|e| format!("Failed to create tool invocation runtime: {e}"))?,
             );
         }
-        let rt = self.tool_runtime.as_ref().expect("just initialized");
+        let rt = self
+            .tool_runtime
+            .as_ref()
+            .ok_or_else(|| "Tool invocation runtime was not initialized".to_string())?;
         rt.block_on(invoker.invoke_json(&self.job_context, &real_name, &params_json))
             .map_err(|err| err.to_string())
     }
@@ -921,11 +1045,21 @@ impl Tool for WasmToolWrapper {
                 // Emit collected logs
                 for log in logs {
                     match log.level {
-                        LogLevel::Trace => tracing::trace!(target: "wasm_tool", "{}", log.message),
-                        LogLevel::Debug => tracing::debug!(target: "wasm_tool", "{}", log.message),
-                        LogLevel::Info => tracing::info!(target: "wasm_tool", "{}", log.message),
-                        LogLevel::Warn => tracing::warn!(target: "wasm_tool", "{}", log.message),
-                        LogLevel::Error => tracing::error!(target: "wasm_tool", "{}", log.message),
+                        LogLevel::Trace => {
+                            tracing::trace!(target: "wasm_tool", message_bytes = log.message.len(), "WASM guest trace")
+                        }
+                        LogLevel::Debug => {
+                            tracing::debug!(target: "wasm_tool", message_bytes = log.message.len(), "WASM guest debug log")
+                        }
+                        LogLevel::Info => {
+                            tracing::info!(target: "wasm_tool", message_bytes = log.message.len(), "WASM guest info log")
+                        }
+                        LogLevel::Warn => {
+                            tracing::warn!(target: "wasm_tool", message_bytes = log.message.len(), "WASM guest warning")
+                        }
+                        LogLevel::Error => {
+                            tracing::error!(target: "wasm_tool", message_bytes = log.message.len(), "WASM guest error")
+                        }
                     }
                 }
 
@@ -1205,7 +1339,7 @@ mod tool_invoke_host_tests {
     #[test]
     fn reject_private_ip_blocks_private_literal() {
         let err = super::reject_private_ip("https://192.168.1.1/x").unwrap_err();
-        assert!(err.contains("private/internal IP"));
+        assert!(err.contains("not allowed"));
     }
 
     #[test]
@@ -1259,22 +1393,10 @@ async fn refresh_oauth_token(
     user_id: &str,
     config: &OAuthRefreshConfig,
 ) -> bool {
-    // SSRF defense: token_url comes from the tool's capabilities file.
-    if !config.token_url.starts_with("https://") {
-        tracing::warn!(
-            token_url = %config.token_url,
-            "OAuth token_url must use HTTPS, refusing token refresh"
-        );
-        return false;
-    }
-    let validated = match reject_private_ip(&config.token_url) {
-        Ok(validated) => validated,
-        Err(reason) => {
-            tracing::warn!(
-                token_url = %config.token_url,
-                reason = %reason,
-                "OAuth token_url points to a private/internal IP, refusing token refresh"
-            );
+    let endpoint = match validate_oauth_refresh_config(config).await {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            tracing::warn!(error = %error, "Refusing invalid OAuth refresh configuration");
             return false;
         }
     };
@@ -1304,16 +1426,12 @@ async fn refresh_oauth_token(
             return false;
         }
     };
-
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none());
-    // Pin the connection to the addresses validated above so the token_url host
-    // cannot rebind to a private/internal IP between validation and connect time.
-    if !validated.pinned_addrs.is_empty() {
-        client_builder = client_builder.resolve_to_addrs(&validated.host, &validated.pinned_addrs);
+    if let Err(error) = validate_oauth_secret_value(refresh_secret.expose(), "refresh token") {
+        tracing::warn!(error = %error, "Refusing malformed stored OAuth refresh token");
+        return false;
     }
-    let client = match client_builder.build() {
+
+    let client = match oauth_client_for(&endpoint, Duration::from_secs(15)) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to build HTTP client for token refresh");
@@ -1330,26 +1448,26 @@ async fn refresh_oauth_token(
         params.push(("client_secret", secret.clone()));
     }
 
-    let response = match client.post(&config.token_url).form(&params).send().await {
+    let response = match client.post(endpoint.url).form(&params).send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(error = %e, "OAuth token refresh request failed");
+            tracing::warn!(error = %e.without_url(), "OAuth token refresh request failed");
             return false;
         }
     };
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let error_code = bounded_oauth_error(response).await;
         tracing::warn!(
             status = %status,
-            body = %body,
+            error_code = error_code.as_deref().unwrap_or("unspecified"),
             "OAuth token refresh returned non-success status"
         );
         return false;
     }
 
-    let token_data: serde_json::Value = match response.json().await {
+    let token_data: serde_json::Value = match decode_bounded_json(response).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to parse token refresh response");
@@ -1364,31 +1482,58 @@ async fn refresh_oauth_token(
             return false;
         }
     };
-
-    // Store the new access token with expiry
-    let mut access_params = CreateSecretParams::new(&config.secret_name, new_access_token);
-    if let Some(ref provider) = config.provider {
-        access_params = access_params.with_provider(provider);
+    if let Err(error) = validate_oauth_secret_value(new_access_token, "access token") {
+        tracing::warn!(error = %error, "Refusing malformed OAuth refresh response");
+        return false;
     }
-    if let Some(expires_in) = token_data.get("expires_in").and_then(|v| v.as_u64()) {
-        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
-        access_params = access_params.with_expiry(expires_at);
+    if let Err(error) = validate_bearer_token_type(&token_data) {
+        tracing::warn!(error = %error, "Refusing unsupported OAuth refresh response");
+        return false;
     }
-
-    if let Err(e) = store.create(user_id, access_params).await {
-        tracing::warn!(error = %e, "Failed to store refreshed access token");
+    let expires_at = match oauth_expiry_from_response(&token_data) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(error = %error, "Refusing malformed OAuth token expiry");
+            return false;
+        }
+    };
+    let rotated_refresh = token_data
+        .get("refresh_token")
+        .and_then(|value| value.as_str());
+    if let Some(refresh) = rotated_refresh
+        && let Err(error) = validate_oauth_secret_value(refresh, "refresh token")
+    {
+        tracing::warn!(error = %error, "Refusing malformed rotated OAuth refresh token");
         return false;
     }
 
-    // Store rotated refresh token if the provider sent a new one
-    if let Some(new_refresh) = token_data.get("refresh_token").and_then(|v| v.as_str()) {
+    // A provider can invalidate the old refresh token as soon as it issues a
+    // rotated one. Persist that continuity credential before publishing the
+    // replacement access token; a failure then leaves the old access token as
+    // the authoritative value.
+    if let Some(new_refresh) = rotated_refresh {
         let mut refresh_params = CreateSecretParams::new(&refresh_name, new_refresh);
         if let Some(ref provider) = config.provider {
             refresh_params = refresh_params.with_provider(provider);
         }
         if let Err(e) = store.create(user_id, refresh_params).await {
             tracing::warn!(error = %e, "Failed to store rotated refresh token");
+            return false;
         }
+    }
+
+    // Store the new access token with expiry
+    let mut access_params = CreateSecretParams::new(&config.secret_name, new_access_token);
+    if let Some(ref provider) = config.provider {
+        access_params = access_params.with_provider(provider);
+    }
+    if let Some(expires_at) = expires_at {
+        access_params = access_params.with_expiry(expires_at);
+    }
+
+    if let Err(e) = store.create(user_id, access_params).await {
+        tracing::warn!(error = %e, "Failed to store refreshed access token");
+        return false;
     }
 
     tracing::info!(
@@ -1496,7 +1641,12 @@ async fn resolve_host_credentials(
 
     for mapping in http_cap.credentials.values() {
         // Skip UrlPath credentials, they're handled by placeholder substitution
-        if matches!(mapping.location, CredentialLocation::UrlPath { .. }) {
+        if matches!(
+            mapping.location,
+            CredentialLocation::UrlPath { .. }
+                | CredentialLocation::UrlBase { .. }
+                | CredentialLocation::Body { .. }
+        ) {
             continue;
         }
 
@@ -1584,89 +1734,32 @@ struct ValidatedHost {
 /// (`resolve_to_addrs`) and close the time-of-check / time-of-use gap where the
 /// host could rebind to a private address before `reqwest` performs its own
 /// connect-time resolution.
+#[cfg(test)]
 fn reject_private_ip(url: &str) -> Result<ValidatedHost, String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err("URL contains userinfo (@) which is not allowed".to_string());
-    }
-
-    let host = parsed
+    let guarded = validate_outbound_url_pinned(
+        url,
+        &OutboundUrlGuardOptions {
+            // Credentials and tool data must never traverse a plaintext
+            // network hop. Loopback/private HTTP is independently disallowed.
+            require_https: true,
+            upgrade_http_to_https: false,
+            allowlist: Vec::new(),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let host = guarded
+        .url
         .host_str()
-        .map(|h| {
-            h.strip_prefix('[')
-                .and_then(|v| v.strip_suffix(']'))
-                .unwrap_or(h)
-        })
         .ok_or_else(|| "Failed to parse host from URL".to_string())?
         .to_string();
-
-    // If the host is already an IP, check it directly. There is nothing to pin
-    // because reqwest connects to the literal and cannot rebind it.
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return if is_private_ip(ip) {
-            Err(format!(
-                "HTTP request to private/internal IP {} is not allowed",
-                ip
-            ))
-        } else {
-            Ok(ValidatedHost {
-                host,
-                pinned_addrs: Vec::new(),
-            })
-        };
-    }
-
-    // Resolve DNS and check all addresses
-    use std::net::ToSocketAddrs;
-    // Port 0 is a placeholder; ToSocketAddrs needs host:port but the port
-    // doesn't affect which IPs the hostname resolves to. reqwest's
-    // resolve_to_addrs also ignores the override port and uses the request
-    // URL's port, so the placeholder is fine for pinning too.
-    let addrs: Vec<std::net::SocketAddr> = format!("{}:0", host)
-        .to_socket_addrs()
-        .map_err(|e| format!("DNS resolution failed for {}: {}", host, e))?
-        .collect();
-
-    if addrs.is_empty() {
-        return Err(format!("DNS resolution returned no addresses for {}", host));
-    }
-
-    for addr in &addrs {
-        if is_private_ip(addr.ip()) {
-            return Err(format!(
-                "DNS rebinding detected: {} resolved to private IP {}",
-                host,
-                addr.ip()
-            ));
-        }
-    }
-
     Ok(ValidatedHost {
         host,
-        pinned_addrs: addrs,
+        pinned_addrs: guarded.pinned_addrs,
     })
 }
 
 /// Check if an IP address belongs to a private/internal range.
+#[cfg(test)]
 fn is_private_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()           // 127.0.0.0/8
-            || v4.is_private()         // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-            || v4.is_link_local()      // 169.254.0.0/16
-            || v4.is_unspecified()     // 0.0.0.0
-            || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64 // 100.64.0.0/10 (CGNAT)
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()           // ::1
-            || v6.is_unspecified()     // ::
-            // fc00::/7 (unique local)
-            || (v6.segments()[0] & 0xFE00) == 0xFC00
-            // fe80::/10 (link-local)
-            || (v6.segments()[0] & 0xFFC0) == 0xFE80
-        }
-    }
+    !is_public_outbound_ip(ip)
 }

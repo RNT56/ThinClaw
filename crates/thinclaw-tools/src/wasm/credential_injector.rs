@@ -29,6 +29,23 @@ use thinclaw_secrets::{
     CredentialLocation, CredentialMapping, DecryptedSecret, SecretError, SecretsStore,
 };
 
+const MAX_SHARED_CREDENTIAL_SOURCES: usize = 512;
+const MAX_SHARED_CREDENTIALS_PER_SOURCE: usize = 64;
+const MAX_SHARED_CREDENTIAL_SOURCE_NAME_BYTES: usize = 128;
+
+/// Invalid or excessive shared credential-registry state.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum CredentialRegistryError {
+    #[error("credential mapping source name is invalid")]
+    InvalidSource,
+    #[error(
+        "credential mapping source exceeds the {MAX_SHARED_CREDENTIALS_PER_SOURCE}-mapping limit"
+    )]
+    TooManyMappings,
+    #[error("shared credential registry exceeds the {MAX_SHARED_CREDENTIAL_SOURCES}-source limit")]
+    TooManySources,
+}
+
 /// Error during credential injection.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum InjectionError {
@@ -60,42 +77,116 @@ impl From<SecretError> for InjectionError {
     }
 }
 
-/// Thread-safe, append-only registry of credential mappings from all installed tools.
+/// Thread-safe registry of credential mappings from all installed tools.
 ///
 /// Aggregates credential mappings from WASM tools so the built-in HTTP tool can
 /// auto-inject credentials for matching hosts. Uses `std::sync::RwLock` so
 /// `requires_approval` (sync) can query it without async.
 pub struct SharedCredentialRegistry {
-    mappings: RwLock<Vec<CredentialMapping>>,
+    mappings_by_source: RwLock<HashMap<String, Vec<CredentialMapping>>>,
 }
 
 impl SharedCredentialRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self {
-            mappings: RwLock::new(Vec::new()),
+            mappings_by_source: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Add credential mappings (called when WASM tools register).
-    pub fn add_mappings(&self, mappings: impl IntoIterator<Item = CredentialMapping>) {
-        match self.mappings.write() {
-            Ok(mut guard) => {
-                guard.extend(mappings);
-            }
+    /// Add process-owned mappings that are not associated with a reloadable
+    /// extension. Reloadable tools should use [`Self::replace_source_mappings`].
+    pub fn add_mappings(
+        &self,
+        mappings: impl IntoIterator<Item = CredentialMapping>,
+    ) -> Result<(), CredentialRegistryError> {
+        let mappings = mappings.into_iter().collect::<Vec<_>>();
+        if mappings.len() > MAX_SHARED_CREDENTIALS_PER_SOURCE {
+            return Err(CredentialRegistryError::TooManyMappings);
+        }
+        let mut guard = match self.mappings_by_source.write() {
+            Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::warn!(
                     "SharedCredentialRegistry RwLock poisoned during add_mappings; recovering"
                 );
-                let mut guard = poisoned.into_inner();
-                guard.extend(mappings);
+                poisoned.into_inner()
             }
+        };
+        let existing = guard.get("__process__").map_or(0, Vec::len);
+        if existing.saturating_add(mappings.len()) > MAX_SHARED_CREDENTIALS_PER_SOURCE {
+            return Err(CredentialRegistryError::TooManyMappings);
         }
+        guard
+            .entry("__process__".to_string())
+            .or_default()
+            .extend(mappings);
+        Ok(())
+    }
+
+    /// Validate one reloadable source update before runtime registration.
+    pub fn validate_source_mappings(
+        source: &str,
+        mappings: &[CredentialMapping],
+    ) -> Result<(), CredentialRegistryError> {
+        if source.is_empty()
+            || source.len() > MAX_SHARED_CREDENTIAL_SOURCE_NAME_BYTES
+            || source.chars().any(char::is_control)
+        {
+            return Err(CredentialRegistryError::InvalidSource);
+        }
+        if mappings.len() > MAX_SHARED_CREDENTIALS_PER_SOURCE {
+            return Err(CredentialRegistryError::TooManyMappings);
+        }
+        Ok(())
+    }
+
+    /// Atomically replace every mapping owned by one extension generation.
+    pub fn replace_source_mappings(
+        &self,
+        source: impl Into<String>,
+        mappings: impl IntoIterator<Item = CredentialMapping>,
+    ) -> Result<(), CredentialRegistryError> {
+        let source = source.into();
+        let mappings = mappings.into_iter().collect::<Vec<_>>();
+        Self::validate_source_mappings(&source, &mappings)?;
+        let mut guard = match self.mappings_by_source.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during replace; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        if mappings.is_empty() {
+            guard.remove(&source);
+        } else {
+            if !guard.contains_key(&source) && guard.len() >= MAX_SHARED_CREDENTIAL_SOURCES {
+                return Err(CredentialRegistryError::TooManySources);
+            }
+            guard.insert(source, mappings);
+        }
+        Ok(())
+    }
+
+    /// Remove mappings owned by an unregistered extension.
+    pub fn remove_source(&self, source: &str) {
+        let mut guard = match self.mappings_by_source.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during removal; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard.remove(source);
     }
 
     /// Check if any credential mapping matches this host (sync, for requires_approval).
     pub fn has_credentials_for_host(&self, host: &str) -> bool {
-        let guard = match self.mappings.read() {
+        let guard = match self.mappings_by_source.read() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::warn!(
@@ -104,7 +195,7 @@ impl SharedCredentialRegistry {
                 poisoned.into_inner()
             }
         };
-        guard.iter().any(|mapping| {
+        guard.values().flatten().any(|mapping| {
             mapping
                 .host_patterns
                 .iter()
@@ -114,7 +205,7 @@ impl SharedCredentialRegistry {
 
     /// Get all credential mappings matching a host (for injection).
     pub fn find_for_host(&self, host: &str) -> Vec<CredentialMapping> {
-        let guard = match self.mappings.read() {
+        let guard = match self.mappings_by_source.read() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::warn!(
@@ -124,7 +215,8 @@ impl SharedCredentialRegistry {
             }
         };
         guard
-            .iter()
+            .values()
+            .flatten()
             .filter(|mapping| {
                 mapping
                     .host_patterns
@@ -291,7 +383,9 @@ pub fn inject_credential(
                 .query_params
                 .insert(name.clone(), secret.expose().to_string());
         }
-        CredentialLocation::UrlPath { .. } => {
+        CredentialLocation::UrlPath { .. }
+        | CredentialLocation::UrlBase { .. }
+        | CredentialLocation::Body { .. } => {
             // URL placeholder replacement is handled by channel/tool wrappers
             // that substitute {PLACEHOLDER} values in templated strings.
         }
@@ -359,7 +453,7 @@ mod tests {
     use secrecy::SecretString;
 
     use crate::wasm::credential_injector::{
-        CredentialInjector, base64_encode, host_matches_pattern,
+        CredentialInjector, MAX_SHARED_CREDENTIALS_PER_SOURCE, base64_encode, host_matches_pattern,
     };
     use thinclaw_secrets::{
         CreateSecretParams, CredentialLocation, CredentialMapping, InMemorySecretsStore,
@@ -537,10 +631,12 @@ mod tests {
     #[test]
     fn test_shared_registry_add_and_find() {
         let registry = SharedCredentialRegistry::new();
-        registry.add_mappings(vec![
-            CredentialMapping::bearer("openai_key", "api.openai.com"),
-            CredentialMapping::header("github_token", "X-GitHub-Token", "*.github.com"),
-        ]);
+        registry
+            .add_mappings(vec![
+                CredentialMapping::bearer("openai_key", "api.openai.com"),
+                CredentialMapping::header("github_token", "X-GitHub-Token", "*.github.com"),
+            ])
+            .unwrap();
 
         assert!(registry.has_credentials_for_host("api.openai.com"));
         assert!(!registry.has_credentials_for_host("api.anthropic.com"));
@@ -553,7 +649,9 @@ mod tests {
     #[test]
     fn test_shared_registry_wildcard_host() {
         let registry = SharedCredentialRegistry::new();
-        registry.add_mappings(vec![CredentialMapping::bearer("gh_token", "*.github.com")]);
+        registry
+            .add_mappings(vec![CredentialMapping::bearer("gh_token", "*.github.com")])
+            .unwrap();
 
         assert!(registry.has_credentials_for_host("api.github.com"));
         assert!(registry.has_credentials_for_host("uploads.github.com"));
@@ -563,11 +661,39 @@ mod tests {
     #[test]
     fn test_shared_registry_multiple_adds() {
         let registry = SharedCredentialRegistry::new();
-        registry.add_mappings(vec![CredentialMapping::bearer("key1", "api.example.com")]);
-        registry.add_mappings(vec![CredentialMapping::bearer("key2", "api.example.com")]);
+        registry
+            .add_mappings(vec![CredentialMapping::bearer("key1", "api.example.com")])
+            .unwrap();
+        registry
+            .add_mappings(vec![CredentialMapping::bearer("key2", "api.example.com")])
+            .unwrap();
 
         let found = registry.find_for_host("api.example.com");
         assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn source_mappings_are_replaced_and_removed_atomically() {
+        let registry = SharedCredentialRegistry::new();
+        registry
+            .replace_source_mappings(
+                "tool",
+                [CredentialMapping::bearer("old", "api.example.com")],
+            )
+            .unwrap();
+        registry
+            .replace_source_mappings(
+                "tool",
+                [CredentialMapping::bearer("new", "api.example.com")],
+            )
+            .unwrap();
+
+        let found = registry.find_for_host("api.example.com");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].secret_name, "new");
+
+        registry.remove_source("tool");
+        assert!(registry.find_for_host("api.example.com").is_empty());
     }
 
     #[test]
@@ -584,16 +710,30 @@ mod tests {
                     r.add_mappings(vec![CredentialMapping::bearer(
                         format!("key_{}", i),
                         "api.example.com",
-                    )]);
+                    )])
                 })
             })
             .collect();
 
         for h in handles {
-            h.join().unwrap();
+            h.join().unwrap().unwrap();
         }
 
         let found = registry.find_for_host("api.example.com");
         assert_eq!(found.len(), 4);
+    }
+
+    #[test]
+    fn shared_registry_rejects_oversized_sources_and_mapping_sets() {
+        let registry = SharedCredentialRegistry::new();
+        let too_many = (0..=MAX_SHARED_CREDENTIALS_PER_SOURCE)
+            .map(|index| CredentialMapping::bearer(format!("key-{index}"), "api.example.com"))
+            .collect::<Vec<_>>();
+        assert!(registry.replace_source_mappings("tool", too_many).is_err());
+        assert!(
+            registry
+                .replace_source_mappings("x".repeat(129), std::iter::empty())
+                .is_err()
+        );
     }
 }

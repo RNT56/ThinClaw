@@ -34,7 +34,8 @@ impl Observer for LogObserver {
                     model,
                     duration_ms = duration.as_millis() as u64,
                     success,
-                    error = error_message.as_deref().unwrap_or(""),
+                    error_present = error_message.is_some(),
+                    error_bytes = error_message.as_deref().map_or(0, str::len),
                     "observer: llm.response"
                 );
             }
@@ -73,7 +74,7 @@ impl Observer for LogObserver {
                 );
             }
             ObserverEvent::Error { component, message } => {
-                tracing::warn!(component, error = message.as_str(), "observer: error");
+                tracing::warn!(component, error_bytes = message.len(), "observer: error");
             }
         }
     }

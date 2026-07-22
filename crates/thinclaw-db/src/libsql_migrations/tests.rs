@@ -18,6 +18,9 @@ fn upgrades_and_repairs_cover_conversation_surfaces() {
                 .sql
                 .contains("ADD COLUMN surface TEXT NOT NULL DEFAULT 'agent_cockpit'")
     }));
+    assert!(UPGRADES.iter().any(|upgrade| {
+        upgrade.version == 30 && upgrade.sql.contains("idx_conversations_surface_activity")
+    }));
     assert!(
         DATA_REPAIRS
             .iter()
@@ -30,7 +33,6 @@ fn repairs_rebuild_transcript_fts() {
     assert!(
         DATA_REPAIRS
             .iter()
-            .any(|statement| statement.contains("conversation_messages_fts")
-                && statement.contains("rebuild"))
+            .any(|stmt| stmt.contains("conversation_messages_fts") && stmt.contains("rebuild"))
     );
 }

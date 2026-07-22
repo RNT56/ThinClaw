@@ -5,6 +5,10 @@ impl MemoryProvider for ChromaProvider {
         "chroma"
     }
 
+    fn supports_strict_subject_scoping(&self) -> bool {
+        true
+    }
+
     async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus {
         configured_provider_health(
             self.name(),
@@ -20,7 +24,7 @@ impl MemoryProvider for ChromaProvider {
     async fn recall(
         &self,
         settings: &LearningSettings,
-        _user_id: &str,
+        user_id: &str,
         query: &str,
         limit: usize,
     ) -> Result<Vec<ProviderMemoryHit>, String> {
@@ -48,7 +52,7 @@ impl MemoryProvider for ChromaProvider {
             &provider_config_value(&provider.config, "database")
                 .unwrap_or_else(|| "default_database".to_string()),
         );
-        let url = provider_join_url(&base_url, &path);
+        let url = provider_join_url(&base_url, &path)?;
         let response = provider_json_request(
             &provider.config,
             "x-chroma-token",
@@ -58,6 +62,7 @@ impl MemoryProvider for ChromaProvider {
                 "query_embeddings": [embedding],
                 "n_results": limit,
                 "include": ["documents", "metadatas", "distances"],
+                "where": {"user_id": {"$eq": user_id}},
             })),
         )
         .await?;
@@ -94,7 +99,7 @@ impl MemoryProvider for ChromaProvider {
             &provider_config_value(&provider.config, "database")
                 .unwrap_or_else(|| "default_database".to_string()),
         );
-        let url = provider_join_url(&base_url, &path);
+        let url = provider_join_url(&base_url, &path)?;
         let id = format!("thinclaw-{}", Uuid::new_v4());
         let _ = provider_json_request(
             &provider.config,
@@ -122,6 +127,10 @@ impl MemoryProvider for QdrantProvider {
         "qdrant"
     }
 
+    fn supports_strict_subject_scoping(&self) -> bool {
+        true
+    }
+
     async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus {
         configured_provider_health(
             self.name(),
@@ -137,7 +146,7 @@ impl MemoryProvider for QdrantProvider {
     async fn recall(
         &self,
         settings: &LearningSettings,
-        _user_id: &str,
+        user_id: &str,
         query: &str,
         limit: usize,
     ) -> Result<Vec<ProviderMemoryHit>, String> {
@@ -157,7 +166,7 @@ impl MemoryProvider for QdrantProvider {
             "query_path",
             &format!("/collections/{collection}/points/query"),
         );
-        let url = provider_join_url(&base_url, &path);
+        let url = provider_join_url(&base_url, &path)?;
         let response = provider_json_request(
             &provider.config,
             "api-key",
@@ -167,6 +176,9 @@ impl MemoryProvider for QdrantProvider {
                 "query": embedding,
                 "limit": limit,
                 "with_payload": true,
+                "filter": {
+                    "must": [{"key": "user_id", "match": {"value": user_id}}]
+                },
             })),
         )
         .await?;
@@ -195,7 +207,7 @@ impl MemoryProvider for QdrantProvider {
             "sync_path",
             &format!("/collections/{collection}/points"),
         );
-        let url = provider_join_url(&base_url, &path);
+        let url = provider_join_url(&base_url, &path)?;
         let _ = provider_json_request(
             &provider.config,
             "api-key",

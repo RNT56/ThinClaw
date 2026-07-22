@@ -36,6 +36,7 @@ thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
 thinclaw-safety = { version = "0.1.0", path = "../thinclaw-safety" }
 thinclaw-soul = { version = "0.1.0", path = "../thinclaw-soul" }
 thinclaw-tools-core = { version = "0.1.0", path = "../thinclaw-tools-core" }
+thinclaw-tools = { version = "0.1.0", path = "../thinclaw-tools" }
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
 thinclaw-workspace = { version = "0.1.0", path = "../thinclaw-workspace" }
 thiserror = { workspace = true }

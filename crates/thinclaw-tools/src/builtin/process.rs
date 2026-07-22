@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,9 @@ use super::shell_security::{
     check_allowed_executables, classify_hard_block, detect_command_injection,
     detect_library_injection, requires_explicit_approval,
 };
-use crate::execution::{LocalExecutionBackend, LocalHostExecutionBackend, ProcessStartRequest};
+use crate::execution::{
+    LocalExecutionBackend, LocalHostExecutionBackend, OwnedChild, ProcessStartRequest,
+};
 use thinclaw_tools_core::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig, require_str,
 };
@@ -151,9 +154,9 @@ pub struct ProcessEntry {
     /// Effective network isolation mode.
     pub network_isolation: Option<String>,
     /// Output buffer (stdout + stderr interleaved).
-    pub output: OutputBuffer,
+    pub output: Arc<StdMutex<OutputBuffer>>,
     /// Handle to the child process (for kill/wait).
-    pub child: Option<tokio::process::Child>,
+    pub child: Option<OwnedChild>,
     /// Stdin writer (for write action).
     pub stdin: Option<tokio::process::ChildStdin>,
     /// Reader completion flags so wait() can return only after streams drain.
@@ -194,7 +197,7 @@ impl ProcessRegistry {
                     "backend": p.backend,
                     "status": p.status.to_string(),
                     "runtime_secs": runtime.as_secs(),
-                    "output_bytes": p.output.total_bytes(),
+                    "output_bytes": lock_output(&p.output).total_bytes(),
                 })
             })
             .collect()
@@ -203,9 +206,13 @@ impl ProcessRegistry {
 
 /// Start the auto-reaper background task that polls for completed processes.
 pub fn start_reaper(registry: SharedProcessRegistry) {
+    let registry = Arc::downgrade(&registry);
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(REAPER_INTERVAL).await;
+            let Some(registry) = registry.upgrade() else {
+                break;
+            };
             let mut reg = registry.write().await;
             for entry in reg.processes.values_mut() {
                 if entry.status != ProcessStatus::Running {
@@ -225,6 +232,12 @@ pub fn start_reaper(registry: SharedProcessRegistry) {
             }
         }
     });
+}
+
+fn lock_output(output: &StdMutex<OutputBuffer>) -> std::sync::MutexGuard<'_, OutputBuffer> {
+    output
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
@@ -384,6 +397,7 @@ impl Tool for ProcessTool {
                 };
                 let stdout_done = Arc::new(AtomicBool::new(stdout.is_none()));
                 let stderr_done = Arc::new(AtomicBool::new(stderr.is_none()));
+                let output = Arc::new(StdMutex::new(OutputBuffer::new(MAX_BUFFER_SIZE)));
 
                 let entry = ProcessEntry {
                     id: id.clone(),
@@ -395,7 +409,7 @@ impl Tool for ProcessTool {
                     runtime_mode: runtime_mode.clone(),
                     runtime_capabilities: runtime_capabilities.clone(),
                     network_isolation: network_isolation.clone(),
-                    output: OutputBuffer::new(MAX_BUFFER_SIZE),
+                    output: Arc::clone(&output),
                     child: Some(started.child),
                     stdin,
                     stdout_done: Arc::clone(&stdout_done),
@@ -408,13 +422,9 @@ impl Tool for ProcessTool {
                 }
 
                 // Set up output capture tasks
-                let registry_clone = Arc::clone(&self.registry);
-                let id_clone = id.clone();
-
                 // Spawn stdout reader
                 if let Some(stdout) = stdout {
-                    let reg = Arc::clone(&registry_clone);
-                    let pid = id_clone.clone();
+                    let output = Arc::clone(&output);
                     let done = Arc::clone(&stdout_done);
                     tokio::spawn(async move {
                         use tokio::io::AsyncReadExt;
@@ -424,10 +434,7 @@ impl Tool for ProcessTool {
                             match reader.read(&mut buf).await {
                                 Ok(0) => break,
                                 Ok(n) => {
-                                    let mut r = reg.write().await;
-                                    if let Some(entry) = r.processes.get_mut(&pid) {
-                                        entry.output.append(&buf[..n]);
-                                    }
+                                    lock_output(&output).append(&buf[..n]);
                                 }
                                 Err(_) => break,
                             }
@@ -438,8 +445,7 @@ impl Tool for ProcessTool {
 
                 // Spawn stderr reader
                 if let Some(stderr) = stderr {
-                    let reg = Arc::clone(&registry_clone);
-                    let pid = id_clone.clone();
+                    let output = Arc::clone(&output);
                     let done = Arc::clone(&stderr_done);
                     tokio::spawn(async move {
                         use tokio::io::AsyncReadExt;
@@ -449,10 +455,7 @@ impl Tool for ProcessTool {
                             match reader.read(&mut buf).await {
                                 Ok(0) => break,
                                 Ok(n) => {
-                                    let mut r = reg.write().await;
-                                    if let Some(entry) = r.processes.get_mut(&pid) {
-                                        entry.output.append(&buf[..n]);
-                                    }
+                                    lock_output(&output).append(&buf[..n]);
                                 }
                                 Err(_) => break,
                             }
@@ -497,7 +500,11 @@ impl Tool for ProcessTool {
                     ToolError::InvalidParameters(format!("Unknown process: {}", process_id))
                 })?;
 
-                let (content, new_offset) = entry.output.read_from(offset);
+                let (content, new_offset, total_bytes) = {
+                    let output = lock_output(&entry.output);
+                    let (content, new_offset) = output.read_from(offset);
+                    (content, new_offset, output.total_bytes())
+                };
 
                 Ok(ToolOutput::success(
                     serde_json::json!({
@@ -510,7 +517,7 @@ impl Tool for ProcessTool {
                         "status": entry.status.to_string(),
                         "output": content,
                         "offset": new_offset,
-                        "total_bytes": entry.output.total_bytes(),
+                        "total_bytes": total_bytes,
                     }),
                     start.elapsed(),
                 ))
@@ -544,7 +551,7 @@ impl Tool for ProcessTool {
                         let streams_drained = entry.stdout_done.load(Ordering::SeqCst)
                             && entry.stderr_done.load(Ordering::SeqCst);
                         if entry.status != ProcessStatus::Running && streams_drained {
-                            let output = entry.output.read_all();
+                            let output = lock_output(&entry.output).read_all();
                             return Ok(ToolOutput::success(
                                 serde_json::json!({
                                     "process_id": process_id,
@@ -741,6 +748,15 @@ mod tests {
 
         let processes = result.result.get("processes").unwrap().as_array().unwrap();
         assert!(processes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reaper_does_not_keep_registry_alive() {
+        let registry = make_registry();
+        let weak = Arc::downgrade(&registry);
+        start_reaper(Arc::clone(&registry));
+        drop(registry);
+        assert!(weak.upgrade().is_none());
     }
 
     #[tokio::test]

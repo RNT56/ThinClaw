@@ -152,7 +152,7 @@ impl Workspace {
                  and used to build the agent's context.\n\n\
                  ## Structure\n\n\
                  - `IDENTITY.md` - Agent name, creature, presentation, personality\n\
-                 - `SOUL.md` - Canonical soul in THINCLAW_HOME (read via `memory_read SOUL.md`)\n\
+                 - `SOUL.md` - Canonical soul in THINCLAW_HOME (loaded and managed by the runtime)\n\
                  - `SOUL.local.md` - Optional workspace-only overlay (not created by default)\n\
                  - `AGENTS.md` - Session routine and operational instructions\n\
                  - `USER.md` - Information about you (the user)\n\

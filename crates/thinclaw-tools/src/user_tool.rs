@@ -11,6 +11,12 @@ use thinclaw_tools_core::{ApprovalRequirement, ToolError};
 
 static PLACEHOLDER_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}").expect("placeholder regex"));
+const MAX_USER_TOOL_DEFINITION_BYTES: u64 = 1024 * 1024;
+const MAX_USER_TOOL_DIRECTORY_ENTRIES: usize = 10_000;
+const MAX_USER_TOOL_RENDER_BYTES: usize = 1024 * 1024;
+const MAX_USER_TOOL_JSON_NODES: usize = 4_096;
+const MAX_USER_TOOL_JSON_DEPTH: usize = 64;
+const MAX_USER_TOOL_PLACEHOLDERS: usize = 256;
 
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -64,56 +70,62 @@ impl UserToolDefinition {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.name.trim().is_empty() {
-            return Err("user tool name must not be empty".to_string());
-        }
-
-        if self.name.contains('/') || self.name.contains('\\') {
-            return Err("user tool name must not contain path separators".to_string());
-        }
-
-        if self.name.starts_with('.') {
-            return Err("user tool name must not start with '.'".to_string());
+        if self.name.trim() != self.name
+            || self.name.is_empty()
+            || self.name.len() > 128
+            || self.name.starts_with('.')
+            || !self
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            || self.description.len() > 4_096
+            || self.description.contains('\0')
+            || self
+                .description
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        {
+            return Err("user tool name or description is malformed or oversized".to_string());
         }
 
         match self.kind {
             UserToolKind::Shell => {
-                if self
-                    .command
-                    .as_deref()
-                    .unwrap_or_default()
-                    .trim()
-                    .is_empty()
+                let command = self.command.as_deref().unwrap_or_default();
+                if command.trim().is_empty() || command.len() > 64 * 1024 || command.contains('\0')
                 {
-                    return Err("shell user tools require a non-empty 'command'".to_string());
+                    return Err(
+                        "shell user tools require a bounded, non-empty 'command'".to_string()
+                    );
                 }
             }
             UserToolKind::Wasm => {
-                if self
-                    .wasm_path
-                    .as_deref()
-                    .unwrap_or_default()
-                    .trim()
-                    .is_empty()
+                let wasm_path = self.wasm_path.as_deref().unwrap_or_default();
+                if !valid_user_tool_path(wasm_path)
+                    || self
+                        .capabilities_path
+                        .as_deref()
+                        .is_some_and(|path| !valid_user_tool_path(path))
                 {
-                    return Err("wasm user tools require 'wasm_path'".to_string());
+                    return Err("wasm user tools require valid bounded paths".to_string());
                 }
             }
             UserToolKind::McpProxy => {
-                if self
-                    .target_tool
-                    .as_deref()
-                    .unwrap_or_default()
-                    .trim()
-                    .is_empty()
-                {
-                    return Err("mcp_proxy user tools require 'target_tool'".to_string());
+                let target = self.target_tool.as_deref().unwrap_or_default();
+                if target.is_empty() || target.len() > 256 || target.chars().any(char::is_control) {
+                    return Err("mcp_proxy user tools require a bounded 'target_tool'".to_string());
                 }
             }
         }
 
         Ok(())
     }
+}
+
+fn valid_user_tool_path(path: &str) -> bool {
+    !path.trim().is_empty()
+        && path.len() <= 4_096
+        && !path.contains('\0')
+        && !path.chars().any(char::is_control)
 }
 
 #[derive(Debug, Default)]
@@ -154,36 +166,40 @@ pub fn collect_string_placeholders(raw: &str) -> BTreeSet<String> {
     PLACEHOLDER_PATTERN
         .captures_iter(raw)
         .filter_map(|captures| captures.get(1).map(|group| group.as_str().to_string()))
+        .take(MAX_USER_TOOL_PLACEHOLDERS)
         .collect()
 }
 
 pub fn collect_json_placeholders(value: &serde_json::Value) -> BTreeSet<String> {
     let mut placeholders = BTreeSet::new();
-    collect_json_placeholders_into(value, &mut placeholders);
-    placeholders
-}
-
-fn collect_json_placeholders_into(value: &serde_json::Value, placeholders: &mut BTreeSet<String>) {
-    match value {
-        serde_json::Value::String(raw) => placeholders.extend(collect_string_placeholders(raw)),
-        serde_json::Value::Array(items) => {
-            for item in items {
-                collect_json_placeholders_into(item, placeholders);
-            }
+    let mut pending = vec![value];
+    let mut visited = 0usize;
+    while let Some(value) = pending.pop() {
+        visited = visited.saturating_add(1);
+        if visited > MAX_USER_TOOL_JSON_NODES || placeholders.len() >= MAX_USER_TOOL_PLACEHOLDERS {
+            break;
         }
-        serde_json::Value::Object(map) => {
-            for value in map.values() {
-                collect_json_placeholders_into(value, placeholders);
+        match value {
+            serde_json::Value::String(raw) => {
+                for placeholder in collect_string_placeholders(raw) {
+                    if placeholders.len() >= MAX_USER_TOOL_PLACEHOLDERS {
+                        break;
+                    }
+                    placeholders.insert(placeholder);
+                }
             }
+            serde_json::Value::Array(items) => pending.extend(items.iter()),
+            serde_json::Value::Object(map) => pending.extend(map.values()),
+            _ => {}
         }
-        _ => {}
     }
+    placeholders
 }
 
 pub fn build_placeholder_schema(placeholders: &[String]) -> serde_json::Value {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
-    for placeholder in placeholders {
+    for placeholder in placeholders.iter().take(MAX_USER_TOOL_PLACEHOLDERS) {
         properties.insert(
             placeholder.clone(),
             serde_json::json!({
@@ -224,10 +240,20 @@ pub fn render_template_string(
         };
         rendered.push_str(&template[last..matched.start()]);
         rendered.push_str(&render_placeholder_value(name, params, mode)?);
+        if rendered.len() > MAX_USER_TOOL_RENDER_BYTES {
+            return Err(ToolError::InvalidParameters(
+                "rendered user tool template exceeds the 1 MiB limit".to_string(),
+            ));
+        }
         last = matched.end();
     }
 
     rendered.push_str(&template[last..]);
+    if rendered.len() > MAX_USER_TOOL_RENDER_BYTES {
+        return Err(ToolError::InvalidParameters(
+            "rendered user tool template exceeds the 1 MiB limit".to_string(),
+        ));
+    }
     Ok(rendered)
 }
 
@@ -235,6 +261,32 @@ pub fn render_template_json(
     template: &serde_json::Value,
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, ToolError> {
+    let mut visited = 0usize;
+    let rendered = render_template_json_inner(template, params, 0, &mut visited)?;
+    if serde_json::to_vec(&rendered)
+        .map_err(|error| ToolError::InvalidParameters(error.to_string()))?
+        .len()
+        > MAX_USER_TOOL_RENDER_BYTES
+    {
+        return Err(ToolError::InvalidParameters(
+            "rendered user tool JSON exceeds the 1 MiB limit".to_string(),
+        ));
+    }
+    Ok(rendered)
+}
+
+fn render_template_json_inner(
+    template: &serde_json::Value,
+    params: &serde_json::Value,
+    depth: usize,
+    visited: &mut usize,
+) -> Result<serde_json::Value, ToolError> {
+    *visited = visited.saturating_add(1);
+    if depth > MAX_USER_TOOL_JSON_DEPTH || *visited > MAX_USER_TOOL_JSON_NODES {
+        return Err(ToolError::InvalidParameters(
+            "user tool JSON template is too deep or complex".to_string(),
+        ));
+    }
     match template {
         serde_json::Value::String(raw) => Ok(serde_json::Value::String(render_template_string(
             raw,
@@ -244,13 +296,16 @@ pub fn render_template_json(
         serde_json::Value::Array(items) => Ok(serde_json::Value::Array(
             items
                 .iter()
-                .map(|item| render_template_json(item, params))
+                .map(|item| render_template_json_inner(item, params, depth + 1, visited))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
         serde_json::Value::Object(map) => {
             let mut rendered = serde_json::Map::new();
             for (key, value) in map {
-                rendered.insert(key.clone(), render_template_json(value, params)?);
+                rendered.insert(
+                    key.clone(),
+                    render_template_json_inner(value, params, depth + 1, visited)?,
+                );
             }
             Ok(serde_json::Value::Object(rendered))
         }
@@ -268,7 +323,13 @@ pub fn render_placeholder_value(
         .ok_or_else(|| ToolError::InvalidParameters(format!("missing '{}' parameter", name)))?;
 
     let raw = match value {
-        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::String(text) if text.len() <= MAX_USER_TOOL_RENDER_BYTES => text.clone(),
+        serde_json::Value::String(_) => {
+            return Err(ToolError::InvalidParameters(format!(
+                "'{}' parameter exceeds the 1 MiB render limit",
+                name
+            )));
+        }
         serde_json::Value::Number(number) => number.to_string(),
         serde_json::Value::Bool(flag) => flag.to_string(),
         serde_json::Value::Null => String::new(),
@@ -301,8 +362,20 @@ where
 {
     let mut results = UserToolLoadResults::default();
 
-    if !dir.exists() {
-        return results;
+    match tokio::fs::symlink_metadata(dir).await {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            results.errors.push((
+                dir.to_path_buf(),
+                "user tool path must be a real directory".to_string(),
+            ));
+            return results;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return results,
+        Err(error) => {
+            results.errors.push((dir.to_path_buf(), error.to_string()));
+            return results;
+        }
     }
 
     let mut entries = match tokio::fs::read_dir(dir).await {
@@ -314,16 +387,48 @@ where
     };
 
     let mut definition_files = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    let mut scanned_entries = 0_usize;
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => {
+                results.errors.push((dir.to_path_buf(), error.to_string()));
+                break;
+            }
+        };
+        scanned_entries = scanned_entries.saturating_add(1);
+        if scanned_entries > MAX_USER_TOOL_DIRECTORY_ENTRIES {
+            results.errors.push((
+                dir.to_path_buf(),
+                "user tool directory exceeds the entry limit".to_string(),
+            ));
+            break;
+        }
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
+        let is_regular_file = tokio::fs::symlink_metadata(&path)
+            .await
+            .is_ok_and(|metadata| {
+                metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() <= MAX_USER_TOOL_DEFINITION_BYTES
+            });
+        if is_regular_file && path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
             definition_files.push(path);
         }
     }
     definition_files.sort();
 
     for path in definition_files {
-        let raw = match tokio::fs::read_to_string(&path).await {
+        let raw = match thinclaw_platform::read_regular_file_bounded_single_link_async(
+            path.clone(),
+            MAX_USER_TOOL_DEFINITION_BYTES,
+        )
+        .await
+        .and_then(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        }) {
             Ok(raw) => raw,
             Err(err) => {
                 results.errors.push((path.clone(), err.to_string()));
@@ -401,6 +506,25 @@ command = "printf %s {input}"
         assert_eq!(rendered["message"], "hello alice");
         assert_eq!(rendered["nested"][0], "alice");
         assert_eq!(rendered["nested"][1], 7);
+    }
+
+    #[test]
+    fn rejects_excessively_deep_or_large_rendered_templates() {
+        let mut nested = serde_json::json!("leaf");
+        for _ in 0..=MAX_USER_TOOL_JSON_DEPTH {
+            nested = serde_json::Value::Array(vec![nested]);
+        }
+        assert!(render_template_json(&nested, &serde_json::json!({})).is_err());
+
+        let oversized = "x".repeat(MAX_USER_TOOL_RENDER_BYTES + 1);
+        assert!(
+            render_template_string(
+                "{value}",
+                &serde_json::json!({ "value": oversized }),
+                RenderMode::Raw,
+            )
+            .is_err()
+        );
     }
 
     #[derive(Default)]

@@ -152,8 +152,11 @@ export async function selectThinClawModel(model: string | null): Promise<void> {
     return compatibilityCommands.thinclawSaveSelectedCloudModel(model);
 }
 
-export async function installThinClawSkillRepo(repoUrl: string): Promise<string> {
-    return compatibilityCommands.thinclawInstallSkillRepo(repoUrl);
+export async function installThinClawSkillRepo(
+    repoUrl: string,
+    approvedDigest: string | null = null,
+): Promise<string> {
+    return compatibilityCommands.thinclawInstallSkillRepo(repoUrl, approvedDigest);
 }
 
 export async function installThinClawSkillDeps(name: string, installId?: string): Promise<void> {

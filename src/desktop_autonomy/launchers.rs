@@ -45,6 +45,18 @@ impl DesktopAutonomyManager {
             }
             let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
             let home = self.session_launcher_home()?;
+            let wrapper_path = self.session_wrapper_path(&home);
+            let wrapper = format!(
+                "#!/bin/sh\nset -eu\ncandidate={candidate}\nfallback={fallback}\nif [ -f \"$candidate\" ] && [ -x \"$candidate\" ]; then\n  exec \"$candidate\" run --no-onboard\nfi\nexec \"$fallback\" run --no-onboard\n",
+                candidate = shell_single_quote(
+                    self.promoted_session_binary_path()
+                        .to_string_lossy()
+                        .as_ref()
+                ),
+                fallback = shell_single_quote(exe.to_string_lossy().as_ref()),
+            );
+            self.write_executable_session_wrapper(&wrapper_path, wrapper)
+                .await?;
             let logs_dir = home.join(".thinclaw").join("logs");
             tokio::fs::create_dir_all(&logs_dir)
                 .await
@@ -133,12 +145,12 @@ impl DesktopAutonomyManager {
 </dict>\n\
 </plist>\n",
                 label = self.launch_agent_label(),
-                exe = xml_escape(exe.to_string_lossy().as_ref()),
+                exe = xml_escape(wrapper_path.to_string_lossy().as_ref()),
                 environment_variables = environment_variables,
                 stdout = xml_escape(stdout.to_string_lossy().as_ref()),
                 stderr = xml_escape(stderr.to_string_lossy().as_ref()),
             );
-            tokio::fs::write(&plist_path, plist)
+            write_autonomy_file(plist_path.clone(), plist.into_bytes())
                 .await
                 .map_err(|e| format!("failed to write launch agent plist: {e}"))?;
             Ok(plist_path)
@@ -190,6 +202,7 @@ impl DesktopAutonomyManager {
         {
             let launcher_path = self.session_launcher_path()?;
             let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+            let promoted_exe = self.promoted_session_binary_path();
             let mut lines = vec![
                 "@echo off".to_string(),
                 "set DESKTOP_AUTONOMY_ENABLED=true".to_string(),
@@ -213,9 +226,14 @@ impl DesktopAutonomyManager {
             if let Some(username) = self.config.target_username.as_deref() {
                 lines.push(format!("set DESKTOP_AUTONOMY_TARGET_USERNAME={username}"));
             }
-            lines.push(format!("\"{}\" run --no-onboard", exe.display()));
+            lines.push(format!(
+                "if exist \"{}\" (\r\n  \"{}\" run --no-onboard\r\n) else (\r\n  \"{}\" run --no-onboard\r\n)",
+                promoted_exe.display(),
+                promoted_exe.display(),
+                exe.display(),
+            ));
             let script = format!("{}\r\n", lines.join("\r\n"));
-            tokio::fs::write(&launcher_path, script)
+            write_autonomy_file(launcher_path.clone(), script.into_bytes())
                 .await
                 .map_err(|e| format!("failed to write windows session launcher: {e}"))?;
             Ok(launcher_path)
@@ -292,10 +310,7 @@ impl DesktopAutonomyManager {
             }
             let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
             let home = self.session_launcher_home()?;
-            let wrapper_path = home
-                .join(".local")
-                .join("bin")
-                .join("thinclaw-desktop-autonomy-session");
+            let wrapper_path = self.session_wrapper_path(&home);
             if let Some(parent) = wrapper_path.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
@@ -343,32 +358,24 @@ impl DesktopAutonomyManager {
                 ));
             }
             let wrapper = format!(
-                "#!/bin/sh\nset -eu\nexport HOME={home}\n{env}\nexec {exe} run --no-onboard\n",
+                "#!/bin/sh\nset -eu\nexport HOME={home}\n{env}\ncandidate={candidate}\nfallback={fallback}\nif [ -f \"$candidate\" ] && [ -x \"$candidate\" ]; then\n  exec \"$candidate\" run --no-onboard\nfi\nexec \"$fallback\" run --no-onboard\n",
                 home = shell_single_quote(home.to_string_lossy().as_ref()),
                 env = env_lines.join("\n"),
-                exe = shell_single_quote(exe.to_string_lossy().as_ref()),
+                candidate = shell_single_quote(
+                    self.promoted_session_binary_path()
+                        .to_string_lossy()
+                        .as_ref()
+                ),
+                fallback = shell_single_quote(exe.to_string_lossy().as_ref()),
             );
-            tokio::fs::write(&wrapper_path, wrapper)
-                .await
-                .map_err(|e| format!("failed to write linux session wrapper: {e}"))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = tokio::fs::metadata(&wrapper_path)
-                    .await
-                    .map_err(|e| format!("failed to inspect linux session wrapper: {e}"))?
-                    .permissions();
-                perms.set_mode(0o755);
-                tokio::fs::set_permissions(&wrapper_path, perms)
-                    .await
-                    .map_err(|e| format!("failed to chmod linux session wrapper: {e}"))?;
-            }
+            self.write_executable_session_wrapper(&wrapper_path, wrapper)
+                .await?;
             let desktop_entry = format!(
                 "[Desktop Entry]\nType=Application\nName=ThinClaw Desktop Autonomy\nComment=ThinClaw reckless desktop session launcher\nExec={}\nPath={}\nX-GNOME-Autostart-enabled=true\nX-KDE-autostart-after=panel\nTerminal=false\n",
                 wrapper_path.display(),
                 home.display(),
             );
-            tokio::fs::write(&launcher_path, desktop_entry)
+            write_autonomy_file(launcher_path.clone(), desktop_entry.into_bytes())
                 .await
                 .map_err(|e| format!("failed to write linux session launcher: {e}"))?;
             if self.config.deployment_mode == crate::settings::DesktopDeploymentMode::DedicatedUser
@@ -401,9 +408,14 @@ impl DesktopAutonomyManager {
 
         #[cfg(target_os = "linux")]
         {
-            let raw = tokio::fs::read_to_string(launcher_path)
-                .await
-                .map_err(|e| format!("failed to read linux session launcher: {e}"))?;
+            let raw = thinclaw_platform::read_regular_file_bounded_single_link_async(
+                launcher_path.to_path_buf(),
+                64 * 1024,
+            )
+            .await
+            .map_err(|e| format!("failed to read linux session launcher: {e}"))?;
+            let raw = std::str::from_utf8(&raw)
+                .map_err(|_| "linux session launcher is not valid UTF-8".to_string())?;
             if !raw.contains("[Desktop Entry]")
                 || !raw.contains("Exec=")
                 || !raw.contains("thinclaw-desktop-autonomy-session")
@@ -422,6 +434,51 @@ impl DesktopAutonomyManager {
             "com.thinclaw.desktop-autonomy.{}",
             self.config.deployment_mode.as_str()
         )
+    }
+
+    pub(super) fn promoted_session_binary_path(&self) -> PathBuf {
+        self.shadow_binary_path(&self.current_build_link())
+    }
+
+    pub(super) fn session_wrapper_path(&self, home: &Path) -> PathBuf {
+        home.join(".local")
+            .join("bin")
+            .join("thinclaw-desktop-autonomy-session")
+    }
+
+    #[cfg(unix)]
+    async fn write_executable_session_wrapper(
+        &self,
+        wrapper_path: &Path,
+        wrapper: String,
+    ) -> Result<(), String> {
+        if let Some(parent) = wrapper_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("failed to create session wrapper dir: {e}"))?;
+            let metadata = tokio::fs::symlink_metadata(parent)
+                .await
+                .map_err(|e| format!("failed to inspect session wrapper dir: {e}"))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("session wrapper parent is not a real directory".to_string());
+            }
+        }
+        write_autonomy_file(wrapper_path.to_path_buf(), wrapper.into_bytes())
+            .await
+            .map_err(|e| format!("failed to write session wrapper: {e}"))?;
+
+        use std::os::unix::fs::PermissionsExt as _;
+        let metadata = tokio::fs::symlink_metadata(wrapper_path)
+            .await
+            .map_err(|e| format!("failed to inspect session wrapper: {e}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("session wrapper is not a regular file".to_string());
+        }
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o755);
+        tokio::fs::set_permissions(wrapper_path, permissions)
+            .await
+            .map_err(|e| format!("failed to chmod session wrapper: {e}"))
     }
 
     pub(super) fn session_launcher_home(&self) -> Result<PathBuf, String> {

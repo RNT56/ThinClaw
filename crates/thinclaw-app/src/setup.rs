@@ -835,7 +835,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SetupBootstrapChannelInput {
     pub signal_http_url: Option<String>,
     pub signal_account: Option<String>,
@@ -885,6 +885,55 @@ pub struct SetupBootstrapChannelInput {
     pub gateway_port: Option<u16>,
     pub gateway_auth_token: Option<String>,
     pub cli_enabled: Option<bool>,
+}
+
+impl std::fmt::Debug for SetupBootstrapChannelInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SetupBootstrapChannelInput")
+            .field(
+                "signal_http_url",
+                &self.signal_http_url.as_deref().map(redacted_bootstrap_url),
+            )
+            .field("http_enabled", &self.http_enabled)
+            .field("discord_enabled", &self.discord_enabled)
+            .field(
+                "discord_bot_token",
+                &self.discord_bot_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("slack_enabled", &self.slack_enabled)
+            .field(
+                "slack_bot_token",
+                &self.slack_bot_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "slack_app_token",
+                &self.slack_app_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("nostr_enabled", &self.nostr_enabled)
+            .field("gmail_enabled", &self.gmail_enabled)
+            .field("imessage_enabled", &self.imessage_enabled)
+            .field("apple_mail_enabled", &self.apple_mail_enabled)
+            .field("bluebubbles_enabled", &self.bluebubbles_enabled)
+            .field(
+                "bluebubbles_server_url",
+                &self
+                    .bluebubbles_server_url
+                    .as_deref()
+                    .map(redacted_bootstrap_url),
+            )
+            .field(
+                "bluebubbles_password",
+                &self.bluebubbles_password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("gateway_enabled", &self.gateway_enabled)
+            .field(
+                "gateway_auth_token",
+                &self.gateway_auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("cli_enabled", &self.cli_enabled)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for SetupBootstrapChannelInput {
@@ -972,7 +1021,7 @@ pub struct SetupBootstrapAgentInput {
     pub workspace_mode: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SetupBootstrapEnvInput {
     pub database_backend: Option<String>,
     pub database_url: Option<String>,
@@ -990,6 +1039,45 @@ pub struct SetupBootstrapEnvInput {
     pub web_ui: SetupBootstrapWebUiInput,
     pub observability_backend: String,
     pub agent: SetupBootstrapAgentInput,
+}
+
+impl std::fmt::Debug for SetupBootstrapEnvInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SetupBootstrapEnvInput")
+            .field("database_backend", &self.database_backend)
+            .field(
+                "database_url",
+                &self.database_url.as_deref().map(redacted_bootstrap_url),
+            )
+            .field("libsql_path", &self.libsql_path)
+            .field(
+                "libsql_url",
+                &self.libsql_url.as_deref().map(redacted_bootstrap_url),
+            )
+            .field(
+                "secrets_master_key",
+                &self.secrets_master_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("allow_env_master_key", &self.allow_env_master_key)
+            .field("llm_backend", &self.llm_backend)
+            .field(
+                "llm_base_url",
+                &self.llm_base_url.as_deref().map(redacted_bootstrap_url),
+            )
+            .field(
+                "ollama_base_url",
+                &self.ollama_base_url.as_deref().map(redacted_bootstrap_url),
+            )
+            .field("onboard_completed", &self.onboard_completed)
+            .field("runtime_profile", &self.runtime_profile)
+            .field("channels", &self.channels)
+            .field("providers", &self.providers)
+            .field("web_ui", &self.web_ui)
+            .field("observability_backend", &self.observability_backend)
+            .field("agent", &self.agent)
+            .finish()
+    }
 }
 
 impl Default for SetupBootstrapEnvInput {
@@ -1015,10 +1103,45 @@ impl Default for SetupBootstrapEnvInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SetupBootstrapEnvVar {
     pub key: &'static str,
     pub value: String,
+}
+
+impl std::fmt::Debug for SetupBootstrapEnvVar {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = if bootstrap_env_key_is_sensitive(self.key) {
+            "[REDACTED]".to_string()
+        } else if self.key.ends_with("_URL") {
+            redacted_bootstrap_url(&self.value)
+        } else {
+            self.value.clone()
+        };
+        formatter
+            .debug_struct("SetupBootstrapEnvVar")
+            .field("key", &self.key)
+            .field("value", &value)
+            .finish()
+    }
+}
+
+fn bootstrap_env_key_is_sensitive(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    key.contains("TOKEN")
+        || key.contains("PASSWORD")
+        || key.contains("SECRET")
+        || key.contains("API_KEY")
+        || key.contains("MASTER_KEY")
+        || key == "DATABASE_URL"
+}
+
+fn redacted_bootstrap_url(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        "<empty-url>".to_string()
+    } else {
+        "[REDACTED URL]".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

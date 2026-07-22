@@ -66,8 +66,8 @@ fn deploy_env_documents_linux_runtime_overrides() {
     let env = repo_file("deploy/env.example");
     for key in [
         "THINCLAW_IMAGE=ghcr.io/rnt56/thinclaw:latest",
-        "BROWSER_DOCKER=auto",
-        "CHROMIUM_IMAGE=chromedp/headless-shell:latest",
+        "BROWSER_DOCKER=never",
+        "CHROMIUM_IMAGE=chromedp/headless-shell:150.0.7871.125@sha256:7f8ec4782f1b138c30900e65ae53795d5966fbf52168b8fc062843db3e6d5be5",
         "THINCLAW_RUNTIME_PROFILE=pi-os-lite-64",
         "THINCLAW_HEADLESS=true",
         "SCREEN_CAPTURE_ENABLED=false",
@@ -108,10 +108,10 @@ fn pi_os_lite_support_is_documented_and_guarded() {
     assert!(setup.contains("THINCLAW_RUNTIME_PROFILE=pi-os-lite-64"));
     assert!(setup.contains("THINCLAW_HEADLESS=true"));
     assert!(setup.contains("dotenv_quote"));
-    assert!(setup.contains("CHROMIUM_IMAGE=chromedp/headless-shell:latest"));
+    assert!(setup.contains("CHROMIUM_IMAGE=chromedp/headless-shell:150.0.7871.125@sha256:7f8ec4782f1b138c30900e65ae53795d5966fbf52168b8fc062843db3e6d5be5"));
     assert!(readme.contains("docs/DEPLOYMENT.md"));
     assert!(
-        pi_deployment_docs.contains("deploy-setup.sh --mode native --profile edge"),
+        pi_deployment_docs.contains("deploy-setup.sh --secrets-stdin --mode native --profile edge"),
         "Pi OS Lite guide should document the supported native edge install"
     );
     assert!(deployment_docs.contains("thinclaw doctor --profile pi-os-lite-64"));

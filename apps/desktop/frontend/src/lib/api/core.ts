@@ -240,6 +240,11 @@ export async function revealGatewayToken(): Promise<string> {
     return compatibilityCommands.thinclawRevealGatewayToken();
 }
 
+/** Copy the local gateway token without returning it through renderer IPC. */
+export async function copyGatewayToken(): Promise<void> {
+    return compatibilityCommands.thinclawCopyGatewayToken();
+}
+
 /**
  * Save Slack configuration
  */

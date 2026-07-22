@@ -1,7 +1,7 @@
 //! Experiment-related ExperimentStore implementation for LibSqlBackend.
 
 use async_trait::async_trait;
-use libsql::params;
+use libsql::{TransactionBehavior, params};
 use uuid::Uuid;
 
 use super::{
@@ -15,6 +15,12 @@ use thinclaw_experiments::{
     ExperimentTrial,
 };
 use thinclaw_types::error::DatabaseError;
+
+const MAX_EXPERIMENT_USAGE_QUERY_RESULTS: usize = 10_000;
+
+fn bounded_usage_query_limit(limit: usize) -> i64 {
+    limit.min(MAX_EXPERIMENT_USAGE_QUERY_RESULTS) as i64
+}
 
 #[async_trait]
 impl ExperimentStore for LibSqlBackend {
@@ -30,13 +36,15 @@ impl ExperimentStore for LibSqlBackend {
                 preset, strategy_prompt, workdir, prepare_command, run_command,
                 mutable_paths, fixed_paths, primary_metric, secondary_metrics,
                 comparison_policy, stop_policy, default_runner_profile_id,
-                promotion_mode, autonomy_mode, status, created_at, updated_at
+                promotion_mode, autonomy_mode, status, created_at, updated_at,
+                owner_user_id
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5,
                 ?6, ?7, ?8, ?9, ?10,
                 ?11, ?12, ?13, ?14,
                 ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22
+                ?18, ?19, ?20, ?21, ?22,
+                ?23
             )
             "#,
             params![
@@ -66,6 +74,7 @@ impl ExperimentStore for LibSqlBackend {
                 serde_json::to_string(&project.status).unwrap_or_else(|_| "\"draft\"".to_string()),
                 fmt_ts(&project.created_at),
                 fmt_ts(&project.updated_at),
+                project.owner_user_id.as_str(),
             ],
         )
         .await
@@ -80,7 +89,13 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_projects WHERE id = ?1",
+                r#"SELECT id, name, workspace_path, git_remote_name, base_branch,
+                          preset, strategy_prompt, workdir, prepare_command, run_command,
+                          mutable_paths, fixed_paths, primary_metric, secondary_metrics,
+                          comparison_policy, stop_policy, default_runner_profile_id,
+                          promotion_mode, autonomy_mode, status, created_at, updated_at,
+                          owner_user_id
+                   FROM experiment_projects WHERE id = ?1"#,
                 params![id.to_string()],
             )
             .await
@@ -96,16 +111,83 @@ impl ExperimentStore for LibSqlBackend {
         }
     }
 
+    async fn get_experiment_project_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentProject>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"SELECT id, name, workspace_path, git_remote_name, base_branch,
+                          preset, strategy_prompt, workdir, prepare_command, run_command,
+                          mutable_paths, fixed_paths, primary_metric, secondary_metrics,
+                          comparison_policy, stop_policy, default_runner_profile_id,
+                          promotion_mode, autonomy_mode, status, created_at, updated_at,
+                          owner_user_id
+                   FROM experiment_projects
+                   WHERE id = ?1 AND owner_user_id = ?2"#,
+                params![id.to_string(), owner_user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(Some(row_to_project(&row)?)),
+            None => Ok(None),
+        }
+    }
+
     async fn list_experiment_projects(&self) -> Result<Vec<ExperimentProject>, DatabaseError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_projects ORDER BY updated_at DESC, name ASC",
+                r#"SELECT id, name, workspace_path, git_remote_name, base_branch,
+                          preset, strategy_prompt, workdir, prepare_command, run_command,
+                          mutable_paths, fixed_paths, primary_metric, secondary_metrics,
+                          comparison_policy, stop_policy, default_runner_profile_id,
+                          promotion_mode, autonomy_mode, status, created_at, updated_at,
+                          owner_user_id
+                   FROM experiment_projects ORDER BY updated_at DESC, name ASC"#,
                 (),
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
+        let mut items = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            items.push(row_to_project(&row)?);
+        }
+        Ok(items)
+    }
+
+    async fn list_experiment_projects_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentProject>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"SELECT id, name, workspace_path, git_remote_name, base_branch,
+                          preset, strategy_prompt, workdir, prepare_command, run_command,
+                          mutable_paths, fixed_paths, primary_metric, secondary_metrics,
+                          comparison_policy, stop_policy, default_runner_profile_id,
+                          promotion_mode, autonomy_mode, status, created_at, updated_at,
+                          owner_user_id
+                   FROM experiment_projects
+                   WHERE owner_user_id = ?1
+                   ORDER BY updated_at DESC, name ASC"#,
+                params![owner_user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
         let mut items = Vec::new();
         while let Some(row) = rows
             .next()
@@ -145,7 +227,7 @@ impl ExperimentStore for LibSqlBackend {
                 autonomy_mode = ?19,
                 status = ?20,
                 updated_at = ?21
-            WHERE id = ?1
+            WHERE id = ?1 AND owner_user_id = ?22
             "#,
             params![
                 project.id.to_string(),
@@ -173,6 +255,7 @@ impl ExperimentStore for LibSqlBackend {
                     .unwrap_or_else(|_| "\"autonomous\"".to_string()),
                 serde_json::to_string(&project.status).unwrap_or_else(|_| "\"draft\"".to_string()),
                 fmt_ts(&project.updated_at),
+                project.owner_user_id.as_str(),
             ],
         )
         .await
@@ -192,6 +275,22 @@ impl ExperimentStore for LibSqlBackend {
         Ok(count > 0)
     }
 
+    async fn delete_experiment_project_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        let count = conn
+            .execute(
+                "DELETE FROM experiment_projects WHERE id = ?1 AND owner_user_id = ?2",
+                params![id.to_string(), owner_user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(count > 0)
+    }
+
     async fn create_experiment_runner_profile(
         &self,
         profile: &ExperimentRunnerProfile,
@@ -202,11 +301,13 @@ impl ExperimentStore for LibSqlBackend {
             INSERT INTO experiment_runner_profiles (
                 id, name, backend, backend_config, image_or_runtime,
                 gpu_requirements, env_grants, secret_references,
-                cache_policy, status, readiness_class, launch_eligible, created_at, updated_at
+                cache_policy, status, readiness_class, launch_eligible, created_at, updated_at,
+                owner_user_id
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5,
                 ?6, ?7, ?8,
-                ?9, ?10, ?11, ?12, ?13, ?14
+                ?9, ?10, ?11, ?12, ?13, ?14,
+                ?15
             )
             "#,
             params![
@@ -227,6 +328,7 @@ impl ExperimentStore for LibSqlBackend {
                 if profile.launch_eligible { 1 } else { 0 },
                 fmt_ts(&profile.created_at),
                 fmt_ts(&profile.updated_at),
+                profile.owner_user_id.as_str(),
             ],
         )
         .await
@@ -241,8 +343,40 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_runner_profiles WHERE id = ?1",
+                r#"SELECT id, name, backend, backend_config, image_or_runtime,
+                          gpu_requirements, env_grants, secret_references,
+                          cache_policy, status, readiness_class, launch_eligible,
+                          created_at, updated_at, owner_user_id
+                   FROM experiment_runner_profiles WHERE id = ?1"#,
                 params![id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(Some(row_to_runner(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_experiment_runner_profile_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentRunnerProfile>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"SELECT id, name, backend, backend_config, image_or_runtime,
+                          gpu_requirements, env_grants, secret_references,
+                          cache_policy, status, readiness_class, launch_eligible,
+                          created_at, updated_at, owner_user_id
+                   FROM experiment_runner_profiles
+                   WHERE id = ?1 AND owner_user_id = ?2"#,
+                params![id.to_string(), owner_user_id],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -262,8 +396,41 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_runner_profiles ORDER BY updated_at DESC, name ASC",
+                r#"SELECT id, name, backend, backend_config, image_or_runtime,
+                          gpu_requirements, env_grants, secret_references,
+                          cache_policy, status, readiness_class, launch_eligible,
+                          created_at, updated_at, owner_user_id
+                   FROM experiment_runner_profiles ORDER BY updated_at DESC, name ASC"#,
                 (),
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut items = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            items.push(row_to_runner(&row)?);
+        }
+        Ok(items)
+    }
+
+    async fn list_experiment_runner_profiles_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentRunnerProfile>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"SELECT id, name, backend, backend_config, image_or_runtime,
+                          gpu_requirements, env_grants, secret_references,
+                          cache_policy, status, readiness_class, launch_eligible,
+                          created_at, updated_at, owner_user_id
+                   FROM experiment_runner_profiles
+                   WHERE owner_user_id = ?1
+                   ORDER BY updated_at DESC, name ASC"#,
+                params![owner_user_id],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -298,7 +465,7 @@ impl ExperimentStore for LibSqlBackend {
                 readiness_class = ?11,
                 launch_eligible = ?12,
                 updated_at = ?13
-            WHERE id = ?1
+            WHERE id = ?1 AND owner_user_id = ?14
             "#,
             params![
                 profile.id.to_string(),
@@ -317,6 +484,7 @@ impl ExperimentStore for LibSqlBackend {
                     .unwrap_or_else(|_| "\"manual_only\"".to_string()),
                 if profile.launch_eligible { 1 } else { 0 },
                 fmt_ts(&profile.updated_at),
+                profile.owner_user_id.as_str(),
             ],
         )
         .await
@@ -330,6 +498,22 @@ impl ExperimentStore for LibSqlBackend {
             .execute(
                 "DELETE FROM experiment_runner_profiles WHERE id = ?1",
                 params![id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(count > 0)
+    }
+
+    async fn delete_experiment_runner_profile_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        let count = conn
+            .execute(
+                "DELETE FROM experiment_runner_profiles WHERE id = ?1 AND owner_user_id = ?2",
+                params![id.to_string(), owner_user_id],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -406,7 +590,15 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_campaigns WHERE id = ?1",
+                r#"SELECT id, project_id, runner_profile_id, owner_user_id, status,
+                          baseline_commit, best_commit, best_metrics, experiment_branch,
+                          remote_ref, worktree_path, started_at, ended_at, trial_count,
+                          failure_count, pause_reason, queue_state, queue_position,
+                          active_trial_id, total_runtime_ms, total_cost_usd,
+                          consecutive_non_improving_trials, max_trials_override,
+                          gateway_url, metadata, created_at, updated_at,
+                          total_llm_cost_usd, total_runner_cost_usd
+                   FROM experiment_campaigns WHERE id = ?1"#,
                 params![id.to_string()],
             )
             .await
@@ -429,7 +621,16 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_campaigns WHERE id = ?1 AND owner_user_id = ?2",
+                r#"SELECT id, project_id, runner_profile_id, owner_user_id, status,
+                          baseline_commit, best_commit, best_metrics, experiment_branch,
+                          remote_ref, worktree_path, started_at, ended_at, trial_count,
+                          failure_count, pause_reason, queue_state, queue_position,
+                          active_trial_id, total_runtime_ms, total_cost_usd,
+                          consecutive_non_improving_trials, max_trials_override,
+                          gateway_url, metadata, created_at, updated_at,
+                          total_llm_cost_usd, total_runner_cost_usd
+                   FROM experiment_campaigns
+                   WHERE id = ?1 AND owner_user_id = ?2"#,
                 params![id.to_string(), owner_user_id],
             )
             .await
@@ -448,7 +649,15 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_campaigns ORDER BY created_at DESC",
+                r#"SELECT id, project_id, runner_profile_id, owner_user_id, status,
+                          baseline_commit, best_commit, best_metrics, experiment_branch,
+                          remote_ref, worktree_path, started_at, ended_at, trial_count,
+                          failure_count, pause_reason, queue_state, queue_position,
+                          active_trial_id, total_runtime_ms, total_cost_usd,
+                          consecutive_non_improving_trials, max_trials_override,
+                          gateway_url, metadata, created_at, updated_at,
+                          total_llm_cost_usd, total_runner_cost_usd
+                   FROM experiment_campaigns ORDER BY created_at DESC"#,
                 (),
             )
             .await
@@ -471,7 +680,16 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_campaigns WHERE owner_user_id = ?1 ORDER BY created_at DESC",
+                r#"SELECT id, project_id, runner_profile_id, owner_user_id, status,
+                          baseline_commit, best_commit, best_metrics, experiment_branch,
+                          remote_ref, worktree_path, started_at, ended_at, trial_count,
+                          failure_count, pause_reason, queue_state, queue_position,
+                          active_trial_id, total_runtime_ms, total_cost_usd,
+                          consecutive_non_improving_trials, max_trials_override,
+                          gateway_url, metadata, created_at, updated_at,
+                          total_llm_cost_usd, total_runner_cost_usd
+                   FROM experiment_campaigns
+                   WHERE owner_user_id = ?1 ORDER BY created_at DESC"#,
                 params![owner_user_id],
             )
             .await
@@ -624,7 +842,14 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_trials WHERE id = ?1",
+                r#"SELECT id, campaign_id, sequence, candidate_commit, parent_best_commit,
+                          status, runner_backend, exit_code, metrics_json, summary,
+                          decision_reason, log_preview_path, artifact_manifest_json,
+                          runtime_ms, attributed_cost_usd, hypothesis, mutation_summary,
+                          reviewer_decision, provider_job_id, provider_job_metadata,
+                          started_at, completed_at, created_at, updated_at,
+                          llm_cost_usd, runner_cost_usd
+                   FROM experiment_trials WHERE id = ?1"#,
                 params![id.to_string()],
             )
             .await
@@ -648,7 +873,15 @@ impl ExperimentStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT t.* FROM experiment_trials t
+                SELECT t.id, t.campaign_id, t.sequence, t.candidate_commit,
+                       t.parent_best_commit, t.status, t.runner_backend, t.exit_code,
+                       t.metrics_json, t.summary, t.decision_reason, t.log_preview_path,
+                       t.artifact_manifest_json, t.runtime_ms, t.attributed_cost_usd,
+                       t.hypothesis, t.mutation_summary, t.reviewer_decision,
+                       t.provider_job_id, t.provider_job_metadata, t.started_at,
+                       t.completed_at, t.created_at, t.updated_at,
+                       t.llm_cost_usd, t.runner_cost_usd
+                FROM experiment_trials t
                 INNER JOIN experiment_campaigns c ON c.id = t.campaign_id
                 WHERE t.id = ?1 AND c.owner_user_id = ?2
                 "#,
@@ -673,7 +906,15 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_trials WHERE campaign_id = ?1 ORDER BY sequence ASC",
+                r#"SELECT id, campaign_id, sequence, candidate_commit, parent_best_commit,
+                          status, runner_backend, exit_code, metrics_json, summary,
+                          decision_reason, log_preview_path, artifact_manifest_json,
+                          runtime_ms, attributed_cost_usd, hypothesis, mutation_summary,
+                          reviewer_decision, provider_job_id, provider_job_metadata,
+                          started_at, completed_at, created_at, updated_at,
+                          llm_cost_usd, runner_cost_usd
+                   FROM experiment_trials
+                   WHERE campaign_id = ?1 ORDER BY sequence ASC"#,
                 params![campaign_id.to_string()],
             )
             .await
@@ -698,7 +939,15 @@ impl ExperimentStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT t.* FROM experiment_trials t
+                SELECT t.id, t.campaign_id, t.sequence, t.candidate_commit,
+                       t.parent_best_commit, t.status, t.runner_backend, t.exit_code,
+                       t.metrics_json, t.summary, t.decision_reason, t.log_preview_path,
+                       t.artifact_manifest_json, t.runtime_ms, t.attributed_cost_usd,
+                       t.hypothesis, t.mutation_summary, t.reviewer_decision,
+                       t.provider_job_id, t.provider_job_metadata, t.started_at,
+                       t.completed_at, t.created_at, t.updated_at,
+                       t.llm_cost_usd, t.runner_cost_usd
+                FROM experiment_trials t
                 INNER JOIN experiment_campaigns c ON c.id = t.campaign_id
                 WHERE t.campaign_id = ?1 AND c.owner_user_id = ?2
                 ORDER BY t.sequence ASC
@@ -789,47 +1038,41 @@ impl ExperimentStore for LibSqlBackend {
         trial_id: Uuid,
         artifacts: &[ExperimentArtifactRef],
     ) -> Result<(), DatabaseError> {
+        let _transaction_guard = self.transaction_lock.lock().await;
         let conn = self.connect().await?;
-        conn.execute("BEGIN", ())
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        let delete_result = conn
-            .execute(
-                "DELETE FROM experiment_artifact_refs WHERE trial_id = ?1",
-                params![trial_id.to_string()],
-            )
-            .await;
-        if let Err(error) = delete_result {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(DatabaseError::Query(error.to_string()));
-        }
+        tx.execute(
+            "DELETE FROM experiment_artifact_refs WHERE trial_id = ?1",
+            params![trial_id.to_string()],
+        )
+        .await
+        .map_err(|error| DatabaseError::Query(error.to_string()))?;
         for artifact in artifacts {
-            if let Err(error) = conn
-                .execute(
-                    r#"
+            tx.execute(
+                r#"
                 INSERT INTO experiment_artifact_refs (
                     id, trial_id, kind, uri_or_local_path, size_bytes,
                     fetchable, metadata, created_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                 "#,
-                    params![
-                        artifact.id.to_string(),
-                        artifact.trial_id.to_string(),
-                        artifact.kind.as_str(),
-                        artifact.uri_or_local_path.as_str(),
-                        artifact.size_bytes.map(|v| v as i64),
-                        artifact.fetchable as i64,
-                        artifact.metadata.to_string(),
-                        fmt_ts(&artifact.created_at),
-                    ],
-                )
-                .await
-            {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(DatabaseError::Query(error.to_string()));
-            }
+                params![
+                    artifact.id.to_string(),
+                    artifact.trial_id.to_string(),
+                    artifact.kind.as_str(),
+                    artifact.uri_or_local_path.as_str(),
+                    artifact.size_bytes.map(|v| v as i64),
+                    artifact.fetchable as i64,
+                    artifact.metadata.to_string(),
+                    fmt_ts(&artifact.created_at),
+                ],
+            )
+            .await
+            .map_err(|error| DatabaseError::Query(error.to_string()))?;
         }
-        conn.execute("COMMIT", ())
+        tx.commit()
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
@@ -842,7 +1085,10 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_artifact_refs WHERE trial_id = ?1 ORDER BY created_at ASC",
+                r#"SELECT id, trial_id, kind, uri_or_local_path, size_bytes,
+                          fetchable, metadata, created_at
+                   FROM experiment_artifact_refs
+                   WHERE trial_id = ?1 ORDER BY created_at ASC"#,
                 params![trial_id.to_string()],
             )
             .await
@@ -867,7 +1113,9 @@ impl ExperimentStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT a.* FROM experiment_artifact_refs a
+                SELECT a.id, a.trial_id, a.kind, a.uri_or_local_path,
+                       a.size_bytes, a.fetchable, a.metadata, a.created_at
+                FROM experiment_artifact_refs a
                 INNER JOIN experiment_trials t ON t.id = a.trial_id
                 INNER JOIN experiment_campaigns c ON c.id = t.campaign_id
                 WHERE a.trial_id = ?1 AND c.owner_user_id = ?2
@@ -924,7 +1172,8 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_targets WHERE id = ?1",
+                r#"SELECT id, name, kind, location, metadata, created_at, updated_at
+                   FROM experiment_targets WHERE id = ?1"#,
                 params![id.to_string()],
             )
             .await
@@ -943,7 +1192,8 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_targets ORDER BY updated_at DESC, name ASC",
+                r#"SELECT id, name, kind, location, metadata, created_at, updated_at
+                   FROM experiment_targets ORDER BY updated_at DESC, name ASC"#,
                 (),
             )
             .await
@@ -1047,7 +1297,10 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_target_links ORDER BY updated_at DESC, provider ASC, model ASC",
+                r#"SELECT id, target_id, kind, provider, model, route_key,
+                          logical_role, metadata, created_at, updated_at
+                   FROM experiment_target_links
+                   ORDER BY updated_at DESC, provider ASC, model ASC"#,
                 (),
             )
             .await
@@ -1131,8 +1384,13 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_model_usage_records ORDER BY created_at DESC LIMIT ?1",
-                params![limit as i64],
+                r#"SELECT id, provider, model, route_key, logical_role, endpoint_type,
+                          workload_tag, latency_ms, cost_usd, success,
+                          prompt_asset_ids, retrieval_asset_ids, tool_policy_ids,
+                          evaluator_ids, parser_ids, metadata, created_at
+                   FROM experiment_model_usage_records
+                   ORDER BY created_at DESC LIMIT ?1"#,
+                params![bounded_usage_query_limit(limit)],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -1155,8 +1413,14 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_model_usage_records WHERE json_extract(metadata, '$.experiment_campaign_id') = ?1 ORDER BY created_at ASC LIMIT ?2",
-                params![campaign_id.to_string(), limit as i64],
+                r#"SELECT id, provider, model, route_key, logical_role, endpoint_type,
+                          workload_tag, latency_ms, cost_usd, success,
+                          prompt_asset_ids, retrieval_asset_ids, tool_policy_ids,
+                          evaluator_ids, parser_ids, metadata, created_at
+                   FROM experiment_model_usage_records
+                   WHERE json_extract(metadata, '$.experiment_campaign_id') = ?1
+                   ORDER BY created_at ASC LIMIT ?2"#,
+                params![campaign_id.to_string(), bounded_usage_query_limit(limit)],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -1179,8 +1443,14 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_model_usage_records WHERE json_extract(metadata, '$.experiment_trial_id') = ?1 ORDER BY created_at ASC LIMIT ?2",
-                params![trial_id.to_string(), limit as i64],
+                r#"SELECT id, provider, model, route_key, logical_role, endpoint_type,
+                          workload_tag, latency_ms, cost_usd, success,
+                          prompt_asset_ids, retrieval_asset_ids, tool_policy_ids,
+                          evaluator_ids, parser_ids, metadata, created_at
+                   FROM experiment_model_usage_records
+                   WHERE json_extract(metadata, '$.experiment_trial_id') = ?1
+                   ORDER BY created_at ASC LIMIT ?2"#,
+                params![trial_id.to_string(), bounded_usage_query_limit(limit)],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -1237,7 +1507,10 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_leases WHERE id = ?1",
+                r#"SELECT id, campaign_id, trial_id, runner_profile_id, status,
+                          token_hash, job_payload, credentials_payload, expires_at,
+                          claimed_at, completed_at, created_at, updated_at
+                   FROM experiment_leases WHERE id = ?1"#,
                 params![id.to_string()],
             )
             .await
@@ -1259,7 +1532,11 @@ impl ExperimentStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT * FROM experiment_leases WHERE trial_id = ?1 ORDER BY created_at DESC LIMIT 1",
+                r#"SELECT id, campaign_id, trial_id, runner_profile_id, status,
+                          token_hash, job_payload, credentials_payload, expires_at,
+                          claimed_at, completed_at, created_at, updated_at
+                   FROM experiment_leases
+                   WHERE trial_id = ?1 ORDER BY created_at DESC LIMIT 1"#,
                 params![trial_id.to_string()],
             )
             .await
@@ -1317,6 +1594,7 @@ fn row_to_project(row: &libsql::Row) -> Result<ExperimentProject, DatabaseError>
     Ok(ExperimentProject {
         id: Uuid::parse_str(&get_text(row, 0))
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?,
+        owner_user_id: get_text(row, 22),
         name: get_text(row, 1),
         workspace_path: get_text(row, 2),
         git_remote_name: get_text(row, 3),
@@ -1349,6 +1627,7 @@ fn row_to_runner(row: &libsql::Row) -> Result<ExperimentRunnerProfile, DatabaseE
     Ok(ExperimentRunnerProfile {
         id: Uuid::parse_str(&get_text(row, 0))
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?,
+        owner_user_id: get_text(row, 14),
         name: get_text(row, 1),
         backend: row_json_to(row, 2)?,
         backend_config: get_json(row, 3),

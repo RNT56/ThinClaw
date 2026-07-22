@@ -8334,18 +8334,19 @@ function backendLaunchHint(backend) {
   }
 }
 
-function renderResearchLease(auth, campaign) {
+function renderResearchLease(auth, campaign, launch) {
   const shell = document.getElementById('research-lease-shell');
   const output = document.getElementById('research-lease-output');
   const description = document.getElementById('research-lease-description');
   if (!shell || !output || !description || !auth || !campaign) return;
   const runner = experimentsState.runners.find((entry) => entry.id === campaign.runner_profile_id);
-  const gatewayUrl = window.location.origin;
   description.textContent = backendLaunchHint(runner ? runner.backend : '');
-  output.textContent = 'thinclaw experiment-runner'
-    + ' --lease-id ' + auth.lease_id
-    + ' --gateway-url ' + gatewayUrl
-    + ' --token ' + auth.token;
+  output.textContent = launch && launch.bootstrap_command
+    ? String(launch.bootstrap_command)
+    : 'thinclaw experiment-runner'
+      + ' --lease-id ' + auth.lease_id
+      + ' --gateway-url ' + window.location.origin
+      + ' --token ' + auth.token;
   shell.style.display = '';
 }
 
@@ -8359,8 +8360,8 @@ function handleResearchCampaignResponse(data) {
   experimentsState.lastLeaseCampaignId = data.lease
     ? (data.campaign ? data.campaign.id : experimentsState.selectedCampaignId)
     : null;
-  if (data.lease && data.campaign) {
-    renderResearchLease(data.lease, data.campaign);
+  if (data.lease && data.campaign && data.launch && data.launch.requires_operator_action) {
+    renderResearchLease(data.lease, data.campaign, data.launch);
   } else {
     const shell = document.getElementById('research-lease-shell');
     if (shell) shell.style.display = 'none';

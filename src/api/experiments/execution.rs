@@ -1,5 +1,17 @@
 use super::*;
 
+const MAX_LOCAL_EXPERIMENT_SUMMARY_BYTES: u64 = 8 * 1024 * 1024;
+
+async fn persist_local_experiment_artifact(
+    path: &Path,
+    bytes: impl Into<Vec<u8>>,
+    description: &str,
+) -> ApiResult<()> {
+    thinclaw_platform::write_private_file_atomic_async(path.to_path_buf(), bytes.into(), true)
+        .await
+        .map_err(|error| ApiError::Internal(format!("failed to persist {description}: {error}")))
+}
+
 pub(super) async fn launch_trial(
     store: &Arc<dyn Database>,
     user_id: &str,
@@ -23,7 +35,7 @@ pub(super) async fn launch_trial(
             message: err,
             bootstrap_command: campaign_gateway_url(&campaign)
                 .as_deref()
-                .map(|gateway| adapters::build_bootstrap_command(gateway, &lease)),
+                .and_then(|gateway| adapters::build_bootstrap_command(gateway, &lease).ok()),
             provider_template: None,
             provider_job_id: None,
             provider_job_metadata: serde_json::json!({}),
@@ -40,7 +52,10 @@ pub(super) async fn launch_trial(
         }
         trial.summary = Some(launch_outcome.message.clone());
         trial.provider_job_id = launch_outcome.provider_job_id.clone();
-        trial.provider_job_metadata = launch_outcome.provider_job_metadata.clone();
+        trial.provider_job_metadata = adapters::sanitize_provider_job_metadata(
+            runner.backend,
+            &launch_outcome.provider_job_metadata,
+        );
         trial.updated_at = Utc::now();
         campaign.queue_state = ExperimentCampaignQueueState::Active;
         campaign.status = ExperimentCampaignStatus::Running;
@@ -56,10 +71,11 @@ pub(super) async fn launch_trial(
             .update_experiment_campaign(&campaign)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
+        let response_lease = launch_outcome.requires_operator_action.then_some(lease);
         return Ok(ExperimentCampaignActionResponse {
             campaign,
             trial: Some(trial),
-            lease: Some(lease),
+            lease: response_lease,
             launch: Some(launch_details_from_outcome(launch_outcome)),
             message: "Remote trial prepared.".to_string(),
         });
@@ -406,6 +422,53 @@ pub(super) async fn upsert_local_trial_artifact_refs(
     Ok(())
 }
 
+fn local_experiment_secret_values(env_grants: &serde_json::Value) -> Vec<String> {
+    let mut values = env_grants
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.values())
+        .filter_map(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+    values.dedup();
+    values
+}
+
+fn redact_local_experiment_text(value: &str, secrets: &[String]) -> String {
+    secrets.iter().fold(value.to_string(), |text, secret| {
+        text.replace(secret, "[REDACTED]")
+    })
+}
+
+fn redact_local_experiment_json(value: &mut serde_json::Value, secrets: &[String]) {
+    fn visit(value: &mut serde_json::Value, secrets: &[String], depth: usize) {
+        if depth > 64 {
+            *value = serde_json::Value::Null;
+            return;
+        }
+        match value {
+            serde_json::Value::String(text) => {
+                *text = redact_local_experiment_text(text, secrets);
+            }
+            serde_json::Value::Array(items) => {
+                for item in items.iter_mut().take(1024) {
+                    visit(item, secrets, depth + 1);
+                }
+                items.truncate(1024);
+            }
+            serde_json::Value::Object(map) => {
+                for item in map.values_mut() {
+                    visit(item, secrets, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    visit(value, secrets, 0);
+}
+
 pub(super) async fn execute_local_trial(
     user_id: &str,
     settings: &Settings,
@@ -463,7 +526,8 @@ pub(super) async fn execute_local_trial(
         .await;
     }
 
-    let env_grants = resolved_runner_env_grants(user_id, runner).await;
+    let env_grants = resolved_runner_env_grants(user_id, runner).await?;
+    let secret_values = local_experiment_secret_values(&env_grants);
     let backend = experiment_execution_backend(settings, runner, user_id);
     let mut log = String::new();
     if let Some(prepare_command) = project.prepare_command.as_deref() {
@@ -475,13 +539,14 @@ pub(super) async fn execute_local_trial(
         )
         .await?;
         log.push_str("== prepare ==\n");
-        log.push_str(&output.output);
+        log.push_str(&redact_local_experiment_text(
+            &output.output,
+            &secret_values,
+        ));
         log.push('\n');
         if output.exit_code != 0 {
             let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
-            tokio::fs::write(&log_path, &log)
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            persist_local_experiment_artifact(&log_path, log.as_bytes(), "local trial log").await?;
             return Ok(ExperimentRunnerCompletion {
                 exit_code: Some(output.exit_code as i32),
                 metrics_json: serde_json::json!({}),
@@ -508,31 +573,47 @@ pub(super) async fn execute_local_trial(
     .await?;
     let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
     log.push_str("== run ==\n");
-    log.push_str(&run_output.output);
-    tokio::fs::write(&log_path, &log)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    log.push_str(&redact_local_experiment_text(
+        &run_output.output,
+        &secret_values,
+    ));
+    persist_local_experiment_artifact(&log_path, log.as_bytes(), "local trial log").await?;
 
     let summary_path = run_root.join("summary.json");
     let persisted_summary_path = artifact_dir.join(format!("{}-summary.json", trial.id.simple()));
-    let summary_json = if summary_path.exists() {
-        let raw = tokio::fs::read_to_string(&summary_path)
-            .await
-            .unwrap_or_default();
-        tokio::fs::write(&persisted_summary_path, &raw)
-            .await
-            .map_err(|e| {
-                ApiError::Internal(format!("failed to persist local summary.json: {e}"))
-            })?;
-        serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-    let summary_manifest_path = if summary_path.exists() {
-        persisted_summary_path.to_string_lossy().to_string()
-    } else {
-        summary_path.to_string_lossy().to_string()
-    };
+    let (summary_json, summary_manifest_path) =
+        match thinclaw_platform::read_regular_file_bounded_async(
+            summary_path.clone(),
+            MAX_LOCAL_EXPERIMENT_SUMMARY_BYTES,
+        )
+        .await
+        {
+            Ok(raw) => {
+                let mut summary = serde_json::from_slice::<serde_json::Value>(&raw)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                redact_local_experiment_json(&mut summary, &secret_values);
+                let sanitized = serde_json::to_vec(&summary).unwrap_or_else(|_| b"{}".to_vec());
+                persist_local_experiment_artifact(
+                    &persisted_summary_path,
+                    sanitized,
+                    "local summary.json",
+                )
+                .await?;
+                (
+                    summary,
+                    persisted_summary_path.to_string_lossy().to_string(),
+                )
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+                serde_json::json!({}),
+                summary_path.to_string_lossy().to_string(),
+            ),
+            Err(error) => {
+                return Err(ApiError::Internal(format!(
+                    "local summary.json must be a bounded regular file: {error}"
+                )));
+            }
+        };
     let metrics = extract_metrics(
         &project.primary_metric,
         &project.secondary_metrics,
@@ -649,13 +730,14 @@ pub(super) async fn execute_agent_env_benchmark_trial(
         artifact_dir.join(format!("{}-agent-env-trajectory.json", trial.id.simple()));
     let trajectory_json = serde_json::to_string_pretty(&trajectories)
         .map_err(|err| ApiError::Internal(err.to_string()))?;
-    tokio::fs::write(&trajectory_path, &trajectory_json)
-        .await
-        .map_err(|err| ApiError::Internal(err.to_string()))?;
+    persist_local_experiment_artifact(
+        &trajectory_path,
+        trajectory_json.as_bytes(),
+        "agent-env trajectory",
+    )
+    .await?;
     let log = render_trajectory_log(&trajectories);
-    tokio::fs::write(log_path, &log)
-        .await
-        .map_err(|err| ApiError::Internal(err.to_string()))?;
+    persist_local_experiment_artifact(log_path, log.as_bytes(), "agent-env trial log").await?;
 
     Ok(ExperimentRunnerCompletion {
         exit_code: Some(if score >= 1.0 { 0 } else { 1 }),

@@ -1,6 +1,9 @@
 //! Deepgram Nova-3 STT backend.
 
-use crate::inference::stt::{SttBackend, SttRequest};
+use crate::inference::stt::{
+    audio_file_metadata, bounded_stt_json, stt_http_client, validate_stt_request,
+    validate_transcript, SttBackend, SttRequest,
+};
 use crate::inference::{BackendInfo, InferenceError, InferenceResult};
 use async_trait::async_trait;
 
@@ -27,24 +30,19 @@ impl SttBackend for DeepgramSttBackend {
     }
 
     async fn transcribe(&self, request: SttRequest) -> InferenceResult<String> {
-        let client = reqwest::Client::new();
-
-        let mut url =
-            "https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true".to_string();
-        if let Some(lang) = &request.language {
-            url.push_str(&format!("&language={}", lang));
+        validate_stt_request(&request)?;
+        let client = stt_http_client(false)?;
+        let (_, content_type, _) = audio_file_metadata(request.format);
+        let mut request_builder = client
+            .post("https://api.deepgram.com/v1/listen")
+            .query(&[("model", "nova-3"), ("smart_format", "true")])
+            .header("Authorization", format!("Token {}", self.api_key))
+            .header("Content-Type", content_type);
+        if let Some(language) = request.language.as_deref() {
+            request_builder = request_builder.query(&[("language", language)]);
         }
 
-        let content_type = match request.format {
-            super::super::AudioFormat::Wav => "audio/wav",
-            super::super::AudioFormat::Mp3 => "audio/mp3",
-            _ => "audio/wav",
-        };
-
-        let response = client
-            .post(&url)
-            .header("Authorization", format!("Token {}", self.api_key))
-            .header("Content-Type", content_type)
+        let response = request_builder
             .body(request.audio)
             .send()
             .await
@@ -56,17 +54,12 @@ impl SttBackend for DeepgramSttBackend {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
             return Err(InferenceError::provider(format!(
-                "Deepgram error ({}): {}",
-                status, text
+                "Deepgram error ({status})"
             )));
         }
 
-        let result: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| InferenceError::provider(format!("Parse error: {}", e)))?;
+        let result: serde_json::Value = bounded_stt_json(response).await?;
 
         let transcript = result
             .get("results")
@@ -78,7 +71,7 @@ impl SttBackend for DeepgramSttBackend {
             .and_then(|t| t.as_str())
             .unwrap_or("");
 
-        Ok(transcript.trim().to_string())
+        validate_transcript(transcript.to_string())
     }
 
     fn supports_streaming(&self) -> bool {

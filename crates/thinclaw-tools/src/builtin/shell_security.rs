@@ -12,7 +12,6 @@ use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use unicode_normalization::UnicodeNormalization;
 
@@ -663,47 +662,42 @@ impl ExternalCommandScanner {
             ));
         }
 
-        let mut child = match Command::new(&resolved.path)
-            .arg("--json")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
+        if cmd.len() > 1024 * 1024 {
+            return ExternalScanReport::unknown("command exceeds external scanner input limit");
+        }
+        let mut command = Command::new(&resolved.path);
+        command.arg("--json");
+        let output = match thinclaw_platform::bounded_command_output_with_input(
+            &mut command,
+            cmd.as_bytes(),
+            EXTERNAL_SCANNER_TIMEOUT,
+            1024 * 1024,
+            64 * 1024,
+        )
+        .await
         {
-            Ok(child) => child,
+            Ok(output) => output,
             Err(error) => {
                 return ExternalScanReport::unknown(format!(
-                    "failed to spawn external scanner ({}): {}",
+                    "external scanner execution failed ({}): {}",
                     scanner_source_name(resolved.source),
                     error
                 ));
             }
         };
 
-        if let Some(mut stdin) = child.stdin.take()
-            && stdin.write_all(cmd.as_bytes()).await.is_err()
-        {
-            let _ = child.kill().await;
-            return ExternalScanReport::unknown("failed to write command to external scanner");
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return ExternalScanReport::unknown(format!(
+                "external scanner exited with {}: {}",
+                output.status,
+                if stderr.is_empty() {
+                    "empty stderr".to_string()
+                } else {
+                    stderr
+                }
+            ));
         }
-
-        let output =
-            match tokio::time::timeout(EXTERNAL_SCANNER_TIMEOUT, child.wait_with_output()).await {
-                Ok(Ok(output)) => output,
-                Ok(Err(error)) => {
-                    return ExternalScanReport::unknown(format!(
-                        "external scanner execution failed ({}): {}",
-                        scanner_source_name(resolved.source),
-                        error
-                    ));
-                }
-                Err(_) => {
-                    return ExternalScanReport::unknown(format!(
-                        "external scanner timed out after {}ms",
-                        EXTERNAL_SCANNER_TIMEOUT.as_millis()
-                    ));
-                }
-            };
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if stdout.is_empty() {
@@ -894,17 +888,19 @@ fn read_scanner_manifest(
     binary_path: &Path,
 ) -> Result<ScannerProvenanceManifest, ScannerResolveError> {
     let manifest_path = scanner_manifest_path(binary_path);
-    let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
-        ScannerResolveError::new(
-            ExternalScannerProvenanceStatus::MissingManifest,
-            format!(
-                "external scanner provenance manifest missing or unreadable '{}': {}",
-                manifest_path.display(),
-                error
-            ),
-        )
-    })?;
-    serde_json::from_str(&raw).map_err(|error| {
+    let raw = thinclaw_platform::read_regular_file_bounded(&manifest_path, 1024 * 1024).map_err(
+        |error| {
+            ScannerResolveError::new(
+                ExternalScannerProvenanceStatus::MissingManifest,
+                format!(
+                    "external scanner provenance manifest missing or unreadable '{}': {}",
+                    manifest_path.display(),
+                    error
+                ),
+            )
+        },
+    )?;
+    serde_json::from_slice(&raw).map_err(|error| {
         ScannerResolveError::new(
             ExternalScannerProvenanceStatus::InvalidSignature,
             format!(
@@ -940,6 +936,18 @@ fn verify_scanner_manifest_with_keys(
     manifest: &ScannerProvenanceManifest,
     trusted_keys: &[(&str, &str)],
 ) -> Result<(), ScannerResolveError> {
+    let binary = read_scanner_binary(binary_path).map_err(|error| {
+        ScannerResolveError::new(ExternalScannerProvenanceStatus::InvalidSignature, error)
+    })?;
+    verify_scanner_manifest_bytes_with_keys(binary_path, &binary, manifest, trusted_keys)
+}
+
+fn verify_scanner_manifest_bytes_with_keys(
+    binary_path: &Path,
+    binary: &[u8],
+    manifest: &ScannerProvenanceManifest,
+    trusted_keys: &[(&str, &str)],
+) -> Result<(), ScannerResolveError> {
     let binary_name = binary_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -954,9 +962,7 @@ fn verify_scanner_manifest_with_keys(
         ));
     }
 
-    let actual_sha = file_sha256(binary_path).map_err(|error| {
-        ScannerResolveError::new(ExternalScannerProvenanceStatus::InvalidSignature, error)
-    })?;
+    let actual_sha = bytes_sha256(binary);
     if !actual_sha.eq_ignore_ascii_case(&manifest.sha256) {
         return Err(ScannerResolveError::new(
             ExternalScannerProvenanceStatus::InvalidSignature,
@@ -1033,8 +1039,8 @@ fn find_scanner_on_path() -> Option<PathBuf> {
 
 fn install_failure_marker() -> Option<InstallFailureMarker> {
     let marker_path = install_failure_marker_path();
-    let raw = std::fs::read_to_string(marker_path).ok()?;
-    serde_json::from_str(&raw).ok()
+    let raw = thinclaw_platform::read_regular_file_bounded(&marker_path, 64 * 1024).ok()?;
+    serde_json::from_slice(&raw).ok()
 }
 
 fn install_failure_cooldown_until(marker: &InstallFailureMarker) -> Option<SystemTime> {
@@ -1063,12 +1069,24 @@ fn write_install_failure_marker(reason: impl Into<String>) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string(&marker) {
-        let _ = std::fs::write(marker_path, json);
+        let _ = thinclaw_platform::write_private_file_atomic(&marker_path, json.as_bytes(), true);
     }
 }
 
 fn ensure_cached_scanner_install(source_path: &Path) -> Result<(), String> {
-    verify_scanner_binary(source_path).map_err(|error| {
+    let source_manifest = read_scanner_manifest(source_path).map_err(|error| {
+        let message = error.message;
+        write_install_failure_marker(message.clone());
+        message
+    })?;
+    let source_bytes = read_scanner_binary(source_path)?;
+    verify_scanner_manifest_bytes_with_keys(
+        source_path,
+        &source_bytes,
+        &source_manifest,
+        TRUSTED_SCANNER_KEYS,
+    )
+    .map_err(|error| {
         let message = error.message;
         write_install_failure_marker(message.clone());
         message
@@ -1090,72 +1108,41 @@ fn ensure_cached_scanner_install(source_path: &Path) -> Result<(), String> {
         message
     })?;
 
-    let source_sha = file_sha256(source_path)?;
-    if cached_path.is_file() && file_sha256(&cached_path)? == source_sha {
-        let _ = std::fs::copy(
-            scanner_manifest_path(source_path),
-            scanner_manifest_path(&cached_path),
-        );
-        verify_scanner_binary(&cached_path).map_err(|error| {
-            let message = error.message;
-            write_install_failure_marker(message.clone());
-            message
-        })?;
-        clear_install_failure_marker();
-        return Ok(());
-    }
-
-    let tmp_path = cached_path.with_extension("tmp");
-    std::fs::copy(source_path, &tmp_path).map_err(|error| {
-        let message = format!(
-            "failed to copy external scanner from '{}' to '{}': {}",
-            source_path.display(),
-            tmp_path.display(),
-            error
-        );
-        write_install_failure_marker(message.clone());
-        message
-    })?;
-
-    let copied_sha = file_sha256(&tmp_path)?;
-    if copied_sha != source_sha {
-        let _ = std::fs::remove_file(&tmp_path);
-        let message = format!(
-            "external scanner SHA-256 mismatch after cache install (expected {}, got {})",
-            source_sha, copied_sha
-        );
-        write_install_failure_marker(message.clone());
-        return Err(message);
+    let source_sha = bytes_sha256(&source_bytes);
+    let cached_matches =
+        thinclaw_platform::read_regular_file_bounded(&cached_path, MAX_EXTERNAL_SCANNER_BYTES)
+            .is_ok_and(|bytes| bytes_sha256(&bytes) == source_sha);
+    if !cached_matches {
+        thinclaw_platform::write_regular_file_atomic(&cached_path, &source_bytes, true).map_err(
+            |error| {
+                let message = format!("failed to install cached external scanner: {error}");
+                write_install_failure_marker(message.clone());
+                message
+            },
+        )?;
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755));
+        std::fs::set_permissions(&cached_path, std::fs::Permissions::from_mode(0o755)).map_err(
+            |error| {
+                let message = format!("failed to make cached external scanner executable: {error}");
+                write_install_failure_marker(message.clone());
+                message
+            },
+        )?;
     }
 
-    std::fs::rename(&tmp_path, &cached_path).map_err(|error| {
-        let message = format!(
-            "failed to finalize cached external scanner install '{}': {}",
-            cached_path.display(),
-            error
-        );
-        write_install_failure_marker(message.clone());
-        message
-    })?;
-
-    let source_manifest_path = scanner_manifest_path(source_path);
     let cached_manifest_path = scanner_manifest_path(&cached_path);
-    std::fs::copy(&source_manifest_path, &cached_manifest_path).map_err(|error| {
-        let message = format!(
-            "failed to copy external scanner provenance manifest from '{}' to '{}': {}",
-            source_manifest_path.display(),
-            cached_manifest_path.display(),
-            error
-        );
-        write_install_failure_marker(message.clone());
-        message
-    })?;
+    let manifest_bytes = serde_json::to_vec_pretty(&source_manifest)
+        .map_err(|error| format!("failed to serialize scanner provenance manifest: {error}"))?;
+    thinclaw_platform::write_private_file_atomic(&cached_manifest_path, &manifest_bytes, true)
+        .map_err(|error| {
+            let message = format!("failed to install scanner provenance manifest: {error}");
+            write_install_failure_marker(message.clone());
+            message
+        })?;
     verify_scanner_binary(&cached_path).map_err(|error| {
         let message = error.message;
         write_install_failure_marker(message.clone());
@@ -1166,14 +1153,25 @@ fn ensure_cached_scanner_install(source_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn file_sha256(path: &Path) -> Result<String, String> {
+    let bytes = read_scanner_binary(path)?;
+    Ok(bytes_sha256(&bytes))
+}
+
+const MAX_EXTERNAL_SCANNER_BYTES: u64 = 128 * 1024 * 1024;
+
+fn read_scanner_binary(path: &Path) -> Result<Vec<u8>, String> {
+    thinclaw_platform::read_regular_file_bounded(path, MAX_EXTERNAL_SCANNER_BYTES)
+        .map_err(|error| format!("failed to read external scanner: {error}"))
+}
+
+fn bytes_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
 
-    let bytes = std::fs::read(path)
-        .map_err(|error| format!("failed to read '{}': {}", path.display(), error))?;
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    Ok(hex::encode(hasher.finalize()))
+    hex::encode(hasher.finalize())
 }
 
 fn detect_terminal_injection(cmd: &str) -> Option<&'static str> {

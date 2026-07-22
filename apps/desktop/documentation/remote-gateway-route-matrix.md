@@ -34,7 +34,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_learning_evaluate_outcomes` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 | `thinclaw_test_connection` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 
-### Local only (197)
+### Local only (199)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -138,6 +138,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_agents_list` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_canvas_dispatch_event` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_canvas_navigate` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_canvas_panel_action` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_canvas_panel_dismiss` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_canvas_panel_get` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_canvas_panels_list` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -147,6 +148,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_checkpoint_restore` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_checkpoints_list` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_config_schema` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_copy_gateway_token` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_cron_lint` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_experiments_list_envs` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_experiments_run_eval` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |

@@ -329,7 +329,11 @@ impl Channel for TuiChannel {
                 };
 
                 if msg_tx
-                    .send(IncomingMessage::new("tui", "default", content))
+                    .send(
+                        IncomingMessage::new("tui", "default", content)
+                            .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
+                            .with_actor_identity("default", "default"),
+                    )
                     .await
                     .is_err()
                 {
@@ -339,7 +343,11 @@ impl Channel for TuiChannel {
 
             if !sent_shutdown {
                 let _ = msg_tx
-                    .send(IncomingMessage::new("tui", "default", "/quit"))
+                    .send(
+                        IncomingMessage::new("tui", "default", "/quit")
+                            .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
+                            .with_actor_identity("default", "default"),
+                    )
                     .await;
             }
         });

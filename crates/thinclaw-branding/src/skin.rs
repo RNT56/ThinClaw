@@ -281,11 +281,19 @@ impl CliSkin {
         {
             for entry in entries.flatten() {
                 let path = entry.path();
+                let is_bounded_regular = std::fs::symlink_metadata(&path).is_ok_and(|metadata| {
+                    metadata.is_file()
+                        && !metadata.file_type().is_symlink()
+                        && metadata.len() <= 256 * 1024
+                });
+                if !is_bounded_regular {
+                    continue;
+                }
                 if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
                     continue;
                 }
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                    && !stem.trim().is_empty()
+                    && valid_skin_name(stem)
                 {
                     names.insert(stem.to_string());
                 }
@@ -468,8 +476,12 @@ fn skin_dir() -> Option<PathBuf> {
 }
 
 fn load_user_skin(name: &str) -> Option<CliSkin> {
+    if !valid_skin_name(name) {
+        return None;
+    }
     let path = skin_dir()?.join(format!("{name}.toml"));
-    let data = std::fs::read_to_string(&path).ok()?;
+    let data = thinclaw_platform::read_regular_file_bounded(&path, 256 * 1024).ok()?;
+    let data = String::from_utf8(data).ok()?;
     match parse_skin_toml(&data, name) {
         Ok(skin) => Some(skin),
         Err(err) => {
@@ -481,6 +493,14 @@ fn load_user_skin(name: &str) -> Option<CliSkin> {
             None
         }
     }
+}
+
+fn valid_skin_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn load_builtin_skin(name: &str) -> Option<CliSkin> {

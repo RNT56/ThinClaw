@@ -693,7 +693,7 @@ async fn discover_provider_models(
                         api_key.ok_or_else(missing_credentials)?
                     ));
                     Ok(discovery
-                        .discover_openai_compatible(&endpoint.base_url, auth.as_deref())
+                        .discover_public_openai_compatible(&endpoint.base_url, auth.as_deref())
                         .await)
                 }
             }
@@ -738,11 +738,17 @@ async fn discover_provider_models(
                 .await)
         }
         "bedrock" => {
-            let (base_url, auth) =
+            let (base_url, auth, public_only) =
                 resolve_bedrock_discovery_target(user_id, settings, secrets).await?;
-            Ok(discovery
-                .discover_openai_compatible(&base_url, auth.as_deref())
-                .await)
+            if public_only {
+                Ok(discovery
+                    .discover_public_openai_compatible(&base_url, auth.as_deref())
+                    .await)
+            } else {
+                Ok(discovery
+                    .discover_openai_compatible(&base_url, auth.as_deref())
+                    .await)
+            }
         }
         "llama_cpp" => {
             let base_url = settings
@@ -783,7 +789,7 @@ async fn resolve_bedrock_discovery_target(
     user_id: &str,
     settings: &crate::settings::Settings,
     secrets: Option<&Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
-) -> Result<(String, Option<String>), String> {
+) -> Result<(String, Option<String>, bool), String> {
     let region = settings
         .bedrock_region
         .clone()
@@ -804,10 +810,8 @@ async fn resolve_bedrock_discovery_target(
     )
     .await
     {
-        return Ok((
-            crate::llm::discovery::bedrock_mantle_base_url(&region),
-            Some(format!("Bearer {api_key}")),
-        ));
+        let base_url = crate::llm::discovery::bedrock_mantle_base_url(&region)?;
+        return Ok((base_url, Some(format!("Bearer {api_key}")), true));
     }
 
     if let Some(proxy_url) = settings.bedrock_proxy_url.clone().or_else(|| {
@@ -825,7 +829,7 @@ async fn resolve_bedrock_discovery_target(
         )
         .await
         .map(|key| format!("Bearer {key}"));
-        return Ok((proxy_url, auth));
+        return Ok((proxy_url, auth, false));
     }
 
     Err(
@@ -1107,7 +1111,7 @@ pub(crate) async fn providers_save_key_handler(
     Json(body): Json<ProviderKeyRequest>,
 ) -> Result<(StatusCode, Json<ProviderKeyMutationResponse>), StatusCode> {
     require_sensitive_route_auth(&request_identity)?;
-    if !provider_key_write_limiter().check() {
+    if !provider_key_write_limiter().check_for(&request_identity.rate_limit_key(None)) {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     let secrets = state
@@ -1186,7 +1190,7 @@ pub(crate) async fn providers_delete_key_handler(
     Path(slug): Path<String>,
 ) -> Result<(StatusCode, Json<ProviderKeyMutationResponse>), StatusCode> {
     require_sensitive_route_auth(&request_identity)?;
-    if !provider_key_write_limiter().check() {
+    if !provider_key_write_limiter().check_for(&request_identity.rate_limit_key(None)) {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     let secrets = state

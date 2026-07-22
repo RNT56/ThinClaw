@@ -43,28 +43,141 @@ const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 impl SignalChannel {
     /// Create a new Signal channel with normalized config and fresh client/cache.
     pub fn new(config: SignalConfig) -> Result<Self, ChannelError> {
-        let mut config = config;
-        config.http_url = config.http_url.trim_end_matches('/').to_string();
+        let config = Self::validated_config(config)?;
+        let client = Self::base_http_client()?;
+        Ok(Self::with_client(config, client))
+    }
 
-        let client = Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| ChannelError::Http(e.to_string()))?;
+    /// Create the production Signal channel with DNS validation and pinning.
+    pub async fn new_pinned(config: SignalConfig) -> Result<Self, ChannelError> {
+        let config = Self::validated_config(config)?;
+        let client = Self::pinned_http_client(&config.http_url).await?;
+        Ok(Self::with_client(config, client))
+    }
 
+    fn with_client(config: SignalConfig, client: Client) -> Self {
         let cap = REPLY_TARGETS_CAP;
         let reply_targets = Arc::new(RwLock::new(LruCache::new(cap)));
         let debug_mode = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_notify = Arc::new(Notify::new());
 
-        Ok(Self::from_parts(
+        Self::from_parts(
             config,
             client,
             reply_targets,
             debug_mode,
             shutdown,
             shutdown_notify,
-        ))
+        )
+    }
+
+    fn base_http_client() -> Result<Client, ChannelError> {
+        Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .map_err(|e| ChannelError::Http(e.to_string()))
+    }
+
+    fn validated_config(mut config: SignalConfig) -> Result<SignalConfig, ChannelError> {
+        config.http_url = config.http_url.trim_end_matches('/').to_string();
+        let parsed = reqwest::Url::parse(&config.http_url)
+            .map_err(|_| ChannelError::Configuration("Signal HTTP URL is malformed".to_string()))?;
+        let host = parsed.host_str().ok_or_else(|| {
+            ChannelError::Configuration("Signal HTTP URL requires a host".to_string())
+        })?;
+        let local_http_host = host.eq_ignore_ascii_case("localhost")
+            || host.to_ascii_lowercase().ends_with(".local")
+            || host.to_ascii_lowercase().ends_with(".internal")
+            || !host.contains('.')
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| !thinclaw_tools_core::is_public_outbound_ip(ip));
+        let lists = [
+            &config.allow_from,
+            &config.allow_from_groups,
+            &config.group_allow_from,
+        ];
+        if config.http_url.is_empty()
+            || config.http_url.len() > MAX_SIGNAL_ENDPOINT_BYTES
+            || !matches!(parsed.scheme(), "http" | "https")
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || parsed.scheme() == "http" && !local_http_host
+            || config.account.is_empty()
+            || config.account.len() > 256
+            || config.account.chars().any(char::is_control)
+            || !matches!(config.dm_policy.as_str(), "open" | "pairing" | "allowlist")
+            || !matches!(
+                config.group_policy.as_str(),
+                "disabled" | "open" | "allowlist"
+            )
+            || lists.iter().any(|list| {
+                list.len() > MAX_SIGNAL_CONFIG_ENTRIES
+                    || list.iter().any(|value| {
+                        value.is_empty()
+                            || value.len() > MAX_SIGNAL_CONFIG_VALUE_BYTES
+                            || value.chars().any(char::is_control)
+                    })
+            })
+        {
+            return Err(ChannelError::Configuration(
+                "Signal channel configuration is malformed or oversized".to_string(),
+            ));
+        }
+        Ok(config)
+    }
+
+    async fn pinned_http_client(http_url: &str) -> Result<Client, ChannelError> {
+        let parsed = reqwest::Url::parse(http_url)
+            .map_err(|_| ChannelError::Configuration("Signal HTTP URL is malformed".to_string()))?;
+        let host = parsed.host_str().ok_or_else(|| {
+            ChannelError::Configuration("Signal HTTP URL requires a host".to_string())
+        })?;
+        let port = parsed.port_or_known_default().ok_or_else(|| {
+            ChannelError::Configuration("Signal HTTP URL has no port".to_string())
+        })?;
+        let resolved = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::lookup_host((host, port)),
+        )
+        .await
+        .map_err(|_| {
+            ChannelError::Configuration("Signal endpoint DNS lookup timed out".to_string())
+        })?
+        .map_err(|_| {
+            ChannelError::Configuration("Signal endpoint DNS lookup failed".to_string())
+        })?;
+        let mut addresses = resolved.collect::<Vec<_>>();
+        addresses.sort_unstable();
+        addresses.dedup();
+        if addresses.is_empty()
+            || addresses.len() > MAX_SIGNAL_DNS_ADDRESSES
+            || addresses.iter().any(|address| {
+                let ip = address.ip();
+                ip.is_unspecified()
+                    || ip.is_multicast()
+                    || matches!(ip, std::net::IpAddr::V4(ip) if ip.is_broadcast())
+                    || parsed.scheme() == "http" && thinclaw_tools_core::is_public_outbound_ip(ip)
+            })
+        {
+            return Err(ChannelError::Configuration(
+                "Signal endpoint resolved to an invalid address".to_string(),
+            ));
+        }
+        Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .resolve_to_addrs(host, &addresses)
+            .build()
+            .map_err(|e| ChannelError::Http(e.to_string()))
     }
 
     /// Construct a SignalChannel from pre-validated parts.
@@ -231,10 +344,12 @@ impl SignalChannel {
                     );
                     let http_url = self.config.http_url.clone();
                     let account = self.config.account.clone();
+                    let client = self.client.clone();
                     let sender_owned = sender.to_string();
                     let message_owned = message.clone();
                     tokio::spawn(async move {
                         if let Err(e) = Self::send_pairing_reply_async(
+                            &client,
                             &http_url,
                             &account,
                             &sender_owned,
@@ -257,16 +372,12 @@ impl SignalChannel {
 
     /// Send a pairing reply message to the sender (async helper for spawned task).
     async fn send_pairing_reply_async(
+        client: &Client,
         http_url: &str,
         account: &str,
         recipient: &str,
         message: &str,
     ) -> Result<(), ChannelError> {
-        let client = Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| ChannelError::Http(e.to_string()))?;
-
         let target = Self::parse_recipient_target(recipient);
         let params = Self::build_rpc_params_static(http_url, account, &target, Some(message));
 
@@ -289,7 +400,11 @@ impl SignalChannel {
             .await
             .map_err(|e| ChannelError::SendFailed {
                 name: "signal".to_string(),
-                reason: format!("RPC request failed to {}: {e}", Self::redact_url(&url)),
+                reason: format!(
+                    "RPC request failed to {}: {}",
+                    Self::redact_url(&url),
+                    e.without_url()
+                ),
             })?;
 
         let status = resp.status();
@@ -300,12 +415,9 @@ impl SignalChannel {
         }
 
         if !is_success {
-            let bytes = resp.bytes().await.unwrap_or_default();
-            let truncated_len = bytes.len().min(MAX_ERROR_LOG_BODY);
-            let truncated_body = String::from_utf8_lossy(&bytes[..truncated_len]);
             return Err(ChannelError::SendFailed {
                 name: "signal".to_string(),
-                reason: format!("HTTP error {}: {}", status.as_u16(), truncated_body),
+                reason: format!("Signal RPC returned HTTP {}", status.as_u16()),
             });
         }
 
@@ -439,7 +551,11 @@ impl SignalChannel {
             .await
             .map_err(|e| ChannelError::SendFailed {
                 name: "signal".to_string(),
-                reason: format!("RPC request failed to {}: {e}", Self::redact_url(&url)),
+                reason: format!(
+                    "RPC request failed to {}: {}",
+                    Self::redact_url(&url),
+                    e.without_url()
+                ),
             })?;
 
         // 201 = success with no body (e.g. typing indicators).
@@ -471,7 +587,13 @@ impl SignalChannel {
                 reason: format!("Failed to read RPC response: {e}"),
             })?;
             let chunk_len = chunk.len();
-            total_bytes += chunk_len;
+            total_bytes =
+                total_bytes
+                    .checked_add(chunk_len)
+                    .ok_or_else(|| ChannelError::SendFailed {
+                        name: "signal".to_string(),
+                        reason: "RPC response size overflow".to_string(),
+                    })?;
 
             if total_bytes > MAX_HTTP_RESPONSE_SIZE {
                 return Err(ChannelError::SendFailed {
@@ -494,11 +616,9 @@ impl SignalChannel {
 
         // Check for non-success HTTP status codes before parsing as JSON.
         if !status.is_success() {
-            let truncated_len = std::cmp::min(bytes.len(), 512);
-            let truncated_body = String::from_utf8_lossy(&bytes[..truncated_len]);
             return Err(ChannelError::SendFailed {
                 name: "signal".to_string(),
-                reason: format!("HTTP error {}: {}", status.as_u16(), truncated_body),
+                reason: format!("Signal RPC returned HTTP {}", status.as_u16()),
             });
         }
 
@@ -514,6 +634,11 @@ impl SignalChannel {
                 .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown");
+            let msg = msg
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(1024)
+                .collect::<String>();
             return Err(ChannelError::SendFailed {
                 name: "signal".to_string(),
                 reason: format!("Signal RPC error {code}: {msg}"),
@@ -694,15 +819,18 @@ impl SignalChannel {
                         }
                     }
                 }
-                _ => {}
+                _ => {
+                    tracing::warn!("Signal: unknown group policy, dropping message");
+                    return None;
+                }
             }
         } else {
             // DM message - apply DM policy
             match self.config.dm_policy.as_str() {
                 "open" => {}
-                "pairing"
-                    // Pairing policy: check allow_from + pairing store
-                    if !self.is_sender_allowed_with_pairing(&sender) => {
+                "pairing" => {
+                    // Pairing policy: check allow_from + pairing store.
+                    if !self.is_sender_allowed_with_pairing(&sender) {
                         // Handle pairing request - this will create a request and send reply if new
                         match self.handle_pairing_request(
                             &sender,
@@ -711,8 +839,7 @@ impl SignalChannel {
                             conversation_kind,
                             &conversation_scope_id,
                             &external_conversation_key,
-                        )
-                        {
+                        ) {
                             Ok(_) => {
                                 // Pairing request processed (new or existing), drop the message
                                 return None;
@@ -723,13 +850,18 @@ impl SignalChannel {
                             }
                         }
                     }
-                "allowlist"
-                    // Default: check allow_from list
-                    if !self.is_sender_allowed(&sender) => {
+                }
+                "allowlist" => {
+                    // Default: check allow_from list.
+                    if !self.is_sender_allowed(&sender) {
                         tracing::debug!(sender = %sender, "Signal: sender not in allow_from, dropping");
                         return None;
                     }
-                _ => {}
+                }
+                _ => {
+                    tracing::warn!("Signal: unknown DM policy, dropping message");
+                    return None;
+                }
             }
         }
 
@@ -1284,35 +1416,7 @@ async fn sse_listener(
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
                 let status = r.status();
-                let mut stream = r.bytes_stream();
-                let mut bytes = Vec::new();
-                let mut collected = 0usize;
-                loop {
-                    let next_chunk = tokio::select! {
-                        chunk = stream.next() => chunk,
-                        _ = shutdown_notify.notified() => {
-                            if shutdown.load(Ordering::Relaxed) {
-                                return Ok(());
-                            }
-                            continue;
-                        }
-                    };
-                    let Some(chunk) = next_chunk else {
-                        break;
-                    };
-                    let chunk = chunk.unwrap_or_default();
-                    let remaining = MAX_ERROR_LOG_BODY.saturating_sub(collected);
-                    if remaining == 0 {
-                        break;
-                    }
-                    bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-                    collected = bytes.len();
-                    if collected >= MAX_ERROR_LOG_BODY {
-                        break;
-                    }
-                }
-                let body = String::from_utf8_lossy(&bytes);
-                tracing::warn!("Signal SSE returned {status}: {body}");
+                tracing::warn!("Signal SSE returned {status}");
                 if sleep_or_signal_shutdown(&shutdown, &shutdown_notify, retry_delay).await {
                     return Ok(());
                 }
@@ -1321,7 +1425,10 @@ async fn sse_listener(
             }
             Err(e) => {
                 let safe_url = SignalChannel::redact_url(url.as_str());
-                tracing::warn!("Signal SSE connect error to {safe_url}: {e}, retrying...");
+                tracing::warn!(
+                    error = %e.without_url(),
+                    "Signal SSE connect error to {safe_url}; retrying"
+                );
                 if sleep_or_signal_shutdown(&shutdown, &shutdown_notify, retry_delay).await {
                     return Ok(());
                 }
@@ -1358,7 +1465,7 @@ async fn sse_listener(
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::debug!("Signal SSE chunk error, reconnecting: {e}");
+                    tracing::debug!(error = %e.without_url(), "Signal SSE chunk error; reconnecting");
                     break;
                 }
             };

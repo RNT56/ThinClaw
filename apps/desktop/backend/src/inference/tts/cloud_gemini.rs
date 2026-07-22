@@ -1,9 +1,11 @@
 //! Gemini TTS backend.
 
-use crate::inference::tts::{TtsBackend, TtsRequest};
+use crate::inference::tts::{
+    bounded_tts_json, checked_tts_response, decode_bounded_tts_base64, tts_http_client,
+    validate_tts_request, TtsBackend, TtsRequest,
+};
 use crate::inference::{AudioFormat, BackendInfo, InferenceError, InferenceResult, VoiceInfo};
 use async_trait::async_trait;
-use base64::{engine::general_purpose, Engine as _};
 
 pub struct GeminiTtsBackend {
     pub api_key: String,
@@ -28,16 +30,15 @@ impl TtsBackend for GeminiTtsBackend {
     }
 
     async fn synthesize(&self, request: TtsRequest) -> InferenceResult<Vec<u8>> {
-        let client = reqwest::Client::new();
+        validate_tts_request(&request)?;
+        let client = tts_http_client(&self.api_key)?;
         let voice = request.voice.unwrap_or_else(|| "Kore".to_string());
 
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={}",
-            self.api_key
-        );
+        let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent";
 
         let response = client
-            .post(&url)
+            .post(url)
+            .header("x-goog-api-key", &self.api_key)
             .json(&serde_json::json!({
                 "contents": [{
                     "parts": [{ "text": request.text }]
@@ -57,19 +58,8 @@ impl TtsBackend for GeminiTtsBackend {
             .await
             .map_err(|e| InferenceError::network(format!("Gemini TTS failed: {}", e)))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(InferenceError::provider(format!(
-                "Gemini TTS error ({}): {}",
-                status, text
-            )));
-        }
-
-        let result: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| InferenceError::provider(format!("Parse error: {}", e)))?;
+        let response = checked_tts_response(response, "Gemini").await?;
+        let result: serde_json::Value = bounded_tts_json(response, "Gemini").await?;
 
         // Extract base64 audio from response
         let audio_b64 = result
@@ -83,11 +73,7 @@ impl TtsBackend for GeminiTtsBackend {
             .and_then(|d| d.as_str())
             .ok_or_else(|| InferenceError::provider("No audio in Gemini TTS response"))?;
 
-        let bytes = general_purpose::STANDARD
-            .decode(audio_b64)
-            .map_err(|e| InferenceError::provider(format!("Base64 decode failed: {}", e)))?;
-
-        Ok(bytes)
+        decode_bounded_tts_base64(audio_b64, "Gemini")
     }
 
     async fn available_voices(&self) -> InferenceResult<Vec<VoiceInfo>> {

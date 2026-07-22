@@ -12,11 +12,17 @@ use async_trait::async_trait;
 use rust_decimal::prelude::FromPrimitive;
 
 use thinclaw_llm_core::{ChatMessage, CompletionRequest, LlmProvider};
-use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};
+use thinclaw_tools_core::{
+    ApprovalRequirement, OutboundUrlGuardOptions, Tool, ToolDomain, ToolError, ToolOutput,
+    validate_outbound_url_pinned_async,
+};
 use thinclaw_types::{JobContext, MediaContent};
 
 /// Maximum image file size (10MB).
 const MAX_IMAGE_SIZE: u64 = 10 * 1024 * 1024;
+const MAX_IMAGE_URL_BYTES: usize = 16 * 1024;
+const MAX_IMAGE_REDIRECTS: usize = 5;
+const IMAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Supported image MIME types.
 const SUPPORTED_MIMES: &[(&str, &[u8])] = &[
@@ -38,6 +44,101 @@ fn detect_mime(bytes: &[u8]) -> Option<&'static str> {
         return Some("image/webp");
     }
     None
+}
+
+async fn fetch_remote_image(url: &str) -> Result<(Vec<u8>, String), ToolError> {
+    if url.is_empty() || url.len() > MAX_IMAGE_URL_BYTES {
+        return Err(ToolError::InvalidParameters(
+            "image URL is empty or oversized".to_string(),
+        ));
+    }
+
+    let deadline = tokio::time::Instant::now() + IMAGE_FETCH_TIMEOUT;
+    let options = OutboundUrlGuardOptions {
+        require_https: true,
+        upgrade_http_to_https: false,
+        allowlist: Vec::new(),
+    };
+    let mut current = url.to_string();
+    for redirect_count in 0..=MAX_IMAGE_REDIRECTS {
+        let guarded = tokio::time::timeout_at(
+            deadline,
+            validate_outbound_url_pinned_async(&current, &options),
+        )
+        .await
+        .map_err(|_| ToolError::Timeout(IMAGE_FETCH_TIMEOUT))??;
+        let host = guarded
+            .url
+            .host_str()
+            .ok_or_else(|| ToolError::InvalidParameters("image URL has no host".to_string()))?
+            .to_string();
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .ok_or(ToolError::Timeout(IMAGE_FETCH_TIMEOUT))?;
+        let mut builder = reqwest::Client::builder()
+            .timeout(remaining)
+            .connect_timeout(remaining.min(Duration::from_secs(10)))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if !guarded.pinned_addrs.is_empty() {
+            builder = builder.resolve_to_addrs(&host, &guarded.pinned_addrs);
+        }
+        let client = builder
+            .build()
+            .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {e}")))?;
+        let response = client.get(guarded.url.clone()).send().await.map_err(|e| {
+            if e.is_timeout() {
+                ToolError::Timeout(IMAGE_FETCH_TIMEOUT)
+            } else {
+                ToolError::ExecutionFailed(format!("Failed to fetch image: {e}"))
+            }
+        })?;
+
+        if response.status().is_redirection() {
+            if redirect_count == MAX_IMAGE_REDIRECTS {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "image fetch exceeded {MAX_IMAGE_REDIRECTS} redirects"
+                )));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(
+                        "image redirect has no valid Location header".to_string(),
+                    )
+                })?;
+            let target = guarded.url.join(location).map_err(|error| {
+                ToolError::ExecutionFailed(format!("invalid image redirect: {error}"))
+            })?;
+            if target.as_str().len() > MAX_IMAGE_URL_BYTES {
+                return Err(ToolError::ExecutionFailed(
+                    "image redirect URL is oversized".to_string(),
+                ));
+            }
+            current = target.to_string();
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "HTTP {} fetching image",
+                response.status()
+            )));
+        }
+
+        let mut display_url = guarded.url;
+        display_url.set_query(None);
+        display_url.set_fragment(None);
+        let bytes = thinclaw_types::http_response::bounded_bytes(response, MAX_IMAGE_SIZE as usize)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read image: {e}")))?;
+        return Ok((bytes, display_url.to_string()));
+    }
+
+    Err(ToolError::ExecutionFailed(
+        "image fetch ended without a response".to_string(),
+    ))
 }
 
 /// Tool for proactive image analysis using the multimodal LLM.
@@ -107,62 +208,16 @@ impl Tool for VisionAnalyzeTool {
         // Load image bytes
         let (image_bytes, source_desc) = if let Some(path_str) = image_path {
             let path = Path::new(path_str);
-            if !path.exists() {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "Image file not found: {}",
-                    path_str
-                )));
-            }
-
-            let metadata = tokio::fs::metadata(path)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed(format!("Cannot access file: {}", e)))?;
-
-            if metadata.len() > MAX_IMAGE_SIZE {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "Image too large ({} bytes, max {} bytes)",
-                    metadata.len(),
-                    MAX_IMAGE_SIZE
-                )));
-            }
-
-            let bytes = tokio::fs::read(path)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read image: {}", e)))?;
+            let bytes = thinclaw_platform::read_regular_file_bounded_single_link_async(
+                path.to_path_buf(),
+                MAX_IMAGE_SIZE,
+            )
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read image: {e}")))?;
 
             (bytes, path_str.to_string())
         } else if let Some(url) = image_url {
-            // Fetch from URL
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {}", e)))?;
-
-            let response =
-                client.get(url).send().await.map_err(|e| {
-                    ToolError::ExecutionFailed(format!("Failed to fetch image: {}", e))
-                })?;
-
-            if !response.status().is_success() {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "HTTP {} fetching image from {}",
-                    response.status(),
-                    url
-                )));
-            }
-
-            let bytes = response.bytes().await.map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to read response: {}", e))
-            })?;
-
-            if bytes.len() as u64 > MAX_IMAGE_SIZE {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "Image too large ({} bytes)",
-                    bytes.len()
-                )));
-            }
-
-            (bytes.to_vec(), url.to_string())
+            fetch_remote_image(url).await?
         } else {
             // Guarded above (one of image_path / image_url must be set), but make
             // the fallback a recoverable error rather than a process-killing panic
@@ -185,8 +240,8 @@ impl Tool for VisionAnalyzeTool {
                 .and_then(|value| value.to_str())
                 .unwrap_or("image");
             MediaContent::new(image_bytes.clone(), mime).with_filename(filename)
-        } else if let Some(url) = image_url {
-            MediaContent::new(image_bytes.clone(), mime).with_source_url(url)
+        } else if image_url.is_some() {
+            MediaContent::new(image_bytes.clone(), mime).with_source_url(&source_desc)
         } else {
             MediaContent::new(image_bytes.clone(), mime)
         };

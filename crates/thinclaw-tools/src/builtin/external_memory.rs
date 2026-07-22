@@ -34,13 +34,13 @@ pub struct ExternalMemoryProviderStatus {
 pub trait ExternalMemoryPort: Send + Sync {
     async fn active_provider_name(&self, user_id: &str) -> Option<String>;
     async fn provider_health(&self, user_id: &str) -> Vec<ExternalMemoryProviderStatus>;
-    async fn provider_tool_extensions(&self, user_id: &str) -> Vec<String>;
+    async fn provider_tool_extensions(&self, ctx: &JobContext) -> Vec<String>;
     async fn provider_recall(
         &self,
-        user_id: &str,
+        ctx: &JobContext,
         query: &str,
         limit: usize,
-    ) -> Vec<serde_json::Value>;
+    ) -> Result<Vec<serde_json::Value>, String>;
     async fn configure_memory_provider(
         &self,
         user_id: &str,
@@ -50,13 +50,37 @@ pub trait ExternalMemoryPort: Send + Sync {
     ) -> Result<Vec<ExternalMemoryProviderStatus>, String>;
     async fn export_provider_payload(
         &self,
-        user_id: &str,
+        ctx: &JobContext,
         payload: &serde_json::Value,
     ) -> Result<String, String>;
     async fn disable_active_memory_provider(
         &self,
         user_id: &str,
     ) -> Result<Vec<ExternalMemoryProviderStatus>, String>;
+}
+
+fn require_principal_admin(ctx: &JobContext) -> Result<(), ToolError> {
+    let explicitly_admin = ctx
+        .metadata
+        .get("principal_admin")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let is_direct = !matches!(
+        ctx.metadata
+            .get("conversation_kind")
+            .or_else(|| ctx.metadata.get("chat_type"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("direct")
+            .to_ascii_lowercase()
+            .as_str(),
+        "group" | "group_chat" | "channel" | "supergroup" | "room" | "guild"
+    );
+    if explicitly_admin || (is_direct && ctx.principal_id == ctx.owner_actor_id()) {
+        return Ok(());
+    }
+    Err(ToolError::NotAuthorized(
+        "external memory provider configuration requires principal-admin access".to_string(),
+    ))
 }
 
 fn config_value_to_string(value: serde_json::Value) -> Option<String> {
@@ -164,7 +188,11 @@ impl Tool for ExternalMemoryRecallTool {
         let active_status = active_provider_status(active_provider.as_deref(), &statuses)?;
         ensure_active_provider_healthy(active_status)?;
 
-        let hits = self.port.provider_recall(&ctx.user_id, query, limit).await;
+        let hits = self
+            .port
+            .provider_recall(ctx, query, limit)
+            .await
+            .map_err(ToolError::ExternalService)?;
 
         Ok(ToolOutput::success(
             serde_json::json!({
@@ -179,7 +207,7 @@ impl Tool for ExternalMemoryRecallTool {
     }
 
     fn requires_sanitization(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -223,7 +251,7 @@ impl Tool for ExternalMemoryStatusTool {
         let active_status = statuses
             .iter()
             .find(|status| status.provider == active_provider);
-        let tool_extensions = self.port.provider_tool_extensions(&ctx.user_id).await;
+        let tool_extensions = self.port.provider_tool_extensions(ctx).await;
 
         Ok(ToolOutput::success(
             serde_json::json!({
@@ -238,7 +266,7 @@ impl Tool for ExternalMemoryStatusTool {
     }
 
     fn requires_sanitization(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -301,7 +329,7 @@ impl Tool for ExternalMemorySetupTool {
                 },
                 "user_id": {
                     "type": "string",
-                    "description": "Optional provider-side user identifier; defaults to the ThinClaw principal."
+                    "description": "Optional provider-side tenant/root prefix. ThinClaw always appends its actor/conversation subject key to preserve isolation."
                 },
                 "enabled": {
                     "type": "boolean",
@@ -338,6 +366,7 @@ impl Tool for ExternalMemorySetupTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        require_principal_admin(ctx)?;
         let provider = require_str(&params, "provider")?
             .trim()
             .to_ascii_lowercase();
@@ -486,7 +515,7 @@ impl Tool for ExternalMemoryExportTool {
 
         let provider = self
             .port
-            .export_provider_payload(&ctx.user_id, &payload)
+            .export_provider_payload(ctx, &payload)
             .await
             .map_err(ToolError::ExecutionFailed)?;
 
@@ -538,6 +567,7 @@ impl Tool for ExternalMemoryOffTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        require_principal_admin(ctx)?;
         let statuses = self
             .port
             .disable_active_memory_provider(&ctx.user_id)
@@ -559,5 +589,27 @@ impl Tool for ExternalMemoryOffTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_shortcut_is_direct_only() {
+        let mut direct = JobContext::with_identity("owner", "owner", "test", "test");
+        direct.metadata = serde_json::json!({"conversation_kind": "direct"});
+        assert!(require_principal_admin(&direct).is_ok());
+
+        let mut group = JobContext::with_identity("owner", "owner", "test", "test");
+        group.metadata = serde_json::json!({"conversation_kind": "group"});
+        assert!(require_principal_admin(&group).is_err());
+
+        group.metadata = serde_json::json!({
+            "conversation_kind": "group",
+            "principal_admin": true
+        });
+        assert!(require_principal_admin(&group).is_ok());
     }
 }

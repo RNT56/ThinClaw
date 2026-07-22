@@ -5,11 +5,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, OriginalUri, Path, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get},
@@ -18,7 +19,7 @@ use base64::{Engine as _, engine::general_purpose};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::wasm::schema::WebhookSecretValidation;
 use crate::wasm::wrapper::WasmChannel;
@@ -37,7 +38,7 @@ pub struct RegisteredEndpoint {
 }
 
 /// Runtime webhook auth configuration for a registered channel.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct RegisteredWebhookAuth {
     /// HTTP header name that carries the secret or signature.
     pub secret_header: Option<String>,
@@ -49,6 +50,22 @@ pub struct RegisteredWebhookAuth {
     pub verify_token_param: Option<String>,
     /// Shared secret used for GET/HEAD verification.
     pub verify_token_secret: Option<String>,
+}
+
+impl std::fmt::Debug for RegisteredWebhookAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegisteredWebhookAuth")
+            .field("secret_header", &self.secret_header)
+            .field("secret_validation", &self.secret_validation)
+            .field("has_signature_secret", &self.signature_secret.is_some())
+            .field("verify_token_param", &self.verify_token_param)
+            .field(
+                "has_verify_token_secret",
+                &self.verify_token_secret.is_some(),
+            )
+            .finish()
+    }
 }
 
 impl RegisteredWebhookAuth {
@@ -67,6 +84,11 @@ pub struct WasmChannelRouter {
     endpoints: RwLock<HashMap<String, RegisteredEndpoint>>,
     /// Webhook auth config keyed by channel name.
     webhook_auth: RwLock<HashMap<String, RegisteredWebhookAuth>>,
+    /// Serializes multi-map registration and removal transactions.
+    mutation_lock: tokio::sync::Mutex<()>,
+    /// Bounded fingerprints of recently accepted signed requests. Providers
+    /// may retry delivery, but a retry must never execute guest side effects twice.
+    replay_guard: Mutex<HashMap<[u8; 32], Instant>>,
 }
 
 impl WasmChannelRouter {
@@ -77,7 +99,116 @@ impl WasmChannelRouter {
             path_to_channel: RwLock::new(HashMap::new()),
             endpoints: RwLock::new(HashMap::new()),
             webhook_auth: RwLock::new(HashMap::new()),
+            mutation_lock: tokio::sync::Mutex::new(()),
+            replay_guard: Mutex::new(HashMap::new()),
         }
+    }
+
+    async fn accept_signed_request_once(
+        &self,
+        channel_name: &str,
+        validation: WebhookSecretValidation,
+        signature: &str,
+    ) -> bool {
+        if validation == WebhookSecretValidation::Equals {
+            return true;
+        }
+        use sha2::{Digest as _, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(channel_name.as_bytes());
+        hasher.update([0]);
+        hasher.update(format!("{validation:?}").as_bytes());
+        hasher.update([0]);
+        hasher.update(signature.as_bytes());
+        let fingerprint: [u8; 32] = hasher.finalize().into();
+
+        const REPLAY_WINDOW: Duration = Duration::from_secs(10 * 60);
+        const MAX_REPLAY_ENTRIES: usize = 4096;
+        let now = Instant::now();
+        let mut seen = self.replay_guard.lock().await;
+        seen.retain(|_, accepted_at| now.duration_since(*accepted_at) <= REPLAY_WINDOW);
+        if seen.contains_key(&fingerprint) {
+            return false;
+        }
+        if seen.len() >= MAX_REPLAY_ENTRIES
+            && let Some(oldest) = seen
+                .iter()
+                .min_by_key(|(_, accepted_at)| **accepted_at)
+                .map(|(fingerprint, _)| *fingerprint)
+        {
+            seen.remove(&oldest);
+        }
+        seen.insert(fingerprint, now);
+        true
+    }
+
+    fn validate_auth(auth: &RegisteredWebhookAuth) -> Result<(), String> {
+        if auth.secret_header.as_deref().is_some_and(|name| {
+            name.len() > 256 || HeaderName::from_bytes(name.as_bytes()).is_err()
+        }) || auth
+            .signature_secret
+            .as_deref()
+            .is_some_and(|secret| secret.is_empty() || secret.len() > 64 * 1024)
+            || auth
+                .verify_token_secret
+                .as_deref()
+                .is_some_and(|secret| secret.is_empty() || secret.len() > 64 * 1024)
+            || auth.verify_token_param.as_deref().is_some_and(|name| {
+                name.is_empty()
+                    || name.len() > 128
+                    || !name.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+                    })
+            })
+        {
+            return Err(
+                "webhook authentication configuration is malformed or oversized".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn validate_registration(
+        &self,
+        name: &str,
+        endpoints: &[RegisteredEndpoint],
+        auth: &RegisteredWebhookAuth,
+    ) -> Result<(), String> {
+        if !crate::wasm::capabilities::is_valid_channel_name(name) || endpoints.len() > 32 {
+            return Err("channel name or endpoint count is invalid".to_string());
+        }
+        Self::validate_auth(auth)?;
+        let owned_prefix = format!("/webhook/{name}");
+        for endpoint in endpoints {
+            if endpoint.channel_name != name
+                || (endpoint.path != owned_prefix
+                    && !endpoint
+                        .path
+                        .strip_prefix(&owned_prefix)
+                        .is_some_and(|suffix| suffix.starts_with('/')))
+                || endpoint.path.len() > 256
+                || endpoint.methods.len() > 8
+                || endpoint.methods.iter().any(|method| {
+                    !matches!(
+                        method.to_ascii_uppercase().as_str(),
+                        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"
+                    )
+                })
+            {
+                return Err(
+                    "webhook endpoint is outside its channel namespace or malformed".to_string(),
+                );
+            }
+        }
+        let path_map = self.path_to_channel.read().await;
+        if endpoints.iter().any(|endpoint| {
+            path_map
+                .get(&endpoint.path)
+                .is_some_and(|owner| owner != name)
+        }) {
+            return Err("webhook endpoint is already owned by another channel".to_string());
+        }
+        Ok(())
     }
 
     /// Register a channel with its endpoints.
@@ -91,8 +222,21 @@ impl WasmChannelRouter {
         channel: Arc<WasmChannel>,
         endpoints: Vec<RegisteredEndpoint>,
         auth: RegisteredWebhookAuth,
-    ) {
+    ) -> Result<(), String> {
         let name = channel.channel_name().to_string();
+        self.validate_registration(&name, &endpoints, &auth).await?;
+
+        let _mutation_guard = self.mutation_lock.lock().await;
+        {
+            let path_map = self.path_to_channel.read().await;
+            if endpoints.iter().any(|endpoint| {
+                path_map
+                    .get(&endpoint.path)
+                    .is_some_and(|owner| owner != &name)
+            }) {
+                return Err("webhook endpoint is already owned by another channel".to_string());
+            }
+        }
 
         // Store the channel
         self.channels.write().await.insert(name.clone(), channel);
@@ -114,6 +258,7 @@ impl WasmChannelRouter {
         }
 
         self.webhook_auth.write().await.insert(name, auth);
+        Ok(())
     }
 
     /// Get the secret header name for a channel.
@@ -139,7 +284,15 @@ impl WasmChannelRouter {
     }
 
     /// Update webhook auth for an already-registered channel.
-    pub async fn update_webhook_auth(&self, channel_name: &str, auth: RegisteredWebhookAuth) {
+    pub async fn update_webhook_auth(
+        &self,
+        channel_name: &str,
+        auth: RegisteredWebhookAuth,
+    ) -> Result<(), String> {
+        if !crate::wasm::capabilities::is_valid_channel_name(channel_name) {
+            return Err("invalid channel name".to_string());
+        }
+        Self::validate_auth(&auth)?;
         self.webhook_auth
             .write()
             .await
@@ -148,20 +301,22 @@ impl WasmChannelRouter {
             channel = %channel_name,
             "Updated webhook auth for channel"
         );
+        Ok(())
     }
 
     /// Update only the POST webhook secret for an already-registered channel.
-    pub async fn update_secret(&self, channel_name: &str, secret: String) {
+    pub async fn update_secret(&self, channel_name: &str, secret: String) -> Result<(), String> {
         let mut auth = self.get_webhook_auth(channel_name).await;
         auth.signature_secret = Some(secret.clone());
         if auth.verify_token_param.is_some() && auth.verify_token_secret.is_none() {
             auth.verify_token_secret = Some(secret);
         }
-        self.update_webhook_auth(channel_name, auth).await;
+        self.update_webhook_auth(channel_name, auth).await
     }
 
     /// Unregister a channel and its endpoints.
     pub async fn unregister(&self, channel_name: &str) {
+        let _mutation_guard = self.mutation_lock.lock().await;
         self.channels.write().await.remove(channel_name);
         self.webhook_auth.write().await.remove(channel_name);
         self.endpoints
@@ -195,16 +350,25 @@ impl WasmChannelRouter {
 
     /// Validate a secret for a channel.
     pub async fn validate_secret(&self, channel_name: &str, provided: &str) -> bool {
+        use subtle::ConstantTimeEq as _;
+
+        if provided.is_empty() || provided.len() > 64 * 1024 {
+            return false;
+        }
         let auth = self.get_webhook_auth(channel_name).await;
         auth.signature_secret
             .as_ref()
-            .map(|expected| expected == provided)
-            .or_else(|| {
-                auth.verify_token_secret
-                    .as_ref()
-                    .map(|expected| expected == provided)
+            .map(|expected| {
+                expected.len() == provided.len()
+                    && bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
             })
-            .unwrap_or(true)
+            .or_else(|| {
+                auth.verify_token_secret.as_ref().map(|expected| {
+                    expected.len() == provided.len()
+                        && bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
+                })
+            })
+            .unwrap_or(false)
     }
 
     /// Check if a channel requires a secret.
@@ -288,15 +452,27 @@ fn verify_twitch_eventsub_signature(
     else {
         return false;
     };
-    let Some(timestamp) = headers
+    let Some(timestamp_raw) = headers
         .get("Twitch-Eventsub-Message-Timestamp")
         .and_then(|value| value.to_str().ok())
     else {
         return false;
     };
-    let mut signed = Vec::with_capacity(message_id.len() + timestamp.len() + payload.len());
+    if message_id.is_empty() || message_id.len() > 256 || timestamp_raw.len() > 64 {
+        return false;
+    }
+    let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(timestamp_raw) else {
+        return false;
+    };
+    let age = chrono::Utc::now()
+        .signed_duration_since(timestamp.with_timezone(&chrono::Utc))
+        .num_seconds();
+    if !(-60..=600).contains(&age) {
+        return false;
+    }
+    let mut signed = Vec::with_capacity(message_id.len() + timestamp_raw.len() + payload.len());
     signed.extend_from_slice(message_id.as_bytes());
-    signed.extend_from_slice(timestamp.as_bytes());
+    signed.extend_from_slice(timestamp_raw.as_bytes());
     signed.extend_from_slice(payload);
     verify_signature(secret, &signed, signature)
 }
@@ -410,7 +586,9 @@ fn verify_twilio_request_signature(
 ) -> bool {
     use subtle::ConstantTimeEq;
 
-    let canonical_url = twilio_canonical_url(headers, full_path);
+    let Some(canonical_url) = twilio_canonical_url(headers, full_path) else {
+        return false;
+    };
     let mut signed = canonical_url.into_bytes();
     for (key, value) in sorted_form_fields(body) {
         signed.extend_from_slice(key.as_bytes());
@@ -423,19 +601,22 @@ fn verify_twilio_request_signature(
     expected.as_bytes().ct_eq(signature.as_bytes()).into()
 }
 
-fn twilio_canonical_url(headers: &HeaderMap, full_path: &str) -> String {
-    if let Some(url) = header_value(headers, "x-original-url")
-        .or_else(|| header_value(headers, "x-forwarded-url"))
-        .or_else(|| header_value(headers, "x-thinclaw-public-url"))
+fn twilio_canonical_url(headers: &HeaderMap, full_path: &str) -> Option<String> {
+    // Bind validation to the route and authority actually handled here.
+    // Forwarded/original-URL headers are client-controlled in this router and
+    // would let a captured signature be replayed against another endpoint.
+    let host = header_value(headers, "host")?;
+    if host.is_empty()
+        || host.len() > 512
+        || host
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        || !full_path.starts_with("/webhook/")
+        || full_path.len() > 4096
     {
-        return url;
+        return None;
     }
-
-    let proto = header_value(headers, "x-forwarded-proto").unwrap_or_else(|| "https".to_string());
-    let host = header_value(headers, "x-forwarded-host")
-        .or_else(|| header_value(headers, "host"))
-        .unwrap_or_else(|| "localhost".to_string());
-    format!("{proto}://{host}{full_path}")
+    Some(format!("https://{host}{full_path}"))
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -480,6 +661,13 @@ fn build_raw_http_response(
     *response.status_mut() = status;
 
     for (name, value) in headers {
+        if !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "content-type" | "cache-control" | "retry-after" | "x-slack-no-retry"
+        ) {
+            tracing::warn!(header = %name, "Skipping disallowed WASM webhook response header");
+            continue;
+        }
         let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
             tracing::warn!(header = %name, "Skipping invalid response header name");
             continue;
@@ -496,11 +684,20 @@ fn build_raw_http_response(
 
 /// Webhook request body for WASM channels.
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct WasmWebhookRequest {
     /// Optional secret for authentication.
     #[serde(default)]
     pub secret: Option<String>,
+}
+
+impl std::fmt::Debug for WasmWebhookRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WasmWebhookRequest")
+            .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// Health response.
@@ -527,6 +724,7 @@ async fn webhook_handler(
     method: Method,
     Path(path): Path<String>,
     Query(query): Query<HashMap<String, String>>,
+    OriginalUri(original_uri): OriginalUri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -654,7 +852,11 @@ async fn webhook_handler(
                 );
             };
 
-            if expected != provided {
+            use subtle::ConstantTimeEq as _;
+            if provided.len() > 64 * 1024
+                || expected.len() != provided.len()
+                || !bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
+            {
                 tracing::warn!(
                     channel = %channel_name,
                     "Webhook verify token validation failed"
@@ -684,8 +886,7 @@ async fn webhook_handler(
                     } else {
                         None
                     }
-                })
-                .or_else(|| query.get("secret").cloned());
+                });
 
             let Some(provided) = provided else {
                 tracing::warn!(
@@ -720,7 +921,11 @@ async fn webhook_handler(
             };
 
             let valid = match auth.secret_validation {
-                WebhookSecretValidation::Equals => expected == provided,
+                WebhookSecretValidation::Equals => {
+                    use subtle::ConstantTimeEq as _;
+                    expected.len() == provided.len()
+                        && bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
+                }
                 WebhookSecretValidation::HmacSha256Body => {
                     verify_signature(expected.as_bytes(), &body, &provided)
                 }
@@ -738,7 +943,9 @@ async fn webhook_handler(
                 WebhookSecretValidation::TwilioRequestSignature => verify_twilio_request_signature(
                     expected.as_bytes(),
                     &headers,
-                    &full_path,
+                    original_uri
+                        .path_and_query()
+                        .map_or(original_uri.path(), |value| value.as_str()),
                     &body,
                     &provided,
                 ),
@@ -774,6 +981,18 @@ async fn webhook_handler(
                 );
             }
 
+            if !state
+                .router
+                .accept_signed_request_once(channel_name, auth.secret_validation, &provided)
+                .await
+            {
+                tracing::warn!(
+                    channel = %channel_name,
+                    "Suppressed replayed signed webhook request"
+                );
+                return Response::new(Body::empty());
+            }
+
             tracing::debug!(channel = %channel_name, "Webhook secret validated");
             true
         }
@@ -781,14 +1000,47 @@ async fn webhook_handler(
         false
     };
 
-    // Convert headers to HashMap
+    // The host already authenticated the request. Do not hand credential,
+    // cookie, or signature material to the untrusted guest component.
+    let auth = state.router.get_webhook_auth(channel_name).await;
+    let configured_secret_header = auth.secret_header.as_deref();
     let headers_map: HashMap<String, String> = headers
         .iter()
+        .filter(|(name, _)| {
+            let name = name.as_str();
+            !matches!(
+                name,
+                "authorization"
+                    | "proxy-authorization"
+                    | "cookie"
+                    | "x-webhook-secret"
+                    | "x-slack-signature"
+                    | "x-line-signature"
+                    | "x-twilio-signature"
+                    | "x-signature-ed25519"
+                    | "twitch-eventsub-message-signature"
+                    | "x-telegram-bot-api-secret-token"
+            ) && !configured_secret_header
+                .is_some_and(|configured| configured.eq_ignore_ascii_case(name))
+        })
         .filter_map(|(k, v)| {
             v.to_str()
                 .ok()
                 .map(|v| (k.as_str().to_string(), v.to_string()))
         })
+        .collect();
+    let query_map: HashMap<String, String> = query
+        .iter()
+        .filter(|(name, _)| {
+            !matches!(
+                name.to_ascii_lowercase().as_str(),
+                "secret" | "access_token" | "token" | "api_key" | "key"
+            ) && auth
+                .verify_token_param
+                .as_deref()
+                .is_none_or(|configured| configured != name.as_str())
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
 
     tracing::info!(
@@ -802,7 +1054,7 @@ async fn webhook_handler(
             method.as_str(),
             &full_path,
             &headers_map,
-            &query,
+            &query_map,
             &body,
             secret_validated,
         )
@@ -830,8 +1082,7 @@ async fn webhook_handler(
             json_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 serde_json::json!({
-                    "error": "Channel callback failed",
-                    "details": e.to_string()
+                    "error": "Channel callback failed"
                 }),
             )
         }
@@ -847,6 +1098,8 @@ pub fn create_wasm_channel_router(router: Arc<WasmChannelRouter>) -> Router {
         .route("/wasm-channels/health", get(health_handler))
         // Catch-all for webhook paths
         .route("/webhook/{*path}", any(webhook_handler))
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(64))
         .with_state(state)
 }
 
@@ -989,7 +1242,8 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         // Should find channel by path
         let found = router.get_channel_for_path("/webhook/slack").await;
@@ -1015,7 +1269,8 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         // Correct secret
         assert!(router.validate_secret("slack", "secret123").await);
@@ -1023,12 +1278,14 @@ mod tests {
         // Wrong secret
         assert!(!router.validate_secret("slack", "wrong").await);
 
-        // Channel without secret always validates
+        // The helper fails closed when no secret is configured. Public
+        // endpoints bypass it based on endpoint policy instead.
         let channel2 = create_test_channel("telegram");
         router
             .register(channel2, vec![], RegisteredWebhookAuth::default())
-            .await;
-        assert!(router.validate_secret("telegram", "anything").await);
+            .await
+            .unwrap();
+        assert!(!router.validate_secret("telegram", "anything").await);
     }
 
     #[tokio::test]
@@ -1045,7 +1302,8 @@ mod tests {
 
         router
             .register(channel, endpoints, RegisteredWebhookAuth::default())
-            .await;
+            .await
+            .unwrap();
 
         // Should exist
         assert!(
@@ -1076,10 +1334,12 @@ mod tests {
 
         router
             .register(channel1, vec![], RegisteredWebhookAuth::default())
-            .await;
+            .await
+            .unwrap();
         router
             .register(channel2, vec![], RegisteredWebhookAuth::default())
-            .await;
+            .await
+            .unwrap();
 
         let channels = router.list_channels().await;
         assert_eq!(channels.len(), 2);
@@ -1104,7 +1364,8 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         // Should return the custom header
         assert_eq!(
@@ -1123,7 +1384,8 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+            .unwrap();
         assert_eq!(router.get_secret_header("slack").await, "X-Webhook-Secret");
     }
 
@@ -1150,7 +1412,8 @@ mod tests {
                     signature_secret: Some("app-secret".to_string()),
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         let app = create_wasm_channel_router(Arc::clone(&router));
         let ok = app
@@ -1199,7 +1462,8 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         let app = create_wasm_channel_router(Arc::clone(&router));
         let body = Bytes::from_static(br#"{"entry":[]}"#);
@@ -1259,7 +1523,8 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         let app = create_wasm_channel_router(Arc::clone(&router));
         let body = Bytes::from_static(br#"{"events":[]}"#);
@@ -1318,12 +1583,13 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         let app = create_wasm_channel_router(Arc::clone(&router));
         let body = Bytes::from_static(br#"{"challenge":"ok"}"#);
         let message_id = "msg-1";
-        let timestamp = "2026-05-13T10:00:00Z";
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let mut signed = Vec::new();
         signed.extend_from_slice(message_id.as_bytes());
         signed.extend_from_slice(timestamp.as_bytes());
@@ -1336,7 +1602,7 @@ mod tests {
                     .method("POST")
                     .uri("/webhook/twitch")
                     .header("Twitch-Eventsub-Message-Id", message_id)
-                    .header("Twitch-Eventsub-Message-Timestamp", timestamp)
+                    .header("Twitch-Eventsub-Message-Timestamp", &timestamp)
                     .header("Twitch-Eventsub-Message-Signature", signature)
                     .body(Body::from(body))
                     .unwrap(),
@@ -1372,7 +1638,8 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         let app = create_wasm_channel_router(Arc::clone(&router));
         let body = Bytes::from_static(b"Body=hello+there&From=%2B15551234567");
@@ -1448,7 +1715,8 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         let app = create_wasm_channel_router(Arc::clone(&router));
         let body = Bytes::from_static(br#"{"type":1}"#);

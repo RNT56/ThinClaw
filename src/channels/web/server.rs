@@ -47,6 +47,7 @@ use thinclaw_gateway::web::ports::{
     gateway_message_to_chat_message, gateway_port_error, gateway_unavailable as unavailable,
     with_activation_metadata,
 };
+use thinclaw_gateway::web::settings::{is_sensitive_settings_key, validate_setting_entry};
 use thinclaw_gateway::web::types::PendingApprovalEntry;
 use thinclaw_llm_core::CompletionRequest;
 
@@ -724,18 +725,43 @@ impl SettingsPort for GatewayState {
         patch: GatewaySettingsPatch,
     ) -> Result<GatewaySettingsSnapshot, GatewayPortError> {
         let store = self.store.as_ref().ok_or_else(|| unavailable("database"))?;
+        if patch.user_id.trim().is_empty()
+            || patch.user_id.len() > 256
+            || patch.user_id.chars().any(char::is_control)
+        {
+            return Err(GatewayPortError::InvalidRequest {
+                reason: "settings patch user_id is malformed".to_string(),
+            });
+        }
         let values = patch
             .values
             .as_object()
             .ok_or_else(|| GatewayPortError::InvalidRequest {
                 reason: "settings patch values must be an object".to_string(),
             })?;
-        for (key, value) in values {
-            store
-                .set_setting(&patch.user_id, key, value)
-                .await
-                .map_err(|error| gateway_port_error("save setting", error))?;
+        if values.len() > 10_000 {
+            return Err(GatewayPortError::InvalidRequest {
+                reason: "settings patch contains too many entries".to_string(),
+            });
         }
+        let mut settings = std::collections::HashMap::with_capacity(values.len());
+        for (key, value) in values {
+            if is_sensitive_settings_key(key) {
+                return Err(GatewayPortError::InvalidRequest {
+                    reason: format!("settings patch cannot write sensitive key '{key}'"),
+                });
+            }
+            validate_setting_entry(key, value).map_err(|_| GatewayPortError::InvalidRequest {
+                reason: format!("settings patch contains invalid entry '{key}'"),
+            })?;
+            settings.insert(key.clone(), value.clone());
+        }
+        // Both database backends implement this as a transaction. A failed
+        // patch therefore cannot leave a prefix of its keys persisted.
+        store
+            .set_all_settings(&patch.user_id, &settings)
+            .await
+            .map_err(|error| gateway_port_error("save settings", error))?;
         self.load_settings(&patch.user_id).await
     }
 }
@@ -1037,15 +1063,15 @@ pub async fn start_server(
                 reason: format!("Failed to get local addr: {}", e),
             })?;
     if let Some(path) = std::env::var_os("THINCLAW_GATEWAY_BOUND_ADDR_FILE") {
-        std::fs::write(&path, bound_addr.to_string()).map_err(|e| {
-            crate::error::ChannelError::StartupFailed {
-                name: "gateway".to_string(),
-                reason: format!(
-                    "Failed to write bound gateway address to {}: {}",
-                    std::path::PathBuf::from(path).display(),
-                    e
-                ),
-            }
+        let path = std::path::PathBuf::from(path);
+        thinclaw_platform::write_private_file_atomic(
+            &path,
+            bound_addr.to_string().as_bytes(),
+            true,
+        )
+        .map_err(|e| crate::error::ChannelError::StartupFailed {
+            name: "gateway".to_string(),
+            reason: format!("Failed to write bound gateway address file: {e}"),
         })?;
     }
 

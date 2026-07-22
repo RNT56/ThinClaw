@@ -80,10 +80,7 @@ fn load_device_registry() -> Arc<DeviceRegistry> {
                 "thinclaw-device-registry-fallback-{}",
                 uuid::Uuid::new_v4()
             )));
-            Arc::new(
-                futures::executor::block_on(DeviceRegistry::load(empty_store))
-                    .expect("loading a fresh empty device store cannot fail"),
-            )
+            Arc::new(DeviceRegistry::empty(empty_store))
         }
     }
 }

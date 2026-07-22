@@ -177,6 +177,7 @@ pub struct ThreadExportResponse {
     pub thread_id: Uuid,
     pub format: String,
     pub content: String,
+    pub message_count: usize,
 }
 
 #[derive(Debug, Deserialize)]

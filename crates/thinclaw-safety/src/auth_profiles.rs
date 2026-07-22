@@ -4,11 +4,12 @@
 //! rotation and fallback capabilities.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 /// A single auth profile.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AuthProfile {
     /// Profile name (e.g., "production", "development", "backup").
     pub name: String,
@@ -27,6 +28,40 @@ pub struct AuthProfile {
     pub healthy: bool,
     /// Usage count (for round-robin rotation).
     pub usage_count: u64,
+}
+
+impl fmt::Debug for AuthProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthProfile")
+            .field("name", &self.name)
+            .field("provider", &self.provider)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url.as_deref().map(redacted_endpoint))
+            .field("org_id", &self.org_id)
+            .field("is_default", &self.is_default)
+            .field("healthy", &self.healthy)
+            .field("usage_count", &self.usage_count)
+            .finish()
+    }
+}
+
+fn redacted_endpoint(raw: &str) -> String {
+    let Ok(url) = url::Url::parse(raw) else {
+        return "<invalid-url>".to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return "<invalid-url>".to_string();
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
 }
 
 impl AuthProfile {
@@ -97,6 +132,9 @@ impl AuthProfileManager {
     /// Set a profile as the default for its provider.
     pub fn set_default(&mut self, provider: &str, name: &str) -> bool {
         if let Some(profiles) = self.profiles.get_mut(provider) {
+            if !profiles.iter().any(|profile| profile.name == name) {
+                return false;
+            }
             for p in profiles.iter_mut() {
                 p.is_default = p.name == name;
             }
@@ -121,7 +159,7 @@ impl AuthProfileManager {
                     .iter_mut()
                     .find(|p| p.healthy && p.usage_count == min)
             {
-                profile.usage_count += 1;
+                profile.usage_count = profile.usage_count.saturating_add(1);
                 return Some(profile);
             }
         }
@@ -222,6 +260,22 @@ mod tests {
     }
 
     #[test]
+    fn setting_unknown_default_preserves_existing_default() {
+        let mut mgr = AuthProfileManager::new();
+        let mut prod = make_profile("prod", "openai");
+        prod.is_default = true;
+        mgr.add(prod);
+        mgr.add(make_profile("dev", "openai"));
+
+        assert!(!mgr.set_default("openai", "missing"));
+        assert_eq!(
+            mgr.get_default("openai")
+                .map(|profile| profile.name.as_str()),
+            Some("prod")
+        );
+    }
+
+    #[test]
     fn test_masked_key() {
         let profile = AuthProfile::new("test", "openai", "sk-1234567890abcdef");
         assert_eq!(profile.masked_key(), "sk-1...cdef");
@@ -231,6 +285,23 @@ mod tests {
     fn test_short_key_masked() {
         let profile = AuthProfile::new("test", "openai", "short");
         assert_eq!(profile.masked_key(), "****");
+    }
+
+    #[test]
+    fn debug_redacts_key_and_sensitive_url_parts() {
+        let mut profile = AuthProfile::new("test", "openai", "super-secret-api-key");
+        profile.base_url = Some(
+            "https://user:password@example.com/private/token?api_key=query-secret#fragment"
+                .to_string(),
+        );
+
+        let debug = format!("{profile:?}");
+        assert!(debug.contains("https://example.com"));
+        assert!(!debug.contains("super-secret-api-key"));
+        assert!(!debug.contains("password"));
+        assert!(!debug.contains("private/token"));
+        assert!(!debug.contains("query-secret"));
+        assert!(!debug.contains("fragment"));
     }
 
     #[test]

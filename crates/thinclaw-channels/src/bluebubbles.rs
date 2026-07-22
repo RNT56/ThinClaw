@@ -27,23 +27,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::extract::DefaultBodyLimit;
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
+use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::util::floor_char_boundary;
 use thinclaw_channels_core::{
-    Channel, ConfigField, ConfigSchema, IncomingMessage, MessageStream, OutgoingResponse,
-    StatusUpdate,
+    Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
 };
 use thinclaw_types::error::ChannelError;
-
-mod helpers;
-use helpers::{
-    base64_decode, extract_record, first_string, normalize_server_url, redact_pii, redact_url,
-    split_message,
-};
 
 /// Channel name constant.
 const NAME: &str = "bluebubbles";
@@ -63,6 +59,19 @@ const MAX_TEXT_LENGTH: usize = 4000;
 /// Maximum inbound attachment we buffer into memory (20 MB), matching the
 /// iMessage/Discord caps. Without it a large/lying payload can exhaust memory.
 const MAX_INBOUND_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_SIZE: usize = 40 * 1024 * 1024;
+const MAX_ATTACHMENTS: usize = 10;
+const MAX_API_RESPONSE_SIZE: usize = 4 * 1024 * 1024;
+const MAX_WEBHOOK_BODY_SIZE: usize = 1024 * 1024;
+const MAX_INBOUND_TEXT_SIZE: usize = 256 * 1024;
+const MAX_OUTBOUND_TEXT_SIZE: usize = 256 * 1024;
+const MAX_IDENTIFIER_SIZE: usize = 4096;
+const MAX_GUID_SIZE: usize = 1024;
+const MAX_PASSWORD_SIZE: usize = 4096;
+const MAX_ALLOW_FROM_ENTRIES: usize = 4096;
+const MAX_GUID_CACHE_ENTRIES: usize = 2048;
+const MAX_WEBHOOK_CONCURRENCY: usize = 16;
+const MAX_SERVER_DNS_ADDRESSES: usize = 64;
 
 /// BlueBubbles webhook event types that carry messages.
 const MESSAGE_EVENTS: &[&str] = &["new-message", "message", "updated-message"];
@@ -214,21 +223,22 @@ impl SeenGuids {
         }
         true
     }
+
+    fn remove(&mut self, guid: &str) {
+        if self.set.remove(guid) {
+            self.order.retain(|value| value != guid);
+        }
+    }
 }
 
 impl BlueBubblesChannel {
     /// Create a new BlueBubbles channel.
     pub async fn new(config: BlueBubblesConfig) -> Result<Self, ChannelError> {
-        if config.server_url.is_empty() {
-            return Err(ChannelError::Configuration(
-                "BlueBubbles server URL is required".to_string(),
-            ));
-        }
+        let mut config = config;
+        config.server_url = normalize_server_url(&config.server_url);
+        validate_bluebubbles_config(&config)?;
 
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| ChannelError::Configuration(format!("HTTP client error: {e}")))?;
+        let client = build_bluebubbles_client(&config.server_url).await?;
 
         // Pre-create the mpsc channel for incoming messages.
         // tx is cloned into the webhook handler; rx is taken by start().
@@ -280,10 +290,12 @@ impl BlueBubblesChannel {
             });
         }
 
-        res.json().await.map_err(|e| ChannelError::Disconnected {
-            name: NAME.to_string(),
-            reason: format!("API GET {path} parse error: {}", e.without_url()),
-        })
+        crate::response::bounded_json(res, MAX_API_RESPONSE_SIZE)
+            .await
+            .map_err(|e| ChannelError::Disconnected {
+                name: NAME.to_string(),
+                reason: format!("BlueBubbles API returned invalid JSON: {e}"),
+            })
     }
 
     /// POST request to the BlueBubbles API.
@@ -311,10 +323,12 @@ impl BlueBubblesChannel {
             });
         }
 
-        res.json().await.map_err(|e| ChannelError::SendFailed {
-            name: NAME.to_string(),
-            reason: format!("API POST {path} parse error: {}", e.without_url()),
-        })
+        crate::response::bounded_json(res, MAX_API_RESPONSE_SIZE)
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: format!("BlueBubbles API returned invalid JSON: {e}"),
+            })
     }
 
     // ── Connection ──────────────────────────────────────────────────
@@ -328,7 +342,7 @@ impl BlueBubblesChannel {
                 name: NAME.to_string(),
                 reason: format!(
                     "Cannot reach BlueBubbles server at {}: {e}",
-                    self.config.server_url
+                    redact_url(&self.config.server_url)
                 ),
             })?;
 
@@ -372,6 +386,12 @@ impl BlueBubblesChannel {
         if target.is_empty() {
             return Ok(None);
         }
+        if !valid_bluebubbles_identifier(target, MAX_IDENTIFIER_SIZE) {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "BlueBubbles chat identifier is malformed or oversized".to_string(),
+            });
+        }
 
         // Already a raw GUID
         if target.contains(';') {
@@ -396,7 +416,7 @@ impl BlueBubblesChannel {
         match self.api_post("/api/v1/chat/query", &payload).await {
             Ok(res) => {
                 if let Some(chats) = res.get("data").and_then(|d| d.as_array()) {
-                    for chat in chats {
+                    for chat in chats.iter().take(1000) {
                         let guid = chat
                             .get("guid")
                             .or(chat.get("chatGuid"))
@@ -408,9 +428,12 @@ impl BlueBubblesChannel {
 
                         if identifier == Some(target)
                             && let Some(g) = guid
+                                .filter(|g| valid_bluebubbles_identifier(g, MAX_IDENTIFIER_SIZE))
                         {
                             let mut cache = self.guid_cache.write().await;
-                            cache.insert(target.to_string(), g.to_string());
+                            if cache.len() < MAX_GUID_CACHE_ENTRIES {
+                                cache.insert(target.to_string(), g.to_string());
+                            }
                             return Ok(Some(g.to_string()));
                         }
 
@@ -418,14 +441,18 @@ impl BlueBubblesChannel {
                         if let Some(participants) =
                             chat.get("participants").and_then(|p| p.as_array())
                         {
-                            for part in participants {
+                            for part in participants.iter().take(1000) {
                                 let addr =
                                     part.get("address").and_then(|a| a.as_str()).unwrap_or("");
                                 if addr.trim() == target
-                                    && let Some(g) = guid
+                                    && let Some(g) = guid.filter(|g| {
+                                        valid_bluebubbles_identifier(g, MAX_IDENTIFIER_SIZE)
+                                    })
                                 {
                                     let mut cache = self.guid_cache.write().await;
-                                    cache.insert(target.to_string(), g.to_string());
+                                    if cache.len() < MAX_GUID_CACHE_ENTRIES {
+                                        cache.insert(target.to_string(), g.to_string());
+                                    }
                                     return Ok(Some(g.to_string()));
                                 }
                             }
@@ -448,6 +475,11 @@ impl BlueBubblesChannel {
         let host = match self.config.webhook_host.as_str() {
             "0.0.0.0" | "::" => "localhost",
             h => h,
+        };
+        let host = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+            format!("[{host}]")
+        } else {
+            host.to_string()
         };
         let password = urlencoding::encode(self.config.password.expose_secret());
         format!(
@@ -530,7 +562,10 @@ impl BlueBubblesChannel {
                     );
                 }
                 Err(e) => {
-                    tracing::debug!("BlueBubbles: webhook unregister failed (non-critical): {e}");
+                    tracing::debug!(
+                        error = %e.without_url(),
+                        "BlueBubbles: webhook unregister failed (non-critical)"
+                    );
                 }
             }
         }
@@ -548,31 +583,41 @@ impl BlueBubblesChannel {
         text: &str,
         reply_to: Option<&str>,
     ) -> Result<(), ChannelError> {
+        if !valid_bluebubbles_identifier(chat_guid, MAX_IDENTIFIER_SIZE)
+            || text.len() > MAX_OUTBOUND_TEXT_SIZE
+            || reply_to.is_some_and(|value| !valid_bluebubbles_identifier(value, MAX_GUID_SIZE))
+        {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "BlueBubbles message is malformed or oversized".to_string(),
+            });
+        }
         let chunks = split_message(text, MAX_TEXT_LENGTH);
         for chunk in chunks {
-            let mut payload = serde_json::json!({
-                "chatGuid": chat_guid,
-                "tempGuid": format!("temp-{}", uuid::Uuid::new_v4()),
-                "message": chunk,
-            });
+            let mut payload = serde_json::Map::from_iter([
+                ("chatGuid".to_string(), serde_json::json!(chat_guid)),
+                (
+                    "tempGuid".to_string(),
+                    serde_json::json!(format!("temp-{}", uuid::Uuid::new_v4())),
+                ),
+                ("message".to_string(), serde_json::json!(chunk)),
+            ]);
 
             // Thread the reply if Private API is available
             if let Some(original_guid) = reply_to
                 && self.private_api.load(Ordering::Relaxed)
                 && self.helper_connected.load(Ordering::Relaxed)
             {
-                let obj = payload
-                    .as_object_mut()
-                    .expect("payload was created as a JSON object literal");
-                obj.insert("method".into(), serde_json::json!("private-api"));
-                obj.insert(
+                payload.insert("method".into(), serde_json::json!("private-api"));
+                payload.insert(
                     "selectedMessageGuid".into(),
                     serde_json::json!(original_guid),
                 );
-                obj.insert("partIndex".into(), serde_json::json!(0));
+                payload.insert("partIndex".into(), serde_json::json!(0));
             }
 
-            self.api_post("/api/v1/message/text", &payload).await?;
+            self.api_post("/api/v1/message/text", &serde_json::Value::Object(payload))
+                .await?;
         }
         Ok(())
     }
@@ -592,6 +637,21 @@ impl BlueBubblesChannel {
         caption: Option<&str>,
         is_audio_message: bool,
     ) -> Result<(), ChannelError> {
+        if !valid_bluebubbles_identifier(chat_guid, MAX_IDENTIFIER_SIZE)
+            || data.len() > MAX_INBOUND_ATTACHMENT_SIZE as usize
+            || filename.is_empty()
+            || filename.len() > 255
+            || filename.chars().any(char::is_control)
+            || filename.contains(['/', '\\'])
+            || mime.is_empty()
+            || mime.len() > 256
+            || mime.chars().any(char::is_control)
+        {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "BlueBubbles attachment is malformed or oversized".to_string(),
+            });
+        }
         let url = self.api_url("/api/v1/message/attachment");
 
         let file_part = reqwest::multipart::Part::bytes(data)
@@ -621,7 +681,7 @@ impl BlueBubblesChannel {
             .await
             .map_err(|e| ChannelError::SendFailed {
                 name: NAME.to_string(),
-                reason: format!("Attachment upload failed: {e}"),
+                reason: format!("Attachment upload failed: {}", e.without_url()),
             })?;
 
         if !res.status().is_success() {
@@ -757,16 +817,20 @@ impl BlueBubblesChannel {
             .send()
             .await
         {
-            Ok(res) if res.status().is_success() => match res.bytes().await {
-                Ok(data) => {
-                    let mc = thinclaw_media::MediaContent::new(data.to_vec(), mime);
-                    Some(mc)
+            Ok(res) if res.status().is_success() => {
+                match crate::response::bounded_bytes(res, MAX_INBOUND_ATTACHMENT_SIZE as usize)
+                    .await
+                {
+                    Ok(data) => {
+                        let mc = thinclaw_media::MediaContent::new(data.to_vec(), mime);
+                        Some(mc)
+                    }
+                    Err(e) => {
+                        tracing::warn!("BlueBubbles: attachment body read failed: {e}");
+                        None
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("BlueBubbles: attachment body read failed: {e}");
-                    None
-                }
-            },
+            }
             Ok(res) => {
                 tracing::warn!(
                     status = %res.status(),
@@ -775,7 +839,10 @@ impl BlueBubblesChannel {
                 None
             }
             Err(e) => {
-                tracing::warn!("BlueBubbles: attachment download failed: {e}");
+                tracing::warn!(
+                    error = %e.without_url(),
+                    "BlueBubbles: attachment download failed"
+                );
                 None
             }
         }
@@ -807,6 +874,10 @@ impl BlueBubblesChannel {
                 axum::routing::post(handle_webhook),
             )
             .with_state(state)
+            .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_SIZE))
+            .layer(tower::limit::ConcurrencyLimitLayer::new(
+                MAX_WEBHOOK_CONCURRENCY,
+            ))
     }
 
     /// Spawn (or respawn) the webhook HTTP listener, draining any prior one
@@ -826,7 +897,7 @@ impl BlueBubblesChannel {
 
         let handle = tokio::spawn(async move {
             let addr = format!("{host}:{port}");
-            let listener = match tokio::net::TcpListener::bind(&addr).await {
+            let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
                 Ok(l) => l,
                 Err(e) => {
                     tracing::error!(
@@ -866,73 +937,6 @@ impl Channel for BlueBubblesChannel {
         NAME
     }
 
-    fn config_schema(&self) -> Option<ConfigSchema> {
-        Some(ConfigSchema {
-            channel_id: NAME.to_string(),
-            channel_name: "BlueBubbles".to_string(),
-            fields: vec![
-                ConfigField {
-                    id: "server_url".to_string(),
-                    label: "Server URL".to_string(),
-                    field_type: "text".to_string(),
-                    required: true,
-                    help_text: Some("BlueBubbles server, for example http://192.168.1.50:1234.".to_string()),
-                    default_value: Some(serde_json::json!(self.config.server_url)),
-                    options: None,
-                },
-                ConfigField {
-                    id: "webhook_host".to_string(),
-                    label: "Webhook host".to_string(),
-                    field_type: "text".to_string(),
-                    required: true,
-                    help_text: Some("Local address that accepts BlueBubbles callbacks.".to_string()),
-                    default_value: Some(serde_json::json!(self.config.webhook_host)),
-                    options: None,
-                },
-                ConfigField {
-                    id: "webhook_port".to_string(),
-                    label: "Webhook port".to_string(),
-                    field_type: "number".to_string(),
-                    required: true,
-                    help_text: Some("Local callback port (1-65535).".to_string()),
-                    default_value: Some(serde_json::json!(self.config.webhook_port)),
-                    options: None,
-                },
-                ConfigField {
-                    id: "webhook_path".to_string(),
-                    label: "Webhook path".to_string(),
-                    field_type: "text".to_string(),
-                    required: true,
-                    help_text: Some("Callback path, beginning with /.".to_string()),
-                    default_value: Some(serde_json::json!(self.config.webhook_path)),
-                    options: None,
-                },
-                ConfigField {
-                    id: "allow_from".to_string(),
-                    label: "Allowed senders".to_string(),
-                    field_type: "textarea".to_string(),
-                    required: false,
-                    help_text: Some("Phone numbers or email addresses, one per line or comma-separated; empty allows all.".to_string()),
-                    default_value: Some(serde_json::json!(self.config.allow_from.join("\n"))),
-                    options: None,
-                },
-                ConfigField {
-                    id: "send_read_receipts".to_string(),
-                    label: "Send read receipts".to_string(),
-                    field_type: "checkbox".to_string(),
-                    required: false,
-                    help_text: Some("Requires the BlueBubbles Private API.".to_string()),
-                    default_value: Some(serde_json::json!(self.config.send_read_receipts)),
-                    options: None,
-                },
-            ],
-            help: Some(
-                "The server password remains on the dedicated BlueBubbles setup path and is never returned by this form."
-                    .to_string(),
-            ),
-        })
-    }
-
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         // Clear any prior shutdown flag so the (re)spawned listener serves and
         // does not immediately hit its graceful-shutdown path.
@@ -966,29 +970,33 @@ impl Channel for BlueBubblesChannel {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        validate_outgoing_attachments(&response.attachments)?;
         let chat_id_for_att = msg
             .metadata
             .get("chat_guid")
             .and_then(|v| v.as_str())
             .or_else(|| msg.metadata.get("chat_id").and_then(|v| v.as_str()))
             .unwrap_or(&msg.user_id);
-        if let Some(resolved_att) = self.resolve_chat_guid(chat_id_for_att).await? {
+        let resolved_attachment_chat = self.resolve_chat_guid(chat_id_for_att).await?;
+        if !response.attachments.is_empty() && resolved_attachment_chat.is_none() {
+            return Err(ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: "BlueBubbles could not resolve the attachment destination".to_string(),
+            });
+        }
+        if let Some(resolved_att) = resolved_attachment_chat.as_deref() {
             for att in &response.attachments {
                 let fname = att.filename.as_deref().unwrap_or("attachment");
                 let is_audio = att.mime_type.starts_with("audio/");
-                if let Err(e) = self
-                    .send_attachment(
-                        &resolved_att,
-                        att.data.clone(),
-                        fname,
-                        &att.mime_type,
-                        None,
-                        is_audio,
-                    )
-                    .await
-                {
-                    tracing::warn!(error = %e, "BlueBubbles: failed to send attachment");
-                }
+                self.send_attachment(
+                    resolved_att,
+                    att.data.clone(),
+                    fname,
+                    &att.mime_type,
+                    None,
+                    is_audio,
+                )
+                .await?;
             }
         }
 
@@ -996,8 +1004,22 @@ impl Channel for BlueBubblesChannel {
         if response.attachments.is_empty()
             && let Some(attachments) = msg.metadata.get("response_attachments")
             && let Some(arr) = attachments.as_array()
-            && let Some(resolved_att) = self.resolve_chat_guid(chat_id_for_att).await?
         {
+            let resolved_att =
+                resolved_attachment_chat
+                    .as_deref()
+                    .ok_or_else(|| ChannelError::SendFailed {
+                        name: NAME.to_string(),
+                        reason: "BlueBubbles could not resolve the legacy attachment destination"
+                            .to_string(),
+                    })?;
+            if arr.len() > MAX_ATTACHMENTS {
+                return Err(ChannelError::SendFailed {
+                    name: NAME.to_string(),
+                    reason: "BlueBubbles response contains too many legacy attachments".to_string(),
+                });
+            }
+            let mut total_bytes = 0usize;
             for att in arr {
                 let data_b64 = att.get("data").and_then(|d| d.as_str()).unwrap_or("");
                 let fname = att
@@ -1008,15 +1030,23 @@ impl Channel for BlueBubblesChannel {
                     .get("mime_type")
                     .and_then(|m| m.as_str())
                     .unwrap_or("application/octet-stream");
-                if let Ok(bytes) = base64_decode(data_b64) {
-                    let is_audio = mime.starts_with("audio/");
-                    if let Err(e) = self
-                        .send_attachment(&resolved_att, bytes, fname, mime, None, is_audio)
-                        .await
-                    {
-                        tracing::warn!(error = %e, "BlueBubbles: failed to send attachment");
+                let bytes = base64_decode_bounded(data_b64, MAX_INBOUND_ATTACHMENT_SIZE as usize)?;
+                total_bytes = total_bytes.checked_add(bytes.len()).ok_or_else(|| {
+                    ChannelError::SendFailed {
+                        name: NAME.to_string(),
+                        reason: "BlueBubbles legacy attachment size overflow".to_string(),
                     }
+                })?;
+                if total_bytes > MAX_TOTAL_ATTACHMENT_SIZE {
+                    return Err(ChannelError::SendFailed {
+                        name: NAME.to_string(),
+                        reason: "BlueBubbles legacy attachments exceed the total size limit"
+                            .to_string(),
+                    });
                 }
+                let is_audio = mime.starts_with("audio/");
+                self.send_attachment(resolved_att, bytes, fname, mime, None, is_audio)
+                    .await?;
             }
         }
 
@@ -1074,31 +1104,36 @@ impl Channel for BlueBubblesChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        validate_outgoing_attachments(&response.attachments)?;
         // Resolve the user_id to a chat GUID
         match self.resolve_chat_guid(user_id).await? {
             Some(guid) => {
                 for att in &response.attachments {
                     let fname = att.filename.as_deref().unwrap_or("attachment");
                     let is_audio = att.mime_type.starts_with("audio/");
-                    if let Err(e) = self
-                        .send_attachment(
-                            &guid,
-                            att.data.clone(),
-                            fname,
-                            &att.mime_type,
-                            None,
-                            is_audio,
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "BlueBubbles: failed to send broadcast attachment");
-                    }
+                    self.send_attachment(
+                        &guid,
+                        att.data.clone(),
+                        fname,
+                        &att.mime_type,
+                        None,
+                        is_audio,
+                    )
+                    .await?;
                 }
                 self.send_text(&guid, &response.content, None).await
             }
             None => {
                 // Try creating a new chat if it looks like a valid address
                 if user_id.contains('@') || user_id.starts_with('+') {
+                    if !response.attachments.is_empty() {
+                        return Err(ChannelError::SendFailed {
+                            name: NAME.to_string(),
+                            reason:
+                                "BlueBubbles cannot attach files until the new chat is available"
+                                    .to_string(),
+                        });
+                    }
                     let payload = serde_json::json!({
                         "addresses": [user_id],
                         "message": response.content,
@@ -1187,7 +1222,12 @@ async fn handle_webhook(
         .or(params.get("guid"))
         .map(|s| s.as_str())
         .unwrap_or("");
-    if token != state.password.expose_secret() {
+    if token
+        .as_bytes()
+        .ct_eq(state.password.expose_secret().as_bytes())
+        .unwrap_u8()
+        != 1
+    {
         return axum::http::StatusCode::UNAUTHORIZED;
     }
 
@@ -1257,9 +1297,12 @@ async fn handle_webhook(
 
     // Drop duplicate deliveries. BlueBubbles resends the full message on edits
     // (`updated-message`); without this the agent answers the same message twice.
-    if let Some(guid) = record.get("guid").and_then(|v| v.as_str())
-        && !guid.is_empty()
-    {
+    let dedupe_guid = record
+        .get("guid")
+        .and_then(|v| v.as_str())
+        .filter(|guid| valid_bluebubbles_identifier(guid, MAX_GUID_SIZE))
+        .map(String::from);
+    if let Some(guid) = dedupe_guid.as_deref() {
         let mut seen = state.seen.lock().unwrap_or_else(|p| p.into_inner());
         if !seen.insert_new(guid) {
             return axum::http::StatusCode::OK;
@@ -1273,6 +1316,9 @@ async fn handle_webhook(
         record.get("body"),
     ])
     .unwrap_or_default();
+    if text.len() > MAX_INBOUND_TEXT_SIZE || text.chars().any(|value| value == '\0') {
+        return axum::http::StatusCode::PAYLOAD_TOO_LARGE;
+    }
 
     // Extract attachments
     let attachments = record
@@ -1280,6 +1326,9 @@ async fn handle_webhook(
         .and_then(|a| a.as_array())
         .cloned()
         .unwrap_or_default();
+    if attachments.len() > MAX_ATTACHMENTS {
+        return axum::http::StatusCode::PAYLOAD_TOO_LARGE;
+    }
 
     if text.is_empty() && attachments.is_empty() {
         return axum::http::StatusCode::OK;
@@ -1329,14 +1378,18 @@ async fn handle_webhook(
         .or_else(|| chat_guid.clone());
 
     let sender = match sender {
-        Some(s) => s,
+        Some(s) if valid_bluebubbles_identifier(&s, MAX_IDENTIFIER_SIZE) => s,
         None => return axum::http::StatusCode::BAD_REQUEST,
+        Some(_) => return axum::http::StatusCode::BAD_REQUEST,
     };
 
     let session_chat_id = chat_guid
         .as_deref()
         .or(chat_identifier.as_deref())
         .unwrap_or(&sender);
+    if !valid_bluebubbles_identifier(session_chat_id, MAX_IDENTIFIER_SIZE) {
+        return axum::http::StatusCode::BAD_REQUEST;
+    }
 
     // Check allow-list
     if !state.allow_from.is_empty() && !state.allow_from.iter().any(|a| a == "*" || a == &sender) {
@@ -1345,15 +1398,19 @@ async fn handle_webhook(
 
     // Download attachments
     let mut media_attachments = Vec::new();
+    let mut total_attachment_bytes = 0usize;
     for att in &attachments {
         let att_guid = att.get("guid").and_then(|g| g.as_str()).unwrap_or("");
-        if att_guid.is_empty() {
+        if !valid_bluebubbles_identifier(att_guid, MAX_GUID_SIZE) {
             continue;
         }
         let mime = att
             .get("mimeType")
             .and_then(|m| m.as_str())
             .unwrap_or("application/octet-stream");
+        if mime.is_empty() || mime.len() > 256 || mime.chars().any(char::is_control) {
+            continue;
+        }
 
         let encoded = urlencoding::encode(att_guid);
         let password = urlencoding::encode(state.config.password.expose_secret());
@@ -1370,27 +1427,16 @@ async fn handle_webhook(
             .await
         {
             Ok(res) if res.status().is_success() => {
-                // Reject before buffering if the server declares an oversized body.
-                if res
-                    .content_length()
-                    .is_some_and(|len| len > MAX_INBOUND_ATTACHMENT_SIZE)
+                if let Ok(data) =
+                    crate::response::bounded_bytes(res, MAX_INBOUND_ATTACHMENT_SIZE as usize).await
                 {
-                    tracing::warn!(
-                        att_guid = %redact_pii(att_guid),
-                        "BlueBubbles: attachment exceeds size limit, skipping"
-                    );
-                    continue;
-                }
-                if let Ok(data) = res.bytes().await {
-                    // Guard against a lying/absent Content-Length.
-                    if data.len() as u64 > MAX_INBOUND_ATTACHMENT_SIZE {
-                        tracing::warn!(
-                            att_guid = %redact_pii(att_guid),
-                            "BlueBubbles: attachment body exceeds size limit, skipping"
-                        );
-                        continue;
+                    if total_attachment_bytes.saturating_add(data.len()) > MAX_TOTAL_ATTACHMENT_SIZE
+                    {
+                        tracing::warn!("BlueBubbles: total attachment size limit reached");
+                        break;
                     }
-                    let mc = thinclaw_media::MediaContent::new(data.to_vec(), mime);
+                    total_attachment_bytes += data.len();
+                    let mc = thinclaw_media::MediaContent::new(data, mime);
                     media_attachments.push(mc);
                 }
             }
@@ -1443,10 +1489,19 @@ async fn handle_webhook(
         .with_attachments(media_attachments);
 
     // Send to channel
-    if let Some(ref tx) = state.tx
-        && tx.send(incoming).await.is_err()
-    {
-        tracing::warn!("BlueBubbles: incoming message channel dropped");
+    if let Some(ref tx) = state.tx {
+        let sent = tokio::time::timeout(Duration::from_secs(5), tx.send(incoming)).await;
+        if !matches!(sent, Ok(Ok(()))) {
+            if let Some(guid) = dedupe_guid.as_deref() {
+                state
+                    .seen
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(guid);
+            }
+            tracing::warn!("BlueBubbles: incoming message channel unavailable");
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE;
+        }
     }
 
     // Fire-and-forget read receipt
@@ -1454,19 +1509,17 @@ async fn handle_webhook(
         && state.private_api.load(Ordering::Relaxed)
         && state.helper_connected.load(Ordering::Relaxed)
     {
-        let client = state.client.clone();
         let password = urlencoding::encode(state.config.password.expose_secret()).to_string();
         let server_url = state.config.server_url.clone();
         let chat = session_chat_id.to_string();
-        tokio::spawn(async move {
-            let encoded = urlencoding::encode(&chat);
-            let url = format!("{server_url}/api/v1/chat/{encoded}/read?password={password}");
-            let _ = client
-                .post(&url)
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
-                .await;
-        });
+        let encoded = urlencoding::encode(&chat);
+        let url = format!("{server_url}/api/v1/chat/{encoded}/read?password={password}");
+        let _ = state
+            .client
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await;
     }
 
     axum::http::StatusCode::OK
@@ -1497,6 +1550,163 @@ impl BlueBubblesChannel {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+fn validate_bluebubbles_config(config: &BlueBubblesConfig) -> Result<(), ChannelError> {
+    if config.server_url.is_empty() {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles server URL is required".to_string(),
+        ));
+    }
+    if config.server_url.len() > 4096 {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles server URL is oversized".to_string(),
+        ));
+    }
+
+    let parsed = url::Url::parse(&config.server_url).map_err(|_| {
+        ChannelError::Configuration("BlueBubbles server URL is malformed".to_string())
+    })?;
+    let host = parsed.host_str().ok_or_else(|| {
+        ChannelError::Configuration("BlueBubbles server URL requires a host".to_string())
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles server URL must be an HTTP(S) origin without credentials, path, query, or fragment"
+                .to_string(),
+        ));
+    }
+    if parsed.scheme() == "http" && !is_local_bluebubbles_host(host) {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles requires HTTPS for non-local servers".to_string(),
+        ));
+    }
+
+    let password = config.password.expose_secret();
+    if password.is_empty()
+        || password.len() > MAX_PASSWORD_SIZE
+        || password.chars().any(char::is_control)
+    {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles password is missing, malformed, or oversized".to_string(),
+        ));
+    }
+    if config.webhook_port == 0
+        || config.webhook_host.is_empty()
+        || config.webhook_host.len() > 255
+        || config.webhook_host.chars().any(char::is_control)
+        || config.webhook_host.contains(['/', '?', '#', '@'])
+        || !config.webhook_path.starts_with('/')
+        || config.webhook_path.len() > 256
+        || config.webhook_path.contains(['?', '#'])
+        || config.webhook_path.chars().any(char::is_control)
+        || config.allow_from.len() > MAX_ALLOW_FROM_ENTRIES
+        || config
+            .allow_from
+            .iter()
+            .any(|value| value != "*" && !valid_bluebubbles_identifier(value, MAX_IDENTIFIER_SIZE))
+    {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles webhook or allow-list configuration is malformed or oversized".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn build_bluebubbles_client(server_url: &str) -> Result<Client, ChannelError> {
+    let parsed = url::Url::parse(server_url).map_err(|_| {
+        ChannelError::Configuration("BlueBubbles server URL is malformed".to_string())
+    })?;
+    let host = parsed.host_str().ok_or_else(|| {
+        ChannelError::Configuration("BlueBubbles server URL requires a host".to_string())
+    })?;
+    let port = parsed.port_or_known_default().ok_or_else(|| {
+        ChannelError::Configuration("BlueBubbles server URL has no port".to_string())
+    })?;
+    let resolved = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((host, port)),
+    )
+    .await
+    .map_err(|_| {
+        ChannelError::Configuration("BlueBubbles server DNS lookup timed out".to_string())
+    })?
+    .map_err(|_| ChannelError::Configuration("BlueBubbles server DNS lookup failed".to_string()))?;
+    let mut addresses = resolved.collect::<Vec<_>>();
+    addresses.sort_unstable();
+    addresses.dedup();
+    if addresses.is_empty()
+        || addresses.len() > MAX_SERVER_DNS_ADDRESSES
+        || addresses.iter().any(|address| {
+            let ip = address.ip();
+            ip.is_unspecified()
+                || ip.is_multicast()
+                || matches!(ip, std::net::IpAddr::V4(ip) if ip.is_broadcast())
+                || parsed.scheme() == "http" && thinclaw_tools_core::is_public_outbound_ip(ip)
+        })
+    {
+        return Err(ChannelError::Configuration(
+            "BlueBubbles server resolved to an invalid address".to_string(),
+        ));
+    }
+
+    Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .resolve_to_addrs(host, &addresses)
+        .build()
+        .map_err(|e| ChannelError::Configuration(format!("HTTP client error: {e}")))
+}
+
+fn is_local_bluebubbles_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".local")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| !thinclaw_tools_core::is_public_outbound_ip(ip))
+}
+
+fn valid_bluebubbles_identifier(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
+}
+
+fn validate_outgoing_attachments(
+    attachments: &[thinclaw_media::MediaContent],
+) -> Result<(), ChannelError> {
+    if attachments.len() > MAX_ATTACHMENTS {
+        return Err(ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: "BlueBubbles response contains too many attachments".to_string(),
+        });
+    }
+    let total = attachments
+        .iter()
+        .try_fold(0usize, |total, attachment| {
+            total.checked_add(attachment.data.len())
+        })
+        .ok_or_else(|| ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: "BlueBubbles attachment size overflow".to_string(),
+        })?;
+    if total > MAX_TOTAL_ATTACHMENT_SIZE
+        || attachments
+            .iter()
+            .any(|attachment| attachment.data.len() > MAX_INBOUND_ATTACHMENT_SIZE as usize)
+    {
+        return Err(ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: "BlueBubbles attachments exceed the configured size limit".to_string(),
+        });
+    }
+    Ok(())
+}
+
 async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
     tokio::select! {
         result = &mut handle => {
@@ -1512,416 +1722,146 @@ async fn drain_channel_task(mut handle: JoinHandle<()>, name: &'static str) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{body::Body, http::Request};
-    use futures::StreamExt;
-    use secrecy::SecretString;
-    use std::time::Duration;
-    use tokio::time::timeout;
-    use tower::ServiceExt;
-
-    #[tokio::test]
-    async fn config_schema_exposes_nonsecret_values_and_never_password() {
-        let channel = BlueBubblesChannel::new(BlueBubblesConfig::new(
-            "http://127.0.0.1:1234".to_string(),
-            SecretString::from("do-not-expose".to_string()),
-            "127.0.0.1".to_string(),
-            8645,
-            "/callback".to_string(),
-            vec!["+12025550100".to_string()],
-            false,
-        ))
-        .await
-        .unwrap();
-
-        let schema = channel.config_schema().unwrap();
-        assert_eq!(schema.fields.len(), 6);
-        assert!(schema.fields.iter().all(|field| field.id != "password"));
-        assert!(
-            !serde_json::to_string(&schema)
-                .unwrap()
-                .contains("do-not-expose")
-        );
+/// Normalize a server URL (add http:// if missing, strip trailing slash).
+fn normalize_server_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
     }
-
-    #[test]
-    fn seen_guids_dedupes_and_evicts() {
-        let mut seen = SeenGuids::default();
-        assert!(seen.insert_new("a"), "first sighting is new");
-        assert!(!seen.insert_new("a"), "repeat is a duplicate");
-        assert!(seen.insert_new("b"), "different guid is new");
-        // Overflow the ring so "a" is eventually evicted and seen fresh again.
-        for i in 0..SeenGuids::CAP {
-            seen.insert_new(&format!("fill-{i}"));
-        }
-        assert!(seen.insert_new("a"), "evicted guid is treated as new again");
-    }
-
-    #[test]
-    fn test_normalize_server_url() {
-        assert_eq!(
-            normalize_server_url("192.168.1.50:1234"),
-            "http://192.168.1.50:1234"
-        );
-        assert_eq!(
-            normalize_server_url("http://192.168.1.50:1234/"),
-            "http://192.168.1.50:1234"
-        );
-        assert_eq!(
-            normalize_server_url("https://my.tunnel.dev"),
-            "https://my.tunnel.dev"
-        );
-        assert_eq!(normalize_server_url(""), "");
-        assert_eq!(normalize_server_url("  "), "");
-    }
-
-    #[test]
-    fn test_extract_record_from_data_object() {
-        let payload = serde_json::json!({
-            "type": "new-message",
-            "data": { "text": "hello", "isFromMe": false }
-        });
-        let record = extract_record(&payload).unwrap();
-        assert_eq!(record.get("text").unwrap().as_str(), Some("hello"));
-    }
-
-    #[test]
-    fn test_extract_record_from_data_array() {
-        let payload = serde_json::json!({
-            "type": "new-message",
-            "data": [{ "text": "hello" }]
-        });
-        let record = extract_record(&payload).unwrap();
-        assert_eq!(record.get("text").unwrap().as_str(), Some("hello"));
-    }
-
-    #[test]
-    fn test_first_string() {
-        let a = serde_json::json!("");
-        let b = serde_json::json!("hello");
-        assert_eq!(first_string(&[Some(&a), Some(&b)]), Some("hello".into()));
-        assert_eq!(first_string(&[None, None]), None);
-    }
-
-    #[test]
-    fn test_split_message_short() {
-        let chunks = split_message("Hello!", 4000);
-        assert_eq!(chunks, vec!["Hello!"]);
-    }
-
-    #[test]
-    fn test_split_message_long() {
-        let text = "a".repeat(5000);
-        let chunks = split_message(&text, 4000);
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].len(), 4000);
-    }
-
-    #[tokio::test]
-    async fn test_webhook_routes_forwards_allowed_inbound_message() {
-        let config = BlueBubblesConfig {
-            server_url: "http://127.0.0.1:1".to_string(),
-            password: SecretString::from("bluebubbles-pass"),
-            webhook_host: "127.0.0.1".to_string(),
-            webhook_port: 8645,
-            webhook_path: "/bluebubbles-webhook".to_string(),
-            allow_from: vec!["alice@example.com".to_string()],
-            send_read_receipts: false,
-        };
-
-        let channel = BlueBubblesChannel::new(config)
-            .await
-            .expect("channel should initialize");
-        let mut stream = channel.start().await.expect("stream should start");
-
-        let app = channel.webhook_routes();
-        let payload = serde_json::json!({
-            "type": "new-message",
-            "text": "hello from iMessage",
-            "chatGuid": "chat-1",
-            "isFromMe": false,
-            "chatIdentifier": "chat-1",
-            "handle": { "address": "alice@example.com" },
-            "isGroup": false,
-        });
-        let request = Request::builder()
-            .method("POST")
-            .uri("/bluebubbles-webhook?password=bluebubbles-pass")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::to_vec(&payload).expect("payload should serialize"),
-            ))
-            .expect("request should build");
-
-        let response = app
-            .oneshot(request)
-            .await
-            .expect("webhook request should be served");
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-
-        let message = timeout(Duration::from_secs(1), stream.next())
-            .await
-            .expect("message should arrive")
-            .expect("stream should yield one message");
-        assert_eq!(message.channel, "bluebubbles");
-        assert_eq!(message.user_id, "alice@example.com");
-        assert_eq!(message.content, "hello from iMessage");
-        assert_eq!(message.metadata["chat_guid"], "chat-1");
-        assert_eq!(message.metadata["conversation_kind"], "direct");
-        assert_eq!(message.metadata["attachment_count"], 0);
-    }
-
-    #[tokio::test]
-    async fn test_webhook_routes_rejects_unlisted_sender() {
-        let config = BlueBubblesConfig {
-            server_url: "http://127.0.0.1:1".to_string(),
-            password: SecretString::from("bluebubbles-pass"),
-            webhook_host: "127.0.0.1".to_string(),
-            webhook_port: 8645,
-            webhook_path: "/bluebubbles-webhook".to_string(),
-            allow_from: vec!["trusted@example.com".to_string()],
-            send_read_receipts: false,
-        };
-
-        let channel = BlueBubblesChannel::new(config)
-            .await
-            .expect("channel should initialize");
-        let mut stream = channel.start().await.expect("stream should start");
-        let app = channel.webhook_routes();
-
-        let payload = serde_json::json!({
-            "type": "new-message",
-            "text": "ignore this",
-            "chatGuid": "chat-2",
-            "isFromMe": false,
-            "handle": { "address": "unknown@example.com" },
-        });
-        let request = Request::builder()
-            .method("POST")
-            .uri("/bluebubbles-webhook?guid=bluebubbles-pass")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::to_vec(&payload).expect("payload should serialize"),
-            ))
-            .expect("request should build");
-
-        let response = app
-            .oneshot(request)
-            .await
-            .expect("webhook request should be served");
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-
-        assert!(
-            timeout(Duration::from_millis(200), stream.next())
-                .await
-                .is_err(),
-            "unlisted sender should not emit a message"
-        );
-    }
-
-    #[test]
-    fn test_redact_url() {
-        assert_eq!(
-            redact_url("http://192.168.1.50:1234/api/v1/ping"),
-            "http://192.168.1.50:1234/***"
-        );
-        assert_eq!(redact_url("https://my.tunnel.dev"), "https://my.tunnel.dev");
-    }
-
-    #[test]
-    fn test_redact_pii() {
-        assert_eq!(redact_pii("+4917612345678"), "[REDACTED]");
-        assert_eq!(redact_pii("user@icloud.com"), "[REDACTED]");
-        assert_eq!(redact_pii("hello"), "hello");
-    }
-
-    #[test]
-    fn test_message_events_filter() {
-        assert!(MESSAGE_EVENTS.contains(&"new-message"));
-        assert!(MESSAGE_EVENTS.contains(&"updated-message"));
-        assert!(!MESSAGE_EVENTS.contains(&"typing-indicator"));
-    }
-
-    #[test]
-    fn test_tapback_codes_range() {
-        // Added reactions: 2000-2005
-        for code in 2000..=2005 {
-            assert!(
-                TAPBACK_CODES.contains(&code),
-                "tapback code {code} should be present"
-            );
-        }
-        // Removed reactions: 3000-3005
-        for code in 3000..=3005 {
-            assert!(
-                TAPBACK_CODES.contains(&code),
-                "tapback code {code} should be present"
-            );
-        }
-        // Non-tapback codes should not match
-        assert!(!TAPBACK_CODES.contains(&0));
-        assert!(!TAPBACK_CODES.contains(&1999));
-        assert!(!TAPBACK_CODES.contains(&2006));
-    }
-
-    #[tokio::test]
-    async fn test_webhook_filters_tapback_reactions() {
-        let config = BlueBubblesConfig {
-            server_url: "http://127.0.0.1:1".to_string(),
-            password: SecretString::from("bluebubbles-pass"),
-            webhook_host: "127.0.0.1".to_string(),
-            webhook_port: 8645,
-            webhook_path: "/bluebubbles-webhook".to_string(),
-            allow_from: vec![],
-            send_read_receipts: false,
-        };
-
-        let channel = BlueBubblesChannel::new(config)
-            .await
-            .expect("channel should initialize");
-        let mut stream = channel.start().await.expect("stream should start");
-        let app = channel.webhook_routes();
-
-        // Send a tapback reaction (love = 2000)
-        let payload = serde_json::json!({
-            "type": "new-message",
-            "data": {
-                "text": "",
-                "chatGuid": "chat-1",
-                "isFromMe": false,
-                "associatedMessageType": 2000,
-                "handle": { "address": "alice@example.com" },
-            }
-        });
-        let request = Request::builder()
-            .method("POST")
-            .uri("/bluebubbles-webhook?password=bluebubbles-pass")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&payload).expect("serialize")))
-            .expect("build request");
-
-        let response = app.oneshot(request).await.expect("serve");
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-
-        // No message should arrive — tapbacks are filtered
-        assert!(
-            timeout(Duration::from_millis(200), stream.next())
-                .await
-                .is_err(),
-            "tapback reaction should not produce a message"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_webhook_form_encoded_fallback() {
-        let config = BlueBubblesConfig {
-            server_url: "http://127.0.0.1:1".to_string(),
-            password: SecretString::from("bluebubbles-pass"),
-            webhook_host: "127.0.0.1".to_string(),
-            webhook_port: 8645,
-            webhook_path: "/bluebubbles-webhook".to_string(),
-            allow_from: vec![],
-            send_read_receipts: false,
-        };
-
-        let channel = BlueBubblesChannel::new(config)
-            .await
-            .expect("channel should initialize");
-        let mut stream = channel.start().await.expect("stream should start");
-        let app = channel.webhook_routes();
-
-        // Send form-encoded body: payload=<url-encoded JSON>
-        let json_str = serde_json::json!({
-            "type": "new-message",
-            "data": {
-                "text": "form-encoded hello",
-                "chatGuid": "chat-form",
-                "isFromMe": false,
-                "handle": { "address": "bob@example.com" },
-            }
-        })
-        .to_string();
-        let form_body = format!("payload={}", urlencoding::encode(&json_str));
-
-        let request = Request::builder()
-            .method("POST")
-            .uri("/bluebubbles-webhook?password=bluebubbles-pass")
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(Body::from(form_body))
-            .expect("build request");
-
-        let response = app.oneshot(request).await.expect("serve");
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-
-        let message = timeout(Duration::from_secs(1), stream.next())
-            .await
-            .expect("message should arrive")
-            .expect("stream should yield a message");
-        assert_eq!(message.channel, "bluebubbles");
-        assert_eq!(message.content, "form-encoded hello");
-        assert_eq!(message.user_id, "bob@example.com");
-    }
-
-    #[test]
-    fn test_base64_decode_valid() {
-        let result = base64_decode("SGVsbG8=").expect("should decode");
-        assert_eq!(result, b"Hello");
-    }
-
-    #[test]
-    fn test_base64_decode_invalid() {
-        assert!(base64_decode("!!!invalid!!!").is_err());
-    }
-
-    #[tokio::test]
-    async fn test_webhook_includes_reply_to_metadata() {
-        let config = BlueBubblesConfig {
-            server_url: "http://127.0.0.1:1".to_string(),
-            password: SecretString::from("pass123"),
-            webhook_host: "127.0.0.1".to_string(),
-            webhook_port: 8645,
-            webhook_path: "/bluebubbles-webhook".to_string(),
-            allow_from: vec![],
-            send_read_receipts: false,
-        };
-
-        let channel = BlueBubblesChannel::new(config)
-            .await
-            .expect("channel should initialize");
-        let mut stream = channel.start().await.expect("stream should start");
-        let app = channel.webhook_routes();
-
-        let payload = serde_json::json!({
-            "type": "new-message",
-            "data": {
-                "text": "replying to something",
-                "chatGuid": "chat-reply",
-                "isFromMe": false,
-                "handle": { "address": "carol@example.com" },
-                "threadOriginatorGuid": "original-msg-guid-123",
-                "guid": "this-msg-guid-456",
-            }
-        });
-        let request = Request::builder()
-            .method("POST")
-            .uri("/bluebubbles-webhook?password=pass123")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&payload).expect("serialize")))
-            .expect("build request");
-
-        let response = app.oneshot(request).await.expect("serve");
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-
-        let message = timeout(Duration::from_secs(1), stream.next())
-            .await
-            .expect("message should arrive")
-            .expect("stream should yield");
-        assert_eq!(message.metadata["message_id"], "this-msg-guid-456");
-        assert_eq!(
-            message.metadata["reply_to_message_id"],
-            "original-msg-guid-123"
-        );
-    }
+    let lower = trimmed.to_ascii_lowercase();
+    let with_scheme = if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        format!("http://{trimmed}")
+    } else {
+        trimmed.to_string()
+    };
+    with_scheme.trim_end_matches('/').to_string()
 }
+
+/// Extract the message record from a BlueBubbles webhook payload.
+fn extract_record(payload: &serde_json::Value) -> Option<serde_json::Value> {
+    if let Some(data) = payload.get("data") {
+        if data.is_object() {
+            return Some(data.clone());
+        }
+        if let Some(arr) = data.as_array()
+            && let Some(first) = arr.first()
+            && first.is_object()
+        {
+            return Some(first.clone());
+        }
+    }
+    if let Some(msg) = payload.get("message")
+        && msg.is_object()
+    {
+        return Some(msg.clone());
+    }
+    if payload.is_object() {
+        return Some(payload.clone());
+    }
+    None
+}
+
+/// Get the first non-empty string from a slice of optional JSON values.
+fn first_string(candidates: &[Option<&serde_json::Value>]) -> Option<String> {
+    for candidate in candidates {
+        if let Some(val) = candidate
+            && let Some(s) = val.as_str()
+        {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Split a long message into chunks at newline boundaries.
+fn split_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        let safe_end = floor_char_boundary(remaining, max_len);
+        let split_at = remaining[..safe_end].rfind('\n').unwrap_or(safe_end);
+
+        chunks.push(remaining[..split_at].to_string());
+        remaining = remaining[split_at..].trim_start_matches('\n');
+    }
+
+    chunks
+}
+
+/// Redact a URL for logging (hide password, port, etc.).
+fn redact_url(url: &str) -> String {
+    // Show scheme + host, hide everything else
+    if let Some(idx) = url.find("://") {
+        let after_scheme = &url[idx + 3..];
+        if let Some(slash) = after_scheme.find('/') {
+            return format!("{}://{}/***", &url[..idx], &after_scheme[..slash]);
+        }
+        return format!("{}://{}", &url[..idx], after_scheme);
+    }
+    "[redacted]".to_string()
+}
+
+/// Redact phone numbers and email addresses from text.
+fn redact_pii(text: &str) -> String {
+    use std::sync::OnceLock;
+    static PHONE_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static EMAIL_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+    let phone = PHONE_RE
+        .get_or_init(|| regex::Regex::new(r"\+?\d{7,15}").expect("static phone regex is valid"));
+    let email = EMAIL_RE.get_or_init(|| {
+        regex::Regex::new(r"[\w.+-]+@[\w-]+\.[\w.]+").expect("static email regex is valid")
+    });
+    let s = phone.replace_all(text, "[REDACTED]");
+    email.replace_all(&s, "[REDACTED]").to_string()
+}
+
+/// Decode a base64-encoded string to bytes.
+#[cfg(test)]
+fn base64_decode(input: &str) -> Result<Vec<u8>, ChannelError> {
+    base64_decode_bounded(input, MAX_INBOUND_ATTACHMENT_SIZE as usize)
+}
+
+fn base64_decode_bounded(input: &str, limit: usize) -> Result<Vec<u8>, ChannelError> {
+    use base64::Engine;
+    let max_encoded = limit
+        .checked_mul(4)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_add(4))
+        .unwrap_or(usize::MAX);
+    if input.len() > max_encoded {
+        return Err(ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: "base64 attachment exceeds the configured size limit".to_string(),
+        });
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(input)
+        .map_err(|e| ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: format!("base64 decode error: {e}"),
+        })?;
+    if decoded.len() > limit {
+        return Err(ChannelError::SendFailed {
+            name: NAME.to_string(),
+            reason: "decoded attachment exceeds the configured size limit".to_string(),
+        });
+    }
+    Ok(decoded)
+}
+
+#[cfg(test)]
+mod tests;

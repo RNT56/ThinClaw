@@ -1,6 +1,6 @@
 //! Authoritative-intent routing and compact tool-schema rendering.
 
-use crate::llm::{ChatMessage, Role, ToolDefinition};
+use crate::llm::{ChatMessage, ToolDefinition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AuthoritativeIntent {
@@ -41,7 +41,7 @@ fn last_user_message(messages: &[ChatMessage]) -> Option<&str> {
     messages
         .iter()
         .rev()
-        .find(|message| matches!(message.role, Role::User))
+        .find(|message| message.is_user_instruction())
         .map(|message| message.content.as_str())
 }
 

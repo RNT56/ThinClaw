@@ -61,6 +61,25 @@ impl RoutineStore for PgBackend {
             .await
     }
 
+    async fn advance_routine_runtime(
+        &self,
+        id: Uuid,
+        last_run_at: DateTime<Utc>,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .advance_routine_runtime(id, last_run_at, next_fire_at)
+            .await
+    }
+
+    async fn set_routine_next_fire_at(
+        &self,
+        id: Uuid,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), DatabaseError> {
+        self.store.set_routine_next_fire_at(id, next_fire_at).await
+    }
+
     async fn delete_routine(&self, id: Uuid) -> Result<bool, DatabaseError> {
         self.store.delete_routine(id).await
     }
@@ -69,15 +88,51 @@ impl RoutineStore for PgBackend {
         self.store.create_routine_run(run).await
     }
 
+    async fn try_admit_routine_run(
+        &self,
+        run: &RoutineRun,
+        routine_limit: i64,
+        global_limit: i64,
+        initial_lease_expires_at: DateTime<Utc>,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<crate::RoutineRunAdmission, DatabaseError> {
+        self.store
+            .try_admit_routine_run(
+                run,
+                routine_limit,
+                global_limit,
+                initial_lease_expires_at,
+                next_fire_at,
+            )
+            .await
+    }
+
     async fn complete_routine_run(
         &self,
         id: Uuid,
         status: RunStatus,
         result_summary: Option<&str>,
         tokens_used: Option<i32>,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<crate::RoutineRunCompletion, DatabaseError> {
         self.store
             .complete_routine_run(id, status, result_summary, tokens_used)
+            .await
+    }
+
+    async fn apply_routine_failure_policy(
+        &self,
+        routine_id: Uuid,
+        expected_consecutive_failures: u32,
+        not_before: DateTime<Utc>,
+        disable: bool,
+    ) -> Result<bool, DatabaseError> {
+        self.store
+            .apply_routine_failure_policy(
+                routine_id,
+                expected_consecutive_failures,
+                not_before,
+                disable,
+            )
             .await
     }
 
@@ -113,7 +168,10 @@ impl RoutineStore for PgBackend {
         self.store.renew_routine_run_lease(run_id, lease_secs).await
     }
 
-    async fn cleanup_stale_routine_runs(&self, legacy_ttl_secs: i64) -> Result<u64, DatabaseError> {
+    async fn cleanup_stale_routine_runs(
+        &self,
+        legacy_ttl_secs: i64,
+    ) -> Result<crate::RoutineRunReapResult, DatabaseError> {
         self.store.cleanup_stale_routine_runs(legacy_ttl_secs).await
     }
 

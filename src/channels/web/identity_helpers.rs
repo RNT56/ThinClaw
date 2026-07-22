@@ -1,7 +1,9 @@
 use crate::channels::web::types::SseEvent;
 use crate::db::Database;
 use crate::history::ConversationKind as HistoryConversationKind;
-use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
+#[cfg(test)]
+use crate::identity::scope_id_from_key;
+use crate::identity::{ResolvedIdentity, direct_scope_id};
 pub use thinclaw_gateway::web::identity::{
     GatewayAuthSource, GatewayRequestIdentity, requested_identity_override,
 };
@@ -124,21 +126,7 @@ pub(crate) fn gateway_identity(
     actor_id: &str,
     thread_id: Option<&str>,
 ) -> ResolvedIdentity {
-    let stable_external_conversation_key = match thread_id {
-        Some(thread_id) => {
-            format!("gateway://direct/{principal_id}/actor/{actor_id}/thread/{thread_id}")
-        }
-        None => format!("gateway://direct/{principal_id}/actor/{actor_id}"),
-    };
-
-    ResolvedIdentity {
-        principal_id: principal_id.to_string(),
-        actor_id: actor_id.to_string(),
-        conversation_scope_id: scope_id_from_key(&format!("principal:{principal_id}")),
-        conversation_kind: ConversationKind::Direct,
-        raw_sender_id: actor_id.to_string(),
-        stable_external_conversation_key,
-    }
+    thinclaw_gateway::web::identity::gateway_identity(principal_id, actor_id, thread_id)
 }
 
 pub(crate) async fn sse_event_visible_to_identity(
@@ -370,14 +358,16 @@ async fn promote_gateway_main_direct_conversation(
     user_id: &str,
     actor_id: &str,
 ) -> Result<(), crate::error::DatabaseError> {
+    let user_key = thinclaw_identity::escape_stable_key_component(user_id);
+    let actor_key = thinclaw_identity::escape_stable_key_component(actor_id);
     let stable_external_conversation_key =
-        format!("gateway://direct/{user_id}/actor/{actor_id}/assistant");
+        format!("gateway://direct/{user_key}/actor/{actor_key}/assistant");
     store
         .update_conversation_identity(
             conversation_id,
             Some(user_id),
             Some(actor_id),
-            Some(scope_id_from_key(&format!("principal:{user_id}"))),
+            Some(direct_scope_id(user_id, actor_id)),
             HistoryConversationKind::Direct,
             Some(&stable_external_conversation_key),
         )

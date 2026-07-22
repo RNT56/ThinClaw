@@ -133,11 +133,12 @@ impl PodmanConfig {
 
     /// Detect if podman is available.
     pub fn is_available(&self) -> bool {
-        std::process::Command::new(&self.binary_path)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        let binary = std::path::Path::new(&self.binary_path);
+        if binary.components().count() > 1 {
+            binary.is_file()
+        } else {
+            thinclaw_platform::find_executable_in_path(&self.binary_path).is_some()
+        }
     }
 }
 

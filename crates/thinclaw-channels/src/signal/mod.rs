@@ -15,8 +15,10 @@ const MAX_SSE_BUFFER_SIZE: usize = 1024 * 1024;
 const MAX_SSE_EVENT_SIZE: usize = 256 * 1024;
 const MAX_HTTP_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
 const MAX_REPLY_TARGETS: usize = 10000;
-const MAX_ERROR_LOG_BODY: usize = 1024;
-
+const MAX_SIGNAL_ENDPOINT_BYTES: usize = 4096;
+const MAX_SIGNAL_CONFIG_ENTRIES: usize = 4096;
+const MAX_SIGNAL_CONFIG_VALUE_BYTES: usize = 4096;
+const MAX_SIGNAL_DNS_ADDRESSES: usize = 64;
 const REPLY_TARGETS_CAP: NonZeroUsize =
     NonZeroUsize::new(MAX_REPLY_TARGETS).expect("MAX_REPLY_TARGETS is non-zero");
 

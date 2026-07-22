@@ -19,9 +19,9 @@ use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::history::SandboxJobRecord;
-use crate::sandbox_jobs::SandboxChildRegistry;
+use crate::sandbox_jobs::{SandboxChildRegistry, enqueue_sandbox_prompt};
 use crate::sandbox_types::{
-    ContainerHandle, ContainerJobManager, CredentialGrant, JobMode, PendingPrompt, PromptQueue,
+    ContainerHandle, ContainerJobManager, CredentialGrant, JobMode, PromptQueue,
 };
 #[cfg(test)]
 use crate::sandbox_types::{ContainerJobConfig, TokenStore};
@@ -138,6 +138,7 @@ impl RootJobToolHost {
             tool = tool.with_scheduler(scheduler);
         }
         tool.with_sandbox(self.job_manager.clone(), self.store.clone())
+            .with_prompt_queue(self.prompt_queue.clone())
     }
 
     fn events_tool(&self) -> Result<JobEventsTool, ToolHostError> {
@@ -745,6 +746,21 @@ impl Tool for CreateJobTool {
         Some(crate::tools::tool::ToolRateLimitConfig::new(5, 30))
     }
 
+    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        if params
+            .get("credentials")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|credentials| !credentials.is_empty())
+        {
+            // A credential-bearing child can read and exfiltrate the granted
+            // plaintext. Session auto-approval must never silently authorize
+            // that capability escalation.
+            ApprovalRequirement::Always
+        } else {
+            ApprovalRequirement::UnlessAutoApproved
+        }
+    }
+
     async fn execute(
         &self,
         params: serde_json::Value,
@@ -989,6 +1005,7 @@ pub struct CancelJobTool {
     scheduler: Option<Arc<Scheduler>>,
     job_manager: Option<Arc<ContainerJobManager>>,
     store: Option<Arc<dyn Database>>,
+    prompt_queue: Option<PromptQueue>,
 }
 
 impl CancelJobTool {
@@ -998,6 +1015,7 @@ impl CancelJobTool {
             scheduler: None,
             job_manager: None,
             store: None,
+            prompt_queue: None,
         }
     }
 
@@ -1013,6 +1031,11 @@ impl CancelJobTool {
     ) -> Self {
         self.job_manager = job_manager;
         self.store = store;
+        self
+    }
+
+    pub fn with_prompt_queue(mut self, prompt_queue: Option<PromptQueue>) -> Self {
+        self.prompt_queue = prompt_queue;
         self
     }
 }
@@ -1097,7 +1120,7 @@ impl Tool for CancelJobTool {
                     self.store.clone(),
                     self.job_manager.clone(),
                     None,
-                    None,
+                    self.prompt_queue.clone(),
                 );
                 controller
                     .cancel_job(job_id, "Cancelled by user")
@@ -1301,16 +1324,15 @@ impl Tool for JobPromptTool {
             }
         };
 
-        let prompt = PendingPrompt {
-            content: prompt_params.content,
-            done: prompt_params.done,
-        };
-        let done = prompt.done;
-
-        {
-            let mut queue = self.prompt_queue.lock().await;
-            queue.entry(job_id).or_default().push_back(prompt);
-        }
+        let done = prompt_params.done;
+        enqueue_sandbox_prompt(
+            &self.prompt_queue,
+            job_id,
+            prompt_params.content,
+            prompt_params.done,
+        )
+        .await
+        .map_err(ToolError::ExecutionFailed)?;
 
         let result = job_policy::job_prompt_output(job_id, done);
 

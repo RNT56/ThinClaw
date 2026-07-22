@@ -6,10 +6,12 @@ pub mod agent_management;
 pub mod apple_mail;
 #[cfg(feature = "browser")]
 pub mod browser;
+#[cfg(feature = "browser")]
 pub mod browser_a11y;
 pub mod browser_cloud;
 pub mod camera_capture;
 pub mod canvas;
+mod capture_target;
 pub mod clarify;
 pub mod comfyui;
 pub mod desktop_autonomy;
@@ -60,6 +62,7 @@ pub use agent_management::{
 pub use apple_mail::AppleMailTool;
 #[cfg(feature = "browser")]
 pub use browser::{BrowserDockerRuntime, BrowserTool};
+#[cfg(feature = "browser")]
 pub use browser_a11y::AgentBrowserTool;
 pub use camera_capture::CameraCaptureTool;
 pub use canvas::{CanvasAction, CanvasTool, UiComponent};

@@ -21,7 +21,8 @@ use thinclaw_gateway::web::settings::{
     settings_export_response_from_map, settings_list_response_from_rows,
     settings_store_unavailable_status, telegram_default_transport_mode,
     telegram_subagent_session_mode_reset_updates, telegram_subagent_session_mode_update,
-    telegram_transport_runtime_updates,
+    telegram_transport_runtime_updates, validate_sandbox_code_setting, validate_setting_entry,
+    validate_settings_key,
 };
 
 pub(crate) async fn settings_list_handler(
@@ -54,6 +55,7 @@ pub(crate) async fn settings_get_handler(
     request_identity: GatewayRequestIdentity,
     Path(key): Path<String>,
 ) -> Result<Json<SettingResponse>, StatusCode> {
+    validate_settings_key(&key)?;
     let store = state
         .store
         .as_ref()
@@ -80,6 +82,7 @@ pub(crate) async fn settings_set_handler(
     Path(key): Path<String>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    validate_setting_entry(&key, &body.value)?;
     let store = state
         .store
         .as_ref()
@@ -92,6 +95,8 @@ pub(crate) async fn settings_set_handler(
         );
         return Err(sensitive_setting_write_forbidden_status());
     }
+
+    validate_sandbox_code_setting(&key, &body.value)?;
 
     if key == "user_timezone" {
         let timezone = parse_timezone_setting_value(&body.value, |value| {
@@ -141,15 +146,20 @@ pub(crate) async fn settings_set_handler(
     }
 
     if let (Some(jm), Some(update)) = (state.job_manager.clone(), cc_update) {
-        tokio::spawn(async move {
-            jm.update_claude_code_settings(update.model, update.max_turns)
-                .await;
-        });
+        jm.update_claude_code_settings(update.model, update.max_turns)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "Failed to update live Claude Code settings");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
     }
     if let (Some(jm), Some(model)) = (state.job_manager.clone(), codex_update) {
-        tokio::spawn(async move {
-            jm.update_codex_code_settings(model).await;
-        });
+        jm.update_codex_code_settings(model)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "Failed to update live Codex settings");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
     }
 
     if let (Some(cm), Some(update)) = (state.channel_manager.clone(), stream_mode_update) {
@@ -243,6 +253,7 @@ pub(crate) async fn settings_delete_handler(
     request_identity: GatewayRequestIdentity,
     Path(key): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
+    validate_settings_key(&key)?;
     let store = state
         .store
         .as_ref()
@@ -270,6 +281,27 @@ pub(crate) async fn settings_delete_handler(
             tracing::error!("Failed to delete setting '{}': {}", key, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    if let Some(job_manager) = state.job_manager.as_ref() {
+        match key.as_str() {
+            "claude_code_model" => {
+                job_manager
+                    .update_claude_code_settings(Some(None), None)
+                    .await
+            }
+            "claude_code_max_turns" => {
+                job_manager
+                    .update_claude_code_settings(None, Some(None))
+                    .await
+            }
+            "codex_code_model" => job_manager.update_codex_code_settings(None).await,
+            _ => Ok(()),
+        }
+        .map_err(|error| {
+            tracing::error!(%error, key = %key, "Failed to reset live sandbox code setting");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
     if key.starts_with("learning.") {
         crate::agent::learning::invalidate_provider_ready_cache(
             &store,
@@ -401,7 +433,14 @@ pub(crate) async fn settings_import_handler(
         .store
         .as_ref()
         .ok_or_else(settings_store_unavailable_status)?;
+    if body.settings.len() > 10_000 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
     let settings = sanitize_imported_settings(body.settings);
+    for (key, value) in &settings {
+        validate_setting_entry(key, value)?;
+        validate_sandbox_code_setting(key, value)?;
+    }
     let imported_timezone = match settings.get("user_timezone") {
         Some(value) => parse_timezone_setting_value(value, |value| {
             crate::timezone::parse_timezone(value).is_some()
@@ -415,6 +454,38 @@ pub(crate) async fn settings_import_handler(
             tracing::error!("Failed to import settings: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    if let Some(job_manager) = state.job_manager.as_ref() {
+        let claude_model = settings
+            .get("claude_code_model")
+            .and_then(|value| claude_code_settings_update("claude_code_model", value))
+            .and_then(|update| update.model);
+        let claude_turns = settings
+            .get("claude_code_max_turns")
+            .and_then(|value| claude_code_settings_update("claude_code_max_turns", value))
+            .and_then(|update| update.max_turns);
+        if claude_model.is_some() || claude_turns.is_some() {
+            job_manager
+                .update_claude_code_settings(claude_model, claude_turns)
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, "Failed to apply imported Claude Code settings");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+        }
+        if let Some(codex_model) = settings
+            .get("codex_code_model")
+            .and_then(|value| codex_code_model_update("codex_code_model", value))
+        {
+            job_manager
+                .update_codex_code_settings(codex_model)
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, "Failed to apply imported Codex settings");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+        }
+    }
 
     // Bulk imports can change/activate/deactivate a memory provider; the
     // single-key set/delete handlers above already invalidate on learning.*

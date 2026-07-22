@@ -14,14 +14,108 @@ use crate::agent::context_monitor::{
 use crate::agent::learning::{ImprovementClass, LearningEvent, LearningOrchestrator, RiskTier};
 use crate::agent::outcomes;
 use crate::agent::session::{
-    Session, Thread, model_override_to_portable, persisted_subagent_to_portable,
+    Session, TurnToolCall, model_override_to_portable, persisted_subagent_to_portable,
     thread_runtime_state_from_portable,
 };
-use crate::agent::{load_thread_runtime, mutate_thread_runtime};
 use crate::channels::web::types::SseEvent;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::db::Database;
 use crate::identity::ResolvedIdentity;
+
+const ATTACHMENT_CONTEXTS_METADATA_KEY: &str = "untrusted_attachment_contexts";
+const TOOL_TRACE_METADATA_KEYS: &[&str] = &[
+    "tool_trace",
+    "tool_trace_version",
+    "tool_trace_original_count",
+];
+const INTERNAL_CONTEXT_ROW_METADATA_KEYS: &[&str] = &[
+    "synthetic_origin",
+    "thinclaw_context_only",
+    "hide_user_input_from_webui_chat",
+    "hide_from_webui_chat",
+];
+
+/// Remove fields whose meaning is owned by ThinClaw's durable context
+/// pipeline. Ingress adapters may carry arbitrary metadata, so copying it
+/// verbatim into user/assistant rows would let a sender forge attachment or
+/// tool evidence that hydration later treats as an internal record.
+pub(in crate::agent) fn sanitized_ingress_conversation_metadata(
+    metadata: &serde_json::Value,
+) -> serde_json::Value {
+    let mut object = metadata.as_object().cloned().unwrap_or_default();
+    object.remove(thinclaw_agent::session::EFFECTIVE_USER_INSTRUCTION_METADATA_KEY);
+    object.remove(thinclaw_agent::session::EFFECTIVE_USER_INSTRUCTION_VERSION_METADATA_KEY);
+    object.remove(ATTACHMENT_CONTEXTS_METADATA_KEY);
+    for key in TOOL_TRACE_METADATA_KEYS {
+        object.remove(*key);
+    }
+    for key in INTERNAL_CONTEXT_ROW_METADATA_KEYS {
+        object.remove(*key);
+    }
+    serde_json::Value::Object(object)
+}
+
+fn sanitized_user_row_metadata(
+    metadata: &serde_json::Value,
+    attachment_contexts: &[thinclaw_agent::session::TurnContextEvidence],
+) -> serde_json::Value {
+    let mut sanitized = sanitized_ingress_conversation_metadata(metadata);
+    if !attachment_contexts.is_empty()
+        && let Some(object) = sanitized.as_object_mut()
+    {
+        object.insert(
+            ATTACHMENT_CONTEXTS_METADATA_KEY.to_string(),
+            serde_json::to_value(attachment_contexts).unwrap_or_else(|_| serde_json::json!([])),
+        );
+    }
+    sanitized
+}
+
+/// Build metadata for a row deliberately inserted through `inject_context`.
+/// Only this internal path may mint lifecycle markers that hydration trusts.
+pub(in crate::agent) fn sanitized_injected_context_metadata(
+    metadata: &serde_json::Value,
+) -> serde_json::Value {
+    let startup_hook = thinclaw_agent::session::message_is_startup_hook(metadata);
+    let hide_user_input = metadata
+        .get("hide_user_input_from_webui_chat")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let hide_from_chat = metadata
+        .get("hide_from_webui_chat")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mut sanitized = sanitized_ingress_conversation_metadata(metadata);
+    if let Some(object) = sanitized.as_object_mut() {
+        object.insert(
+            "thinclaw_context_only".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        if startup_hook {
+            object.insert(
+                "synthetic_origin".to_string(),
+                serde_json::Value::String("startup_hook".to_string()),
+            );
+        }
+        if hide_user_input {
+            object.insert(
+                "hide_user_input_from_webui_chat".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        if hide_from_chat {
+            object.insert(
+                "hide_from_webui_chat".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+    }
+    sanitized
+}
+
+fn sanitized_assistant_row_metadata(metadata: &serde_json::Value) -> serde_json::Value {
+    sanitized_ingress_conversation_metadata(metadata)
+}
 
 fn detect_user_correction_signal(role: &str, content: &str) -> u32 {
     thinclaw_agent::thread_ops::detect_user_correction_signal(role, content)
@@ -52,26 +146,18 @@ impl Agent {
         trajectory_metadata: Option<serde_json::Value>,
     ) {
         let correction_count = detect_user_correction_signal(role, content);
-        let class = if correction_count > 0 {
-            ImprovementClass::Skill
-        } else {
-            ImprovementClass::Memory
-        };
-        let risk_tier = if correction_count > 0 {
-            RiskTier::Medium
-        } else {
-            RiskTier::Low
-        };
-        let summary = if correction_count > 0 {
-            "Persisted explicit user correction to conversation history".to_string()
-        } else {
-            format!("Persisted {} message to conversation history", role)
-        };
-        let target = if correction_count > 0 {
-            "workflow_correction"
-        } else {
-            "conversation_history"
-        };
+        // Ordinary transcript persistence is not learning. Turning every user
+        // and assistant row into a low-risk memory candidate previously
+        // auto-appended boilerplate into MEMORY.md twice per turn. Explicit
+        // corrections remain learning-relevant; deliberate memory capture goes
+        // through memory_write with a concrete entry and scope.
+        if correction_count == 0 {
+            return;
+        }
+        let class = ImprovementClass::Skill;
+        let risk_tier = RiskTier::Medium;
+        let summary = "Persisted explicit user correction to conversation history".to_string();
+        let target = "workflow_correction";
 
         let job_id = message
             .metadata
@@ -86,6 +172,8 @@ impl Agent {
             "principal_id": identity.principal_id.clone(),
             "actor_id": identity.actor_id.clone(),
             "conversation_kind": identity.conversation_kind.as_str(),
+            "conversation_scope_id": identity.conversation_scope_id.to_string(),
+            "stable_external_conversation_key": identity.stable_external_conversation_key.clone(),
             "message_id": message.id.to_string(),
             "content_length": content.len(),
             "content_preview": Self::compact_text_preview(content),
@@ -226,39 +314,21 @@ impl Agent {
         session: &Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) {
-        let (thread, auto_approved_tools) = {
-            let mut sess = session.lock().await;
-            // Runtime snapshots are persisted on every turn transition
-            // (start, approval, completion), so this is the narrowest choke
-            // point that reliably runs while the session lock is held for
-            // an in-progress conversation. Without this, `last_active_at`
-            // only moved on thread creation/switch/hydration, so long
-            // conversations could be pruned as idle mid-turn.
-            sess.touch_last_active();
-            (
-                sess.threads.get(&thread_id).cloned(),
-                Some(sess.auto_approved_tools.iter().cloned().collect::<Vec<_>>()),
-            )
-        };
-        let Some(thread) = thread else {
-            return;
-        };
-        self.persist_thread_runtime_with_thread(message, thread_id, &thread, auto_approved_tools)
-            .await;
-    }
-
-    async fn persist_thread_runtime_with_thread(
-        &self,
-        message: &IncomingMessage,
-        thread_id: Uuid,
-        thread: &Thread,
-        auto_approved_tools: Option<Vec<String>>,
-    ) {
         let identity = message.resolved_identity();
-        let Some(store) = self
+        let Some(store) = (match self
             .ensure_persisted_conversation(thread_id, message, &identity)
             .await
-        else {
+        {
+            Ok(store) => store,
+            Err(err) => {
+                tracing::warn!(
+                    thread = %thread_id,
+                    error = %err,
+                    "Failed to ensure conversation before runtime snapshot"
+                );
+                return;
+            }
+        }) else {
             return;
         };
 
@@ -271,73 +341,96 @@ impl Agent {
         } else {
             None
         };
-        let existing_runtime = match load_thread_runtime(&store, thread_id).await {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                tracing::debug!(
-                    thread = %thread_id,
-                    error = %err,
-                    "Failed to load thread runtime before snapshot; preserving defaults"
-                );
-                None
-            }
+        let undo_checkpoints = self
+            .session_manager
+            .get_undo_manager(thread_id)
+            .await
+            .lock()
+            .await
+            .persisted_checkpoints(thinclaw_agent::undo::MAX_PERSISTED_CHECKPOINTS);
+
+        // Serialize before reading live state, not after. Interrupts bypass the
+        // ordinary execution lock and can race a tool-result snapshot; cloning
+        // the thread first allowed an older Processing snapshot to overwrite a
+        // newer Interrupted snapshot. Every runtime RMW path shares this lock,
+        // so a mutation that happens after our clone necessarily persists after
+        // this write and wins in durable state.
+        let _runtime_guard =
+            thinclaw_agent::thread_runtime::acquire_runtime_mutation_lock(thread_id).await;
+
+        let (thread, auto_approved_tools) = {
+            let mut sess = session.lock().await;
+            // Runtime snapshots are persisted on every turn transition
+            // (start, approval, completion), so this is also the narrowest
+            // reliable place to keep session pruning activity current.
+            sess.touch_last_active();
+            (
+                sess.threads.get(&thread_id).cloned(),
+                Some(sess.auto_approved_tools.iter().cloned().collect::<Vec<_>>()),
+            )
+        };
+        let Some(thread) = thread else {
+            return;
         };
 
-        if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
+        let persist_result = async {
+            let mut runtime = crate::agent::load_thread_runtime(&store, thread_id)
+                .await?
+                .unwrap_or_default();
             let active_subagents = runtime.active_subagents.clone();
-            let portable_existing = existing_runtime.as_ref().map(|runtime| {
-                thinclaw_agent::ports::ThreadRuntimeSnapshot {
-                    state: runtime.state.into(),
-                    pending_approval: runtime.pending_approval.clone().map(Into::into),
-                    pending_auth: runtime.pending_auth.clone().map(Into::into),
-                    owner_agent_id: runtime.owner_agent_id.clone(),
-                    model_override: runtime
-                        .model_override
-                        .clone()
-                        .map(model_override_to_portable),
-                    auto_approved_tools: runtime.auto_approved_tools.clone(),
-                    active_subagents: runtime
-                        .active_subagents
-                        .iter()
-                        .cloned()
-                        .map(persisted_subagent_to_portable)
-                        .collect(),
-                    last_context_pressure: runtime
-                        .last_context_pressure
-                        .and_then(|pressure| serde_json::to_value(pressure).ok()),
-                    post_compaction_context: runtime.post_compaction_context.clone(),
-                    frozen_workspace_prompt: runtime.frozen_workspace_prompt.clone(),
-                    frozen_provider_system_prompt: runtime.frozen_provider_system_prompt.clone(),
-                    prompt_snapshot_hash: runtime.prompt_snapshot_hash.clone(),
-                    ephemeral_overlay_hash: runtime.ephemeral_overlay_hash.clone(),
-                    prompt_contract_version: runtime.prompt_contract_version.clone(),
-                    prompt_manifest_digest: runtime.prompt_manifest_digest.clone(),
-                    prompt_segment_order: runtime.prompt_segment_order.clone(),
-                    provider_context_refs: runtime.provider_context_refs.clone(),
-                    active_message_row_count: runtime.active_message_row_count,
-                    undo_checkpoints: runtime.undo_checkpoints.clone(),
-                    plan_mode: runtime.plan_mode,
-                }
-            });
-            let snapshot = thinclaw_agent::thread_ops::runtime_snapshot_for_persistence(
-                thread,
+            let portable_existing = thinclaw_agent::ports::ThreadRuntimeSnapshot {
+                state: runtime.state.into(),
+                pending_approval: runtime.pending_approval.clone().map(Into::into),
+                pending_auth: runtime.pending_auth.clone().map(Into::into),
+                owner_agent_id: runtime.owner_agent_id.clone(),
+                model_override: runtime
+                    .model_override
+                    .clone()
+                    .map(model_override_to_portable),
+                auto_approved_tools: runtime.auto_approved_tools.clone(),
+                active_subagents: runtime
+                    .active_subagents
+                    .iter()
+                    .cloned()
+                    .map(persisted_subagent_to_portable)
+                    .collect(),
+                last_context_pressure: runtime
+                    .last_context_pressure
+                    .and_then(|pressure| serde_json::to_value(pressure).ok()),
+                post_compaction_context: runtime.post_compaction_context.clone(),
+                frozen_workspace_prompt: runtime.frozen_workspace_prompt.clone(),
+                frozen_provider_system_prompt: runtime.frozen_provider_system_prompt.clone(),
+                prompt_snapshot_hash: runtime.prompt_snapshot_hash.clone(),
+                ephemeral_overlay_hash: runtime.ephemeral_overlay_hash.clone(),
+                prompt_contract_version: runtime.prompt_contract_version.clone(),
+                prompt_manifest_digest: runtime.prompt_manifest_digest.clone(),
+                prompt_segment_order: runtime.prompt_segment_order.clone(),
+                provider_context_refs: runtime.provider_context_refs.clone(),
+                active_message_start_row: runtime.active_message_start_row,
+                active_message_row_count: runtime.active_message_row_count,
+                inflight_tool_trace: runtime.inflight_tool_trace.clone(),
+                undo_checkpoints: runtime.undo_checkpoints.clone(),
+                plan_mode: runtime.plan_mode,
+            };
+            let mut snapshot = thinclaw_agent::thread_ops::runtime_snapshot_for_persistence(
+                &thread,
                 owner_agent_id.clone(),
                 model_override.clone().map(model_override_to_portable),
                 auto_approved_tools.clone(),
-                portable_existing
-                    .as_ref()
-                    .map(|runtime| runtime.active_subagents.clone())
-                    .unwrap_or_default(),
-                portable_existing.as_ref(),
+                portable_existing.active_subagents.clone(),
+                Some(&portable_existing),
             );
-            *runtime = thread_runtime_state_from_portable(
+            snapshot.undo_checkpoints = undo_checkpoints.clone();
+            runtime = thread_runtime_state_from_portable(
                 snapshot,
                 model_override.clone(),
                 active_subagents,
             );
-        })
-        .await
-        {
+            crate::agent::save_thread_runtime(&store, thread_id, &runtime).await?;
+            Ok::<(), crate::error::DatabaseError>(())
+        }
+        .await;
+        if let Err(err) = persist_result {
             tracing::warn!(
                 thread = %thread_id,
                 error = %err,
@@ -358,33 +451,69 @@ impl Agent {
     ///
     /// `active_message_row_count` should be the number of durable
     /// conversation rows (oldest-first) that correspond to the
-    /// already-mutated in-memory thread, i.e. `thread.messages().len()`.
+    /// already-mutated in-memory thread, i.e.
+    /// `thread.persisted_message_count()` (synthetic context is excluded).
     pub(in crate::agent) async fn persist_active_watermark_and_undo_stack(
         &self,
         thread_id: Uuid,
         active_message_row_count: i64,
         undo: &thinclaw_agent::undo::UndoManager,
-    ) {
+    ) -> Result<(), crate::error::Error> {
         let Some(store) = self.runtime_ports().threads.as_ref().map(Arc::clone) else {
-            return;
+            return Ok(());
         };
 
         let checkpoints =
             undo.persisted_checkpoints(thinclaw_agent::undo::MAX_PERSISTED_CHECKPOINTS);
-        if let Err(err) = thinclaw_agent::thread_ops::set_active_watermark_and_undo_stack(
+        thinclaw_agent::thread_ops::set_active_watermark_and_undo_stack(
             store.as_ref(),
             thread_id,
             active_message_row_count,
             checkpoints,
         )
-        .await
-        {
-            tracing::debug!(
-                thread = %thread_id,
-                error = %err,
-                "Failed to persist active-message watermark and undo stack"
-            );
-        }
+        .await?;
+        Ok(())
+    }
+
+    /// Persist an oldest-row removal boundary after compaction or `/clear`.
+    /// The DB transcript remains an append-only audit log; only the active
+    /// replay window moves forward.
+    pub(in crate::agent) async fn advance_active_history_window(
+        &self,
+        thread_id: Uuid,
+        removed_row_count: i64,
+        active_message_row_count: i64,
+        post_compaction_context: Option<String>,
+    ) -> Result<(), crate::error::Error> {
+        let Some(store) = self.runtime_ports().threads.as_ref().map(Arc::clone) else {
+            return Ok(());
+        };
+        thinclaw_agent::thread_ops::advance_active_history_window(
+            store.as_ref(),
+            thread_id,
+            removed_row_count,
+            active_message_row_count,
+            post_compaction_context,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub(in crate::agent) async fn clear_active_history_window(
+        &self,
+        thread_id: Uuid,
+        removed_row_count: i64,
+    ) -> Result<(), crate::error::Error> {
+        let Some(store) = self.runtime_ports().threads.as_ref().map(Arc::clone) else {
+            return Ok(());
+        };
+        thinclaw_agent::thread_ops::clear_active_history_window(
+            store.as_ref(),
+            thread_id,
+            removed_row_count,
+        )
+        .await?;
+        Ok(())
     }
 
     pub(in crate::agent) async fn record_context_pressure_state(
@@ -526,16 +655,40 @@ impl Agent {
         thread_id: Uuid,
         message: &IncomingMessage,
         user_input: &str,
-    ) {
+        attachment_contexts: &[thinclaw_agent::session::TurnContextEvidence],
+    ) -> Result<Option<Uuid>, crate::error::Error> {
+        let durable_metadata = sanitized_user_row_metadata(&message.metadata, attachment_contexts);
+        self.persist_user_row(thread_id, message, user_input, durable_metadata)
+            .await
+    }
+
+    pub(in crate::agent) async fn persist_injected_context_message(
+        &self,
+        thread_id: Uuid,
+        message: &IncomingMessage,
+        content: &str,
+    ) -> Result<Option<Uuid>, crate::error::Error> {
+        let durable_metadata = sanitized_injected_context_metadata(&message.metadata);
+        self.persist_user_row(thread_id, message, content, durable_metadata)
+            .await
+    }
+
+    async fn persist_user_row(
+        &self,
+        thread_id: Uuid,
+        message: &IncomingMessage,
+        user_input: &str,
+        durable_metadata: serde_json::Value,
+    ) -> Result<Option<Uuid>, crate::error::Error> {
         let identity = message.resolved_identity();
         let Some(store) = self
             .ensure_persisted_conversation(thread_id, message, &identity)
-            .await
+            .await?
         else {
-            return;
+            return Ok(None);
         };
 
-        let persisted_message_id = match store
+        let persisted_message_id = store
             .add_conversation_message_with_attribution(
                 thread_id,
                 "user",
@@ -543,16 +696,9 @@ impl Agent {
                 Some(&identity.actor_id),
                 message.user_name.as_deref(),
                 Some(&identity.raw_sender_id),
-                Some(&message.metadata),
+                Some(&durable_metadata),
             )
-            .await
-        {
-            Ok(message_id) => Some(message_id),
-            Err(e) => {
-                tracing::warn!("Failed to persist user message: {}", e);
-                return;
-            }
-        };
+            .await?;
 
         self.best_effort_record_learning_event(
             &store,
@@ -561,11 +707,73 @@ impl Agent {
             &identity,
             "user",
             user_input,
-            persisted_message_id,
+            Some(persisted_message_id),
             None,
         )
         .await;
         self.emit_conversation_sync_event(thread_id, "user_message", Some(&message.channel));
+        Ok(Some(persisted_message_id))
+    }
+
+    /// Atomically make a hook-transformed user instruction the canonical
+    /// model-visible input in both durable and live context. The transcript's
+    /// raw content is retained; hydration replays this internal metadata field.
+    pub(in crate::agent) async fn persist_effective_user_instruction(
+        &self,
+        thread_id: Uuid,
+        session: &Arc<Mutex<Session>>,
+        effective_instruction: &str,
+    ) -> Result<(), crate::error::Error> {
+        let (message_id, current_instruction) = {
+            let sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get(&thread_id)
+                .ok_or(crate::error::JobError::NotFound { id: thread_id })?;
+            let turn = thread
+                .last_turn()
+                .ok_or_else(|| crate::error::JobError::ContextError {
+                    id: thread_id,
+                    reason: "No active user turn exists for the LLM input hook".to_string(),
+                })?;
+            (turn.durable_user_message_id, turn.user_input.clone())
+        };
+
+        if current_instruction == effective_instruction {
+            return Ok(());
+        }
+
+        if let Some(store) = self.store() {
+            let message_id = message_id.ok_or_else(|| crate::error::DatabaseError::NotFound {
+                entity: "durable user message for active turn".to_string(),
+                id: thread_id.to_string(),
+            })?;
+            store
+                .set_effective_user_instruction(thread_id, message_id, effective_instruction)
+                .await?;
+        }
+
+        let mut sess = session.lock().await;
+        let thread = sess
+            .threads
+            .get_mut(&thread_id)
+            .ok_or(crate::error::JobError::NotFound { id: thread_id })?;
+        let turn = thread
+            .last_turn_mut()
+            .ok_or_else(|| crate::error::JobError::ContextError {
+                id: thread_id,
+                reason: "Active user turn disappeared during LLM input persistence".to_string(),
+            })?;
+        if turn.durable_user_message_id != message_id || turn.user_input != current_instruction {
+            return Err(crate::error::JobError::ContextError {
+                id: thread_id,
+                reason: "Active user turn changed during LLM input persistence".to_string(),
+            }
+            .into());
+        }
+        turn.user_input = effective_instruction.to_string();
+        thread.updated_at = chrono::Utc::now();
+        Ok(())
     }
 
     /// Persist the assistant response to the DB after the agentic loop completes.
@@ -578,18 +786,35 @@ impl Agent {
         thread_id: Uuid,
         message: &IncomingMessage,
         response: &str,
+        tool_calls: &[TurnToolCall],
         session_id: Uuid,
         turn_number: usize,
-    ) {
+    ) -> Result<(), crate::error::Error> {
         let identity = message.resolved_identity();
         let Some(store) = self
             .ensure_persisted_conversation(thread_id, message, &identity)
-            .await
+            .await?
         else {
-            return;
+            return Ok(());
         };
 
-        let persisted_message_id = match store
+        let mut assistant_metadata = sanitized_assistant_row_metadata(&message.metadata);
+        if !tool_calls.is_empty()
+            && let Some(metadata) = assistant_metadata.as_object_mut()
+        {
+            let durable_trace = thinclaw_agent::session::durable_tool_trace(tool_calls);
+            metadata.insert("tool_trace_version".to_string(), serde_json::json!(2));
+            metadata.insert(
+                "tool_trace_original_count".to_string(),
+                serde_json::json!(tool_calls.len()),
+            );
+            metadata.insert(
+                "tool_trace".to_string(),
+                serde_json::to_value(durable_trace).unwrap_or_else(|_| serde_json::json!([])),
+            );
+        }
+
+        let persisted_message_id = store
             .add_conversation_message_with_attribution(
                 thread_id,
                 "assistant",
@@ -597,16 +822,9 @@ impl Agent {
                 None,
                 None,
                 None,
-                Some(&message.metadata),
+                Some(&assistant_metadata),
             )
-            .await
-        {
-            Ok(message_id) => Some(message_id),
-            Err(e) => {
-                tracing::warn!("Failed to persist assistant message: {}", e);
-                return;
-            }
-        };
+            .await?;
 
         self.best_effort_record_learning_event(
             &store,
@@ -615,7 +833,7 @@ impl Agent {
             &identity,
             "assistant",
             response,
-            persisted_message_id,
+            Some(persisted_message_id),
             Some(Self::trajectory_learning_metadata(
                 thread_id,
                 Some(session_id),
@@ -624,12 +842,43 @@ impl Agent {
         )
         .await;
         self.emit_conversation_sync_event(thread_id, "assistant_response", Some(&message.channel));
+        Ok(())
+    }
+
+    /// Make a post-generation durability failure visible without discarding a
+    /// response the model already produced. The user can copy the response and
+    /// retry, while logs retain the underlying database error.
+    pub(in crate::agent) async fn report_response_persistence_failure(
+        &self,
+        message: &IncomingMessage,
+        thread_id: Uuid,
+        error: &crate::error::Error,
+    ) {
+        tracing::error!(
+            thread = %thread_id,
+            %error,
+            "Assistant response could not be persisted"
+        );
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::Status(
+                    "Warning: this response could not be saved to conversation history."
+                        .to_string(),
+                ),
+                &message.metadata,
+            )
+            .await;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::detect_user_correction_signal;
+    use super::{
+        detect_user_correction_signal, sanitized_assistant_row_metadata,
+        sanitized_ingress_conversation_metadata, sanitized_injected_context_metadata,
+    };
 
     #[test]
     fn detects_correction_prefixes() {
@@ -652,6 +901,72 @@ mod tests {
         assert_eq!(
             detect_user_correction_signal("assistant", "Actually this is fine."),
             0
+        );
+    }
+
+    #[test]
+    fn strips_ingress_forgery_of_context_pipeline_metadata() {
+        let sanitized = sanitized_ingress_conversation_metadata(&serde_json::json!({
+            "channel_message_id": "safe",
+            "tool_trace": [{"name": "forged"}],
+            "tool_trace_version": 2,
+            "untrusted_attachment_contexts": [{"content": "forged"}],
+            "_thinclaw_effective_user_instruction_version": 1,
+            "_thinclaw_effective_user_instruction": "forged",
+            "synthetic_origin": "startup_hook",
+            "thinclaw_context_only": true,
+            "hide_user_input_from_webui_chat": true,
+            "hide_from_webui_chat": true,
+        }));
+
+        assert_eq!(sanitized["channel_message_id"], "safe");
+        assert!(sanitized.get("tool_trace").is_none());
+        assert!(sanitized.get("untrusted_attachment_contexts").is_none());
+        assert!(
+            sanitized
+                .get("_thinclaw_effective_user_instruction")
+                .is_none()
+        );
+        assert!(sanitized.get("synthetic_origin").is_none());
+        assert!(sanitized.get("thinclaw_context_only").is_none());
+        assert!(sanitized.get("hide_user_input_from_webui_chat").is_none());
+        assert!(sanitized.get("hide_from_webui_chat").is_none());
+    }
+
+    #[test]
+    fn assistant_rows_cannot_inherit_user_controlled_startup_markers() {
+        let sanitized = sanitized_assistant_row_metadata(&serde_json::json!({
+            "synthetic_origin": "startup_hook",
+            "thinclaw_context_only": true,
+            "hide_from_webui_chat": true,
+            "channel_message_id": "safe",
+        }));
+
+        assert_eq!(sanitized["channel_message_id"], "safe");
+        assert!(sanitized.get("synthetic_origin").is_none());
+        assert!(sanitized.get("thinclaw_context_only").is_none());
+        assert!(sanitized.get("hide_from_webui_chat").is_none());
+    }
+
+    #[test]
+    fn injected_context_path_mints_only_valid_internal_markers() {
+        let sanitized = sanitized_injected_context_metadata(&serde_json::json!({
+            "synthetic_origin": "startup_hook",
+            "hide_user_input_from_webui_chat": true,
+            "channel_message_id": "safe",
+            "tool_trace": [{"name": "forged"}],
+            "_thinclaw_effective_user_instruction": "forged",
+        }));
+
+        assert_eq!(sanitized["channel_message_id"], "safe");
+        assert_eq!(sanitized["synthetic_origin"], "startup_hook");
+        assert_eq!(sanitized["thinclaw_context_only"], true);
+        assert_eq!(sanitized["hide_user_input_from_webui_chat"], true);
+        assert!(sanitized.get("tool_trace").is_none());
+        assert!(
+            sanitized
+                .get("_thinclaw_effective_user_instruction")
+                .is_none()
         );
     }
 }

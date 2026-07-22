@@ -54,6 +54,9 @@ pub async fn setup_tunnel(
                 if t.cf_token.is_some() || has_cf_secret {
                     print_info("  Auth:      token configured");
                 }
+                if let Some(ref hostname) = t.cf_hostname {
+                    print_info(&format!("  Hostname:  {hostname}"));
+                }
             }
             Some(channel_setup::TUNNEL_PROVIDER_TAILSCALE) => {
                 let mode = if t.ts_funnel {
@@ -128,7 +131,7 @@ pub async fn setup_tunnel(
     match choice {
         0 => setup_tunnel_ngrok(secrets).await,
         1 => setup_tunnel_cloudflare(secrets).await,
-        2 => setup_tunnel_tailscale(),
+        2 => setup_tunnel_tailscale().await,
         3 => setup_tunnel_custom(),
         4 => setup_tunnel_static(),
         _ => Ok(TunnelSettings::default()),
@@ -207,6 +210,17 @@ async fn setup_tunnel_cloudflare(
     crate::setup::prompts::print_blank_line();
 
     let token = secret_input("Cloudflare tunnel token")?;
+    let hostname = input(
+        "Public HTTPS URL configured for this tunnel (for example https://agent.example.com)",
+    )?;
+    let parsed = url::Url::parse(hostname.trim()).map_err(|error| {
+        ChannelSetupError::Validation(format!("invalid Cloudflare tunnel URL: {error}"))
+    })?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err(ChannelSetupError::Validation(
+            "Cloudflare tunnel URL must use HTTPS and include a hostname".to_string(),
+        ));
+    }
     let cf_token = if let Some(ctx) = secrets {
         ctx.save_secret(TUNNEL_CF_TOKEN_SECRET, &token).await?;
         None
@@ -222,6 +236,7 @@ async fn setup_tunnel_cloudflare(
     Ok(TunnelSettings {
         provider: Some(channel_setup::TUNNEL_PROVIDER_CLOUDFLARE.to_string()),
         cf_token,
+        cf_hostname: Some(hostname.trim_end_matches('/').to_string()),
         ..Default::default()
     })
 }
@@ -236,13 +251,17 @@ async fn setup_tunnel_cloudflare(
 /// Uses `resolve_binary` so that Homebrew-installed CLIs at
 /// `/opt/homebrew/bin/tailscale` are found even when that directory
 /// is not in `$PATH` (common for processes spawned by launchd/IDEs).
-fn test_tailscale_cli() -> bool {
+async fn test_tailscale_cli() -> bool {
     let binary = crate::util::resolve_binary("tailscale");
-    let output = std::process::Command::new(&binary)
-        .arg("version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output();
+    let mut command = tokio::process::Command::new(&binary);
+    command.arg("version");
+    let output = thinclaw_platform::bounded_command_output(
+        &mut command,
+        std::time::Duration::from_secs(15),
+        64 * 1024,
+        64 * 1024,
+    )
+    .await;
 
     match output {
         Ok(o) => {
@@ -262,11 +281,11 @@ fn test_tailscale_cli() -> bool {
     }
 }
 
-fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
+async fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
     // Check if tailscale CLI is installed AND working.
     // On macOS, the App Store version installs a CLI shim that crashes with
     // BundleIdentifier errors when spawned from another process.
-    let cli_working = test_tailscale_cli();
+    let cli_working = test_tailscale_cli().await;
 
     if !cli_working {
         crate::setup::prompts::print_blank_line();
@@ -287,13 +306,7 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
             crate::setup::prompts::print_blank_line();
 
             // Check if Homebrew is available for auto-install
-            let has_brew = std::process::Command::new("brew")
-                .arg("--version")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+            let has_brew = thinclaw_platform::find_executable_in_path("brew").is_some();
 
             if has_brew {
                 if confirm(
@@ -301,13 +314,19 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
                     true,
                 )? {
                     print_info("Installing tailscale via Homebrew (this may take a minute)...");
-                    let install_result = std::process::Command::new("brew")
-                        .args(["install", "tailscale"])
-                        .status();
+                    let mut command = tokio::process::Command::new("brew");
+                    command.args(["install", "tailscale"]);
+                    let install_result = thinclaw_platform::bounded_command_output(
+                        &mut command,
+                        std::time::Duration::from_secs(30 * 60),
+                        2 * 1024 * 1024,
+                        2 * 1024 * 1024,
+                    )
+                    .await;
 
                     match install_result {
-                        Ok(status) if status.success() => {
-                            if test_tailscale_cli() {
+                        Ok(output) if output.status.success() => {
+                            if test_tailscale_cli().await {
                                 print_success("Tailscale CLI installed and working!");
                             } else {
                                 print_success("Tailscale CLI installed.");
@@ -477,34 +496,6 @@ fn setup_tunnel_static() -> Result<TunnelSettings, ChannelSetupError> {
 /// PATH first and then falls back to known macOS Homebrew paths
 /// (including `/opt/homebrew/bin/tailscale` and `/usr/local/bin/tailscale`).
 fn is_binary_installed(name: &str) -> bool {
-    let resolved = crate::util::resolve_binary(name);
-
-    // resolve_binary returns the bare name if nothing was found;
-    // if it returned an absolute path, the binary exists at that path.
-    if resolved != name {
-        return true;
-    }
-
-    // resolve_binary returned the bare name — check if it's on PATH.
-    #[cfg(unix)]
-    {
-        std::process::Command::new("which")
-            .arg(name)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-
-    #[cfg(windows)]
-    {
-        std::process::Command::new("where")
-            .arg(name)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
+    thinclaw_platform::find_executable_in_path(name).is_some()
+        || std::path::Path::new(&crate::util::resolve_binary(name)).is_file()
 }

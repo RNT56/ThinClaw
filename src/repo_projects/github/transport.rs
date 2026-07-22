@@ -15,6 +15,8 @@ pub(super) fn github_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(GITHUB_CONNECT_TIMEOUT)
         .timeout(GITHUB_REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()
         .expect("static GitHub HTTP client configuration should be valid")
 }
@@ -122,6 +124,7 @@ impl GitHubApiClient {
                         && let Some(delay) = self.github_retry_delay(retries_used, None)
                     {
                         retries_used += 1;
+                        let source = source.without_url();
                         tracing::warn!(
                             method = method.as_str(),
                             url,
@@ -136,7 +139,7 @@ impl GitHubApiClient {
                     return Err(GitHubApiError::Http {
                         method: method.to_string(),
                         url: url.to_string(),
-                        source,
+                        source: source.without_url(),
                     });
                 }
             }
@@ -156,11 +159,10 @@ impl GitHubApiClient {
     }
 
     fn circuit_rejection(&self) -> Option<GitHubApiError> {
-        let mut circuit = self
-            .resilience
-            .circuit
-            .lock()
-            .expect("GitHub circuit mutex poisoned");
+        let mut circuit = self.resilience.circuit.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("recovering poisoned GitHub circuit mutex");
+            poisoned.into_inner()
+        });
         let open_until = circuit.open_until?;
         let now = Instant::now();
         if now < open_until {
@@ -174,21 +176,19 @@ impl GitHubApiClient {
     }
 
     fn record_github_request_success(&self) {
-        let mut circuit = self
-            .resilience
-            .circuit
-            .lock()
-            .expect("GitHub circuit mutex poisoned");
+        let mut circuit = self.resilience.circuit.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("recovering poisoned GitHub circuit mutex");
+            poisoned.into_inner()
+        });
         circuit.consecutive_transient_failures = 0;
         circuit.open_until = None;
     }
 
     fn record_github_transient_failure(&self, failure: &str) {
-        let mut circuit = self
-            .resilience
-            .circuit
-            .lock()
-            .expect("GitHub circuit mutex poisoned");
+        let mut circuit = self.resilience.circuit.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("recovering poisoned GitHub circuit mutex");
+            poisoned.into_inner()
+        });
         circuit.consecutive_transient_failures =
             circuit.consecutive_transient_failures.saturating_add(1);
         if circuit.consecutive_transient_failures

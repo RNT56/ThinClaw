@@ -70,22 +70,25 @@ const WORKSPACE_FILES: &[&str] = &[
 /// Only blocks files that live directly in the workspace root. Files inside
 /// project subdirectories (e.g. `clawi-site/README.md`) are safe to write
 /// via the filesystem tool.
-fn is_workspace_path(path: &str) -> bool {
-    let p = std::path::Path::new(path);
-    let filename = p.file_name().and_then(|f| f.to_str()).unwrap_or(path);
-
-    // Check if the file is directly in the root (no parent directory component)
-    // e.g. "README.md" → blocked, but "clawi-site/README.md" → allowed
-    let is_root_level = p
-        .parent()
-        .is_none_or(|parent| parent.as_os_str().is_empty() || parent == std::path::Path::new("."));
-
-    if is_root_level && WORKSPACE_FILES.contains(&filename) {
-        return true;
+fn is_workspace_path(path: &Path, base_dir: Option<&Path>) -> bool {
+    let root = base_dir
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let root = resolve_with_canonical_ancestor(&root);
+    let path = resolve_with_canonical_ancestor(path);
+    let Ok(relative) = path.strip_prefix(&root) else {
+        return false;
+    };
+    let components = relative.components().collect::<Vec<_>>();
+    if components.len() == 1 {
+        return relative
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| WORKSPACE_FILES.contains(&name));
     }
 
-    // daily/ and context/ directories are always memory-managed
-    path.starts_with("daily/") || path.starts_with("context/")
+    relative.starts_with("daily") || relative.starts_with("context")
 }
 
 /// Maximum file size for reading (1MB).
@@ -119,6 +122,39 @@ fn normalize_lexical(path: &Path) -> PathBuf {
         }
     }
     components.iter().collect()
+}
+
+/// Resolve symlinks and platform aliases through the nearest existing
+/// ancestor, while preserving a not-yet-created filename tail. On macOS, for
+/// example, temporary paths may be spelled with `/var` while their canonical
+/// parent is `/private/var`; canonicalizing only the existing root would make a
+/// new child appear to be outside that root.
+fn resolve_with_canonical_ancestor(path: &Path) -> PathBuf {
+    let normalized = normalize_lexical(path);
+    if let Ok(canonical) = normalized.canonicalize() {
+        return canonical;
+    }
+
+    let mut ancestor = normalized.as_path();
+    let mut tail = Vec::<std::ffi::OsString>::new();
+    loop {
+        if ancestor.exists() {
+            let mut resolved = ancestor
+                .canonicalize()
+                .unwrap_or_else(|_| ancestor.to_path_buf());
+            for component in tail.into_iter().rev() {
+                resolved.push(component);
+            }
+            return normalize_lexical(&resolved);
+        }
+        if let Some(name) = ancestor.file_name() {
+            tail.push(name.to_os_string());
+        }
+        match ancestor.parent() {
+            Some(parent) if parent != ancestor => ancestor = parent,
+            _ => return normalized,
+        }
+    }
 }
 
 /// Validate that a path is safe (no traversal attacks).
@@ -164,41 +200,12 @@ pub fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf,
     // trusted-operator contract); registration emits a warning so the
     // unsandboxed state is observable.
     if base_dir.is_some() {
-        let base_canonical = containment_base
-            .canonicalize()
-            .unwrap_or_else(|_| normalize_lexical(&containment_base));
+        let base_canonical = resolve_with_canonical_ancestor(&containment_base);
 
         // For existing paths, canonicalize to resolve symlinks.
         // For non-existent paths, the lexical normalization above already
         // removed all `..` components, so starts_with is reliable.
-        let check_path = if resolved.exists() {
-            resolved.canonicalize().unwrap_or_else(|_| resolved.clone())
-        } else {
-            // Walk up to the nearest existing ancestor directory, canonicalize
-            // it, then re-append the remaining tail. This handles the case
-            // where a symlink sits above the new file.
-            let mut ancestor = resolved.as_path();
-            let mut tail_parts: Vec<&std::ffi::OsStr> = Vec::new();
-            loop {
-                if ancestor.exists() {
-                    let canonical_ancestor = ancestor
-                        .canonicalize()
-                        .unwrap_or_else(|_| ancestor.to_path_buf());
-                    let mut result = canonical_ancestor;
-                    for part in tail_parts.into_iter().rev() {
-                        result = result.join(part);
-                    }
-                    break result;
-                }
-                if let Some(name) = ancestor.file_name() {
-                    tail_parts.push(name);
-                }
-                match ancestor.parent() {
-                    Some(parent) if parent != ancestor => ancestor = parent,
-                    _ => break resolved.clone(),
-                }
-            }
-        };
+        let check_path = resolve_with_canonical_ancestor(&resolved);
 
         if !check_path.starts_with(&base_canonical) {
             return Err(ToolError::NotAuthorized(format!(
@@ -238,8 +245,25 @@ fn metadata_base_dir(ctx: &JobContext) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-pub fn effective_base_dir(ctx: &JobContext, configured: Option<&Path>) -> Option<PathBuf> {
-    metadata_base_dir(ctx).or_else(|| configured.map(Path::to_path_buf))
+pub fn effective_base_dir(
+    ctx: &JobContext,
+    configured: Option<&Path>,
+) -> Result<Option<PathBuf>, ToolError> {
+    let contextual = metadata_base_dir(ctx);
+    match (contextual, configured) {
+        // A per-job base may narrow a configured sandbox, but must never
+        // replace it with an unrelated directory. Context metadata can
+        // originate at protocol boundaries (for example ACP).
+        (Some(contextual), Some(configured)) => {
+            let contextual = contextual.to_str().ok_or_else(|| {
+                ToolError::NotAuthorized("Contextual tool base is not valid UTF-8".to_string())
+            })?;
+            validate_path(contextual, Some(configured)).map(Some)
+        }
+        (Some(contextual), None) => Ok(Some(contextual)),
+        (None, Some(configured)) => Ok(Some(configured.to_path_buf())),
+        (None, None) => Ok(None),
+    }
 }
 
 fn read_file_result(
@@ -350,8 +374,15 @@ impl Tool for ReadFileTool {
 
         let start = std::time::Instant::now();
 
-        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref())?;
         let path = validate_path(path_str, base_dir.as_deref())?;
+
+        if is_workspace_path(&path, base_dir.as_deref()) {
+            return Err(ToolError::InvalidParameters(format!(
+                "'{}' is a workspace memory file. Use memory_read or prompt_manage instead of read_file.",
+                path_str
+            )));
+        }
 
         if let (Some(host), Some(session_id)) = (self.host.as_ref(), acp_session_id(ctx)) {
             match host
@@ -379,9 +410,15 @@ impl Tool for ReadFileTool {
         }
 
         // Check file size
-        let metadata = fs::metadata(&path)
+        let metadata = fs::symlink_metadata(&path)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Cannot access file: {}", e)))?;
+
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ToolError::ExecutionFailed(
+                "Path is not a regular file".to_string(),
+            ));
+        }
 
         if metadata.len() > MAX_READ_SIZE {
             return Err(ToolError::ExecutionFailed(format!(
@@ -392,9 +429,16 @@ impl Tool for ReadFileTool {
         }
 
         // Read file
-        let content = fs::read_to_string(&path)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read file: {}", e)))?;
+        let content = thinclaw_platform::read_regular_file_bounded_single_link_async(
+            path.clone(),
+            MAX_READ_SIZE,
+        )
+        .await
+        .and_then(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })
+        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read file: {}", e)))?;
 
         Ok(ToolOutput::success(
             read_file_result(&path, &content, offset, limit),
@@ -474,8 +518,24 @@ impl Tool for WriteFileTool {
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
+        let content = require_str(&params, "content")?;
+
+        let start = std::time::Instant::now();
+
+        // Check content size
+        if content.len() > MAX_WRITE_SIZE {
+            return Err(ToolError::InvalidParameters(format!(
+                "Content too large ({} bytes). Maximum is {} bytes.",
+                content.len(),
+                MAX_WRITE_SIZE
+            )));
+        }
+
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref())?;
+        let path = validate_path(path_str, base_dir.as_deref())?;
+
         // Reject workspace paths: these live in the database, not on disk.
-        if is_workspace_path(path_str) {
+        if is_workspace_path(&path, base_dir.as_deref()) {
             let normalized = std::path::Path::new(path_str)
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -498,22 +558,6 @@ impl Tool for WriteFileTool {
                 path_str, guidance
             )));
         }
-
-        let content = require_str(&params, "content")?;
-
-        let start = std::time::Instant::now();
-
-        // Check content size
-        if content.len() > MAX_WRITE_SIZE {
-            return Err(ToolError::InvalidParameters(format!(
-                "Content too large ({} bytes). Maximum is {} bytes.",
-                content.len(),
-                MAX_WRITE_SIZE
-            )));
-        }
-
-        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
-        let path = validate_path(path_str, base_dir.as_deref())?;
 
         if let (Some(host), Some(session_id)) = (self.host.as_ref(), acp_session_id(ctx)) {
             match host
@@ -555,9 +599,13 @@ impl Tool for WriteFileTool {
         }
 
         // Write file
-        fs::write(&path, content)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write file: {}", e)))?;
+        thinclaw_platform::write_regular_file_atomic_async(
+            path.clone(),
+            content.as_bytes().to_vec(),
+            true,
+        )
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write file: {}", e)))?;
 
         let result = serde_json::json!({
             "path": path.display().to_string(),
@@ -653,7 +701,7 @@ impl Tool for ListDirTool {
 
         let start = std::time::Instant::now();
 
-        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref())?;
         let path = validate_path(path_str, base_dir.as_deref())?;
 
         let mut entries = Vec::new();
@@ -686,7 +734,7 @@ impl Tool for ListDirTool {
     }
 
     fn requires_sanitization(&self) -> bool {
-        false // Directory listings are safe
+        true // Filenames are untrusted workspace content.
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
@@ -730,10 +778,15 @@ async fn list_dir_inner(
             .unwrap_or(&entry_path)
             .to_string_lossy();
 
-        let metadata = entry.metadata().await.ok();
-        let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
+        let metadata = fs::symlink_metadata(&entry_path).await.ok();
+        let is_symlink = metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.file_type().is_symlink());
+        let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir()) && !is_symlink;
 
-        let display = if is_dir {
+        let display = if is_symlink {
+            format!("{} [symlink]", relative)
+        } else if is_dir {
             format!("{}/", relative)
         } else {
             let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -852,6 +905,12 @@ impl Tool for ApplyPatchTool {
 
         let old_string = require_str(&params, "old_string")?;
 
+        if old_string.is_empty() {
+            return Err(ToolError::InvalidParameters(
+                "old_string must not be empty".to_string(),
+            ));
+        }
+
         let new_string = require_str(&params, "new_string")?;
 
         let replace_all = params
@@ -861,8 +920,15 @@ impl Tool for ApplyPatchTool {
 
         let start = std::time::Instant::now();
 
-        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref())?;
         let path = validate_path(path_str, base_dir.as_deref())?;
+
+        if is_workspace_path(&path, base_dir.as_deref()) {
+            return Err(ToolError::InvalidParameters(format!(
+                "'{}' is a workspace memory file. Use prompt_manage or memory_write instead of apply_patch.",
+                path_str
+            )));
+        }
 
         checkpoint_before_mutation(
             self.host.as_ref(),
@@ -874,15 +940,46 @@ impl Tool for ApplyPatchTool {
         .await?;
 
         // Read current content
-        let content = fs::read_to_string(&path)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read file: {}", e)))?;
+        let content = thinclaw_platform::read_regular_file_bounded_single_link_async(
+            path.clone(),
+            MAX_READ_SIZE,
+        )
+        .await
+        .and_then(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })
+        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read file: {}", e)))?;
 
         // Check if old_string exists
         if !content.contains(old_string) {
             return Err(ToolError::ExecutionFailed(format!(
                 "Could not find the specified text in {}. Make sure old_string matches exactly.",
                 path.display()
+            )));
+        }
+
+        let replacements = if replace_all {
+            content.matches(old_string).count()
+        } else {
+            1
+        };
+        let removed_bytes = old_string
+            .len()
+            .checked_mul(replacements)
+            .ok_or_else(|| ToolError::InvalidParameters("replacement size overflow".to_string()))?;
+        let added_bytes = new_string
+            .len()
+            .checked_mul(replacements)
+            .ok_or_else(|| ToolError::InvalidParameters("replacement size overflow".to_string()))?;
+        let projected_size = content
+            .len()
+            .checked_sub(removed_bytes)
+            .and_then(|size| size.checked_add(added_bytes))
+            .ok_or_else(|| ToolError::InvalidParameters("replacement size overflow".to_string()))?;
+        if projected_size > MAX_WRITE_SIZE {
+            return Err(ToolError::InvalidParameters(format!(
+                "Patched content would be too large ({projected_size} bytes). Maximum is {MAX_WRITE_SIZE} bytes."
             )));
         }
 
@@ -893,17 +990,14 @@ impl Tool for ApplyPatchTool {
             content.replacen(old_string, new_string, 1)
         };
 
-        // Count replacements
-        let replacements = if replace_all {
-            content.matches(old_string).count()
-        } else {
-            1
-        };
-
         // Write back
-        fs::write(&path, &new_content)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write file: {}", e)))?;
+        thinclaw_platform::write_regular_file_atomic_async(
+            path.clone(),
+            new_content.into_bytes(),
+            true,
+        )
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write file: {}", e)))?;
 
         let result = serde_json::json!({
             "path": path.display().to_string(),
@@ -953,6 +1047,15 @@ const MAX_GREP_MATCHES: usize = 100;
 
 /// Maximum file size to scan (5MB).
 const MAX_GREP_FILE_SIZE: u64 = 5 * 1024 * 1024;
+
+/// Maximum regex/literal query size accepted by grep.
+const MAX_GREP_PATTERN_SIZE: usize = 16 * 1024;
+
+/// Maximum number of characters returned from any one source line.
+const MAX_GREP_LINE_CHARS: usize = 8 * 1024;
+
+/// Maximum context radius per match.
+const MAX_GREP_CONTEXT_LINES: usize = 20;
 
 /// Maximum directory depth for recursive search.
 const MAX_GREP_DEPTH: usize = 10;
@@ -1025,6 +1128,13 @@ impl Tool for GrepTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let pattern_str = require_str(&params, "pattern")?;
+        if pattern_str.len() > MAX_GREP_PATTERN_SIZE {
+            return Err(ToolError::InvalidParameters(format!(
+                "Search pattern is too large ({} bytes). Maximum is {} bytes.",
+                pattern_str.len(),
+                MAX_GREP_PATTERN_SIZE
+            )));
+        }
 
         let path_str = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
@@ -1043,11 +1153,12 @@ impl Tool for GrepTool {
         let context_lines = params
             .get("context_lines")
             .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+            .unwrap_or(0)
+            .min(MAX_GREP_CONTEXT_LINES as u64) as usize;
 
         let start = std::time::Instant::now();
 
-        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref())?;
         let path = validate_path(path_str, base_dir.as_deref())?;
 
         // Build the matcher
@@ -1088,18 +1199,33 @@ impl Tool for GrepTool {
                 break;
             }
 
+            if is_workspace_path(file_path, base_dir.as_deref()) {
+                continue;
+            }
+
             // Skip files that are too large
-            let metadata = match fs::metadata(&file_path).await {
+            let metadata = match fs::symlink_metadata(&file_path).await {
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            if metadata.len() > MAX_GREP_FILE_SIZE {
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() > MAX_GREP_FILE_SIZE
+            {
                 continue;
             }
 
             // Read file content (skip binary files)
-            let content = match fs::read_to_string(&file_path).await {
-                Ok(c) => c,
+            let content = match thinclaw_platform::read_regular_file_bounded_single_link_async(
+                file_path.clone(),
+                MAX_GREP_FILE_SIZE,
+            )
+            .await
+            .and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            }) {
+                Ok(content) => content,
                 Err(_) => continue, // binary or unreadable
             };
 
@@ -1127,7 +1253,7 @@ impl Tool for GrepTool {
                                 let actual_line = ctx_start + i + 1;
                                 serde_json::json!({
                                     "line": actual_line,
-                                    "content": l,
+                                    "content": bounded_grep_line(l),
                                     "is_match": actual_line == line_idx + 1,
                                 })
                             })
@@ -1145,7 +1271,7 @@ impl Tool for GrepTool {
                     let mut match_obj = serde_json::json!({
                         "file": relative,
                         "line": line_idx + 1,
-                        "content": line.trim(),
+                        "content": bounded_grep_line(line.trim()),
                     });
 
                     if !context.is_empty() {
@@ -1187,6 +1313,16 @@ impl Tool for GrepTool {
     }
 }
 
+fn bounded_grep_line(value: &str) -> String {
+    let mut chars = value.chars();
+    let bounded = chars.by_ref().take(MAX_GREP_LINE_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}… [truncated]")
+    } else {
+        bounded
+    }
+}
+
 /// Recursively collect files for grep, respecting include patterns and skip dirs.
 async fn collect_files(
     dir: &Path,
@@ -1208,10 +1344,14 @@ async fn collect_files(
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read entry: {}", e)))?
     {
         let entry_path = entry.path();
-        let metadata = match entry.metadata().await {
+        let metadata = match fs::symlink_metadata(&entry_path).await {
             Ok(m) => m,
             Err(_) => continue,
         };
+
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
 
         if metadata.is_dir() {
             let name = entry.file_name();
@@ -1296,6 +1436,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn contextual_base_cannot_replace_configured_sandbox() {
+        let configured = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        let tool = ReadFileTool::new().with_base_dir(configured.path().to_path_buf());
+        let ctx = JobContext {
+            metadata: serde_json::json!({
+                "tool_base_dir": outside.path().to_string_lossy(),
+            }),
+            ..JobContext::default()
+        };
+
+        let result = tool
+            .execute(serde_json::json!({"path": "secret.txt"}), &ctx)
+            .await;
+
+        assert!(matches!(result, Err(ToolError::NotAuthorized(_))));
+    }
+
+    #[tokio::test]
     async fn test_write_file() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("new_file.txt");
@@ -1350,9 +1510,6 @@ mod tests {
         let tool = WriteFileTool::new().with_base_dir(dir.path().to_path_buf());
         let ctx = JobContext::default();
 
-        // The is_workspace_path check runs on the raw path string from the LLM,
-        // which is always a relative filename like "HEARTBEAT.md", not an absolute
-        // path. The base_dir join happens later in validate_path.
         let workspace_files = &[
             "HEARTBEAT.md",
             "MEMORY.md",
@@ -1393,6 +1550,26 @@ mod tests {
             );
         }
 
+        for disguised_path in [
+            dir.path().join("SOUL.md"),
+            dir.path().join("nested/../MEMORY.md"),
+        ] {
+            let err = tool
+                .execute(
+                    serde_json::json!({
+                        "path": disguised_path.to_string_lossy(),
+                        "content": "test"
+                    }),
+                    &ctx,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("prompt_manage")
+                    || err.to_string().contains("memory_write")
+            );
+        }
+
         // daily/ and context/ prefixes should also be rejected
         for prefix_path in &["daily/2024-01-15.md", "context/vision.md"] {
             let err = tool
@@ -1425,6 +1602,86 @@ mod tests {
             )
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn read_and_patch_reject_absolute_workspace_memory_paths() {
+        let dir = TempDir::new().unwrap();
+        let soul_path = dir.path().join("SOUL.md");
+        std::fs::write(&soul_path, "old").unwrap();
+        let ctx = JobContext::default();
+
+        let read_error = ReadFileTool::new()
+            .with_base_dir(dir.path().to_path_buf())
+            .execute(
+                serde_json::json!({"path": soul_path.to_string_lossy()}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(read_error.to_string().contains("memory_read"));
+
+        let patch_error = ApplyPatchTool::new()
+            .with_base_dir(dir.path().to_path_buf())
+            .execute(
+                serde_json::json!({
+                    "path": soul_path.to_string_lossy(),
+                    "old_string": "old",
+                    "new_string": "new"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(patch_error.to_string().contains("prompt_manage"));
+        assert_eq!(std::fs::read_to_string(soul_path).unwrap(), "old");
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_empty_match() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("code.rs");
+        std::fs::write(&path, "content").unwrap();
+
+        let error = ApplyPatchTool::new()
+            .with_base_dir(dir.path().to_path_buf())
+            .execute(
+                serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "old_string": "",
+                    "new_string": "x",
+                    "replace_all": true
+                }),
+                &JobContext::default(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("must not be empty"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "content");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn grep_does_not_follow_nested_symlinks_or_search_workspace_memory() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "needle-outside").unwrap();
+        std::fs::write(dir.path().join("SOUL.md"), "needle-memory").unwrap();
+        symlink(outside.path(), dir.path().join("linked")).unwrap();
+
+        let result = GrepTool::new()
+            .with_base_dir(dir.path().to_path_buf())
+            .execute(
+                serde_json::json!({"path": ".", "pattern": "needle"}),
+                &JobContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.result["total_matches"], 0);
     }
 
     #[tokio::test]

@@ -1,5 +1,7 @@
 //! Compatibility facade for WASM capabilities schema parsing.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::tools::wasm::Capabilities;
@@ -23,15 +25,19 @@ pub struct CapabilitiesFile {
     pub workspace: Option<WorkspaceCapabilitySchema>,
     #[serde(default)]
     pub auth: Option<AuthCapabilitySchema>,
+    #[serde(default)]
+    pub config: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub hooks: Option<serde_json::Value>,
 }
 
 impl CapabilitiesFile {
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
+        thinclaw_tools::wasm::CapabilitiesFile::from_json(json).map(Self::from)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
+        thinclaw_tools::wasm::CapabilitiesFile::from_bytes(bytes).map(Self::from)
     }
 
     pub fn to_capabilities(&self) -> Capabilities {
@@ -41,6 +47,9 @@ impl CapabilitiesFile {
             tool_invoke: self.tool_invoke.clone(),
             workspace: self.workspace.clone(),
             auth: self.auth.clone(),
+            capabilities: None,
+            config: self.config.clone(),
+            hooks: self.hooks.clone(),
         };
         extracted.to_capabilities().into()
     }
@@ -54,6 +63,23 @@ impl From<&CapabilitiesFile> for thinclaw_tools::wasm::CapabilitiesFile {
             tool_invoke: value.tool_invoke.clone(),
             workspace: value.workspace.clone(),
             auth: value.auth.clone(),
+            capabilities: None,
+            config: value.config.clone(),
+            hooks: value.hooks.clone(),
+        }
+    }
+}
+
+impl From<thinclaw_tools::wasm::CapabilitiesFile> for CapabilitiesFile {
+    fn from(value: thinclaw_tools::wasm::CapabilitiesFile) -> Self {
+        Self {
+            http: value.http,
+            secrets: value.secrets,
+            tool_invoke: value.tool_invoke,
+            workspace: value.workspace,
+            auth: value.auth,
+            config: value.config,
+            hooks: value.hooks,
         }
     }
 }

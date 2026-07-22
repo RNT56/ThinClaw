@@ -804,7 +804,15 @@ impl TuiApp {
         });
         self.scroll_offset = u16::MAX;
 
-        match shell_launcher().tokio_command(cmd).output().await {
+        let mut command = shell_launcher().tokio_command(cmd);
+        match thinclaw_platform::bounded_command_output(
+            &mut command,
+            std::time::Duration::from_secs(10 * 60),
+            4 * 1024 * 1024,
+            4 * 1024 * 1024,
+        )
+        .await
+        {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);

@@ -15,7 +15,7 @@ impl AgentEnvAgent for crate::agent::Agent {
         &self,
         message: &IncomingMessage,
     ) -> anyhow::Result<Option<String>> {
-        self.handle_message_external(message)
+        self.handle_message_text_external(message)
             .await
             .map_err(Into::into)
     }

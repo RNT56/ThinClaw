@@ -1,4 +1,5 @@
 use super::RemoteGatewayProxy;
+use crate::thinclaw::bridge::{BridgeError, RouteMode};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -107,7 +108,11 @@ async fn start_fixture_gateway(
 
 async fn start_scripted_gateway(
     responses: Vec<&'static str>,
-) -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+) -> (
+    String,
+    Arc<Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind scripted gateway");
@@ -273,7 +278,11 @@ fn fixture_response(method: &str, path: &str, body: &str) -> String {
         ("GET", "/api/mcp/interactions") => serde_json::json!({ "interactions": [] }),
         ("POST", "/api/skills/install") => serde_json::json!({ "installed": true }),
         _ if method == "GET" && path.starts_with("/api/chat/thread/thread-1/export?") => {
-            serde_json::json!({ "format": "markdown", "content": "fixture transcript" })
+            serde_json::json!({
+                "format": "markdown",
+                "content": "fixture transcript",
+                "message_count": 2
+            })
         }
         _ => panic!("unexpected fixture route: {method} {path}"),
     }
@@ -281,71 +290,118 @@ fn fixture_response(method: &str, path: &str, body: &str) -> String {
 }
 
 #[test]
-fn unavailable_errors_are_explicitly_typed_by_prefix() {
+fn unavailable_errors_preserve_typed_remediation() {
     let error = RemoteGatewayProxy::unavailable("chat abort", "no endpoint");
-    assert!(matches!(
-        error,
-        crate::thinclaw::bridge::BridgeError::Unavailable {
-            capability,
-            reason,
-            remediation: Some(remediation),
-            ..
-        } if capability == "chat abort"
-            && reason.contains("no endpoint")
-            && remediation.contains("upgrade the remote gateway")
-    ));
+    let BridgeError::Unavailable {
+        capability,
+        reason,
+        remediation,
+        satisfied_by,
+    } = error
+    else {
+        panic!("expected a typed unavailable error");
+    };
+
+    assert_eq!(capability, "chat abort");
+    assert!(reason.contains("no endpoint"));
+    assert_eq!(
+        remediation.as_deref(),
+        Some("switch to embedded mode or upgrade the remote gateway")
+    );
+    assert_eq!(satisfied_by, RouteMode::LocalOnly);
 }
 
 #[test]
 fn constructor_normalizes_trailing_slash() {
-    let proxy = RemoteGatewayProxy::new("http://127.0.0.1:18789/", "token")
-        .expect("valid private gateway URL");
+    let proxy = RemoteGatewayProxy::new("http://127.0.0.1:18789/", "token").unwrap();
     assert_eq!(proxy.base_url(), "http://127.0.0.1:18789");
 }
 
 #[test]
-fn constructor_rejects_missing_credentials_and_unsafe_transport() {
-    assert!(RemoteGatewayProxy::new("http://127.0.0.1:18789", "").is_err());
-    assert!(RemoteGatewayProxy::new("http://gateway.example.com:18789", "token").is_err());
-    assert!(RemoteGatewayProxy::new("https://gateway.example.com/api", "token").is_err());
-    assert!(RemoteGatewayProxy::new("https://user@gateway.example.com", "token").is_err());
+fn constructor_restricts_plaintext_to_loopback_and_tailscale() {
+    for accepted in [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://[::1]:3000",
+        "http://100.64.0.1:3000",
+        "http://100.127.255.255:3000",
+        "http://[fd7a:115c:a1e0::1]:3000",
+        "https://gateway.example.com",
+    ] {
+        assert!(
+            RemoteGatewayProxy::new(accepted, "token").is_ok(),
+            "expected URL to be accepted: {accepted}"
+        );
+    }
 
-    assert!(RemoteGatewayProxy::new("https://gateway.example.com", "token").is_ok());
-    assert!(RemoteGatewayProxy::new("http://100.100.1.2:18789", "token").is_ok());
-    assert!(RemoteGatewayProxy::new("http://agent.tailnet.ts.net:18789", "token").is_ok());
+    for rejected in [
+        "http://192.168.1.2:3000",
+        "http://100.63.255.255:3000",
+        "http://100.128.0.0:3000",
+        "http://gateway.example.com",
+        "http://localhost.example.com",
+        "http://[fd7a:115c:a1e1::1]:3000",
+    ] {
+        assert!(
+            RemoteGatewayProxy::new(rejected, "token").is_err(),
+            "expected URL to be rejected: {rejected}"
+        );
+    }
+}
+
+#[test]
+fn constructor_rejects_ambiguous_urls_and_invalid_tokens() {
+    for rejected in [
+        "ftp://127.0.0.1:3000",
+        "http://user:password@127.0.0.1:3000",
+        "http://127.0.0.1:3000/api",
+        "http://127.0.0.1:3000/?next=elsewhere",
+        "http://127.0.0.1:3000/#fragment",
+    ] {
+        assert!(RemoteGatewayProxy::new(rejected, "token").is_err());
+    }
+    assert!(RemoteGatewayProxy::new("http://127.0.0.1:3000", "").is_err());
+    assert!(RemoteGatewayProxy::new("http://127.0.0.1:3000", "token\r\ninjected: yes").is_err());
 }
 
 #[tokio::test]
 async fn raw_secret_injection_is_unavailable_in_remote_mode() {
-    let proxy =
-        RemoteGatewayProxy::new("http://127.0.0.1:18789", "token").expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new("http://127.0.0.1:18789", "token").unwrap();
     let error = proxy
         .inject_secrets(&std::collections::HashMap::new())
         .await
         .expect_err("remote raw secret injection should stay disabled");
 
-    assert!(matches!(
-        error,
-        crate::thinclaw::bridge::BridgeError::Unavailable {
-            capability,
-            reason,
-            remediation: Some(remediation),
-            ..
-        } if capability == "remote raw secret injection"
-            && reason.contains("raw secret injection is disabled")
-            && remediation.contains("provider vault save/delete")
-    ));
+    let BridgeError::Unavailable {
+        capability,
+        reason,
+        remediation,
+        satisfied_by,
+    } = error
+    else {
+        panic!("expected a typed unavailable error");
+    };
+    assert_eq!(capability, "remote raw secret injection");
+    assert_eq!(reason, "raw secret injection is disabled");
+    assert_eq!(
+        remediation.as_deref(),
+        Some("use provider vault save/delete")
+    );
+    assert_eq!(satisfied_by, RouteMode::LocalOnly);
 }
 
 #[tokio::test]
 async fn health_check_proves_the_bearer_credential_on_an_authenticated_route() {
     let (base_url, recorded, fixture) = start_fixture_gateway(1).await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
+        .expect("valid fixture proxy");
 
-    assert!(proxy
-        .health_check()
-        .await
-        .expect("authenticated health check"));
+    assert!(
+        proxy
+            .health_check()
+            .await
+            .expect("authenticated health check")
+    );
     fixture.await.expect("fixture gateway task");
 
     let requests = recorded.lock().await;
@@ -364,7 +420,8 @@ async fn idempotent_get_retries_transient_responses_and_honors_retry_after() {
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
     ])
     .await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
+        .expect("valid fixture proxy");
 
     assert_eq!(
         proxy.get_json("/api/transient").await.expect("retried GET")["ok"],
@@ -375,12 +432,49 @@ async fn idempotent_get_retries_transient_responses_and_honors_retry_after() {
 }
 
 #[tokio::test]
+async fn idempotent_text_reads_retry_truncated_response_bodies() {
+    let (base_url, methods, server) = start_scripted_gateway(vec![
+        "HTTP/1.1 200 OK\r\nRetry-After: 0\r\nContent-Length: 8\r\nConnection: close\r\n\r\nshort",
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+    ])
+    .await;
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
+        .expect("valid fixture proxy");
+
+    assert_eq!(
+        proxy
+            .get_text("/api/text-export")
+            .await
+            .expect("retried text response"),
+        "ok"
+    );
+    server.await.expect("scripted server completes");
+    assert_eq!(&*methods.lock().await, &["GET", "GET"]);
+}
+
+#[tokio::test]
+async fn health_check_retries_truncated_transient_error_bodies() {
+    let (base_url, methods, server) = start_scripted_gateway(vec![
+        "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: 8\r\nConnection: close\r\n\r\nbusy",
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+    ])
+    .await;
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
+        .expect("valid fixture proxy");
+
+    assert!(proxy.health_check().await.expect("retried health check"));
+    server.await.expect("scripted server completes");
+    assert_eq!(&*methods.lock().await, &["GET", "GET"]);
+}
+
+#[tokio::test]
 async fn mutation_requests_are_never_retried_implicitly() {
     let (base_url, methods, server) = start_scripted_gateway(vec![
         "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbusy",
     ])
     .await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
+        .expect("valid fixture proxy");
 
     let error = proxy
         .post_json("/api/mutation", &serde_json::json!({ "value": 1 }))
@@ -388,7 +482,7 @@ async fn mutation_requests_are_never_retried_implicitly() {
         .expect_err("mutation should surface the first transient failure");
     assert!(matches!(
         error,
-        crate::thinclaw::bridge::BridgeError::Network {
+        BridgeError::Network {
             retryable: true,
             ..
         }
@@ -400,13 +494,15 @@ async fn mutation_requests_are_never_retried_implicitly() {
 #[tokio::test]
 async fn fixture_acceptance_remote_chat_and_session_routes() {
     let (base_url, recorded, server) = start_fixture_gateway(11).await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
+        .expect("valid fixture proxy");
 
     let sent = proxy
         .send_message("thread-1", "fixture message")
         .await
         .expect("send message");
     assert_eq!(sent["accepted"], true);
+
     proxy.abort_chat("thread-1").await.expect("abort chat");
     proxy
         .reset_session("thread-1")
@@ -480,7 +576,8 @@ async fn fixture_acceptance_remote_chat_and_session_routes() {
 #[tokio::test]
 async fn fixture_acceptance_remote_management_routes() {
     let (base_url, recorded, server) = start_fixture_gateway(39).await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
+        .expect("valid fixture proxy");
 
     let providers = proxy.list_provider_status().await.expect("provider status");
     assert_eq!(providers["providers"][0]["slug"], "openai");

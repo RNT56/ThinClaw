@@ -2,34 +2,43 @@ pub(super) fn insert_dotted_path(
     root: &mut serde_json::Value,
     path: &str,
     value: serde_json::Value,
-) {
+) -> Result<(), String> {
+    const MAX_PATH_BYTES: usize = 2048;
+    const MAX_PATH_COMPONENTS: usize = 64;
+    const MAX_COMPONENT_BYTES: usize = 256;
+
     let parts: Vec<&str> = path.split('.').collect();
-    if parts.is_empty() {
-        return;
+    if path.is_empty()
+        || path.len() > MAX_PATH_BYTES
+        || parts.len() > MAX_PATH_COMPONENTS
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || part.len() > MAX_COMPONENT_BYTES
+                || part.chars().any(char::is_control)
+        })
+    {
+        return Err("settings path is empty, malformed, or oversized".to_string());
     }
 
     let mut current = root;
     for part in &parts[..parts.len() - 1] {
-        // Navigate into (or create) intermediate objects.
-        if !current.is_object() {
-            *current = serde_json::Value::Object(serde_json::Map::new());
-        }
         current = current
             .as_object_mut()
-            .expect("just ensured object")
+            .ok_or_else(|| format!("settings path conflicts at '{part}'"))?
             .entry(*part)
             .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !current.is_object() {
+            return Err(format!("settings path conflicts at '{part}'"));
+        }
     }
 
     if let Some(final_key) = parts.last() {
-        if !current.is_object() {
-            *current = serde_json::Value::Object(serde_json::Map::new());
-        }
         current
             .as_object_mut()
-            .expect("just ensured object")
+            .ok_or_else(|| format!("settings path conflicts at '{final_key}'"))?
             .insert((*final_key).to_string(), value);
     }
+    Ok(())
 }
 
 /// Recursively collect settings paths with their JSON values (for DB storage).

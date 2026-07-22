@@ -45,6 +45,7 @@ pub struct AgentToolWorkspace {
 pub trait AgentManagementPort: Send + Sync {
     async fn create_agent(
         &self,
+        principal_id: &str,
         agent_id: &str,
         display_name: &str,
         system_prompt: Option<&str>,
@@ -77,7 +78,7 @@ pub trait AgentManagementPort: Send + Sync {
 
     async fn get_agent_record(&self, agent_id: &str) -> Result<Option<AgentToolRecord>, String>;
 
-    async fn agent_context(&self, record: &AgentToolRecord, user_id: &str) -> String;
+    async fn agent_context(&self, record: &AgentToolRecord, ctx: &JobContext) -> String;
 }
 
 fn parse_tool_profile_param(value: &str) -> Result<ToolProfile, ToolError> {
@@ -166,7 +167,7 @@ impl Tool for CreateAgentTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
 
@@ -213,6 +214,7 @@ impl Tool for CreateAgentTool {
         match self
             .registry
             .create_agent(
+                &ctx.principal_id,
                 agent_id,
                 display_name,
                 system_prompt,
@@ -680,8 +682,7 @@ impl Tool for MessageAgentTool {
             }
         };
 
-        let user_id = &ctx.user_id;
-        let full_context = self.registry.agent_context(&record, user_id).await;
+        let full_context = self.registry.agent_context(&record, ctx).await;
 
         // Return a structured A2A response that the dispatcher can use.
         // The actual LLM call happens at a higher level — the dispatcher

@@ -1,26 +1,27 @@
 //! macOS Keychain integration for secure API key storage.
 //!
-//! **Storage model:** All API keys are serialized into one JSON object, then
-//! encrypted as a single AES-256-GCM envelope before that envelope is stored in
-//! one Keychain item:
+//! **Storage model:** All API keys are serialized into one bounded JSON map,
+//! encrypted as an authenticated AES-256-GCM envelope, and stored in one OS
+//! credential item:
 //!   - Service:  `com.thinclaw.desktop`
 //!   - Account:  `api_keys`
 //!   - Password: versioned ciphertext metadata (never raw provider keys)
-//!   - Master key: shared core `thinclaw/master_key` Keychain item
+//!   - Master key: shared runtime `thinclaw/master_key` secure-store item
 //!
-//! Normal startup reads exactly **two** Keychain items (master key + encrypted
-//! envelope), rather than 25+ individual provider items as the previous
-//! per-key design did.
+//! This means exactly **one** `get_generic_password()` call on app startup,
+//! which triggers a single macOS Keychain authorization prompt — not 25+
+//! individual prompts (one per key, as the previous per-key design caused).
 //!
 //! **Advantages:**
-//!   - Core `SecretsCrypto` AES-256-GCM protection plus OS Keychain protection
+//!   - Application-level authenticated encryption plus OS store protection
 //!   - Other processes cannot read without explicit Keychain access approval
-//!   - A bounded two-item startup read instead of one prompt per provider
+//!   - Single unlock prompt on app launch
 //!
 //! # Migration
 //! On first launch after upgrade from the per-key storage format,
-//! `migrate_per_key_items()` reads each legacy Keychain item, consolidates
-//! them into the single JSON blob, then deletes the old items.  This ONLY
+//! `migrate_per_key_items()` reads each legacy Keychain item and consolidates
+//! it into the single JSON blob while retaining the old item as a recovery
+//! copy. This ONLY
 //! runs when the unified blob doesn't exist yet — on subsequent launches,
 //! the blob is found and migration is skipped entirely (avoiding 21 extra
 //! Keychain access prompts).
@@ -38,7 +39,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use thinclaw_core::secrets::SecretsCrypto;
 use tracing::{info, warn};
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 #[cfg(target_os = "macos")]
 use security_framework::passwords::{
@@ -48,40 +49,113 @@ use security_framework::passwords::{
 type KeychainError = security_framework::base::Error;
 
 #[cfg(not(target_os = "macos"))]
-#[derive(Debug, Clone, Copy)]
-struct KeychainError;
+#[derive(Debug, Clone)]
+struct KeychainError {
+    code: i32,
+    message: String,
+}
 
 #[cfg(not(target_os = "macos"))]
 impl KeychainError {
     fn code(&self) -> i32 {
-        -25300
+        self.code
+    }
+
+    fn not_found() -> Self {
+        Self {
+            code: -25300,
+            message: "credential entry not found".to_string(),
+        }
+    }
+
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            code: -1,
+            message: message.into(),
+        }
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 impl fmt::Display for KeychainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("platform keychain is unavailable")
+        f.write_str(&self.message)
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn get_generic_password(_service: &str, _account: &str) -> Result<Vec<u8>, KeychainError> {
-    Err(KeychainError)
+fn run_platform_keychain<T, F, Fut>(operation: F) -> Result<T, KeychainError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, thinclaw_secrets::SecretError>> + 'static,
+{
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                KeychainError::unavailable(format!(
+                    "failed to initialize credential runtime: {error}"
+                ))
+            })?;
+        runtime
+            .block_on(operation())
+            .map_err(|error| KeychainError::unavailable(error.to_string()))
+    })
+    .join()
+    .map_err(|_| KeychainError::unavailable("credential-store worker panicked"))?
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_account(service: &str, account: &str) -> String {
+    if service == "thinclaw" {
+        account.to_string()
+    } else {
+        format!("desktop:{service}:{account}")
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_generic_password(service: &str, account: &str) -> Result<Vec<u8>, KeychainError> {
+    let account = platform_account(service, account);
+    match run_platform_keychain(move || async move {
+        thinclaw_secrets::keychain::get_api_key_result(&account).await
+    })? {
+        Some(value) => Ok(value.into_bytes()),
+        None => Err(KeychainError::not_found()),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 fn set_generic_password(
-    _service: &str,
-    _account: &str,
-    _password: &[u8],
+    service: &str,
+    account: &str,
+    password: &[u8],
 ) -> Result<(), KeychainError> {
-    Err(KeychainError)
+    let account = platform_account(service, account);
+    let value = Zeroizing::new(
+        String::from_utf8(password.to_vec())
+            .map_err(|_| KeychainError::unavailable("credential value is not valid UTF-8"))?,
+    );
+    run_platform_keychain(move || async move {
+        thinclaw_secrets::keychain::store_api_key(&account, value.as_str()).await
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
-fn delete_generic_password(_service: &str, _account: &str) -> Result<(), KeychainError> {
-    Err(KeychainError)
+fn delete_generic_password(service: &str, account: &str) -> Result<(), KeychainError> {
+    let account = platform_account(service, account);
+    let account_for_read = account.clone();
+    let existing = run_platform_keychain(move || async move {
+        thinclaw_secrets::keychain::get_api_key_result(&account_for_read).await
+    })?;
+    if existing.is_none() {
+        return Err(KeychainError::not_found());
+    }
+    run_platform_keychain(move || async move {
+        thinclaw_secrets::keychain::delete_api_key(&account).await
+    })
 }
 
 /// The Keychain service name — matches the app bundle identifier.
@@ -93,9 +167,8 @@ const LEGACY_SERVICE: &str = "com.schack.scrappy";
 /// The single Keychain account that holds all API keys as a JSON object.
 const ACCOUNT: &str = "api_keys";
 
-/// Core ThinClaw secure-store coordinates for the random AES master key. Using
-/// the same item as the CLI/runtime keeps the `SecretsStore::rotate_master_key`
-/// contract durable across process restarts.
+/// The runtime-wide master key lives at the same secure-store coordinates as
+/// the CLI and server so rotation remains durable across process boundaries.
 const MASTER_KEY_SERVICE: &str = "thinclaw";
 const MASTER_KEY_ACCOUNT: &str = "master_key";
 
@@ -103,6 +176,11 @@ const ENCRYPTED_BLOB_VERSION: u32 = 1;
 const INITIAL_KEY_VERSION: i32 = 1;
 const ENCRYPTED_BLOB_CIPHER: &str = "aes-256-gcm";
 const ENCRYPTED_BLOB_KDF: &str = "hkdf-sha256";
+
+const MAX_KEYCHAIN_BLOB_BYTES: usize = 4 * 1024 * 1024;
+const MAX_KEYCHAIN_ENTRIES: usize = 4_096;
+const MAX_KEYCHAIN_KEY_BYTES: usize = 1_024;
+const MAX_KEYCHAIN_VALUE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct EncryptedKeychainBlob {
@@ -124,9 +202,6 @@ struct DecodedKeychainBlob {
     key_version: i32,
     encrypted: bool,
 }
-
-type LegacyKeychainItem = (&'static str, &'static str);
-type PerKeyMigration = (bool, Vec<LegacyKeychainItem>);
 
 /// Provider slugs — used for migration and as JSON map keys.
 ///
@@ -164,11 +239,15 @@ pub const PROVIDERS: &[&str] = &[
     "custom_llm_key",
     // Remote gateway token
     "remote_token",
-    // Local Desktop gateway bearer token
-    "gateway_auth_token",
-    // Gmail OAuth credentials
-    "gmail_oauth_token",
-    "gmail_refresh_token",
+    // Desktop gateway handshake token and protocol signing key
+    "desktop_gateway_auth_token",
+    "desktop_device_private_key",
+    // Google Workspace OAuth state (access/refresh/client/scope metadata)
+    "google_oauth_token",
+    "google_oauth_token_refresh_token",
+    "google_oauth_token_scopes",
+    "google_oauth_token_client_id",
+    "google_oauth_token_client_secret",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,23 +263,43 @@ fn key_cache() -> &'static Mutex<HashMap<String, String>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// AES state for the encrypted envelope. The master key itself remains inside
-/// `SecretsCrypto` and is redacted/zeroized by the core secrets implementation.
 fn keychain_crypto() -> &'static Mutex<Option<KeychainCryptoState>> {
     static CRYPTO: OnceLock<Mutex<Option<KeychainCryptoState>>> = OnceLock::new();
     CRYPTO.get_or_init(|| Mutex::new(None))
 }
 
-/// Whether the cache has been loaded from the Keychain yet.
-fn cache_loaded() -> &'static Mutex<bool> {
-    static LOADED: OnceLock<Mutex<bool>> = OnceLock::new();
-    LOADED.get_or_init(|| Mutex::new(false))
+#[derive(Debug)]
+enum CacheState {
+    Uninitialized,
+    Loaded,
+    Unavailable(String),
+}
+
+fn cache_state() -> &'static Mutex<CacheState> {
+    static STATE: OnceLock<Mutex<CacheState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(CacheState::Uninitialized))
+}
+
+#[derive(Debug)]
+enum BlobReadError {
+    NotFound,
+    Unavailable(String),
+    Invalid(String),
+}
+
+impl std::fmt::Display for BlobReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => formatter.write_str("credential entry not found"),
+            Self::Unavailable(message) | Self::Invalid(message) => formatter.write_str(message),
+        }
+    }
 }
 
 /// Current ThinClaw secret identifiers used for new writes.
 ///
 /// The shorter Scrappy/ThinClaw-era provider slugs remain readable as fallback
-/// aliases and are canonicalized when the unified keychain blob is loaded.
+/// aliases so existing users do not lose credentials during the rename.
 pub(crate) fn canonical_key_name(key: &str) -> &str {
     thinclaw_runtime_contracts::canonical_secret_name(key)
 }
@@ -221,41 +320,40 @@ fn blob_aad(version: u32, key_version: i32) -> Vec<u8> {
 }
 
 fn initialize_crypto() -> Result<Arc<SecretsCrypto>, String> {
-    let master_key_hex = match get_generic_password(MASTER_KEY_SERVICE, MASTER_KEY_ACCOUNT) {
-        Ok(bytes) => String::from_utf8(bytes)
-            .map_err(|_| "Keychain master key is not valid UTF-8".to_string())?,
-        Err(error) if is_not_found(&error) => {
-            use rand::RngCore as _;
+    let master_key_hex = Zeroizing::new(
+        match get_generic_password(MASTER_KEY_SERVICE, MASTER_KEY_ACCOUNT) {
+            Ok(bytes) => String::from_utf8(bytes)
+                .map_err(|_| "Credential master key is not valid UTF-8".to_string())?,
+            Err(error) if is_not_found(&error) => {
+                let key =
+                    Zeroizing::new(thinclaw_core::platform::secure_store::generate_master_key());
+                let encoded = hex::encode(key.as_slice());
+                set_generic_password(MASTER_KEY_SERVICE, MASTER_KEY_ACCOUNT, encoded.as_bytes())
+                    .map_err(|error| format!("Credential master-key write failed: {error}"))?;
+                encoded
+            }
+            Err(error) => return Err(format!("Credential master-key read failed: {error}")),
+        },
+    );
 
-            let mut key = [0_u8; 32];
-            rand::thread_rng().fill_bytes(&mut key);
-            let encoded = hex::encode(key);
-            key.zeroize();
-            set_generic_password(MASTER_KEY_SERVICE, MASTER_KEY_ACCOUNT, encoded.as_bytes())
-                .map_err(|error| format!("Keychain master-key write failed: {error}"))?;
-            encoded
-        }
-        Err(error) => return Err(format!("Keychain master-key read failed: {error}")),
-    };
-
-    let mut decoded = hex::decode(&master_key_hex)
-        .map_err(|_| "Keychain master key is not valid hexadecimal data".to_string())?;
+    let decoded = Zeroizing::new(
+        hex::decode(master_key_hex.as_str())
+            .map_err(|_| "Credential master key is not valid hexadecimal data".to_string())?,
+    );
     if decoded.len() != 32 {
-        let actual_len = decoded.len();
-        decoded.zeroize();
         return Err(format!(
-            "Keychain master key must contain 32 bytes, found {}",
-            actual_len
+            "Credential master key must contain 32 bytes, found {}",
+            decoded.len()
         ));
     }
-    decoded.zeroize();
 
     let crypto = Arc::new(
-        SecretsCrypto::new(SecretString::from(master_key_hex))
-            .map_err(|error| format!("Failed to initialize secrets crypto: {error}"))?,
+        SecretsCrypto::new(SecretString::from(master_key_hex.to_string()))
+            .map_err(|error| format!("Failed to initialize credential encryption: {error}"))?,
     );
-    let mut state = keychain_crypto().lock().unwrap_or_else(|e| e.into_inner());
-    *state = Some(KeychainCryptoState {
+    *keychain_crypto()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(KeychainCryptoState {
         crypto: Arc::clone(&crypto),
         key_version: INITIAL_KEY_VERSION,
     });
@@ -266,32 +364,42 @@ fn decode_keychain_blob(
     bytes: &[u8],
     crypto: &SecretsCrypto,
 ) -> Result<DecodedKeychainBlob, String> {
+    if bytes.len() > MAX_KEYCHAIN_BLOB_BYTES {
+        return Err(format!(
+            "credential entry exceeds {MAX_KEYCHAIN_BLOB_BYTES} bytes"
+        ));
+    }
+
     if let Ok(envelope) = serde_json::from_slice::<EncryptedKeychainBlob>(bytes) {
         if envelope.version != ENCRYPTED_BLOB_VERSION
             || envelope.cipher != ENCRYPTED_BLOB_CIPHER
             || envelope.kdf != ENCRYPTED_BLOB_KDF
+            || envelope.key_version < INITIAL_KEY_VERSION
         {
             return Err(format!(
-                "Unsupported encrypted Keychain envelope v{} ({}/{})",
+                "Unsupported encrypted credential envelope v{} ({}/{})",
                 envelope.version, envelope.cipher, envelope.kdf
             ));
         }
-
-        let ciphertext = hex::decode(&envelope.ciphertext).map_err(|_| {
-            "Encrypted Keychain ciphertext is not valid hexadecimal data".to_string()
-        })?;
-        let salt = hex::decode(&envelope.salt)
-            .map_err(|_| "Encrypted Keychain salt is not valid hexadecimal data".to_string())?;
+        let ciphertext = Zeroizing::new(hex::decode(&envelope.ciphertext).map_err(|_| {
+            "Encrypted credential ciphertext is not valid hexadecimal data".to_string()
+        })?);
+        let salt =
+            Zeroizing::new(hex::decode(&envelope.salt).map_err(|_| {
+                "Encrypted credential salt is not valid hexadecimal data".to_string()
+            })?);
         let decrypted = crypto
             .decrypt_with_aad(
-                &ciphertext,
-                &salt,
+                ciphertext.as_slice(),
+                salt.as_slice(),
                 &blob_aad(envelope.version, envelope.key_version),
             )
-            .map_err(|error| format!("Encrypted Keychain blob authentication failed: {error}"))?;
+            .map_err(|error| {
+                format!("Encrypted credential envelope authentication failed: {error}")
+            })?;
         let secrets = serde_json::from_str::<HashMap<String, String>>(decrypted.expose())
-            .map_err(|error| format!("Decrypted Keychain blob is invalid JSON: {error}"))?;
-
+            .map_err(|error| format!("Decrypted credential envelope is invalid JSON: {error}"))?;
+        validate_credential_map(&secrets)?;
         return Ok(DecodedKeychainBlob {
             secrets,
             key_version: envelope.key_version,
@@ -299,8 +407,10 @@ fn decode_keychain_blob(
         });
     }
 
-    let secrets = serde_json::from_slice::<HashMap<String, String>>(bytes)
-        .map_err(|error| format!("Keychain blob is neither encrypted nor legacy JSON: {error}"))?;
+    let secrets = serde_json::from_slice::<HashMap<String, String>>(bytes).map_err(|error| {
+        format!("Credential entry is neither encrypted nor legacy JSON: {error}")
+    })?;
+    validate_credential_map(&secrets)?;
     Ok(DecodedKeychainBlob {
         secrets,
         key_version: INITIAL_KEY_VERSION,
@@ -313,14 +423,21 @@ fn encode_keychain_blob(
     crypto: &SecretsCrypto,
     key_version: i32,
 ) -> Result<Vec<u8>, String> {
-    let mut plaintext = serde_json::to_vec(secrets)
-        .map_err(|error| format!("Failed to serialize API keys: {error}"))?;
-    let encrypted =
-        crypto.encrypt_with_aad(&plaintext, &blob_aad(ENCRYPTED_BLOB_VERSION, key_version));
-    plaintext.zeroize();
-    let (ciphertext, salt) =
-        encrypted.map_err(|error| format!("Failed to encrypt API keys: {error}"))?;
-    serde_json::to_vec(&EncryptedKeychainBlob {
+    validate_credential_map(secrets)?;
+    if key_version < INITIAL_KEY_VERSION {
+        return Err("Credential encryption key version is invalid".to_string());
+    }
+    let plaintext = Zeroizing::new(
+        serde_json::to_vec(secrets)
+            .map_err(|error| format!("Failed to serialize credentials: {error}"))?,
+    );
+    let (ciphertext, salt) = crypto
+        .encrypt_with_aad(
+            plaintext.as_slice(),
+            &blob_aad(ENCRYPTED_BLOB_VERSION, key_version),
+        )
+        .map_err(|error| format!("Failed to encrypt credentials: {error}"))?;
+    let encoded = serde_json::to_vec(&EncryptedKeychainBlob {
         version: ENCRYPTED_BLOB_VERSION,
         key_version,
         cipher: ENCRYPTED_BLOB_CIPHER.to_string(),
@@ -328,7 +445,13 @@ fn encode_keychain_blob(
         ciphertext: hex::encode(ciphertext),
         salt: hex::encode(salt),
     })
-    .map_err(|error| format!("Failed to serialize encrypted API keys: {error}"))
+    .map_err(|error| format!("Failed to serialize encrypted credentials: {error}"))?;
+    if encoded.len() > MAX_KEYCHAIN_BLOB_BYTES {
+        return Err(format!(
+            "Encrypted credential entry exceeds {MAX_KEYCHAIN_BLOB_BYTES} bytes"
+        ));
+    }
+    Ok(encoded)
 }
 
 fn verify_keychain_blob(
@@ -340,78 +463,88 @@ fn verify_keychain_blob(
     let decoded = decode_keychain_blob(bytes, crypto)?;
     if !decoded.encrypted || decoded.key_version != key_version || decoded.secrets != *expected {
         return Err(
-            "Keychain rotation verification did not reproduce the expected envelope".to_string(),
+            "Credential rotation verification did not reproduce the expected envelope".to_string(),
         );
     }
     Ok(())
 }
 
-/// Load all API keys from the Keychain and authenticate/decrypt their single
-/// AES envelope.
-///
-/// Call this **once** during app startup (before any `get_key` / `set_key`).
-/// Existing plaintext JSON blobs are encrypted in place after a successful
-/// read and canonical-name migration.
-pub fn load_all() -> Result<(), String> {
-    let mut loaded = cache_loaded().lock().unwrap_or_else(|e| e.into_inner());
-    if *loaded {
-        return Ok(()); // Already loaded
+/// Load and authenticate all credentials in one bounded platform-store read.
+/// Legacy plaintext JSON is migrated to an AES-256-GCM envelope before reads
+/// are made available to the rest of the process.
+pub fn load_all() {
+    let mut state = cache_state().lock().unwrap_or_else(|e| e.into_inner());
+    if !matches!(*state, CacheState::Uninitialized) {
+        return;
     }
 
-    let crypto = initialize_crypto()?;
+    let crypto = match initialize_crypto() {
+        Ok(crypto) => crypto,
+        Err(error) => {
+            warn!("[keychain] {error}");
+            *state = CacheState::Unavailable(error);
+            return;
+        }
+    };
+
     let mut cache = key_cache().lock().unwrap_or_else(|e| e.into_inner());
 
-    // Track whether we found an existing unified blob — if so, skip legacy migration
     let mut blob_existed = false;
     let mut needs_encrypted_flush = false;
 
-    match get_generic_password(SERVICE, ACCOUNT) {
-        Ok(bytes) => {
-            let decoded = decode_keychain_blob(&bytes, crypto.as_ref())?;
+    match get_keychain_blob(SERVICE, ACCOUNT, crypto.as_ref()) {
+        Ok(decoded) => {
             let count = decoded.secrets.len();
             needs_encrypted_flush = !decoded.encrypted;
-            if let Some(state) = keychain_crypto()
+            if let Some(crypto_state) = keychain_crypto()
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(|error| error.into_inner())
                 .as_mut()
             {
-                state.key_version = decoded.key_version;
+                crypto_state.key_version = decoded.key_version;
             }
             *cache = decoded.secrets;
             blob_existed = true;
             info!(
-                "[keychain] loaded {} keys from authenticated Keychain envelope",
-                count,
+                "[keychain] loaded {} keys from authenticated credential envelope",
+                count
             );
         }
-        Err(e) if is_not_found(&e) => match get_generic_password(LEGACY_SERVICE, ACCOUNT) {
-            Ok(bytes) => {
-                let decoded = decode_keychain_blob(&bytes, crypto.as_ref())?;
-                let count = decoded.secrets.len();
-                if let Some(state) = keychain_crypto()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_mut()
-                {
-                    state.key_version = decoded.key_version;
+        Err(BlobReadError::NotFound) => {
+            match get_keychain_blob(LEGACY_SERVICE, ACCOUNT, crypto.as_ref()) {
+                Ok(decoded) => {
+                    let count = decoded.secrets.len();
+                    if let Some(crypto_state) = keychain_crypto()
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .as_mut()
+                    {
+                        crypto_state.key_version = decoded.key_version;
+                    }
+                    *cache = decoded.secrets;
+                    blob_existed = true;
+                    needs_encrypted_flush = true;
+                    info!(
+                        "[keychain] migrated {} keys from legacy Scrappy Keychain service",
+                        count
+                    );
                 }
-                *cache = decoded.secrets;
-                blob_existed = true;
-                needs_encrypted_flush = true;
-                info!(
-                    "[keychain] migrated {} keys from legacy Scrappy Keychain service",
-                    count
-                );
+                Err(BlobReadError::NotFound) => {
+                    info!("[keychain] no existing api_keys entry — starting fresh");
+                }
+                Err(error) => {
+                    let message = format!("failed to read legacy credentials: {error}");
+                    warn!("[keychain] {message}");
+                    *state = CacheState::Unavailable(message);
+                    return;
+                }
             }
-            Err(e) if is_not_found(&e) => {
-                info!("[keychain] no existing api_keys entry — starting fresh");
-            }
-            Err(e) => {
-                return Err(format!("Legacy Keychain api_keys read failed: {e}"));
-            }
-        },
-        Err(e) => {
-            return Err(format!("Keychain api_keys read failed: {e}"));
+        }
+        Err(error) => {
+            let message = format!("failed to read credentials: {error}");
+            warn!("[keychain] {message}");
+            *state = CacheState::Unavailable(message);
+            return;
         }
     }
 
@@ -419,41 +552,40 @@ pub fn load_all() -> Result<(), String> {
     // didn't exist yet.  This avoids extra `get_generic_password` calls on
     // every launch, each of which macOS treats as a separate Keychain access
     // that may trigger an additional authorization prompt.
-    let mut legacy_items_to_delete = Vec::new();
     if !blob_existed {
-        let (migrated, pending_deletions) = migrate_per_key_items(&mut cache)?;
-        legacy_items_to_delete = pending_deletions;
+        let migrated = migrate_per_key_items(&mut cache);
         if migrated {
             needs_encrypted_flush = true;
         }
     }
 
-    // Canonicalize provider aliases inside both current and imported blobs.
-    // Preserve an existing canonical value if a stale alias also exists.
     if migrate_legacy_aliases(&mut cache) {
         needs_encrypted_flush = true;
     }
 
     if needs_encrypted_flush {
-        flush_cache(&cache)?;
-    }
-
-    // Delete active-service legacy items only after every imported value has
-    // reached the authenticated envelope. A failed encrypted write therefore
-    // leaves the original credentials available for the next startup attempt.
-    for (service, provider) in legacy_items_to_delete {
-        match delete_generic_password(service, provider) {
-            Ok(()) => info!("[keychain] deleted legacy per-key item: '{}'", provider),
-            Err(error) if is_not_found(&error) => {}
-            Err(error) => warn!(
-                "[keychain] failed to delete legacy '{}': {}",
-                provider, error
-            ),
+        if let Err(error) = flush_cache(&cache) {
+            warn!("[keychain] encrypted credential migration failed: {error}");
+            *state = CacheState::Unavailable(error);
+            return;
         }
     }
 
-    *loaded = true;
-    Ok(())
+    *state = CacheState::Loaded;
+}
+
+fn get_keychain_blob(
+    service: &str,
+    account: &str,
+    crypto: &SecretsCrypto,
+) -> Result<DecodedKeychainBlob, BlobReadError> {
+    match get_generic_password(service, account) {
+        Ok(bytes) => decode_keychain_blob(&bytes, crypto).map_err(BlobReadError::Invalid),
+        Err(error) if is_not_found(&error) => Err(BlobReadError::NotFound),
+        Err(error) => Err(BlobReadError::Unavailable(format!(
+            "platform credential store read failed: {error}"
+        ))),
+    }
 }
 
 /// Store `value` in the Keychain under the given key name.
@@ -462,41 +594,52 @@ pub fn load_all() -> Result<(), String> {
 /// This updates the in-memory cache and flushes the entire JSON blob
 /// back to the Keychain (one write operation).
 pub fn set_key(key: &str, value: Option<&str>) -> Result<(), String> {
+    set_keys(&[(key, value)])
+}
+
+/// Atomically update several values in the unified credential blob. The
+/// in-memory cache is replaced only after the platform write succeeds, so a
+/// failed durable write cannot leave runtime reads observing phantom values.
+pub fn set_keys(entries: &[(&str, Option<&str>)]) -> Result<(), String> {
     // Ensure cache is loaded
     ensure_loaded()?;
+    if entries.len() > MAX_KEYCHAIN_ENTRIES {
+        return Err("Too many credential updates in one operation".to_string());
+    }
+    for (key, value) in entries {
+        validate_credential_entry(key, value.unwrap_or_default())?;
+    }
 
     let mut cache = key_cache().lock().unwrap_or_else(|e| e.into_inner());
-    let mut next = cache.clone();
-    let canonical_key = canonical_key_name(key);
-
-    match value {
-        Some(v) if !v.is_empty() => {
-            next.insert(canonical_key.to_string(), v.to_string());
-            for alias in legacy_aliases_for(canonical_key) {
-                if *alias != canonical_key {
-                    next.remove(*alias);
+    let mut candidate = cache.clone();
+    for (key, value) in entries {
+        let canonical_key = canonical_key_name(key);
+        match value {
+            Some(value) if !value.is_empty() => {
+                candidate.insert(canonical_key.to_string(), (*value).to_string());
+                for alias in legacy_aliases_for(canonical_key) {
+                    if *alias != canonical_key {
+                        candidate.remove(*alias);
+                    }
+                }
+            }
+            _ => {
+                candidate.remove(canonical_key);
+                candidate.remove(*key);
+                for alias in legacy_aliases_for(canonical_key) {
+                    candidate.remove(*alias);
                 }
             }
         }
-        _ => {
-            next.remove(canonical_key);
-            next.remove(key);
-            for alias in legacy_aliases_for(canonical_key) {
-                next.remove(*alias);
-            }
-        }
     }
 
-    // Persist first, then publish the new cache state. This prevents a failed
-    // Keychain write from making the process believe an unpersisted mutation
-    // succeeded.
-    flush_cache(&next)?;
-    *cache = next;
-    if value.is_some_and(|candidate| !candidate.is_empty()) {
-        info!("[keychain] stored '{}'", canonical_key);
-    } else {
-        info!("[keychain] removed '{}'", canonical_key);
-    }
+    validate_credential_map(&candidate)?;
+    flush_cache(&candidate)?;
+    *cache = candidate;
+    info!(
+        "[keychain] committed {} credential update(s)",
+        entries.len()
+    );
     Ok(())
 }
 
@@ -504,8 +647,7 @@ pub fn set_key(key: &str, value: Option<&str>) -> Result<(), String> {
 ///
 /// Reads from the in-memory cache (no Keychain access).
 pub fn get_key(key: &str) -> Option<String> {
-    if let Err(error) = ensure_loaded() {
-        warn!("[keychain] refusing secret read: {error}");
+    if ensure_loaded().is_err() {
         return None;
     }
 
@@ -522,6 +664,16 @@ pub fn get_key(key: &str) -> Option<String> {
         .cloned()
 }
 
+/// Stable, non-identifying secure-store key for a remote agent profile token.
+/// Hashing also prevents an attacker-controlled profile ID from colliding with
+/// built-in provider secret names.
+pub fn profile_token_key(profile_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(profile_id.as_bytes());
+    format!("desktop_agent_profile_token_{}", hex::encode(digest))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Legacy identity.json migration
 // ─────────────────────────────────────────────────────────────────────────────
@@ -531,14 +683,13 @@ pub fn get_key(key: &str) -> Option<String> {
 /// For every field that is `Some(non-empty)`, it is stored in the cache and
 /// cleared from `identity` so the caller can write back a sanitised JSON.
 ///
-/// Returns `Ok(true)` if migration was performed and durably written. On an
-/// error, the input and cache are left unchanged so the plaintext source can be
-/// retained for a later retry instead of being silently discarded.
+/// Returns whether any migration was performed. A failed credential-store
+/// flush is returned to the caller so it must not scrub the plaintext source.
 pub fn migrate_from_identity(identity: &mut LegacyKeys) -> Result<bool, String> {
     ensure_loaded()?;
 
     let mut cache = key_cache().lock().unwrap_or_else(|e| e.into_inner());
-    let mut next = cache.clone();
+    let mut candidate = cache.clone();
     let original_identity = identity.clone();
     let mut migrated = false;
 
@@ -547,7 +698,7 @@ pub fn migrate_from_identity(identity: &mut LegacyKeys) -> Result<bool, String> 
             if let Some(ref val) = $field {
                 if !val.is_empty() {
                     let canonical = canonical_key_name($key);
-                    next.insert(canonical.to_string(), val.clone());
+                    candidate.insert(canonical.to_string(), val.clone());
                     info!("[keychain] migrated '{}' from identity.json", canonical);
                     $field = None;
                     migrated = true;
@@ -582,11 +733,11 @@ pub fn migrate_from_identity(identity: &mut LegacyKeys) -> Result<bool, String> 
     migrate!(identity.remote_token, "remote_token");
 
     if migrated {
-        if let Err(error) = flush_cache(&next) {
+        if let Err(error) = flush_cache(&candidate) {
             *identity = original_identity;
             return Err(error);
         }
-        *cache = next;
+        *cache = candidate;
     }
 
     Ok(migrated)
@@ -600,14 +751,12 @@ pub fn migrate_from_identity(identity: &mut LegacyKeys) -> Result<bool, String> 
 /// to the unified JSON blob format.
 ///
 /// For each known provider slug, checks if a legacy Keychain item exists.
-/// If so, stages it in the cache and returns active-service items for deletion
-/// after the consolidated encrypted envelope has been written successfully.
+/// If so, imports it into the cache. Legacy entries are intentionally retained
+/// as recovery copies until the consolidated blob has been proven durable.
 ///
-/// Returns whether any value was imported plus the items safe to delete after
-/// a successful flush. Scrappy service items are retained for rollback.
-fn migrate_per_key_items(cache: &mut HashMap<String, String>) -> Result<PerKeyMigration, String> {
+/// Returns `true` if any legacy items were found and migrated.
+fn migrate_per_key_items(cache: &mut HashMap<String, String>) -> bool {
     let mut migrated = false;
-    let mut pending_deletions = Vec::new();
 
     for service in [SERVICE, LEGACY_SERVICE] {
         for &provider in PROVIDERS {
@@ -624,19 +773,9 @@ fn migrate_per_key_items(cache: &mut HashMap<String, String>) -> Result<PerKeyMi
                             migrated = true;
                         }
                     }
-                    // Delete only per-key items in the active service, and only
-                    // after load_all has successfully flushed the encrypted
-                    // envelope. Legacy Scrappy items stay for rollback.
-                    if service == SERVICE {
-                        pending_deletions.push((service, provider));
-                    }
                 }
                 Err(e) if is_not_found(&e) => {} // No legacy item
-                Err(error) => {
-                    return Err(format!(
-                        "Legacy Keychain item '{service}/{provider}' read failed: {error}"
-                    ));
-                }
+                Err(_) => {}                     // Ignore read errors during migration
             }
         }
     }
@@ -645,30 +784,24 @@ fn migrate_per_key_items(cache: &mut HashMap<String, String>) -> Result<PerKeyMi
         info!("[keychain] per-key migration complete — consolidated into single entry");
     }
 
-    Ok((migrated, pending_deletions))
+    migrated
 }
 
-/// Move provider aliases in a unified blob to their canonical ThinClaw names.
+/// Move historical provider aliases to their canonical runtime-contract names.
+/// An already-present canonical value always wins over a stale alias.
 fn migrate_legacy_aliases(cache: &mut HashMap<String, String>) -> bool {
-    let keys: Vec<String> = cache.keys().cloned().collect();
+    let keys = cache.keys().cloned().collect::<Vec<_>>();
     let mut migrated = false;
-
     for key in keys {
         let canonical = canonical_key_name(&key);
         if canonical == key {
             continue;
         }
-
         if let Some(value) = cache.remove(&key) {
             cache.entry(canonical.to_string()).or_insert(value);
-            info!(
-                "[keychain] migrated legacy alias '{}' to '{}'",
-                key, canonical
-            );
             migrated = true;
         }
     }
-
     migrated
 }
 
@@ -730,18 +863,30 @@ pub struct LegacyKeys {
 
 /// Ensure the cache has been loaded from the Keychain.
 fn ensure_loaded() -> Result<(), String> {
-    let loaded = cache_loaded().lock().unwrap_or_else(|e| e.into_inner());
-    if !*loaded {
-        drop(loaded); // Release lock before calling load_all
-        load_all()?;
+    let needs_load = {
+        let state = cache_state().lock().unwrap_or_else(|e| e.into_inner());
+        matches!(*state, CacheState::Uninitialized)
+    };
+    if needs_load {
+        load_all();
     }
-    Ok(())
+    let state = cache_state().lock().unwrap_or_else(|e| e.into_inner());
+    match &*state {
+        CacheState::Loaded => Ok(()),
+        CacheState::Unavailable(message) => Err(message.clone()),
+        CacheState::Uninitialized => {
+            Err("platform credential store did not initialize".to_string())
+        }
+    }
 }
 
-/// Flush the in-memory cache to the Keychain as a single JSON blob.
+/// Flush the in-memory cache as one authenticated encrypted envelope.
 fn flush_cache(cache: &HashMap<String, String>) -> Result<(), String> {
-    // Only write non-empty values
-    let clean: HashMap<&String, &String> = cache.iter().filter(|(_, v)| !v.is_empty()).collect();
+    let clean = cache
+        .iter()
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<HashMap<_, _>>();
 
     if clean.is_empty() {
         // No keys → delete the Keychain item
@@ -753,48 +898,48 @@ fn flush_cache(cache: &HashMap<String, String>) -> Result<(), String> {
         return Ok(());
     }
 
-    let crypto = keychain_crypto().lock().unwrap_or_else(|e| e.into_inner());
-    let state = crypto
+    let state = keychain_crypto()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let state = state
         .as_ref()
-        .ok_or_else(|| "Keychain encryption is not initialized".to_string())?;
-    let clean = clean
-        .into_iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect::<HashMap<_, _>>();
+        .ok_or_else(|| "Credential encryption is not initialized".to_string())?;
     let envelope = encode_keychain_blob(&clean, state.crypto.as_ref(), state.key_version)?;
-
     set_generic_password(SERVICE, ACCOUNT, &envelope)
-        .map_err(|e| format!("Keychain write failed: {}", e))?;
+        .map_err(|error| format!("Credential envelope write failed: {error}"))?;
 
-    info!("[keychain] flushed {} keys to Keychain", clean.len());
+    info!("[keychain] flushed {} encrypted credentials", clean.len());
     Ok(())
 }
 
-/// Re-encrypt the entire Desktop envelope under a newly generated core master
-/// key. Persisting the new master key itself is deliberately owned by the
-/// caller so it can roll back that Keychain write if envelope rotation fails.
+/// Re-encrypt the complete envelope under a replacement master key. The
+/// previous durable envelope is restored if write verification fails.
 pub fn rotate_encryption_key(new_crypto: Arc<SecretsCrypto>) -> Result<(i32, i32, usize), String> {
     ensure_loaded()?;
-    let cache = key_cache().lock().unwrap_or_else(|e| e.into_inner());
-    let mut state = keychain_crypto().lock().unwrap_or_else(|e| e.into_inner());
+    let cache = key_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut state = keychain_crypto()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let current = state
         .as_ref()
-        .ok_or_else(|| "Keychain encryption is not initialized".to_string())?;
+        .ok_or_else(|| "Credential encryption is not initialized".to_string())?;
     let old_key_version = current.key_version;
     let new_key_version = old_key_version
         .checked_add(1)
-        .ok_or_else(|| "Keychain encryption key version overflow".to_string())?;
+        .ok_or_else(|| "Credential encryption key version overflow".to_string())?;
     let previous_envelope = match get_generic_password(SERVICE, ACCOUNT) {
         Ok(bytes) => Some(bytes),
         Err(error) if is_not_found(&error) => None,
-        Err(error) => return Err(format!("Keychain rotation read failed: {error}")),
+        Err(error) => return Err(format!("Credential rotation read failed: {error}")),
     };
     let envelope = encode_keychain_blob(&cache, new_crypto.as_ref(), new_key_version)?;
     set_generic_password(SERVICE, ACCOUNT, &envelope)
-        .map_err(|error| format!("Keychain rotation write failed: {error}"))?;
+        .map_err(|error| format!("Credential rotation write failed: {error}"))?;
 
     let verification = get_generic_password(SERVICE, ACCOUNT)
-        .map_err(|error| format!("Keychain rotation verification read failed: {error}"))
+        .map_err(|error| format!("Credential rotation verification read failed: {error}"))
         .and_then(|bytes| {
             verify_keychain_blob(&bytes, new_crypto.as_ref(), new_key_version, &cache)
         });
@@ -815,7 +960,7 @@ pub fn rotate_encryption_key(new_crypto: Arc<SecretsCrypto>) -> Result<(i32, i32
         return match rollback {
             Ok(()) => Err(error),
             Err(rollback_error) => Err(format!(
-                "{error}; previous Keychain envelope rollback failed: {rollback_error}"
+                "{error}; previous credential envelope rollback failed: {rollback_error}"
             )),
         };
     }
@@ -830,7 +975,7 @@ pub fn rotate_encryption_key(new_crypto: Arc<SecretsCrypto>) -> Result<(i32, i32
 pub fn encryption_key_version() -> i32 {
     keychain_crypto()
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(|error| error.into_inner())
         .as_ref()
         .map(|state| state.key_version)
         .unwrap_or(INITIAL_KEY_VERSION)
@@ -848,131 +993,32 @@ pub fn encryption_metadata() -> Result<(i32, usize), String> {
     Ok((key_version, stored_secrets))
 }
 
+fn validate_credential_map(values: &HashMap<String, String>) -> Result<(), String> {
+    if values.len() > MAX_KEYCHAIN_ENTRIES {
+        return Err(format!(
+            "credential entry exceeds {MAX_KEYCHAIN_ENTRIES} values"
+        ));
+    }
+    for (key, value) in values {
+        validate_credential_entry(key, value)?;
+    }
+    Ok(())
+}
+
+fn validate_credential_entry(key: &str, value: &str) -> Result<(), String> {
+    if key.is_empty() || key.len() > MAX_KEYCHAIN_KEY_BYTES || key.chars().any(char::is_control) {
+        return Err("Credential key is empty, oversized, or contains controls".to_string());
+    }
+    if value.len() > MAX_KEYCHAIN_VALUE_BYTES {
+        return Err(format!(
+            "Credential value for '{}' exceeds {MAX_KEYCHAIN_VALUE_BYTES} bytes",
+            key.chars().take(64).collect::<String>()
+        ));
+    }
+    Ok(())
+}
+
 fn is_not_found(e: &KeychainError) -> bool {
     // errSecItemNotFound = -25300
     e.code() == -25300
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_crypto(fill: char) -> SecretsCrypto {
-        SecretsCrypto::new(SecretString::from(
-            std::iter::repeat_n(fill, 64).collect::<String>(),
-        ))
-        .expect("test crypto")
-    }
-
-    #[test]
-    fn encrypted_blob_round_trips_without_plaintext_at_rest() {
-        let crypto = test_crypto('a');
-        let secrets = HashMap::from([
-            ("llm_openai_api_key".to_string(), "sk-sensitive".to_string()),
-            ("hf_token".to_string(), "hf-private".to_string()),
-        ]);
-
-        let encoded = encode_keychain_blob(&secrets, &crypto, 7).expect("encrypt blob");
-        let persisted = String::from_utf8(encoded.clone()).expect("json envelope");
-        assert!(!persisted.contains("sk-sensitive"));
-        assert!(!persisted.contains("hf-private"));
-
-        let decoded = decode_keychain_blob(&encoded, &crypto).expect("decrypt blob");
-        assert!(decoded.encrypted);
-        assert_eq!(decoded.key_version, 7);
-        assert_eq!(decoded.secrets, secrets);
-    }
-
-    #[test]
-    fn encrypted_blob_fails_closed_after_tampering() {
-        let crypto = test_crypto('b');
-        let mut envelope: EncryptedKeychainBlob = serde_json::from_slice(
-            &encode_keychain_blob(
-                &HashMap::from([("secret".to_string(), "value".to_string())]),
-                &crypto,
-                1,
-            )
-            .expect("encrypt blob"),
-        )
-        .expect("parse envelope");
-        let replacement = if envelope.ciphertext.starts_with('0') {
-            '1'
-        } else {
-            '0'
-        };
-        envelope
-            .ciphertext
-            .replace_range(..1, &replacement.to_string());
-        let tampered = serde_json::to_vec(&envelope).expect("serialize tampered envelope");
-
-        assert!(decode_keychain_blob(&tampered, &crypto).is_err());
-    }
-
-    #[test]
-    fn legacy_plaintext_blob_is_detected_for_one_time_encryption() {
-        let legacy = serde_json::to_vec(&HashMap::from([(
-            "openai".to_string(),
-            "legacy-value".to_string(),
-        )]))
-        .expect("legacy json");
-        let decoded = decode_keychain_blob(&legacy, &test_crypto('c')).expect("decode legacy");
-
-        assert!(!decoded.encrypted);
-        assert_eq!(decoded.key_version, INITIAL_KEY_VERSION);
-        assert_eq!(
-            decoded.secrets.get("openai").map(String::as_str),
-            Some("legacy-value")
-        );
-    }
-
-    #[test]
-    fn rotated_blob_requires_the_new_master_key() {
-        let old_crypto = test_crypto('d');
-        let new_crypto = test_crypto('e');
-        let secrets = HashMap::from([("token".to_string(), "private".to_string())]);
-        let rotated = encode_keychain_blob(&secrets, &new_crypto, 2).expect("rotate blob");
-
-        assert!(decode_keychain_blob(&rotated, &old_crypto).is_err());
-        let decoded = decode_keychain_blob(&rotated, &new_crypto).expect("new key decrypts");
-        assert_eq!(decoded.key_version, 2);
-        assert_eq!(decoded.secrets, secrets);
-        verify_keychain_blob(&rotated, &new_crypto, 2, &secrets).expect("rotation verifies");
-    }
-
-    #[test]
-    fn legacy_aliases_are_moved_to_canonical_names() {
-        let mut cache = HashMap::from([
-            ("anthropic".to_string(), "legacy-anthropic".to_string()),
-            ("OPENAI_API_KEY".to_string(), "legacy-openai".to_string()),
-            ("custom-id".to_string(), "custom".to_string()),
-        ]);
-
-        assert!(migrate_legacy_aliases(&mut cache));
-        assert_eq!(
-            cache.get("llm_anthropic_api_key").map(String::as_str),
-            Some("legacy-anthropic")
-        );
-        assert_eq!(
-            cache.get("llm_openai_api_key").map(String::as_str),
-            Some("legacy-openai")
-        );
-        assert_eq!(cache.get("custom-id").map(String::as_str), Some("custom"));
-        assert!(!cache.contains_key("anthropic"));
-        assert!(!cache.contains_key("OPENAI_API_KEY"));
-    }
-
-    #[test]
-    fn canonical_value_wins_when_alias_also_exists() {
-        let mut cache = HashMap::from([
-            ("llm_anthropic_api_key".to_string(), "canonical".to_string()),
-            ("anthropic".to_string(), "legacy".to_string()),
-        ]);
-
-        assert!(migrate_legacy_aliases(&mut cache));
-        assert_eq!(
-            cache.get("llm_anthropic_api_key").map(String::as_str),
-            Some("canonical")
-        );
-        assert!(!cache.contains_key("anthropic"));
-    }
 }

@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use libsql::params;
+use libsql::{TransactionBehavior, params};
 use uuid::Uuid;
 
 use super::{
@@ -11,7 +11,7 @@ use super::{
     opt_text_owned, row_to_routine_event_evaluation_libsql, row_to_routine_event_libsql,
     row_to_routine_libsql, row_to_routine_run_libsql, row_to_routine_trigger_libsql,
 };
-use crate::RoutineStore;
+use crate::{RoutineRunAdmission, RoutineRunCompletion, RoutineRunReapResult, RoutineStore};
 use thinclaw_types::error::DatabaseError;
 use thinclaw_types::routine::{
     Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
@@ -334,6 +334,54 @@ impl RoutineStore for LibSqlBackend {
         Ok(())
     }
 
+    async fn advance_routine_runtime(
+        &self,
+        id: Uuid,
+        last_run_at: DateTime<Utc>,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            r#"
+                UPDATE routines SET
+                    last_run_at = ?2,
+                    next_fire_at = ?3,
+                    run_count = run_count + 1,
+                    consecutive_failures = 0,
+                    updated_at = ?4
+                WHERE id = ?1
+            "#,
+            params![
+                id.to_string(),
+                fmt_ts(&last_run_at),
+                fmt_opt_ts(&next_fire_at),
+                fmt_ts(&Utc::now()),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn set_routine_next_fire_at(
+        &self,
+        id: Uuid,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "UPDATE routines SET next_fire_at = ?2, updated_at = ?3 WHERE id = ?1",
+            params![
+                id.to_string(),
+                fmt_opt_ts(&next_fire_at),
+                fmt_ts(&Utc::now()),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
     async fn delete_routine(&self, id: Uuid) -> Result<bool, DatabaseError> {
         let conn = self.connect().await?;
         let count = conn
@@ -374,33 +422,275 @@ impl RoutineStore for LibSqlBackend {
         Ok(())
     }
 
+    async fn try_admit_routine_run(
+        &self,
+        run: &RoutineRun,
+        routine_limit: i64,
+        global_limit: i64,
+        initial_lease_expires_at: DateTime<Utc>,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<RoutineRunAdmission, DatabaseError> {
+        let _transaction_guard = self.transaction_lock.lock().await;
+        let conn = self.connect().await?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let result = async {
+            if let Some(trigger_key) = run.trigger_key.as_deref() {
+                let mut rows = tx
+                    .query(
+                        "SELECT id FROM routine_runs \
+                         WHERE routine_id = ?1 AND trigger_key = ?2 \
+                         ORDER BY started_at ASC LIMIT 1",
+                        params![run.routine_id.to_string(), trigger_key],
+                    )
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                if let Some(row) = rows
+                    .next()
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?
+                {
+                    let existing = Uuid::parse_str(&get_text(&row, 0)).map_err(|error| {
+                        DatabaseError::Serialization(format!(
+                            "invalid duplicate routine run id: {error}"
+                        ))
+                    })?;
+                    return Ok(RoutineRunAdmission::Duplicate(existing));
+                }
+            }
+
+            let mut rows = tx
+                .query(
+                    "SELECT \
+                         COALESCE(SUM(CASE WHEN routine_id = ?1 THEN 1 ELSE 0 END), 0), \
+                         COUNT(*) \
+                     FROM routine_runs WHERE status = 'running'",
+                    params![run.routine_id.to_string()],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?
+                .ok_or_else(|| {
+                    DatabaseError::Query("routine capacity query returned no row".into())
+                })?;
+            if get_i64(&row, 0) >= routine_limit {
+                return Ok(RoutineRunAdmission::RoutineCapacity);
+            }
+            if get_i64(&row, 1) >= global_limit {
+                return Ok(RoutineRunAdmission::GlobalCapacity);
+            }
+
+            tx.execute(
+                r#"
+                    INSERT INTO routine_runs (
+                        id, routine_id, trigger_type, trigger_detail, trigger_key,
+                        started_at, status, job_id, lease_expires_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "#,
+                params![
+                    run.id.to_string(),
+                    run.routine_id.to_string(),
+                    run.trigger_type.as_str(),
+                    opt_text(run.trigger_detail.as_deref()),
+                    opt_text(run.trigger_key.as_deref()),
+                    fmt_ts(&run.started_at),
+                    run.status.to_string(),
+                    opt_text_owned(run.job_id.map(|id| id.to_string())),
+                    fmt_ts(&initial_lease_expires_at),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            tx.execute(
+                r#"
+                    UPDATE routines SET
+                        last_run_at = ?2,
+                        next_fire_at = ?3,
+                        run_count = run_count + 1,
+                        updated_at = ?4
+                    WHERE id = ?1
+                "#,
+                params![
+                    run.routine_id.to_string(),
+                    fmt_ts(&run.started_at),
+                    fmt_opt_ts(&next_fire_at),
+                    fmt_ts(&Utc::now()),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            Ok(RoutineRunAdmission::Admitted)
+        }
+        .await;
+
+        match result {
+            Ok(value) => {
+                tx.commit()
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
     async fn complete_routine_run(
         &self,
         id: Uuid,
         status: RunStatus,
         result_summary: Option<&str>,
         tokens_used: Option<i32>,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<RoutineRunCompletion, DatabaseError> {
+        if status == RunStatus::Running {
+            return Err(DatabaseError::Constraint(
+                "routine completion status must be terminal".to_string(),
+            ));
+        }
+        let _transaction_guard = self.transaction_lock.lock().await;
         let conn = self.connect().await?;
-        let now = fmt_ts(&Utc::now());
-        conn.execute(
-            r#"
-                UPDATE routine_runs SET
-                    completed_at = ?5, status = ?2,
-                    result_summary = ?3, tokens_used = ?4
-                WHERE id = ?1
-            "#,
-            params![
-                id.to_string(),
-                status.to_string(),
-                opt_text(result_summary),
-                tokens_used.map(|t| t as i64),
-                now,
-            ],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(())
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let result = async {
+            let changed = tx
+                .execute(
+                    r#"
+                        UPDATE routine_runs SET
+                            completed_at = ?5, status = ?2,
+                            result_summary = ?3, tokens_used = ?4,
+                            lease_expires_at = NULL
+                        WHERE id = ?1 AND status = 'running'
+                    "#,
+                    params![
+                        id.to_string(),
+                        status.to_string(),
+                        opt_text(result_summary),
+                        tokens_used.map(|t| t as i64),
+                        fmt_ts(&Utc::now()),
+                    ],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            if changed == 0 {
+                return Ok(RoutineRunCompletion::AlreadyTerminal);
+            }
+
+            let mut rows = tx
+                .query(
+                    "SELECT routine_id FROM routine_runs WHERE id = ?1 LIMIT 1",
+                    params![id.to_string()],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?
+                .ok_or_else(|| DatabaseError::Query("completed routine run disappeared".into()))?;
+            let routine_id = Uuid::parse_str(&get_text(&row, 0)).map_err(|error| {
+                DatabaseError::Serialization(format!("invalid routine id on run: {error}"))
+            })?;
+
+            tx.execute(
+                r#"
+                    UPDATE routines SET
+                        consecutive_failures = CASE
+                            WHEN ?2 = 'failed' THEN consecutive_failures + 1
+                            ELSE 0
+                        END,
+                        updated_at = ?3
+                    WHERE id = ?1
+                "#,
+                params![
+                    routine_id.to_string(),
+                    status.to_string(),
+                    fmt_ts(&Utc::now()),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            let mut rows = tx
+                .query(
+                    "SELECT consecutive_failures FROM routines WHERE id = ?1 LIMIT 1",
+                    params![routine_id.to_string()],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?
+                .ok_or_else(|| DatabaseError::Query("parent routine disappeared".into()))?;
+            let consecutive_failures = u32::try_from(get_i64(&row, 0)).map_err(|error| {
+                DatabaseError::Serialization(format!("invalid failure counter: {error}"))
+            })?;
+            Ok(RoutineRunCompletion::Completed {
+                routine_id,
+                consecutive_failures,
+            })
+        }
+        .await;
+
+        match result {
+            Ok(value) => {
+                tx.commit()
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn apply_routine_failure_policy(
+        &self,
+        routine_id: Uuid,
+        expected_consecutive_failures: u32,
+        not_before: DateTime<Utc>,
+        disable: bool,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        let changed = conn
+            .execute(
+                r#"
+                    UPDATE routines SET
+                        next_fire_at = CASE
+                            WHEN next_fire_at IS NOT NULL AND next_fire_at < ?3 THEN ?3
+                            ELSE next_fire_at
+                        END,
+                        enabled = CASE WHEN ?4 THEN 0 ELSE enabled END,
+                        updated_at = ?5
+                    WHERE id = ?1 AND consecutive_failures = ?2
+                "#,
+                params![
+                    routine_id.to_string(),
+                    i64::from(expected_consecutive_failures),
+                    fmt_ts(&not_before),
+                    disable as i64,
+                    fmt_ts(&Utc::now()),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        if changed > 0 && disable {
+            bump_routine_event_cache_version(&conn).await?;
+        }
+        Ok(changed > 0)
     }
 
     async fn list_routine_runs(
@@ -512,7 +802,10 @@ impl RoutineStore for LibSqlBackend {
         Ok(())
     }
 
-    async fn cleanup_stale_routine_runs(&self, legacy_ttl_secs: i64) -> Result<u64, DatabaseError> {
+    async fn cleanup_stale_routine_runs(
+        &self,
+        legacy_ttl_secs: i64,
+    ) -> Result<RoutineRunReapResult, DatabaseError> {
         let conn = self.connect().await?;
         let now = Utc::now();
         let now_str = fmt_ts(&now);
@@ -521,18 +814,10 @@ impl RoutineStore for LibSqlBackend {
                 - chrono::Duration::try_seconds(legacy_ttl_secs.max(0))
                     .unwrap_or_else(|| chrono::Duration::seconds(0))),
         );
-        // Reap runs whose lease has explicitly expired, OR legacy rows with
-        // no lease at all that have been running longer than the fallback
-        // TTL. Runs with a live (non-expired) lease are never reaped, no
-        // matter how long they've been running — that's the whole point of
-        // the renewable lease replacing the old fixed 10-minute TTL.
-        let count = conn
-            .execute(
+        let mut rows = conn
+            .query(
                 r#"
-                    UPDATE routine_runs SET
-                        status = 'failed',
-                        completed_at = ?1,
-                        result_summary = 'Orphaned: routine run lease expired'
+                    SELECT id FROM routine_runs
                     WHERE status = 'running'
                       AND (
                           (lease_expires_at IS NOT NULL AND lease_expires_at < ?1)
@@ -543,7 +828,39 @@ impl RoutineStore for LibSqlBackend {
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(count)
+        let mut run_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            run_ids.push(Uuid::parse_str(&get_text(&row, 0)).map_err(|error| {
+                DatabaseError::Serialization(format!("invalid stale routine run id: {error}"))
+            })?);
+        }
+        drop(rows);
+
+        let mut result = RoutineRunReapResult::default();
+        for run_id in run_ids {
+            if let RoutineRunCompletion::Completed {
+                routine_id,
+                consecutive_failures,
+            } = self
+                .complete_routine_run(
+                    run_id,
+                    RunStatus::Failed,
+                    Some("Orphaned: routine run lease expired"),
+                    None,
+                )
+                .await?
+            {
+                result.reaped += 1;
+                result
+                    .failure_streaks
+                    .push((routine_id, consecutive_failures));
+            }
+        }
+        Ok(result)
     }
 
     async fn delete_routine_runs(&self, routine_id: Uuid) -> Result<u64, DatabaseError> {
@@ -642,17 +959,19 @@ impl RoutineStore for LibSqlBackend {
         worker_id: &str,
         stale_before: DateTime<Utc>,
     ) -> Result<Option<RoutineEvent>, DatabaseError> {
+        let _transaction_guard = self.transaction_lock.lock().await;
         let conn = self.connect().await?;
         let now = Utc::now();
         let lease_duration = now.signed_duration_since(stale_before);
         let claimed_at = fmt_ts(&now);
         let lease_expires_at = fmt_ts(&(now + lease_duration));
-        conn.execute("BEGIN IMMEDIATE TRANSACTION", ())
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let result = async {
-            let mut rows = conn
+            let mut rows = tx
                 .query(
                     &format!(
                         "SELECT {} FROM routine_event_inbox
@@ -683,7 +1002,7 @@ impl RoutineStore for LibSqlBackend {
                 return Ok(None);
             };
 
-            conn.execute(
+            tx.execute(
                 r#"
                     UPDATE routine_event_inbox
                     SET status = 'processing',
@@ -712,13 +1031,13 @@ impl RoutineStore for LibSqlBackend {
 
         match result {
             Ok(value) => {
-                conn.execute("COMMIT", ())
+                tx.commit()
                     .await
                     .map_err(|e| DatabaseError::Query(e.to_string()))?;
                 Ok(value)
             }
             Err(error) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
+                let _ = tx.rollback().await;
                 Err(error)
             }
         }
@@ -1191,17 +1510,19 @@ impl RoutineStore for LibSqlBackend {
         stale_before: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<RoutineTrigger>, DatabaseError> {
+        let _transaction_guard = self.transaction_lock.lock().await;
         let conn = self.connect().await?;
         let now = Utc::now();
         let lease_duration = now.signed_duration_since(stale_before);
         let claimed_at = fmt_ts(&now);
         let lease_expires_at = fmt_ts(&(now + lease_duration));
-        conn.execute("BEGIN IMMEDIATE TRANSACTION", ())
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let result = async {
-            let mut rows = conn
+            let mut rows = tx
                 .query(
                     &format!(
                         "SELECT {} FROM routine_trigger_queue
@@ -1232,7 +1553,7 @@ impl RoutineStore for LibSqlBackend {
                 .map_err(|e| DatabaseError::Query(e.to_string()))?
             {
                 let trigger = row_to_routine_trigger_libsql(&row)?;
-                conn.execute(
+                tx.execute(
                     r#"
                         UPDATE routine_trigger_queue
                         SET status = 'processing',
@@ -1267,13 +1588,13 @@ impl RoutineStore for LibSqlBackend {
 
         match result {
             Ok(value) => {
-                conn.execute("COMMIT", ())
+                tx.commit()
                     .await
                     .map_err(|e| DatabaseError::Query(e.to_string()))?;
                 Ok(value)
             }
             Err(error) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
+                let _ = tx.rollback().await;
                 Err(error)
             }
         }
@@ -1495,7 +1816,8 @@ mod lease_tests {
         .await;
 
         let reaped = backend.cleanup_stale_routine_runs(3600).await.unwrap();
-        assert_eq!(reaped, 1);
+        assert_eq!(reaped.reaped, 1);
+        assert_eq!(reaped.failure_streaks.len(), 1);
         assert_eq!(run_status(&conn, old_run).await, "failed");
     }
 
@@ -1518,7 +1840,7 @@ mod lease_tests {
         .await;
 
         let reaped = backend.cleanup_stale_routine_runs(3600).await.unwrap();
-        assert_eq!(reaped, 0);
+        assert_eq!(reaped.reaped, 0);
         assert_eq!(run_status(&conn, recent_run).await, "running");
     }
 
@@ -1553,7 +1875,7 @@ mod lease_tests {
         .await;
 
         let reaped = backend.cleanup_stale_routine_runs(3600).await.unwrap();
-        assert_eq!(reaped, 1);
+        assert_eq!(reaped.reaped, 1);
         assert_eq!(run_status(&conn, expired_run).await, "failed");
         assert_eq!(run_status(&conn, fresh_run).await, "running");
     }
@@ -1577,7 +1899,10 @@ mod lease_tests {
         backend.renew_routine_run_lease(run_id, 3600).await.unwrap();
 
         let reaped = backend.cleanup_stale_routine_runs(3600).await.unwrap();
-        assert_eq!(reaped, 0, "renewed lease must protect the run from reaping");
+        assert_eq!(
+            reaped.reaped, 0,
+            "renewed lease must protect the run from reaping"
+        );
         assert_eq!(run_status(&conn, run_id).await, "running");
     }
 

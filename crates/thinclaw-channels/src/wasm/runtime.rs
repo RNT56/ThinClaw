@@ -6,8 +6,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use sha2::{Digest as _, Sha256};
 use tokio::sync::RwLock;
 use wasmtime::{Config, Engine, OptLevel};
 
@@ -22,6 +24,31 @@ pub(crate) const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(500);
 /// the primary deadline; the epoch trap fires a little later, only to stop a
 /// guest still spinning on a blocking thread after its result was abandoned.
 const EPOCH_DEADLINE_MARGIN_TICKS: u64 = 8;
+const MAX_WASM_MODULE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PREPARED_MODULES: usize = 128;
+const MAX_PARALLEL_COMPILATIONS: usize = 4;
+const MAX_WASM_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_WASM_FUEL: u64 = 1_000_000_000;
+const MAX_CALLBACK_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn validate_resource_limits(limits: &ResourceLimits) -> Result<(), WasmChannelError> {
+    if limits.memory_bytes == 0 || limits.memory_bytes > MAX_WASM_MEMORY_BYTES {
+        return Err(WasmChannelError::Config(format!(
+            "WASM memory limit must be between 1 and {MAX_WASM_MEMORY_BYTES} bytes"
+        )));
+    }
+    if limits.fuel == 0 || limits.fuel > MAX_WASM_FUEL {
+        return Err(WasmChannelError::Config(format!(
+            "WASM fuel limit must be between 1 and {MAX_WASM_FUEL}"
+        )));
+    }
+    if limits.timeout.is_zero() || limits.timeout > MAX_CALLBACK_TIMEOUT {
+        return Err(WasmChannelError::Config(
+            "WASM timeout must be greater than zero and at most 120 seconds".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 /// Epoch-tick budget for a callback whose wall-clock timeout is `timeout`.
 /// Always at least one tick so a zero/absurd timeout can never disable the trap.
@@ -99,6 +126,7 @@ pub struct PreparedChannelModule {
     pub(crate) component: Option<wasmtime::component::Component>,
     /// Resource limits for this channel.
     pub limits: ResourceLimits,
+    source_digest: [u8; 32],
 }
 
 impl PreparedChannelModule {
@@ -117,6 +145,7 @@ impl PreparedChannelModule {
             description: description.into(),
             component: None,
             limits: ResourceLimits::default(),
+            source_digest: [0; 32],
         }
     }
 }
@@ -128,6 +157,10 @@ impl std::fmt::Debug for PreparedChannelModule {
             .field("description", &self.description)
             .field("has_component", &self.component.is_some())
             .field("limits", &self.limits)
+            .field(
+                "source_digest_prefix",
+                &&hex::encode(&self.source_digest[..6]),
+            )
             .finish()
     }
 }
@@ -142,11 +175,28 @@ pub struct WasmChannelRuntime {
     config: WasmChannelRuntimeConfig,
     /// Cache of prepared modules by name.
     modules: RwLock<HashMap<String, Arc<PreparedChannelModule>>>,
+    compilation_slots: Arc<tokio::sync::Semaphore>,
+    epoch_running: Arc<AtomicBool>,
+    epoch_thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl WasmChannelRuntime {
     /// Create a new runtime with the given configuration.
     pub fn new(config: WasmChannelRuntimeConfig) -> Result<Self, WasmChannelError> {
+        validate_resource_limits(&config.default_limits)?;
+        if config.callback_timeout.is_zero() || config.callback_timeout > MAX_CALLBACK_TIMEOUT {
+            return Err(WasmChannelError::Config(
+                "callback timeout must be greater than zero and at most 120 seconds".to_string(),
+            ));
+        }
+        if config.fuel_config.enabled
+            && (config.fuel_config.initial_fuel == 0
+                || config.fuel_config.initial_fuel > MAX_WASM_FUEL)
+        {
+            return Err(WasmChannelError::Config(format!(
+                "initial fuel must be between 1 and {MAX_WASM_FUEL}"
+            )));
+        }
         let mut wasmtime_config = Config::new();
 
         // Enable fuel consumption for CPU limiting
@@ -182,11 +232,16 @@ impl WasmChannelRuntime {
         // forever on a blocking thread. The runtime is a process-lifetime
         // singleton, so one ticker thread is created for the whole process.
         let ticker_engine = engine.clone();
-        std::thread::Builder::new()
+        let epoch_running = Arc::new(AtomicBool::new(true));
+        let ticker_running = Arc::clone(&epoch_running);
+        let epoch_thread = std::thread::Builder::new()
             .name("wasm-channel-epoch-ticker".into())
             .spawn(move || {
-                loop {
-                    std::thread::sleep(EPOCH_TICK_INTERVAL);
+                while ticker_running.load(Ordering::Acquire) {
+                    std::thread::park_timeout(EPOCH_TICK_INTERVAL);
+                    if !ticker_running.load(Ordering::Acquire) {
+                        break;
+                    }
                     ticker_engine.increment_epoch();
                 }
             })
@@ -198,6 +253,9 @@ impl WasmChannelRuntime {
             engine,
             config,
             modules: RwLock::new(HashMap::new()),
+            compilation_slots: Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_COMPILATIONS)),
+            epoch_running,
+            epoch_thread: std::sync::Mutex::new(Some(epoch_thread)),
         })
     }
 
@@ -222,15 +280,48 @@ impl WasmChannelRuntime {
         limits: Option<ResourceLimits>,
         description: Option<String>,
     ) -> Result<Arc<PreparedChannelModule>, WasmChannelError> {
+        if !crate::wasm::capabilities::is_valid_channel_name(name) {
+            return Err(WasmChannelError::InvalidName(name.to_string()));
+        }
+        if wasm_bytes.is_empty() || wasm_bytes.len() > MAX_WASM_MODULE_BYTES {
+            return Err(WasmChannelError::Compilation(format!(
+                "WASM component must be between 1 and {MAX_WASM_MODULE_BYTES} bytes"
+            )));
+        }
+        if description
+            .as_deref()
+            .is_some_and(|value| value.len() > 4096)
+        {
+            return Err(WasmChannelError::Config(
+                "channel description exceeds 4096 bytes".to_string(),
+            ));
+        }
+        let limits = limits.unwrap_or_else(|| self.config.default_limits.clone());
+        validate_resource_limits(&limits)?;
+        let source_digest: [u8; 32] = Sha256::digest(wasm_bytes).into();
+
         // Check if already prepared
-        if let Some(module) = self.modules.read().await.get(name) {
+        if let Some(module) = self.modules.read().await.get(name)
+            && module.source_digest == source_digest
+        {
+            return Ok(Arc::clone(module));
+        }
+
+        let _compilation_permit = Arc::clone(&self.compilation_slots)
+            .acquire_owned()
+            .await
+            .map_err(|_| WasmChannelError::Config("compilation limiter is closed".to_string()))?;
+        // A previous waiter may have populated the cache while this task was
+        // queued for a compilation slot.
+        if let Some(module) = self.modules.read().await.get(name)
+            && module.source_digest == source_digest
+        {
             return Ok(Arc::clone(module));
         }
 
         let name = name.to_string();
         let wasm_bytes = wasm_bytes.to_vec();
         let engine = self.engine.clone();
-        let default_limits = self.config.default_limits.clone();
         let desc = description.unwrap_or_else(|| format!("WASM channel: {}", name));
 
         // Compile in blocking task (Wasmtime compilation is synchronous)
@@ -243,7 +334,8 @@ impl WasmChannelRuntime {
                 name: name.clone(),
                 description: desc,
                 component: Some(component),
-                limits: limits.unwrap_or(default_limits),
+                limits,
+                source_digest,
             })
         })
         .await
@@ -255,10 +347,13 @@ impl WasmChannelRuntime {
 
         // Cache the prepared module
         if self.config.cache_compiled {
-            self.modules
-                .write()
-                .await
-                .insert(prepared.name.clone(), Arc::clone(&prepared));
+            let mut modules = self.modules.write().await;
+            if !modules.contains_key(&prepared.name) && modules.len() >= MAX_PREPARED_MODULES {
+                return Err(WasmChannelError::Config(format!(
+                    "prepared channel cache exceeds the {MAX_PREPARED_MODULES}-module limit"
+                )));
+            }
+            modules.insert(prepared.name.clone(), Arc::clone(&prepared));
         }
 
         tracing::info!(
@@ -287,6 +382,20 @@ impl WasmChannelRuntime {
     /// Clear all cached modules.
     pub async fn clear(&self) {
         self.modules.write().await.clear();
+    }
+}
+
+impl Drop for WasmChannelRuntime {
+    fn drop(&mut self) {
+        self.epoch_running.store(false, Ordering::Release);
+        let mut guard = self
+            .epoch_thread
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(handle) = guard.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
     }
 }
 

@@ -71,22 +71,28 @@ mod tests {
 
     #[test]
     fn test_proxy_model_name() {
-        let client = Arc::new(WorkerHttpClient::new(
-            "http://localhost:50051".to_string(),
-            uuid::Uuid::nil(),
-            "test".to_string(),
-        ));
+        let client = Arc::new(
+            WorkerHttpClient::new(
+                "http://localhost:50051".to_string(),
+                uuid::Uuid::nil(),
+                "test".to_string(),
+            )
+            .expect("test client should build"),
+        );
         let provider = ProxyLlmProvider::new(client, "test-model".to_string());
         assert_eq!(provider.model_name(), "test-model");
     }
 
     #[test]
     fn test_proxy_cost_is_zero() {
-        let client = Arc::new(WorkerHttpClient::new(
-            "http://localhost:50051".to_string(),
-            uuid::Uuid::nil(),
-            "test".to_string(),
-        ));
+        let client = Arc::new(
+            WorkerHttpClient::new(
+                "http://localhost:50051".to_string(),
+                uuid::Uuid::nil(),
+                "test".to_string(),
+            )
+            .expect("test client should build"),
+        );
         let provider = ProxyLlmProvider::new(client, "test-model".to_string());
         let (input, output) = provider.cost_per_token();
         assert_eq!(input, Decimal::ZERO);

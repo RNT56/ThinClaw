@@ -2,7 +2,10 @@
 //!
 //! Uses `tts-1` or `tts-1-hd` with 6 voices.
 
-use crate::inference::tts::{TtsBackend, TtsRequest};
+use crate::inference::tts::{
+    bounded_tts_audio, checked_tts_response, tts_http_client, validate_tts_request, TtsBackend,
+    TtsRequest,
+};
 use crate::inference::{AudioFormat, BackendInfo, InferenceError, InferenceResult, VoiceInfo};
 use async_trait::async_trait;
 
@@ -44,7 +47,8 @@ impl TtsBackend for OpenAiTtsBackend {
     }
 
     async fn synthesize(&self, request: TtsRequest) -> InferenceResult<Vec<u8>> {
-        let client = reqwest::Client::new();
+        validate_tts_request(&request)?;
+        let client = tts_http_client(&self.api_key)?;
         let voice = request.voice.unwrap_or_else(|| "alloy".to_string());
         let speed = request.speed.unwrap_or(1.0);
 
@@ -62,25 +66,8 @@ impl TtsBackend for OpenAiTtsBackend {
             .await
             .map_err(|e| InferenceError::network(format!("OpenAI TTS request failed: {}", e)))?;
 
-        if response.status() == 401 {
-            return Err(InferenceError::auth("Invalid OpenAI API key"));
-        }
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(InferenceError::provider(format!(
-                "OpenAI TTS error ({}): {}",
-                status, text
-            )));
-        }
-
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| InferenceError::provider(format!("Failed to read audio: {}", e)))?;
-
-        Ok(bytes.to_vec())
+        let response = checked_tts_response(response, "OpenAI").await?;
+        bounded_tts_audio(response, "OpenAI").await
     }
 
     async fn available_voices(&self) -> InferenceResult<Vec<VoiceInfo>> {

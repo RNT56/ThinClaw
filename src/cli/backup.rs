@@ -10,18 +10,22 @@
 //! they live in the OS keychain / secrets store and must be re-provisioned.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::Subcommand;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::{Config, DatabaseBackend};
 use crate::platform::state_paths;
 use crate::terminal_branding::TerminalBranding;
-use thinclaw_portability::{BundleWriter, OpenBundle, SectionKind};
+use thinclaw_portability::{BundleWriter, MAX_SEALED_BUNDLE_BYTES, OpenBundle, SectionKind};
 
 const PASSPHRASE_ENV: &str = "THINCLAW_BACKUP_PASSPHRASE";
 const WORKSPACE_SECTION: &str = "workspace";
 const DATABASE_SECTION: &str = "database";
+const MAX_DATABASE_DUMP_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_BACKUP_PASSPHRASE_BYTES: usize = 4 * 1024;
+const MIN_EXPORT_PASSPHRASE_BYTES: usize = 12;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum BackupCommand {
@@ -76,7 +80,7 @@ pub async fn run_backup_command(cmd: BackupCommand) -> anyhow::Result<()> {
             yes,
             restore_database,
         } => import(input, passphrase, yes, restore_database).await,
-        BackupCommand::Inspect { input, passphrase } => inspect(input, passphrase),
+        BackupCommand::Inspect { input, passphrase } => inspect(input, passphrase).await,
     }
 }
 
@@ -87,7 +91,7 @@ async fn export(
 ) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     branding.print_banner("ThinClaw Export", Some("Encrypted whole-agent backup"));
-    let passphrase = resolve_passphrase(passphrase, &branding)?;
+    let passphrase = resolve_passphrase(passphrase, &branding, true)?;
 
     let home = state_paths().home;
     if !home.exists() {
@@ -140,10 +144,9 @@ async fn export(
         }
     }
 
-    let sealed = writer.finish(&passphrase)?;
+    let sealed = writer.finish(passphrase.expose_secret())?;
     let out_path = output.unwrap_or_else(|| default_output_name(&created_at));
-    std::fs::write(&out_path, &sealed)?;
-    restrict_permissions(&out_path);
+    thinclaw_platform::write_private_file_atomic(&out_path, &sealed, true)?;
 
     println!(
         "{}",
@@ -168,11 +171,13 @@ async fn import(
 ) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     branding.print_banner("ThinClaw Import", Some("Restore from encrypted backup"));
-    let passphrase = resolve_passphrase(passphrase, &branding)?;
+    let passphrase = resolve_passphrase(passphrase, &branding, false)?;
 
-    let sealed = std::fs::read(&input)
-        .map_err(|error| anyhow::anyhow!("cannot read bundle {}: {error}", input.display()))?;
-    let bundle = OpenBundle::open(&sealed, &passphrase)?;
+    let sealed =
+        thinclaw_platform::read_regular_file_bounded_async(input.clone(), MAX_SEALED_BUNDLE_BYTES)
+            .await
+            .map_err(|error| anyhow::anyhow!("cannot read bundle {}: {error}", input.display()))?;
+    let bundle = OpenBundle::open(&sealed, passphrase.expose_secret())?;
     print_manifest(&branding, bundle.manifest());
 
     if !yes {
@@ -205,13 +210,15 @@ async fn import(
     Ok(())
 }
 
-fn inspect(input: PathBuf, passphrase: Option<String>) -> anyhow::Result<()> {
+async fn inspect(input: PathBuf, passphrase: Option<String>) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     branding.print_banner("ThinClaw Bundle", Some("Manifest (no changes made)"));
-    let passphrase = resolve_passphrase(passphrase, &branding)?;
-    let sealed = std::fs::read(&input)
-        .map_err(|error| anyhow::anyhow!("cannot read bundle {}: {error}", input.display()))?;
-    let bundle = OpenBundle::open(&sealed, &passphrase)?;
+    let passphrase = resolve_passphrase(passphrase, &branding, false)?;
+    let sealed =
+        thinclaw_platform::read_regular_file_bounded_async(input.clone(), MAX_SEALED_BUNDLE_BYTES)
+            .await
+            .map_err(|error| anyhow::anyhow!("cannot read bundle {}: {error}", input.display()))?;
+    let bundle = OpenBundle::open(&sealed, passphrase.expose_secret())?;
     print_manifest(&branding, bundle.manifest());
     Ok(())
 }
@@ -225,62 +232,85 @@ async fn export_database() -> anyhow::Result<Option<(Vec<u8>, String)>> {
         .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     if config.database.backend == DatabaseBackend::Postgres {
-        return pg_dump_export(&config);
+        return pg_dump_export(&config).await;
     }
 
     // Snapshot-capable backend (libSQL): copy the WAL-checkpointed file.
     let db = crate::db::connect_from_config(&config.database)
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let tmp = temp_file("thinclaw-export-snapshot.db");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("thinclaw-export-")
+        .tempdir()?;
+    let tmp = temp_dir.path().join("snapshot.db");
     match db.snapshot(&tmp).await {
         Ok(_) => {
-            let bytes = std::fs::read(&tmp)?;
-            let _ = std::fs::remove_file(&tmp);
+            let bytes =
+                thinclaw_platform::read_regular_file_bounded(&tmp, MAX_DATABASE_DUMP_BYTES)?;
             Ok(Some((
                 bytes,
                 "libsql snapshot (wal-checkpointed)".to_string(),
             )))
         }
-        Err(error) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(anyhow::anyhow!("snapshot failed: {error}"))
-        }
+        Err(error) => Err(anyhow::anyhow!("snapshot failed: {error}")),
     }
 }
 
 /// Run `pg_dump --format=custom` against the configured URL. Returns `None` if
 /// `pg_dump` is not installed so export can still produce a partial bundle.
-fn pg_dump_export(config: &Config) -> anyhow::Result<Option<(Vec<u8>, String)>> {
-    let tmp = temp_file("thinclaw-export-pgdump.bin");
-    let url = config.database.url.expose_secret();
-    let result = std::process::Command::new("pg_dump")
+async fn pg_dump_export(config: &Config) -> anyhow::Result<Option<(Vec<u8>, String)>> {
+    let temp_dir = tempfile::Builder::new()
+        .prefix("thinclaw-pgdump-")
+        .tempdir()?;
+    let tmp = temp_dir.path().join("dump.bin");
+    let mut url = url::Url::parse(config.database.url.expose_secret())
+        .map_err(|error| anyhow::anyhow!("invalid Postgres database URL: {error}"))?;
+    let password = url
+        .password()
+        .map(urlencoding::decode)
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("invalid percent-encoding in database password: {error}"))?
+        .map(|password| SecretString::from(password.into_owned()));
+    url.set_password(None)
+        .map_err(|()| anyhow::anyhow!("could not sanitize Postgres database URL"))?;
+    let mut command = tokio::process::Command::new("pg_dump");
+    command
         .arg("--format=custom")
         .arg("--no-owner")
         .arg("--no-privileges")
         .arg("--file")
         .arg(&tmp)
-        .arg(url)
-        .status();
+        .arg(url.as_str())
+        .env("PGCONNECT_TIMEOUT", "15");
+    if let Some(password) = password.as_ref() {
+        command.env("PGPASSWORD", password.expose_secret());
+    }
+    let result = thinclaw_platform::bounded_command_output(
+        &mut command,
+        Duration::from_secs(30 * 60),
+        64 * 1024,
+        64 * 1024,
+    )
+    .await;
 
     match result {
-        Ok(status) if status.success() => {
-            let bytes = std::fs::read(&tmp)?;
-            let _ = std::fs::remove_file(&tmp);
+        Ok(output) if output.status.success() => {
+            let bytes =
+                thinclaw_platform::read_regular_file_bounded(&tmp, MAX_DATABASE_DUMP_BYTES)?;
             Ok(Some((bytes, "pg_dump --format=custom".to_string())))
         }
-        Ok(status) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(anyhow::anyhow!("pg_dump exited with status {status}"))
-        }
-        Err(error) => {
-            let _ = std::fs::remove_file(&tmp);
+        Ok(output) => Err(anyhow::anyhow!(
+            "pg_dump exited with status {}",
+            output.status
+        )),
+        Err(thinclaw_platform::BoundedProcessError::Spawn(error)) => {
             if error.kind() == std::io::ErrorKind::NotFound {
                 Ok(None) // pg_dump not installed
             } else {
                 Err(anyhow::anyhow!("failed to run pg_dump: {error}"))
             }
         }
+        Err(error) => Err(anyhow::anyhow!("failed to run pg_dump: {error}")),
     }
 }
 
@@ -295,8 +325,7 @@ async fn restore_database_section(
 ) -> anyhow::Result<()> {
     let db_bytes = bundle.section_bytes(DATABASE_SECTION)?;
     let dump_path = input.with_extension("database-dump");
-    std::fs::write(&dump_path, db_bytes)?;
-    restrict_permissions(&dump_path);
+    thinclaw_platform::write_private_file_atomic(&dump_path, db_bytes, true)?;
     println!(
         "{}",
         branding.key_value("database dump written", dump_path.display())
@@ -337,8 +366,11 @@ async fn restore_database_section(
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&target, db_bytes)?;
-        restrict_permissions(&target);
+        validate_libsql_sidecar(&target, "-wal")?;
+        validate_libsql_sidecar(&target, "-shm")?;
+        thinclaw_platform::write_private_file_atomic(&target, db_bytes, true)?;
+        remove_libsql_sidecar_if_present(&target, "-wal")?;
+        remove_libsql_sidecar_if_present(&target, "-shm")?;
         println!("{}", branding.good("local database restored"));
     } else {
         println!(
@@ -370,7 +402,11 @@ fn print_manifest(branding: &TerminalBranding, manifest: &thinclaw_portability::
 }
 
 /// Resolve the passphrase from the flag or `THINCLAW_BACKUP_PASSPHRASE`.
-fn resolve_passphrase(flag: Option<String>, branding: &TerminalBranding) -> anyhow::Result<String> {
+fn resolve_passphrase(
+    flag: Option<String>,
+    branding: &TerminalBranding,
+    require_strong: bool,
+) -> anyhow::Result<SecretString> {
     if let Some(pass) = flag.filter(|p| !p.is_empty()) {
         println!(
             "{}",
@@ -378,14 +414,67 @@ fn resolve_passphrase(flag: Option<String>, branding: &TerminalBranding) -> anyh
                 "using --passphrase; prefer {PASSPHRASE_ENV} to keep it out of shell history"
             ))
         );
-        return Ok(pass);
+        return validate_backup_passphrase(pass, require_strong);
     }
     match std::env::var(PASSPHRASE_ENV) {
-        Ok(pass) if !pass.is_empty() => Ok(pass),
+        Ok(pass) if !pass.is_empty() => validate_backup_passphrase(pass, require_strong),
         _ => anyhow::bail!(
             "no passphrase provided: set {PASSPHRASE_ENV} or pass --passphrase <value>"
         ),
     }
+}
+
+fn validate_backup_passphrase(
+    passphrase: String,
+    require_strong: bool,
+) -> anyhow::Result<SecretString> {
+    if passphrase.len() > MAX_BACKUP_PASSPHRASE_BYTES {
+        anyhow::bail!("backup passphrase exceeds {MAX_BACKUP_PASSPHRASE_BYTES} bytes");
+    }
+    if require_strong && passphrase.len() < MIN_EXPORT_PASSPHRASE_BYTES {
+        anyhow::bail!(
+            "backup passphrase must be at least {MIN_EXPORT_PASSPHRASE_BYTES} bytes for a new export"
+        );
+    }
+    Ok(SecretString::from(passphrase))
+}
+
+fn remove_libsql_sidecar_if_present(target: &Path, suffix: &str) -> anyhow::Result<()> {
+    let sidecar = libsql_sidecar_path(target, suffix);
+    match std::fs::symlink_metadata(&sidecar) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            anyhow::bail!(
+                "refusing to remove non-regular libSQL sidecar {}",
+                sidecar.display()
+            );
+        }
+        Ok(_) => std::fs::remove_file(&sidecar)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn validate_libsql_sidecar(target: &Path, suffix: &str) -> anyhow::Result<()> {
+    let sidecar = libsql_sidecar_path(target, suffix);
+    match std::fs::symlink_metadata(&sidecar) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            anyhow::bail!(
+                "libSQL sidecar is not a regular file: {}",
+                sidecar.display()
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn libsql_sidecar_path(target: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar_name = target.as_os_str().to_os_string();
+    sidecar_name.push(suffix);
+    PathBuf::from(sidecar_name)
 }
 
 /// Volatile or secret paths (relative to the ThinClaw home) excluded from the
@@ -419,22 +508,4 @@ fn default_output_name(created_at: &chrono::DateTime<chrono::Utc>) -> PathBuf {
         "thinclaw-backup-{}.tclaw",
         created_at.format("%Y%m%d-%H%M%S")
     ))
-}
-
-fn temp_file(name: &str) -> PathBuf {
-    let unique = format!("{}-{name}", std::process::id());
-    std::env::temp_dir().join(unique)
-}
-
-/// Restrict a written bundle/dump to owner-only (0600) on Unix.
-fn restrict_permissions(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
 }

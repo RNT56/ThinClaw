@@ -1,17 +1,9 @@
-[name]
-market_research
-
-[description]
-Research a market sector with stock prices and recent news.
-
-[version]
-1.0.0
-
-[author]
-Built-in
-
-[tools_used]
-["finance::search_financial_symbols", "finance::get_stock_price", "news::search_news"]
+name = "Market Research"
+description = "Research a market sector with stock prices and recent news."
+version = "1.0.0"
+author = "Built-in"
+tools_used = ["finance::search_financial_symbols", "finance::get_stock_price", "news::search_news"]
+script_file = "market_research.rhai"
 
 [[parameters]]
 name = "sector"
@@ -25,6 +17,3 @@ description = "Number of news articles to retrieve"
 param_type = "number"
 required = false
 default = 3
-
-[script_file]
-market_research.rhai

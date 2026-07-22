@@ -3,7 +3,7 @@ use axum::{
     http::{StatusCode, request::Parts},
 };
 
-use thinclaw_identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
+use thinclaw_identity::{ConversationKind, ResolvedIdentity, direct_scope_id};
 use thinclaw_settings::GatewayRole;
 
 use crate::web::devices::{DevicePlatform, DeviceScope};
@@ -165,6 +165,19 @@ impl GatewayRequestIdentity {
             role: self.role,
         }
     }
+
+    /// Stable rate-limit partition for this authenticated caller.
+    ///
+    /// Device tokens act as the operator for conversation visibility, so the
+    /// principal alone would collapse every paired device into one bucket.
+    /// Prefer the authenticated device id when present; otherwise partition
+    /// by principal and deliberately ignore request-supplied actor overrides.
+    pub fn rate_limit_key(&self, device: Option<&DeviceContext>) -> String {
+        match device {
+            Some(device) => format!("device:{}", device.device_id),
+            None => format!("principal:{}", self.principal_id),
+        }
+    }
 }
 
 impl<S> FromRequestParts<S> for GatewayRequestIdentity
@@ -185,10 +198,14 @@ where
     }
 }
 
+pub fn valid_gateway_identity_component(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+}
+
 pub fn requested_identity_override(requested: Option<&str>) -> Option<String> {
     requested
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| valid_gateway_identity_component(s))
         .map(ToOwned::to_owned)
 }
 
@@ -197,21 +214,36 @@ pub fn gateway_identity(
     actor_id: &str,
     thread_id: Option<&str>,
 ) -> ResolvedIdentity {
-    let stable_external_conversation_key = match thread_id {
-        Some(thread_id) => {
-            format!("gateway://direct/{principal_id}/actor/{actor_id}/thread/{thread_id}")
-        }
-        None => format!("gateway://direct/{principal_id}/actor/{actor_id}"),
-    };
+    let stable_external_conversation_key = gateway_direct_conversation_key(
+        principal_id,
+        actor_id,
+        thread_id.map(|thread_id| ("thread", thread_id)),
+    );
 
     ResolvedIdentity {
         principal_id: principal_id.to_string(),
         actor_id: actor_id.to_string(),
-        conversation_scope_id: scope_id_from_key(&format!("principal:{principal_id}")),
+        conversation_scope_id: direct_scope_id(principal_id, actor_id),
         conversation_kind: ConversationKind::Direct,
         raw_sender_id: actor_id.to_string(),
         stable_external_conversation_key,
     }
+}
+
+pub fn gateway_direct_conversation_key(
+    principal_id: &str,
+    actor_id: &str,
+    suffix: Option<(&str, &str)>,
+) -> String {
+    let principal_id = thinclaw_identity::escape_stable_key_component(principal_id);
+    let actor_id = thinclaw_identity::escape_stable_key_component(actor_id);
+    let mut key = format!("gateway://direct/{principal_id}/actor/{actor_id}");
+    if let Some((kind, value)) = suffix {
+        let kind = thinclaw_identity::escape_stable_key_component(kind);
+        let value = thinclaw_identity::escape_stable_key_component(value);
+        key.push_str(&format!("/{kind}/{value}"));
+    }
+    key
 }
 
 #[cfg(test)]
@@ -256,5 +288,48 @@ mod tests {
             false,
         );
         assert!(!top_level_watch.is_watch_companion());
+    }
+
+    #[test]
+    fn compatibility_identity_overrides_are_bounded() {
+        assert_eq!(
+            requested_identity_override(Some(" alice ")),
+            Some("alice".to_string())
+        );
+        assert_eq!(requested_identity_override(Some("alice\nadmin")), None);
+        assert_eq!(requested_identity_override(Some(&"x".repeat(257))), None);
+    }
+
+    #[test]
+    fn rate_limit_key_partitions_devices_without_trusting_actor_overrides() {
+        let identity = GatewayRequestIdentity::new(
+            "principal",
+            "actor-a",
+            GatewayAuthSource::BearerHeader,
+            false,
+        );
+        let overridden = identity.with_compat_overrides(None, Some("actor-b"));
+        assert_eq!(
+            identity.rate_limit_key(None),
+            overridden.rate_limit_key(None)
+        );
+
+        let first = DeviceContext::new("device-a", vec![DeviceScope::Chat]);
+        let second = DeviceContext::new("device-b", vec![DeviceScope::Chat]);
+        assert_ne!(
+            identity.rate_limit_key(Some(&first)),
+            identity.rate_limit_key(Some(&second))
+        );
+    }
+
+    #[test]
+    fn gateway_conversation_keys_do_not_collide_on_delimiter_injection() {
+        let first = gateway_direct_conversation_key("a/actor/b", "c", None);
+        let second = gateway_direct_conversation_key("a", "b/actor/c", None);
+        assert_ne!(first, second);
+        assert_eq!(
+            gateway_direct_conversation_key("user", "actor", Some(("thread", "thread-1"))),
+            "gateway://direct/user/actor/actor/thread/thread-1"
+        );
     }
 }

@@ -32,6 +32,16 @@
         }
       ],
       "credentials": {
+        "matrix_homeserver": {
+          "secret_name": "matrix_homeserver",
+          "location": {
+            "type": "url_base",
+            "placeholder": "{MATRIX_HOMESERVER}"
+          },
+          "host_patterns": [
+            "*"
+          ]
+        },
         "matrix_access_token": {
           "secret_name": "matrix_access_token",
           "location": {

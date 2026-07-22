@@ -429,15 +429,15 @@ async directAssetsOpenImagesFolder() : Promise<Result<null, BridgeError>> {
 /**
  * Main command to generate an image in Imagine mode.
  *
- * Routes through `InferenceRouter` for cloud diffusion backends (Imagen 3,
- * DALL-E 3, Stability AI, fal.ai, Together AI).  Falls back to the local
+ * Routes through `InferenceRouter` for cloud diffusion backends (Gemini,
+ * OpenAI GPT Image, Stability AI, fal.ai, Together AI). Falls back to the local
  * sd.cpp / mflux sidecar for `"local"` provider.
  *
  * Provider ID mapping (frontend → backend):
- * - `"nano-banana"` / `"gemini"` → Imagen 3 Flash (via InferenceRouter)
- * - `"nano-banana-pro"` → Imagen 3 Pro (via InferenceRouter)
- * - `"openai"` → DALL-E 3 (via InferenceRouter)
- * - `"stability"` → Stability AI SDXL (via InferenceRouter)
+ * - `"nano-banana"` / `"gemini"` → Gemini 3.1 Flash Image
+ * - `"nano-banana-pro"` → Gemini 3 Pro Image
+ * - `"openai"` → OpenAI GPT Image 2
+ * - `"stability"` → Stability AI Stable Image
  * - `"fal"` → fal.ai FLUX (via InferenceRouter)
  * - `"together"` → Together AI (via InferenceRouter)
  * - `"local"` / anything else → local sd.cpp / mflux sidecar
@@ -850,6 +850,18 @@ async thinclawSwitchToProfile(profileId: string) : Promise<Result<null, BridgeEr
 async thinclawTestConnection(url: string, token: string | null) : Promise<Result<boolean, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_test_connection", { url, token }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Copy the local gateway credential without including it in periodic status
+ * payloads or returning it through renderer IPC.
+ */
+async thinclawCopyGatewayToken() : Promise<Result<null, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_copy_gateway_token") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1339,9 +1351,9 @@ async thinclawSkillPublish(name: string, targetRepo: string, dryRun: boolean | n
     else return { status: "error", error: e  as any };
 }
 },
-async thinclawInstallSkillRepo(repoUrl: string) : Promise<Result<string, BridgeError>> {
+async thinclawInstallSkillRepo(repoUrl: string, approvedDigest: string | null) : Promise<Result<string, BridgeError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("thinclaw_install_skill_repo", { repoUrl }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_install_skill_repo", { repoUrl, approvedDigest }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1984,20 +1996,9 @@ async thinclawSyncLocalLlm() : Promise<Result<null, BridgeError>> {
 }
 },
 /**
- * Deploy the ThinClaw remote agent to a Linux server via SSH + Docker Compose.
- *
- * Accepts the SSH host, user, and optional configuration for Tailscale VPN
- * and systemd service. Emits credential-free `deploy-log` events and returns
- * the generated credential only to the initiating IPC request.
- *
- * Steps:
- * 1. Find the ThinClaw `deploy/` directory (bundled or source)
- * 2. SCP the deploy bundle to the target server
- * 3. Run `setup.sh` on the server:
- * - Always: Docker, UFW firewall, Fail2ban
- * - Optional: Tailscale VPN (--tailscale <key>)
- * - Optional: systemd service (--systemd)
- * 4. Return the URL + generated token as the command result
+ * Deploy ThinClaw to a Linux host and return its connection details directly
+ * to the caller. Only one deployment may run at a time because progress logs
+ * are process-global rather than request-scoped.
  */
 async thinclawDeployRemote(ip: string, user: string, tailscaleKey: string | null, enableSystemd: boolean | null) : Promise<Result<RemoteDeployResult, BridgeError>> {
     try {
@@ -2128,6 +2129,19 @@ async thinclawCanvasPanelDismiss(panelId: string) : Promise<Result<boolean, Brid
 }
 },
 /**
+ * Route a button/form action to the exact actor and conversation that
+ * produced the panel. The client supplies only the opaque public panel
+ * handle; identity and thread routing come from the stored ingress envelope.
+ */
+async thinclawCanvasPanelAction(panelId: string, action: string, values: { [key in string]: JsonValue }) : Promise<Result<ThinClawRpcResponse, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_panel_action", { panelId, action, values }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Delete a routine by ID or name.
  */
 async thinclawRoutineDelete(routineId: string) : Promise<Result<JsonValue, BridgeError>> {
@@ -2206,13 +2220,6 @@ async thinclawSessionSearch(query: string, limit: number | null, summarize: bool
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * Export a session's history in the requested format.
- *
- * Supported formats: `md` (default), `json`, `txt`, `csv`, `html`.
- * The `format` parameter is optional — `None` defaults to markdown
- * for backward compatibility with existing frontend callers.
- */
 async thinclawExportSession(sessionKey: string, format: string | null) : Promise<Result<SessionExportResponse, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("thinclaw_export_session", { sessionKey, format }) };
@@ -2982,8 +2989,8 @@ async thinclawRoutingSimulate(request: RouteSimulationRequest) : Promise<Result<
  * Start the Gmail OAuth PKCE flow via ThinClaw.
  *
  * This opens the user's browser for Google consent, waits for the
- * callback, exchanges the auth code for tokens, and returns them.
- * On success, the tokens are also stored in the Keychain.
+ * callback, exchanges the auth code, and commits the resulting credentials
+ * directly to the Keychain. Credential values are never returned over IPC.
  */
 async thinclawGmailOauthStart() : Promise<Result<GmailOAuthResult, BridgeError>> {
     try {
@@ -3417,7 +3424,8 @@ async directRuntimeDownloadHfModelFiles(repoId: string, filesToDownload: string[
 },
 /**
  * Discover the embedding dimension of a HuggingFace model by fetching its
- * `config.json` and inspecting common sentence-transformer and model fields.
+ * `config.json` from the API and extracting `hidden_size`, `d_model`, or
+ * `embedding_dim`.
  *
  * Returns `None` for GGUF single-file models or repos without a `config.json`.
  * This is used by the onboarding wizard to pre-configure the vector store
@@ -3543,11 +3551,11 @@ async cloudTestSftp(config: SftpConfigInput) : Promise<Result<ConnectionTestResu
 /**
  * Start the OAuth 2.0 PKCE flow for a cloud provider.
  *
- * Returns the authorization URL and PKCE code verifier.
+ * Returns the authorization URL and an opaque backend flow handle.
  * The frontend should:
  * 1. Open the `auth_url` in the system browser
- * 2. Listen for the redirect on `http://localhost:11434/callback` (or similar)
- * 3. Pass the received `code` + `code_verifier` to `cloud_oauth_complete()`
+ * 2. Call `cloud_oauth_complete()` with the returned flow ID; the backend
+ * receives and validates the loopback callback.
  */
 async cloudOauthStart(provider: string) : Promise<Result<OAuthStartResult, BridgeError>> {
     try {
@@ -3562,9 +3570,9 @@ async cloudOauthStart(provider: string) : Promise<Result<OAuthStartResult, Bridg
  *
  * On success, the provider is configured and a connection test is performed.
  */
-async cloudOauthComplete(provider: string, code: string, codeVerifier: string) : Promise<Result<ConnectionTestResult, BridgeError>> {
+async cloudOauthComplete(provider: string, flowId: string) : Promise<Result<ConnectionTestResult, BridgeError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("cloud_oauth_complete", { provider, code, codeVerifier }) };
+    return { status: "ok", data: await TAURI_INVOKE("cloud_oauth_complete", { provider, flowId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3718,12 +3726,7 @@ async thinclawRevealFile(path: string) : Promise<Result<null, BridgeError>> {
 
 /** user-defined types **/
 
-export type AgentProfile = { id: string; name: string; url: string;
-/**
- * Remote bearer token. Accepted on input, but always redacted from serialized
- * profile metadata; the durable value lives in the encrypted Keychain envelope.
- */
-token?: string | null; mode: string; auto_connect?: boolean }
+export type AgentProfile = { id: string; name: string; url: string; mode: string; auto_connect?: boolean }
 export type AgentStatusSummary = { id: string; name: string; url: string; online: boolean; latency_ms: number | null; version: string | null; stats: JsonValue | null; current_task: string | null; progress: number | null; logs: string[] | null; parent_id: string | null; children_ids: string[] | null; active_session_id: string | null; active: boolean; capabilities: string[] | null; run_status: string | null; model: string | null }
 export type AssetKind = "image" | "audio" | "video" | "document" | "generated_image" | "other"
 export type AssetNamespace = "direct_workbench" | "thin_claw_agent"
@@ -3836,7 +3839,7 @@ result_summary: string | null }
 /**
  * Cloud status response for the frontend.
  */
-export type CloudStatusResponse = { mode: string; provider_connected: boolean; provider_name: string | null; storage_used: number; storage_available: number | null; last_sync_at: number | null; has_recovery_key: boolean; migration_in_progress: boolean }
+export type CloudStatusResponse = { mode: string; provider_connected: boolean; provider_name: string | null; storage_used: number; storage_available: number | null; last_sync_at: number | null; sync_active: boolean; sync_error: string | null; has_recovery_key: boolean; migration_in_progress: boolean }
 /**
  * Compaction result
  */
@@ -3978,11 +3981,11 @@ export type GeneratedImage = { id: string; prompt: string; styleId: string | nul
 /**
  * Result from the Gmail OAuth PKCE flow.
  */
-export type GmailOAuthResult = { success: boolean; access_token: string | null; refresh_token: string | null; expires_in: number | null; scope: string | null; error: string | null }
+export type GmailOAuthResult = { success: boolean; expires_in: number | null; scope: string | null; error: string | null }
 /**
  * Gmail channel configuration status.
  */
-export type GmailStatusResponse = { enabled: boolean; configured: boolean; status: string; project_id: string; subscription_id: string; label_filters: string[]; allowed_senders: string[]; missing_fields: string[]; oauth_configured: boolean }
+export type GmailStatusResponse = { enabled: boolean; configured: boolean; status: string; project_id: string; subscription_id: string; topic_id: string; label_filters: string[]; allowed_senders: string[]; missing_fields: string[]; oauth_configured: boolean }
 /**
  * Information about a single file in an HF repo.
  */
@@ -4128,9 +4131,9 @@ export type OAuthStartResult = {
  */
 auth_url: string;
 /**
- * The PKCE code verifier — must be passed back in `cloud_oauth_complete`.
+ * Opaque, one-time handle for the backend-owned callback flow.
  */
-code_verifier: string }
+flow_id: string }
 /**
  * A single paired device/user
  */
@@ -4152,7 +4155,14 @@ export type RemoteAccessStartRequest = { exposure: RemoteAccessExposure;
  */
 confirm_public: boolean }
 export type RemoteAccessStatus = { runtime_mode: string; gateway_running: boolean; gateway_port: number; gateway_url: string; tailscale_installed: boolean; tailscale_authenticated: boolean; tailscale_dns_name: string | null; tailscale_error: string | null; tunnel_running: boolean; exposure: RemoteAccessExposure | null; access_url: string | null }
-export type RemoteDeployResult = { status: string; url: string; token: string; message: string | null }
+/**
+ * Connection details returned only to the renderer that initiated deployment.
+ *
+ * The bearer token must never be broadcast through a process-global event:
+ * another renderer listener could otherwise observe a credential that it did
+ * not request.
+ */
+export type RemoteDeployResult = { status: string; url: string; token: string; message: string | null; reachable: boolean }
 export type RemoteModelEntry = { id: string; name: string; metadata: JsonValue; local_version: string | null; remote_version: string | null; last_checked_at: number | null; status: string | null }
 /**
  * How a command behaves across the dual-mode runtime.
@@ -4312,7 +4322,7 @@ fallback: boolean }
  */
 export type SftpConfigInput = { endpoint: string; username: string | null;
 /**
- * Path to SSH private key (e.g. `~/.ssh/id_rsa`) or password
+ * Path to an SSH private key (e.g. `~/.ssh/id_rsa`).
  */
 key_or_password: string | null; root: string | null }
 export type SidecarStatus = { chat_running: boolean; embedding_running: boolean; stt_running: boolean; tts_configured: boolean; image_configured: boolean; summarizer_running: boolean }
@@ -4416,17 +4426,7 @@ export type ThinClawSessionsResponse = { sessions: ThinClawSession[] }
 /**
  * ThinClaw status response
  */
-export type ThinClawStatus = { engine_running: boolean; engine_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null;
-/**
- * Compatibility field. Persisted bearer credentials are never returned
- * through the broad status command; use `has_remote_token` for presence.
- */
-remote_token: string | null; has_remote_token: boolean; device_id: string;
-/**
- * Compatibility field. Always empty in broad status responses; use the
- * explicit reveal command for a user-initiated copy action.
- */
-auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean;
+export type ThinClawStatus = { engine_running: boolean; engine_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean;
 /**
  * Whether the agent runs tools without individual approval prompts.
  */
@@ -4434,12 +4434,7 @@ auto_approve_tools: boolean;
 /**
  * Whether the first-run identity bootstrap ritual has been completed.
  */
-bootstrap_completed: boolean; custom_llm_url: string | null;
-/**
- * Compatibility field. Persisted API keys are never returned through the
- * broad status command; use `has_custom_llm_key` for presence.
- */
-custom_llm_key: string | null; has_custom_llm_key: boolean; custom_llm_model: string | null; custom_llm_enabled: boolean; enabled_cloud_providers: string[]; enabled_cloud_models: { [key in string]: string[] }; profiles: AgentProfile[]; has_xai_key: boolean; xai_granted: boolean; has_venice_key: boolean; venice_granted: boolean; has_together_key: boolean; together_granted: boolean; has_moonshot_key: boolean; moonshot_granted: boolean; has_minimax_key: boolean; minimax_granted: boolean; has_nvidia_key: boolean; nvidia_granted: boolean; has_qianfan_key: boolean; qianfan_granted: boolean; has_mistral_key: boolean; mistral_granted: boolean; has_xiaomi_key: boolean; xiaomi_granted: boolean; has_cohere_key: boolean; cohere_granted: boolean; has_voyage_key: boolean; voyage_granted: boolean; has_deepgram_key: boolean; deepgram_granted: boolean; has_elevenlabs_key: boolean; elevenlabs_granted: boolean; has_stability_key: boolean; stability_granted: boolean; has_fal_key: boolean; fal_granted: boolean; has_bedrock_key: boolean; bedrock_granted: boolean }
+bootstrap_completed: boolean; custom_llm_url: string | null; has_custom_llm_key: boolean; custom_llm_key: string | null; custom_llm_model: string | null; custom_llm_enabled: boolean; enabled_cloud_providers: string[]; enabled_cloud_models: { [key in string]: string[] }; profiles: AgentProfile[]; has_xai_key: boolean; xai_granted: boolean; has_venice_key: boolean; venice_granted: boolean; has_together_key: boolean; together_granted: boolean; has_moonshot_key: boolean; moonshot_granted: boolean; has_minimax_key: boolean; minimax_granted: boolean; has_nvidia_key: boolean; nvidia_granted: boolean; has_qianfan_key: boolean; qianfan_granted: boolean; has_mistral_key: boolean; mistral_granted: boolean; has_xiaomi_key: boolean; xiaomi_granted: boolean; has_cohere_key: boolean; cohere_granted: boolean; has_voyage_key: boolean; voyage_granted: boolean; has_deepgram_key: boolean; deepgram_granted: boolean; has_elevenlabs_key: boolean; elevenlabs_granted: boolean; has_stability_key: boolean; stability_granted: boolean; has_fal_key: boolean; fal_granted: boolean; has_bedrock_key: boolean; bedrock_granted: boolean }
 /**
  * Thinking mode configuration
  */

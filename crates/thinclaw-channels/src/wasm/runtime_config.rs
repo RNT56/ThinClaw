@@ -309,35 +309,50 @@ pub async fn apply_channel_host_config(
     update_count
 }
 
-/// Inject credentials for a channel based on naming convention.
+/// Load the exact credential set declared by the channel manifest.
 ///
-/// Looks for secrets matching the pattern `{channel_name}_*` and injects them
-/// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
-///
-/// Returns the number of credentials injected.
+/// The snapshot is replaced atomically. If any required credential cannot be
+/// loaded, the previous snapshot is cleared so a revoked or deleted secret
+/// cannot remain usable by a running channel.
 pub async fn inject_channel_credentials_from_secrets(
     channel: &Arc<WasmChannel>,
     secrets: &(dyn SecretsStore + Send + Sync),
     channel_name: &str,
     user_id: &str,
 ) -> Result<usize, String> {
-    let all_secrets = secrets
-        .list(user_id)
-        .await
-        .map_err(|e| format!("Failed to list secrets: {}", e))?;
+    if channel.channel_name() != channel_name {
+        channel.clear_credentials().await;
+        return Err("Channel credential namespace does not match the active channel".to_string());
+    }
 
-    let prefix = format!("{}_", channel_name);
-    let mut count = 0;
+    let mut secret_names = channel
+        .capabilities()
+        .tool_capabilities
+        .http
+        .as_ref()
+        .map(|http| {
+            http.credentials
+                .values()
+                .map(|mapping| mapping.secret_name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    secret_names.sort();
+    secret_names.dedup();
 
-    for secret_meta in all_secrets {
-        if !secret_meta.name.starts_with(&prefix) {
-            continue;
-        }
+    let mut snapshot = HashMap::with_capacity(secret_names.len());
+    for secret_name in secret_names {
+        let Some(placeholder) =
+            crate::wasm::capabilities::credential_placeholder_name(&secret_name)
+        else {
+            channel.clear_credentials().await;
+            return Err("Channel manifest contains an invalid credential name".to_string());
+        };
 
         let decrypted = match secrets
             .get_for_injection(
                 user_id,
-                &secret_meta.name,
+                &secret_name,
                 SecretAccessContext::new(
                     "wasm.channel_runtime_config",
                     "channel_credential_injection",
@@ -346,29 +361,33 @@ pub async fn inject_channel_credentials_from_secrets(
             .await
         {
             Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(
-                    secret = %secret_meta.name,
-                    error = %e,
-                    "Failed to decrypt secret for channel credential injection"
-                );
-                continue;
+            Err(_) => {
+                channel.clear_credentials().await;
+                return Err("Failed to load a required channel credential".to_string());
             }
         };
-
-        let placeholder = secret_meta.name.to_uppercase();
-        channel
-            .set_credential(&placeholder, decrypted.expose().to_string())
-            .await;
-        count += 1;
+        snapshot.insert(placeholder, decrypted.expose().to_string());
     }
 
-    Ok(count)
+    channel.replace_credentials(snapshot).await
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use secrecy::SecretString;
+    use thinclaw_secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};
+
     use super::{WasmChannelHostConfig, telegram_webhook_host_status};
+    use crate::pairing::PairingStore;
+    use crate::wasm::capabilities::{
+        ChannelCapabilities, CredentialLocation, CredentialMapping, HttpCapability,
+    };
+    use crate::wasm::runtime::{
+        PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
+    };
+    use crate::wasm::wrapper::WasmChannel;
 
     #[test]
     fn telegram_updates_include_owner_stream_and_shared_runtime_values() {
@@ -448,6 +467,72 @@ mod tests {
         );
         assert!(!updates.contains_key("owner_id"));
         assert!(!updates.contains_key("webhook_secret"));
+    }
+
+    #[tokio::test]
+    async fn credential_refresh_loads_only_manifest_secrets_and_clears_on_revocation() {
+        let runtime =
+            Arc::new(WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing()).unwrap());
+        let prepared = Arc::new(PreparedChannelModule::for_testing("test", "test channel"));
+        let mut capabilities = ChannelCapabilities::for_channel("test");
+        capabilities.tool_capabilities.http = Some(HttpCapability::default().with_credential(
+            "service",
+            CredentialMapping {
+                secret_name: "test_service_token".to_string(),
+                location: CredentialLocation::Bearer,
+                host_patterns: vec!["api.example.com".to_string()],
+            },
+        ));
+        let channel = Arc::new(WasmChannel::new(
+            runtime,
+            prepared,
+            capabilities,
+            "{}".to_string(),
+            None,
+            Arc::new(PairingStore::new()),
+        ));
+        let crypto = Arc::new(
+            SecretsCrypto::new(SecretString::from(
+                "0123456789abcdef0123456789abcdef".to_string(),
+            ))
+            .unwrap(),
+        );
+        let secrets = InMemorySecretsStore::new(crypto);
+        secrets
+            .create(
+                "user",
+                CreateSecretParams::new("test_service_token", "active-token"),
+            )
+            .await
+            .unwrap();
+        secrets
+            .create(
+                "user",
+                CreateSecretParams::new("test_unmapped_secret", "must-not-load"),
+            )
+            .await
+            .unwrap();
+
+        let count =
+            super::inject_channel_credentials_from_secrets(&channel, &secrets, "test", "user")
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            channel.get_credentials().await,
+            std::collections::HashMap::from([(
+                "TEST_SERVICE_TOKEN".to_string(),
+                "active-token".to_string(),
+            )])
+        );
+
+        assert!(secrets.delete("user", "test_service_token").await.unwrap());
+        assert!(
+            super::inject_channel_credentials_from_secrets(&channel, &secrets, "test", "user",)
+                .await
+                .is_err()
+        );
+        assert!(channel.get_credentials().await.is_empty());
     }
 
     #[test]

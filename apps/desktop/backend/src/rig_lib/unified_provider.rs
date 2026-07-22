@@ -5,7 +5,7 @@ use rig::completion::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tracing::{error, info};
+use tracing::info;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ProviderKind {
@@ -24,6 +24,9 @@ pub struct UnifiedProvider {
     pub api_key: String,
     pub model: String,
     pub model_family: Option<String>,
+    client: Option<reqwest::Client>,
+    streaming_client: Option<reqwest::Client>,
+    configuration_error: Option<String>,
 }
 
 impl UnifiedProvider {
@@ -34,13 +37,127 @@ impl UnifiedProvider {
         model: &str,
         model_family: Option<String>,
     ) -> Self {
+        let configuration = Self::validate_configuration(&kind, base_url, api_key, model);
+        let (base_url, is_local, mut configuration_error) = match configuration {
+            Ok(configuration) => (configuration.0, configuration.1, None),
+            Err(error) => (String::new(), false, Some(error)),
+        };
+        let client = if configuration_error.is_none() {
+            match crate::rig_lib::http::client(is_local, false) {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    configuration_error = Some(error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let streaming_client = if configuration_error.is_none() {
+            match crate::rig_lib::http::client(is_local, true) {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    configuration_error = Some(error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Self {
             kind,
-            base_url: base_url.to_string(),
+            base_url,
             api_key: api_key.to_string(),
             model: model.to_string(),
             model_family,
+            client,
+            streaming_client,
+            configuration_error,
         }
+    }
+
+    fn validate_configuration(
+        kind: &ProviderKind,
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+    ) -> Result<(String, bool), String> {
+        if base_url.is_empty() || base_url.len() > 4_096 || base_url.chars().any(char::is_control) {
+            return Err("The provider endpoint is missing or invalid".to_string());
+        }
+        let url = reqwest::Url::parse(base_url)
+            .map_err(|_| "The provider endpoint is not a valid URL".to_string())?;
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(
+                "The provider endpoint must not contain credentials, a query, or a fragment"
+                    .to_string(),
+            );
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| "The provider endpoint has no host".to_string())?;
+        let host_is_loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
+        let is_local = matches!(kind, ProviderKind::Local);
+        if is_local && !host_is_loopback {
+            return Err("The local provider endpoint must use a loopback host".to_string());
+        }
+        if (is_local && !matches!(url.scheme(), "http" | "https"))
+            || (!is_local && url.scheme() != "https")
+        {
+            return Err(
+                "Remote provider endpoints must use HTTPS; local endpoints must use HTTP(S)"
+                    .to_string(),
+            );
+        }
+        if api_key.trim() != api_key
+            || api_key.len() > 16 * 1024
+            || api_key.chars().any(char::is_control)
+            || (!is_local && api_key.is_empty())
+        {
+            return Err("The provider credential is missing or invalid".to_string());
+        }
+        if model.is_empty() || model.len() > 512 || model.chars().any(char::is_control) {
+            return Err("The provider model identifier is missing or invalid".to_string());
+        }
+        if matches!(kind, ProviderKind::Gemini)
+            && !model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err("The Gemini model identifier is invalid".to_string());
+        }
+        Ok((base_url.trim_end_matches('/').to_string(), is_local))
+    }
+
+    fn client(&self, streaming: bool) -> Result<&reqwest::Client, String> {
+        if let Some(error) = &self.configuration_error {
+            return Err(error.clone());
+        }
+        if streaming {
+            self.streaming_client
+                .as_ref()
+                .ok_or_else(|| "The streaming provider client is unavailable".to_string())
+        } else {
+            self.client
+                .as_ref()
+                .ok_or_else(|| "The provider client is unavailable".to_string())
+        }
+    }
+
+    fn endpoint(&self, path: &str) -> Result<String, String> {
+        self.client(false)?;
+        Ok(format!(
+            "{}/{}",
+            self.base_url,
+            path.trim_start_matches('/')
+        ))
     }
 
     fn is_reasoning_model(&self) -> bool {
@@ -49,7 +166,7 @@ impl UnifiedProvider {
     }
 
     fn sanitize_temperature(&self, temp: f64) -> Option<f64> {
-        if self.is_reasoning_model() {
+        if self.is_reasoning_model() || !temp.is_finite() || !(0.0..=2.0).contains(&temp) {
             None
         } else {
             Some(temp)
@@ -65,10 +182,57 @@ impl UnifiedProvider {
         }
     }
 
+    fn tool_choice(
+        provider: &str,
+        name: Option<&str>,
+        id: Option<&str>,
+        arguments: Value,
+    ) -> Result<ModelChoice, CompletionError> {
+        let name = name.filter(|value| {
+            !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+        });
+        let id = id.filter(|value| {
+            !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+        });
+        let (Some(name), Some(id)) = (name, id) else {
+            return Err(CompletionError::ProviderError(format!(
+                "{provider} returned a malformed tool call"
+            )));
+        };
+        if !arguments.is_object() {
+            return Err(CompletionError::ProviderError(format!(
+                "{provider} returned a malformed tool call"
+            )));
+        }
+        Ok(ModelChoice::ToolCall(
+            name.to_string(),
+            id.to_string(),
+            arguments,
+        ))
+    }
+
+    fn required_first(
+        provider: &str,
+        choices: &[ModelChoice],
+    ) -> Result<ModelChoice, CompletionError> {
+        choices
+            .first()
+            .map(Self::clone_model_choice)
+            .ok_or_else(|| {
+                CompletionError::ProviderError(format!("{provider} returned an empty response"))
+            })
+    }
+
     async fn completion_openai(
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Vec<ModelChoice>>, CompletionError> {
+        let temperature = request.temperature.unwrap_or(0.7);
+        if !temperature.is_finite() || !(0.0..=2.0).contains(&temperature) {
+            return Err(CompletionError::ProviderError(
+                "OpenAI-compatible temperature is outside the supported range".into(),
+            ));
+        }
         let mut messages: Vec<Value> = Vec::new();
         if let Some(p) = request.preamble {
             messages.push(json!({ "role": "system", "content": p }));
@@ -92,19 +256,22 @@ impl UnifiedProvider {
             })).collect::<Vec<_>>()
         });
 
-        if let Some(t) = self.sanitize_temperature(0.7) {
-            body.as_object_mut()
-                .unwrap()
-                .insert("temperature".into(), json!(t));
+        if let Some(t) = self.sanitize_temperature(temperature) {
+            body["temperature"] = json!(t);
         }
 
-        let client = reqwest::Client::new();
-        let url = format!("{}/chat/completions", self.base_url);
+        let client = self.client(false).map_err(CompletionError::ProviderError)?;
+        let url = self
+            .endpoint("chat/completions")
+            .map_err(CompletionError::ProviderError)?;
+        let body = crate::rig_lib::http::bounded_json_body(&body)
+            .map_err(CompletionError::ProviderError)?;
 
         let mut request_builder = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body);
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
 
         if matches!(self.kind, ProviderKind::OpenRouter) {
             request_builder = request_builder
@@ -112,51 +279,83 @@ impl UnifiedProvider {
                 .header("X-Title", "ThinClaw Desktop");
         }
 
-        let resp = request_builder
-            .send()
+        let resp = request_builder.send().await.map_err(|error| {
+            CompletionError::ProviderError(crate::rig_lib::http::transport_error(
+                "OpenAI-compatible request failed",
+                error,
+            ))
+        })?;
+        let resp = crate::rig_lib::http::checked_response(resp, "OpenAI-compatible provider")
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let err_text = resp.text().await.unwrap_or_default();
-            return Err(CompletionError::ProviderError(format!(
-                "OpenAI Error: {} - {}",
-                status, err_text
-            )));
-        }
-
-        let json: Value = resp
-            .json()
+            .map_err(CompletionError::ProviderError)?;
+        let json: Value = crate::rig_lib::http::bounded_json(resp, "OpenAI-compatible provider")
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(CompletionError::ProviderError)?;
 
-        let choice = &json["choices"][0]["message"];
+        let choice = json
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                CompletionError::ProviderError(
+                    "OpenAI-compatible provider returned no message choice".into(),
+                )
+            })?;
         let mut model_choices = Vec::new();
 
-        if let Some(content) = choice["content"].as_str() {
-            model_choices.push(ModelChoice::Message(content.to_string()));
-        }
-
-        if let Some(tool_calls) = choice["tool_calls"].as_array() {
-            for tc in tool_calls {
-                let name = tc["function"]["name"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                let id = tc["id"].as_str().unwrap_or_default().to_string();
-                let args =
-                    serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}"))
-                        .unwrap_or(json!({}));
-                model_choices.push(ModelChoice::ToolCall(name, id, args));
+        if let Some(content) = choice.get("content").and_then(Value::as_str) {
+            if !content.is_empty() {
+                model_choices.push(ModelChoice::Message(content.to_string()));
             }
+        } else if choice.get("content").is_some_and(|value| !value.is_null()) {
+            return Err(CompletionError::ProviderError(
+                "OpenAI-compatible provider returned malformed message content".into(),
+            ));
         }
 
-        let first = if let Some(first) = model_choices.first() {
-            Self::clone_model_choice(first)
-        } else {
-            ModelChoice::Message("".into())
-        };
+        if let Some(tool_calls) = choice.get("tool_calls").and_then(Value::as_array) {
+            if tool_calls.len() > 128 {
+                return Err(CompletionError::ProviderError(
+                    "OpenAI-compatible provider returned too many tool calls".into(),
+                ));
+            }
+            for tc in tool_calls {
+                if tc.get("type").and_then(Value::as_str) != Some("function") {
+                    return Err(CompletionError::ProviderError(
+                        "OpenAI-compatible provider returned a malformed tool call".into(),
+                    ));
+                }
+                let args = tc
+                    .get("function")
+                    .and_then(|function| function.get("arguments"))
+                    .and_then(Value::as_str)
+                    .and_then(|arguments| serde_json::from_str(arguments).ok())
+                    .ok_or_else(|| {
+                        CompletionError::ProviderError(
+                            "OpenAI-compatible provider returned malformed tool arguments".into(),
+                        )
+                    })?;
+                model_choices.push(Self::tool_choice(
+                    "OpenAI-compatible provider",
+                    tc.get("function")
+                        .and_then(|function| function.get("name"))
+                        .and_then(Value::as_str),
+                    tc.get("id").and_then(Value::as_str),
+                    args,
+                )?);
+            }
+        } else if choice
+            .get("tool_calls")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Err(CompletionError::ProviderError(
+                "OpenAI-compatible provider returned malformed tool calls".into(),
+            ));
+        }
+
+        let first = Self::required_first("OpenAI-compatible provider", &model_choices)?;
 
         Ok(CompletionResponse {
             choice: first,
@@ -168,6 +367,12 @@ impl UnifiedProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Vec<ModelChoice>>, CompletionError> {
+        let temperature = request.temperature.unwrap_or(0.7);
+        if !temperature.is_finite() || !(0.0..=1.0).contains(&temperature) {
+            return Err(CompletionError::ProviderError(
+                "Anthropic temperature is outside the supported range".into(),
+            ));
+        }
         let mut messages: Vec<Value> = Vec::new();
         let mut system = None;
         if let Some(p) = request.preamble {
@@ -189,78 +394,90 @@ impl UnifiedProvider {
         });
 
         if let Some(s) = system {
-            body.as_object_mut()
-                .unwrap()
-                .insert("system".into(), json!(s));
+            body["system"] = json!(s);
+        }
+
+        if let Some(temperature) = self.sanitize_temperature(temperature) {
+            body["temperature"] = json!(temperature);
         }
 
         if !request.tools.is_empty() {
-            body.as_object_mut().unwrap().insert(
-                "tools".into(),
-                json!(request
-                    .tools
-                    .iter()
-                    .map(|t| json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "input_schema": t.parameters
-                    }))
-                    .collect::<Vec<_>>()),
-            );
+            body["tools"] = json!(request
+                .tools
+                .iter()
+                .map(|t| json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters
+                }))
+                .collect::<Vec<_>>());
         }
 
-        let client = reqwest::Client::new();
-        let url = format!("{}/messages", self.base_url);
+        let client = self.client(false).map_err(CompletionError::ProviderError)?;
+        let url = self
+            .endpoint("messages")
+            .map_err(CompletionError::ProviderError)?;
+        let body = crate::rig_lib::http::bounded_json_body(&body)
+            .map_err(CompletionError::ProviderError)?;
 
         let resp = client
             .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
-            .json(&body)
+            .body(body)
             .send()
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let err_text = resp.text().await.unwrap_or_default();
-            return Err(CompletionError::ProviderError(format!(
-                "Anthropic Error: {} - {}",
-                status, err_text
-            )));
-        }
-
-        let json: Value = resp
-            .json()
+            .map_err(|error| {
+                CompletionError::ProviderError(crate::rig_lib::http::transport_error(
+                    "Anthropic request failed",
+                    error,
+                ))
+            })?;
+        let resp = crate::rig_lib::http::checked_response(resp, "Anthropic")
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(CompletionError::ProviderError)?;
+        let json: Value = crate::rig_lib::http::bounded_json(resp, "Anthropic")
+            .await
+            .map_err(CompletionError::ProviderError)?;
 
         let mut model_choices = Vec::new();
-        if let Some(content_array) = json["content"].as_array() {
-            for item in content_array {
-                match item["type"].as_str() {
-                    Some("text") => {
-                        model_choices.push(ModelChoice::Message(
-                            item["text"].as_str().unwrap_or_default().to_string(),
-                        ));
+        let content_array = json
+            .get("content")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                CompletionError::ProviderError("Anthropic returned malformed content".into())
+            })?;
+        if content_array.len() > 128 {
+            return Err(CompletionError::ProviderError(
+                "Anthropic returned too many content blocks".into(),
+            ));
+        }
+        for item in content_array {
+            match item.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    let text = item.get("text").and_then(Value::as_str).ok_or_else(|| {
+                        CompletionError::ProviderError(
+                            "Anthropic returned malformed text content".into(),
+                        )
+                    })?;
+                    if !text.is_empty() {
+                        model_choices.push(ModelChoice::Message(text.to_string()));
                     }
-                    Some("tool_use") => {
-                        let name = item["name"].as_str().unwrap_or_default().to_string();
-                        let id = item["id"].as_str().unwrap_or_default().to_string();
-                        let input = item["input"].clone();
-                        model_choices.push(ModelChoice::ToolCall(name, id, input));
-                    }
-                    _ => {}
                 }
+                Some("tool_use") => {
+                    model_choices.push(Self::tool_choice(
+                        "Anthropic",
+                        item.get("name").and_then(Value::as_str),
+                        item.get("id").and_then(Value::as_str),
+                        item.get("input").cloned().unwrap_or(Value::Null),
+                    )?);
+                }
+                _ => {}
             }
         }
 
-        let first = if let Some(first) = model_choices.first() {
-            Self::clone_model_choice(first)
-        } else {
-            ModelChoice::Message("".into())
-        };
+        let first = Self::required_first("Anthropic", &model_choices)?;
 
         Ok(CompletionResponse {
             choice: first,
@@ -272,6 +489,14 @@ impl UnifiedProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse<Vec<ModelChoice>>, CompletionError> {
+        if request
+            .temperature
+            .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+        {
+            return Err(CompletionError::ProviderError(
+                "Gemini temperature is outside the supported range".into(),
+            ));
+        }
         let mut contents: Vec<Value> = Vec::new();
         let mut system_instruction = None;
 
@@ -299,9 +524,7 @@ impl UnifiedProvider {
         });
 
         if let Some(si) = system_instruction {
-            body.as_object_mut()
-                .unwrap()
-                .insert("system_instruction".into(), si);
+            body["system_instruction"] = si;
         }
 
         if let Some(t) = request
@@ -314,71 +537,76 @@ impl UnifiedProvider {
         }
 
         if !request.tools.is_empty() {
-            body.as_object_mut().unwrap().insert(
-                "tools".into(),
-                json!([{
-                    "function_declarations": request.tools.iter().map(|t| json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters
-                    })).collect::<Vec<_>>()
-                }]),
-            );
+            body["tools"] = json!([{
+                "function_declarations": request.tools.iter().map(|t| json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters
+                })).collect::<Vec<_>>()
+            }]);
         }
 
-        let client = reqwest::Client::new();
+        let client = self.client(false).map_err(CompletionError::ProviderError)?;
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.model, self.api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            self.model
         );
+        let body = crate::rig_lib::http::bounded_json_body(&body)
+            .map_err(CompletionError::ProviderError)?;
 
         let resp = client
             .post(&url)
-            .json(&body)
+            .header("x-goog-api-key", &self.api_key)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
             .send()
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let err_text = resp.text().await.unwrap_or_default();
-            return Err(CompletionError::ProviderError(format!(
-                "Gemini Error: {} - {}",
-                status, err_text
-            )));
-        }
-
-        let json: Value = resp
-            .json()
+            .map_err(|error| {
+                CompletionError::ProviderError(crate::rig_lib::http::transport_error(
+                    "Gemini request failed",
+                    error,
+                ))
+            })?;
+        let resp = crate::rig_lib::http::checked_response(resp, "Gemini")
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(CompletionError::ProviderError)?;
+        let json: Value = crate::rig_lib::http::bounded_json(resp, "Gemini")
+            .await
+            .map_err(CompletionError::ProviderError)?;
 
         let mut model_choices = Vec::new();
-        if let Some(candidates) = json["candidates"].as_array() {
-            if let Some(candidate) = candidates.first() {
-                if let Some(parts) = candidate["content"]["parts"].as_array() {
-                    for part in parts {
-                        if let Some(text) = part["text"].as_str() {
-                            model_choices.push(ModelChoice::Message(text.to_string()));
-                        } else if let Some(func_call) = part["functionCall"].as_object() {
-                            let name = func_call["name"].as_str().unwrap_or_default().to_string();
-                            let args = func_call["args"].clone();
-                            model_choices.push(ModelChoice::ToolCall(
-                                name,
-                                "gemini-tool-id".to_string(),
-                                args,
-                            ));
-                        }
-                    }
+        let parts = json
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate.get("content"))
+            .and_then(|content| content.get("parts"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                CompletionError::ProviderError("Gemini returned no candidate content".into())
+            })?;
+        if parts.len() > 128 {
+            return Err(CompletionError::ProviderError(
+                "Gemini returned too many content parts".into(),
+            ));
+        }
+        for (index, part) in parts.iter().enumerate() {
+            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                if !text.is_empty() {
+                    model_choices.push(ModelChoice::Message(text.to_string()));
                 }
+            } else if let Some(func_call) = part.get("functionCall").and_then(Value::as_object) {
+                let id = format!("gemini-tool-{index}");
+                model_choices.push(Self::tool_choice(
+                    "Gemini",
+                    func_call.get("name").and_then(Value::as_str),
+                    Some(&id),
+                    func_call.get("args").cloned().unwrap_or(Value::Null),
+                )?);
             }
         }
 
-        let first = if let Some(first) = model_choices.first() {
-            Self::clone_model_choice(first)
-        } else {
-            ModelChoice::Message("".into())
-        };
+        let first = Self::required_first("Gemini", &model_choices)?;
 
         Ok(CompletionResponse {
             choice: first,
@@ -421,19 +649,19 @@ impl UnifiedProvider {
                 lp.count_tokens(messages).await
             }
             _ => {
-                let mut total_chars = 0;
+                let mut total_chars = 0_usize;
                 for msg in messages {
                     if let Some(content) = msg["content"].as_str() {
-                        total_chars += content.len();
+                        total_chars = total_chars.saturating_add(content.len());
                     } else if let Some(content_array) = msg["content"].as_array() {
                         for part in content_array {
                             if let Some(text) = part["text"].as_str() {
-                                total_chars += text.len();
+                                total_chars = total_chars.saturating_add(text.len());
                             }
                         }
                     }
                 }
-                Ok((total_chars / 3) as u32)
+                Ok(u32::try_from(total_chars.saturating_add(2) / 3).unwrap_or(u32::MAX))
             }
         }
     }
@@ -471,11 +699,14 @@ impl UnifiedProvider {
     async fn stream_anthropic(
         &self,
         messages: Vec<Value>,
-        _temperature: Option<f64>,
+        temperature: Option<f64>,
     ) -> Result<
         std::pin::Pin<Box<dyn futures::Stream<Item = Result<ProviderEvent, String>> + Send>>,
         String,
     > {
+        if temperature.is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {
+            return Err("Anthropic temperature is outside the supported range".to_string());
+        }
         let mut body = json!({
             "model": self.model,
             "messages": messages,
@@ -483,49 +714,39 @@ impl UnifiedProvider {
             "stream": true,
         });
 
-        if let Some(t) = _temperature.and_then(|temp| self.sanitize_temperature(temp)) {
-            body.as_object_mut()
-                .unwrap()
-                .insert("temperature".into(), json!(t));
+        if let Some(t) = temperature.and_then(|temp| self.sanitize_temperature(temp)) {
+            body["temperature"] = json!(t);
         }
 
         // Handle system message if present in the messages list (Anthropic expects it as a top-level field)
         let mut filtered_messages = Vec::new();
         for msg in messages {
             if msg["role"] == "system" {
-                body.as_object_mut()
-                    .unwrap()
-                    .insert("system".into(), msg["content"].clone());
+                body["system"] = msg["content"].clone();
             } else {
                 filtered_messages.push(msg);
             }
         }
         body["messages"] = json!(filtered_messages);
 
-        let client = reqwest::Client::new();
-        let url = format!("{}/messages", self.base_url);
+        let client = self.client(true)?;
+        let url = self.endpoint("messages")?;
+        let body = crate::rig_lib::http::bounded_json_body(&body)?;
 
         let response = client
             .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
-            .json(&body)
+            .body(body)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| {
+                crate::rig_lib::http::transport_error("Anthropic request failed", error)
+            })?;
+        let response = crate::rig_lib::http::checked_response(response, "Anthropic").await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let err_text = response.text().await.unwrap_or_default();
-            error!(
-                "[unified_provider] Anthropic API Error ({}): {}",
-                status, err_text
-            );
-            return Err(format!("Anthropic API Error ({}): {}", status, err_text));
-        }
-
-        let stream = response.bytes_stream().eventsource();
+        let stream = crate::rig_lib::http::bounded_sse_bytes(response).eventsource();
         let s = stream
             .map(|event_res| {
                 let mut events = Vec::new();
@@ -533,6 +754,10 @@ impl UnifiedProvider {
                     Ok(event) => {
                         let data = event.data;
                         if data == "[DONE]" {
+                            return futures::stream::iter(events);
+                        }
+                        if data.len() > 2 * 1024 * 1024 {
+                            events.push(Err("Anthropic event exceeds the supported size".into()));
                             return futures::stream::iter(events);
                         }
 
@@ -551,15 +776,25 @@ impl UnifiedProvider {
                                                 completion_tokens: usage
                                                     .get("output_tokens")
                                                     .and_then(|v| v.as_u64())
-                                                    .unwrap_or(0)
-                                                    as u32,
-                                                total_tokens: 0,
+                                                    .map(|value| {
+                                                        u32::try_from(value).unwrap_or(u32::MAX)
+                                                    })
+                                                    .unwrap_or(0),
+                                                total_tokens: usage
+                                                    .get("output_tokens")
+                                                    .and_then(|v| v.as_u64())
+                                                    .map(|value| {
+                                                        u32::try_from(value).unwrap_or(u32::MAX)
+                                                    })
+                                                    .unwrap_or(0),
                                             },
                                         )));
                                     }
                                 }
                                 _ => {}
                             }
+                        } else {
+                            events.push(Err("Anthropic stream returned invalid JSON".into()));
                         }
                     }
                     Err(e) => {
@@ -576,11 +811,14 @@ impl UnifiedProvider {
     async fn stream_gemini(
         &self,
         messages: Vec<Value>,
-        _temperature: Option<f64>,
+        temperature: Option<f64>,
     ) -> Result<
         std::pin::Pin<Box<dyn futures::Stream<Item = Result<ProviderEvent, String>> + Send>>,
         String,
     > {
+        if temperature.is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value)) {
+            return Err("Gemini temperature is outside the supported range".to_string());
+        }
         info!(
             "[unified_provider] Starting Gemini stream for model: {}",
             self.model
@@ -629,12 +867,10 @@ impl UnifiedProvider {
         });
 
         if let Some(si) = system_instruction {
-            body.as_object_mut()
-                .unwrap()
-                .insert("system_instruction".into(), si);
+            body["system_instruction"] = si;
         }
 
-        if let Some(t) = _temperature
+        if let Some(t) = temperature
             .and_then(|temp| self.sanitize_temperature(temp))
             .or_else(|| self.sanitize_temperature(0.7))
         {
@@ -643,33 +879,26 @@ impl UnifiedProvider {
             }
         }
 
-        let client = reqwest::Client::new();
+        let client = self.client(true)?;
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-            self.model, self.api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse",
+            self.model
         );
+        let body = crate::rig_lib::http::bounded_json_body(&body)?;
 
         let response = client
             .post(&url)
-            .json(&body)
+            .header("x-goog-api-key", &self.api_key)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| {
+                crate::rig_lib::http::transport_error("Gemini request failed", error)
+            })?;
+        let response = crate::rig_lib::http::checked_response(response, "Gemini").await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let err_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown Error".into());
-            error!(
-                "[unified_provider] Gemini API Error ({}): {}",
-                status, err_text
-            );
-            return Err(format!("Gemini API Error ({}): {}", status, err_text));
-        }
-
-        let stream = response.bytes_stream().eventsource();
+        let stream = crate::rig_lib::http::bounded_sse_bytes(response).eventsource();
         let in_thought = std::sync::Arc::new(std::sync::Mutex::new(false));
 
         let s = stream
@@ -678,13 +907,15 @@ impl UnifiedProvider {
                 match event_res {
                     Ok(event) => {
                         let data = event.data;
+                        if data.len() > 2 * 1024 * 1024 {
+                            events.push(Err("Gemini event exceeds the supported size".into()));
+                            return futures::stream::iter(events);
+                        }
                         if let Ok(json) = serde_json::from_str::<Value>(&data) {
-                            info!("[unified_provider] Gemini chunk received.");
                             if let Some(candidates) = json["candidates"].as_array() {
                                 if let Some(candidate) = candidates.first() {
                                     if let Some(parts) = candidate["content"]["parts"].as_array() {
                                         for part in parts {
-                                            info!("[unified_provider] Gemini part: {:?}", part);
                                             // Handle Thinking Process (Gemini 3)
                                             let is_thought =
                                                 part["thought"].as_bool().unwrap_or(false)
@@ -720,6 +951,8 @@ impl UnifiedProvider {
                                     }
                                 }
                             }
+                        } else {
+                            events.push(Err("Gemini stream returned invalid JSON".into()));
                         }
                     }
                     Err(e) => {
