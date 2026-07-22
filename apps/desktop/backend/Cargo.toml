@@ -102,7 +102,7 @@ zeroize = { version = "1", features = ["derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
 
 # Cloud storage (Work Stream A)
-opendal = { version = "0.58", features = ["services-s3", "services-webdav", "services-sftp"] }
+opendal = { version = "0.58", git = "https://github.com/apache/opendal.git", rev = "e42589ad764db6f659e029fc41a83e12b7fb9a92", features = ["services-s3", "services-webdav", "services-sftp"] }
 aes-gcm = "0.11"
 hkdf = "0.13"
 zstd = "0.13"
