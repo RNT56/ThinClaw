@@ -571,36 +571,6 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod bounded_line_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn bounded_line_reader_drains_an_oversized_record() {
-        let (mut writer, reader) = tokio::io::duplex(64);
-        let writer_task = tokio::spawn(async move {
-            writer.write_all(b"abcdef\r\nok\n").await.unwrap();
-        });
-        let mut reader = tokio::io::BufReader::new(reader);
-
-        let first = read_bounded_line(&mut reader, 4)
-            .await
-            .unwrap()
-            .expect("first line");
-        assert_eq!(first.bytes, b"abcd");
-        assert!(first.truncated);
-
-        let second = read_bounded_line(&mut reader, 4)
-            .await
-            .unwrap()
-            .expect("second line");
-        assert_eq!(second.bytes, b"ok");
-        assert!(!second.truncated);
-        assert!(read_bounded_line(&mut reader, 4).await.unwrap().is_none());
-        writer_task.await.unwrap();
-    }
-}
-
 #[cfg(unix)]
 struct DescendantOwnership {
     process_group: libc::pid_t,
@@ -746,5 +716,35 @@ impl DescendantOwnership {
 impl Drop for DescendantOwnership {
     fn drop(&mut self) {
         self.terminate();
+    }
+}
+
+#[cfg(test)]
+mod bounded_line_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_line_reader_drains_an_oversized_record() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(b"abcdef\r\nok\n").await.unwrap();
+        });
+        let mut reader = tokio::io::BufReader::new(reader);
+
+        let first = read_bounded_line(&mut reader, 4)
+            .await
+            .unwrap()
+            .expect("first line");
+        assert_eq!(first.bytes, b"abcd");
+        assert!(first.truncated);
+
+        let second = read_bounded_line(&mut reader, 4)
+            .await
+            .unwrap()
+            .expect("second line");
+        assert_eq!(second.bytes, b"ok");
+        assert!(!second.truncated);
+        assert!(read_bounded_line(&mut reader, 4).await.unwrap().is_none());
+        writer_task.await.unwrap();
     }
 }
