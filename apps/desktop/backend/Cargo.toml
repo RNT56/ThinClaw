@@ -81,7 +81,7 @@ urlencoding = "2"
 eventsource-stream = "0.2.3"
 chromiumoxide = { version = "0.9.1" }
 open = "5"
-zip = "0.6"
+zip = "8.6"
 tauri-plugin-fs = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
