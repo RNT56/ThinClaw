@@ -33,6 +33,7 @@ chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 futures = "0.3"
 utoipa = { version = "5", features = ["uuid"] }
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 
 [package]
 name = "thinclaw"
@@ -154,7 +155,7 @@ regex = "1"
 aho-corasick = "1"
 unicode-normalization = "0.1"
 jsonschema = { version = "0.47", default-features = false }
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+jsonwebtoken = { workspace = true }
 
 # YAML parsing for SKILL.md frontmatter
 serde_yaml_ng = "0.10"
