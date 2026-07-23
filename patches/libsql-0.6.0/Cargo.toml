@@ -169,7 +169,7 @@ optional = true
 package = "libsql-sqlite3-parser"
 
 [dependencies.thiserror]
-version = "1.0.40"
+version = "2.0.18"
 
 [dependencies.tokio]
 version = "1.29.1"
