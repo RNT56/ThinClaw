@@ -72,7 +72,7 @@ base64 = "0.22.1"
 uuid = { version = "1.19.0", features = ["v4", "v5", "fast-rng", "macro-diagnostics"] }
 sysinfo = "0.38"
 tempfile = "3.24.0"
-scraper = "0.25.0"
+scraper = "0.27.0"
 chrono = "0.4.43"
 cron = "0.17"
 rig-core = "0.7.0"
