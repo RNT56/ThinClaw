@@ -18,6 +18,7 @@ import { useEngineSetup } from '../../hooks/use-engine-setup';
 import { clearOnboardingProgress, startOnboardingProgress } from '../../lib/local-storage-migration';
 import { directCommands } from '../../lib/generated/direct-commands';
 import { unwrapResult } from '../../lib/guards';
+import { bridgeErrorMessage } from '../../lib/command-errors';
 import { Progress } from '../ui';
 
 // ---------------------------------------------------------------------------
@@ -80,6 +81,14 @@ export function buildOnboardingSteps({
     if (showEngineSetup) steps.push('engine_setup');
     steps.push('inference', inference === 'local' ? 'models' : 'api_keys', 'permissions', 'complete');
     return steps;
+}
+
+export function buildAgentSettingsPatch(agentName: string, personalityPack: string) {
+    return {
+        'agent.name': agentName.trim(),
+        'agent.personality_pack': personalityPack,
+        'agent.persona_seed': personalityPack,
+    };
 }
 
 const PERSONALITY_PACKS = [
@@ -445,21 +454,17 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     const handleFinish = async () => {
         setIsLoading(true);
         try {
-            unwrapResult(await commands.thinclawConfigPatch({
-                agent: {
-                    'agent.name': agentName.trim(),
-                    'agent.personality_pack': personalityPack,
-                    'agent.persona_seed': personalityPack,
-                },
-            }), 'agent setup');
+            unwrapResult(
+                await commands.thinclawConfigPatch(
+                    buildAgentSettingsPatch(agentName, personalityPack)
+                ),
+                'agent setup'
+            );
 
             // Save HF Token if provided
             if (hfToken && hfToken.trim().length > 0) {
                 await thinclaw.setHfToken(hfToken.trim());
             }
-
-            // Clear onboarding flag
-            clearOnboardingProgress();
 
             // Set inference mode
             await thinclaw.toggleThinClawLocalInference(inferenceChoice === 'local');
@@ -539,10 +544,14 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
             // Save setup completed status
             await thinclaw.setSetupCompleted(true);
+            clearOnboardingProgress();
             toast.success("Setup complete!");
             onComplete();
         } catch (e) {
-            toast.error("Failed to save setup status");
+            console.error('[onboarding] Failed to finish setup:', e);
+            toast.error("Failed to finish setup", {
+                description: bridgeErrorMessage(e),
+            });
         } finally {
             setIsLoading(false);
         }

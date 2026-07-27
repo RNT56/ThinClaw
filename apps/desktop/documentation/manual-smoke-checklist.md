@@ -80,11 +80,12 @@ checklist because Tauri IPC and the Rust backend are required.
 
 ```bash
 cd apps/desktop
-npm run tauri:dev:llamacpp
+npm run tauri:dev
 ```
 
-If a different engine is under test, record the exact command and Cargo feature
-set in the report.
+This selects MLX on Apple Silicon macOS and llama.cpp elsewhere. If a different
+engine is under test, set `THINCLAW_DESKTOP_ENGINE` or use an engine-specific
+script, then record the exact command and Cargo feature set in the report.
 
 ## Local Mode Smoke
 

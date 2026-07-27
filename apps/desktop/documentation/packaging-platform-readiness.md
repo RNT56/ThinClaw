@@ -56,16 +56,16 @@ New writes must use ThinClaw identifiers and ThinClaw storage roots.
 |---|---|---|---|
 | `none` / cloud | none | none | Used for CI build smoke and remote/cloud-only packaging. |
 | `ollama` | none | `whisper`, `whisper-server`, `tts` | Ollama itself is external and must not be bundled. |
-| `llamacpp` | `llama-server` | `whisper`, `whisper-server`, `sd`, `tts` | Native local alpha default. |
-| `mlx` | `uv` | `whisper`, `whisper-server`, `tts` | macOS Apple Silicon only. |
+| `llamacpp` | `llama-server` | `whisper`, `whisper-server`, `sd`, `tts` | Default outside Apple Silicon macOS. |
+| `mlx` | `uv` | `whisper`, `whisper-server`, `tts` | Default on Apple Silicon macOS. |
 | `vllm` | `uv` | `whisper`, `whisper-server`, `tts` | Linux CUDA only. |
 
-Chromium is included automatically when `backend/resources/chromium` exists. Set `INCLUDE_CHROMIUM=1` to require it in a release build, or `INCLUDE_CHROMIUM=0` to omit it deliberately. The release pipeline requires Chromium and packages only the core llama.cpp runtime installed by `setup:all`; optional voice/image sidecars are not downloaded or declared unless an operator explicitly installs them.
+Chromium is included automatically when `backend/resources/chromium` exists. Set `INCLUDE_CHROMIUM=1` to require it in a release build, or `INCLUDE_CHROMIUM=0` to omit it deliberately. The release pipeline requires Chromium and explicitly sets `THINCLAW_DESKTOP_ENGINE=llamacpp` for its current universal release profile; optional voice/image sidecars are not downloaded or declared unless an operator explicitly installs them.
 
 For a macOS llama.cpp release candidate:
 
 ```bash
-npm run setup:all
+THINCLAW_DESKTOP_ENGINE=llamacpp npm run setup:all
 INCLUDE_CHROMIUM=1 npm run tauri:build:llamacpp
 ```
 
@@ -77,7 +77,7 @@ npm run tauri:build:cloud:unsigned
 
 If `backend/bin` is empty, native sidecar builds fail in strict mode. That is intentional: run `npm run setup:ai` or an engine-specific setup script before packaging a native local build.
 
-`npm run setup:all` downloads pinned archives, verifies them before replacing local assets, validates the extracted executables, generates the strict llama.cpp override, and enforces the sidecar budgets. `npm run test:setup:all` executes those same scripts against tiny deterministic archives without mutating the checkout.
+`npm run setup:all` resolves the platform default (MLX on Apple Silicon macOS, llama.cpp elsewhere), downloads pinned archives, verifies them before replacing local assets, validates the extracted executables, generates the matching strict override, and enforces the sidecar budgets. `npm run test:setup:all` executes deterministic setup fixtures and engine-resolution tests without mutating the checkout.
 
 Current limits are 512 MiB per native artifact, 1 GiB for native sidecars and libraries, 768 MiB for Chromium, and 1.5 GiB total bundled runtime. A deliberate increase requires changing `sidecar-budgets.json` in review.
 

@@ -100,8 +100,9 @@ This does everything in one go:
 |--------|------------|-------------|
 | `setup_chromium.sh` | `npm run setup:chromium` | Selects the pinned macOS, Linux x64, Windows x64, or Windows ARM64 Chromium snapshot for the current host and replaces the existing copy only after SHA-256 and archive-layout validation |
 | `setup_llama.sh` | `npm run setup:ai` | Downloads the validated llama.cpp sidecar and required shared libraries for the current host, verifies SHA-256 and `--version`, then installs atomically |
+| `setup_uv.sh` | `npm run setup:mlx` | Downloads the validated `uv` sidecar used to bootstrap MLX on Apple Silicon macOS |
 
-All setup scripts are deterministic and safe to rerun: archives are verified before the existing installation is replaced. `setup:all` finishes by generating the strict llama.cpp bundle override and enforcing committed sidecar-size limits.
+All setup scripts are deterministic and safe to rerun: archives are verified before the existing installation is replaced. `setup:all` selects MLX on Apple Silicon macOS and llama.cpp elsewhere, then generates the matching strict bundle override and enforces committed sidecar-size limits. Set `THINCLAW_DESKTOP_ENGINE=llamacpp`, `mlx`, `vllm`, or `ollama` to override that choice for setup, development, and builds.
 
 > **Tip:** You can also run any sub-script individually, e.g. `npm run setup:ai` to re-download just the AI binaries. For non-macOS-ARM64 local builds, prefer the engine-specific scripts such as `scripts/setup_llama.sh` and `scripts/setup_uv.sh`.
 
@@ -117,16 +118,13 @@ bash scripts/setup_uv.sh
 ```
 
 ### 4. Verify Binary Setup
-After the default `setup:all`, you should see the following core runtime files (macOS ARM64 example):
+After the default `setup:all`, you should see the following core runtime file on macOS ARM64:
 ```
 backend/bin/
-├── llama-server-aarch64-apple-darwin
-├── libllama.dylib
-├── libggml*.dylib
-└── *.metal
+└── uv-aarch64-apple-darwin
 ```
 
-On Linux, the suffix would be `x86_64-unknown-linux-gnu`. On Windows, `x86_64-pc-windows-msvc.exe`.
+An explicit llama.cpp setup also installs `llama-server-{target-triple}` and its platform libraries. On Linux, the suffix would be `x86_64-unknown-linux-gnu`. On Windows, `x86_64-pc-windows-msvc.exe`.
 
 > **Optional media runtimes:** `whisper`, `whisper-server`, `sd`, and `tts` are not part of the core release download or size budget. They are declared only when explicitly installed under the target-suffixed names below; cloud/MLX media routes remain available without bundling those native binaries.
 
@@ -134,11 +132,15 @@ On Linux, the suffix would be `x86_64-unknown-linux-gnu`. On Windows, `x86_64-pc
 
 ## 🖥️ Running in Development
 
-### Default (llama.cpp)
+### Platform Default
 ```bash
-npm run tauri:dev:llamacpp
+npm run tauri:dev
 ```
-This uses the default Cargo feature `llamacpp`. The app will launch with llama.cpp as the inference engine.
+Apple Silicon macOS uses MLX by default; other supported hosts use llama.cpp. Builders and users can override resolution without changing scripts:
+
+```bash
+THINCLAW_DESKTOP_ENGINE=llamacpp npm run tauri:dev
+```
 
 ### Other Engines (dev mode)
 To develop with a different engine, pass the feature flags through to Cargo:
@@ -163,7 +165,9 @@ ThinClaw Desktop provides **dedicated npm scripts** for building each engine var
 1. Runs `scripts/generate_tauri_overrides.sh` to generate a `backend/tauri.override.json` with the correct sidecar/resource bundle list for that engine
 2. Invokes `tauri build` with the appropriate `--config` and `--features` flags
 
-### llama.cpp Build *(default)*
+The generic `npm run tauri:build` command uses MLX on Apple Silicon macOS and llama.cpp elsewhere. `THINCLAW_DESKTOP_ENGINE` provides an explicit builder override.
+
+### llama.cpp Build
 ```bash
 npm run tauri:build:llamacpp
 ```
@@ -219,8 +223,8 @@ The `scripts/generate_tauri_overrides.sh` script generates `backend/tauri.overri
 | Engine | `externalBin` included | `resources` included |
 |--------|----------------------|---------------------|
 | llamacpp | llama-server; optional installed whisper, whisper-server, sd, tts | `*.dylib`, `*.metal`, chromium |
-| mlx / vllm | uv; optional installed whisper, whisper-server, tts | platform libraries, chromium |
-| ollama | optional installed whisper, whisper-server, tts | platform libraries, chromium |
+| mlx / vllm | uv; optional installed whisper, whisper-server, tts | chromium |
+| ollama | optional installed whisper, whisper-server, tts | chromium |
 | none (cloud) | *(none)* | chromium |
 
 Chromium inclusion is automatic when `backend/resources/chromium` exists. Use `INCLUDE_CHROMIUM=1 npm run tauri:build:llamacpp` for release builds that must fail if Chromium has not been prepared, or `INCLUDE_CHROMIUM=0` for a deliberate no-browser bundle.

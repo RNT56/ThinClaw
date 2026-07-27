@@ -15,6 +15,73 @@ const MAX_CONFIG_PATCH_BYTES: usize = 1024 * 1024;
 const MAX_CONFIG_KEY_BYTES: usize = 256;
 const MAX_CONFIG_VALUE_BYTES: usize = 256 * 1024;
 
+struct LocalSettingsContext {
+    store: std::sync::Arc<dyn thinclaw_core::db::Database>,
+    agent: Option<std::sync::Arc<thinclaw_core::agent::Agent>>,
+}
+
+#[cfg(feature = "runtime-libsql")]
+async fn open_stopped_settings_store(
+    state_dir: &std::path::Path,
+) -> Result<std::sync::Arc<dyn thinclaw_core::db::Database>, BridgeError> {
+    use thinclaw_core::db::Database as _;
+
+    let db_path = crate::thinclaw::runtime_builder::runtime_db_path(state_dir);
+    let backend = thinclaw_core::db::libsql::LibSqlBackend::new_local(&db_path)
+        .await
+        .map_err(|error| {
+            BridgeError::from(format!(
+                "failed to open desktop settings database at {}: {error}",
+                db_path.display()
+            ))
+        })?;
+    backend.run_migrations().await.map_err(|error| {
+        BridgeError::from(format!(
+            "failed to prepare desktop settings database at {}: {error}",
+            db_path.display()
+        ))
+    })?;
+
+    info!(
+        path = %db_path.display(),
+        "[thinclaw-runtime] Using stopped-runtime settings database"
+    );
+    Ok(std::sync::Arc::new(backend))
+}
+
+async fn local_settings_context(
+    ironclaw: &ThinClawRuntimeState,
+) -> Result<LocalSettingsContext, BridgeError> {
+    if let Ok(agent) = ironclaw.agent().await {
+        let store = agent
+            .store()
+            .cloned()
+            .ok_or_else(|| BridgeError::from("Database not available"))?;
+        return Ok(LocalSettingsContext {
+            store,
+            agent: Some(agent),
+        });
+    }
+
+    #[cfg(feature = "runtime-libsql")]
+    {
+        return Ok(LocalSettingsContext {
+            store: open_stopped_settings_store(ironclaw.state_dir()).await?,
+            agent: None,
+        });
+    }
+
+    #[cfg(not(feature = "runtime-libsql"))]
+    {
+        Err(gated(
+            "offline desktop settings",
+            "this desktop build uses a remotely managed database",
+            "start or connect the ThinClaw runtime before changing agent settings",
+            RouteMode::LocalAndRemote,
+        ))
+    }
+}
+
 fn validated_config_patch(
     patch: serde_json::Value,
 ) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
@@ -82,15 +149,11 @@ pub async fn thinclaw_config_get(
         return proxy.list_settings().await;
     }
 
-    let agent = ironclaw.agent().await?;
-    if let Some(store) = agent.store() {
-        let resp = thinclaw_core::api::config::list_settings(store, "local_user")
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_value(resp).map_err(|error| BridgeError::from(error.to_string()))
-    } else {
-        Ok(serde_json::json!({ "settings": [] }))
-    }
+    let context = local_settings_context(&ironclaw).await?;
+    let resp = thinclaw_core::api::config::list_settings(&context.store, "local_user")
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(resp).map_err(|error| BridgeError::from(error.to_string()))
 }
 
 #[tauri::command]
@@ -105,18 +168,19 @@ pub async fn thinclaw_config_set(
         return Ok(serde_json::json!({ "ok": true }));
     }
 
-    let agent = ironclaw.agent().await?;
-    let store = agent.store().ok_or("Database not available")?;
+    let context = local_settings_context(&ironclaw).await?;
     let restart_gmail = key.starts_with("channels.gmail_");
-    let secrets = restart_gmail
-        .then(|| agent.secrets_store().cloned())
-        .flatten();
+    let restart_running_runtime = restart_gmail && context.agent.is_some();
+    let secrets = context
+        .agent
+        .as_ref()
+        .and_then(|agent| agent.secrets_store().cloned());
 
-    thinclaw_core::api::config::set_setting(store, "local_user", &key, &value)
+    thinclaw_core::api::config::set_setting(&context.store, "local_user", &key, &value)
         .await
         .map_err(|e| e.to_string())?;
-    drop(agent);
-    if restart_gmail {
+    drop(context);
+    if restart_running_runtime {
         ironclaw.restart_local(secrets).await?;
     }
 
@@ -135,20 +199,21 @@ pub async fn thinclaw_config_patch(
         return Ok(serde_json::json!({ "ok": true }));
     }
 
-    let agent = ironclaw.agent().await?;
-    let store = agent.store().ok_or("Database not available")?;
+    let context = local_settings_context(&ironclaw).await?;
     let restart_gmail = settings
         .keys()
         .any(|key| key.starts_with("channels.gmail_"));
-    let secrets = restart_gmail
-        .then(|| agent.secrets_store().cloned())
-        .flatten();
+    let restart_running_runtime = restart_gmail && context.agent.is_some();
+    let secrets = context
+        .agent
+        .as_ref()
+        .and_then(|agent| agent.secrets_store().cloned());
 
-    thinclaw_core::api::config::import_settings(store, "local_user", &settings)
+    thinclaw_core::api::config::import_settings(&context.store, "local_user", &settings)
         .await
         .map_err(|error| error.to_string())?;
-    drop(agent);
-    if restart_gmail {
+    drop(context);
+    if restart_running_runtime {
         ironclaw.restart_local(secrets).await?;
     }
 
@@ -900,6 +965,8 @@ pub async fn thinclaw_save_cloud_config(
 #[cfg(test)]
 mod tests {
     use super::validated_config_patch;
+    #[cfg(feature = "runtime-libsql")]
+    use super::open_stopped_settings_store;
 
     #[test]
     fn config_patch_requires_a_bounded_object() {
@@ -930,5 +997,42 @@ mod tests {
         .expect("valid patch");
         assert_eq!(settings.len(), 2);
         assert_eq!(settings["channels.gmail_enabled"], serde_json::json!(true));
+    }
+
+    #[cfg(feature = "runtime-libsql")]
+    #[tokio::test]
+    async fn stopped_runtime_settings_survive_database_reopen() {
+        let state_dir = tempfile::tempdir().expect("state directory");
+        let store = open_stopped_settings_store(state_dir.path())
+            .await
+            .expect("open stopped-runtime store");
+        let settings = validated_config_patch(serde_json::json!({
+            "agent.name": "Desktop Agent",
+            "agent.personality_pack": "balanced",
+            "agent.persona_seed": "balanced"
+        }))
+        .expect("agent settings");
+        thinclaw_core::api::config::import_settings(&store, "local_user", &settings)
+            .await
+            .expect("persist stopped-runtime settings");
+        drop(store);
+
+        let reopened = open_stopped_settings_store(state_dir.path())
+            .await
+            .expect("reopen stopped-runtime store");
+        assert_eq!(
+            reopened
+                .get_setting("local_user", "agent.name")
+                .await
+                .expect("read agent name"),
+            Some(serde_json::json!("Desktop Agent"))
+        );
+        assert_eq!(
+            reopened
+                .get_setting("local_user", "agent.personality_pack")
+                .await
+                .expect("read personality"),
+            Some(serde_json::json!("balanced"))
+        );
     }
 }
