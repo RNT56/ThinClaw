@@ -108,7 +108,11 @@ add_platform_resources() {
   case "$TARGET_TRIPLE" in
     *apple-darwin)
       add_resource_if_present "bin/*.dylib"
-      add_resource_if_present "bin/*.metal"
+      # Recent official llama.cpp macOS archives embed the Metal shaders and
+      # no longer ship standalone .metal sources. Bundle them when an older or
+      # custom archive provides them, but do not make them a packaging
+      # requirement.
+      add_optional_resource "bin/*.metal"
       ;;
     *linux*)
       add_resource_if_present "bin/*.so"
@@ -179,14 +183,12 @@ case "$ENGINE" in
     add_optional_sidecar "bin/whisper"
     add_optional_sidecar "bin/whisper-server"
     add_optional_sidecar "bin/tts"
-    add_platform_resources
     ;;
 
   ollama)
     add_optional_sidecar "bin/whisper"
     add_optional_sidecar "bin/whisper-server"
     add_optional_sidecar "bin/tts"
-    add_platform_resources
     ;;
 
   none)

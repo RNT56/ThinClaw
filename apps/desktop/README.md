@@ -34,12 +34,13 @@ npm install
 # 2. Automated sidecar initialization (Chromium, AI binaries)
 npm run setup:all
 
-# 3. Launch in Developer Mode (default engine: llama.cpp)
-npm run tauri:dev:llamacpp
+# 3. Launch in Developer Mode
+# Apple Silicon macOS defaults to MLX; other hosts default to llama.cpp.
+npm run tauri:dev
 
-# Or with a different inference engine:
-# npm run tauri:dev:mlx
-# npm run tauri:dev:ollama
+# Override the default explicitly:
+# THINCLAW_DESKTOP_ENGINE=llamacpp npm run tauri:dev
+# THINCLAW_DESKTOP_ENGINE=ollama npm run tauri:dev
 ```
 
 ### 3. Setup Advice

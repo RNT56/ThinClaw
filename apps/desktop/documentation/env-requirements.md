@@ -21,6 +21,7 @@ Run commands from `apps/desktop` unless noted.
 
 | Mode | Command |
 | --- | --- |
+| Platform-default dev (MLX on Apple Silicon macOS, llama.cpp elsewhere) | `npm run tauri:dev` |
 | llama.cpp dev | `npm run tauri:dev:llamacpp` |
 | MLX dev | `npm run tauri:dev:mlx` |
 | vLLM dev | `npm run tauri:dev:vllm` |
@@ -37,7 +38,9 @@ npm install
 npm run setup:all
 ```
 
-For MLX/vLLM:
+`setup:all` selects MLX on Apple Silicon macOS and llama.cpp elsewhere. Override it for a user or builder with `THINCLAW_DESKTOP_ENGINE=<engine>`.
+
+For an explicit MLX/vLLM setup:
 
 ```bash
 cd apps/desktop

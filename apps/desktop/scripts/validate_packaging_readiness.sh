@@ -172,6 +172,9 @@ if (engine === 'none' && bins.length !== 0) fail(`cloud build should not include
 if (engine === 'llamacpp' && !bins.includes('bin/llama-server')) fail('llama.cpp build must declare llama-server sidecar.');
 if ((engine === 'mlx' || engine === 'vllm') && !bins.includes('bin/uv')) fail(`${engine} build must declare uv sidecar.`);
 if (engine === 'ollama' && bins.includes('bin/llama-server')) fail('ollama build must not bundle llama-server.');
+if (engine !== 'llamacpp' && resources.some(resource => resource.includes('*.dylib') || resource.includes('*.so') || resource.includes('*.dll'))) {
+  fail(`${engine} build must not inherit native libraries from another engine.`);
+}
 
 console.log(`${engine}: externalBin=[${bins.join(', ')}], resources=[${resources.join(', ')}]`);
 NODE

@@ -703,7 +703,7 @@ jobs:
           rm -f "$certificate"
       - name: Install verified Desktop runtime assets
         working-directory: apps/desktop
-        run: npm run setup:all
+        run: THINCLAW_DESKTOP_ENGINE=llamacpp npm run setup:all
       - name: Validate Desktop packaging contract
         working-directory: apps/desktop
         run: npm run validate:packaging
