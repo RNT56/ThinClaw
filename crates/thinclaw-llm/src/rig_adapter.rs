@@ -245,6 +245,95 @@ pub(crate) fn classify_completion_error(provider: &str, message: &str) -> LlmErr
     }
 }
 
+/// True when an OpenAI Chat Completions model requires the current
+/// `max_completion_tokens` request field.
+///
+/// rig-core 0.33 exposes a provider-neutral `max_tokens` field and serializes
+/// it under that legacy name for OpenAI Chat Completions. OpenAI GPT-5+ and
+/// o-series models reject that field, so ThinClaw moves the value into
+/// `additional_params.max_completion_tokens` at the provider boundary. Older
+/// OpenAI models and OpenAI-compatible providers retain rig's legacy behavior.
+fn uses_openai_max_completion_tokens(provider: &str, model: &str) -> bool {
+    if !provider.eq_ignore_ascii_case("openai") {
+        return false;
+    }
+
+    let model = model
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    let model = model.strip_prefix("ft:").unwrap_or(&model);
+
+    if let Some(version) = model.strip_prefix("gpt-") {
+        let major = version
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        return major.parse::<u32>().is_ok_and(|major| major >= 5);
+    }
+
+    model
+        .strip_prefix('o')
+        .and_then(|suffix| suffix.chars().next())
+        .is_some_and(|ch| ch.is_ascii_digit())
+}
+
+fn with_provider_output_token_limit(
+    provider: &str,
+    model: &str,
+    max_tokens: Option<u32>,
+    additional_params: Option<JsonValue>,
+) -> Result<(Option<u64>, Option<JsonValue>), LlmError> {
+    if !uses_openai_max_completion_tokens(provider, model) {
+        return Ok((max_tokens.map(u64::from), additional_params));
+    }
+
+    let Some(max_tokens) = max_tokens else {
+        return Ok((None, additional_params));
+    };
+
+    let mut params = match additional_params {
+        None => serde_json::Map::new(),
+        Some(JsonValue::Object(params)) => params,
+        Some(_) => {
+            return Err(LlmError::RequestFailed {
+                provider: provider.to_string(),
+                reason: "OpenAI additional request parameters must be a JSON object".to_string(),
+            });
+        }
+    };
+    params.insert(
+        "max_completion_tokens".to_string(),
+        JsonValue::from(max_tokens),
+    );
+
+    Ok((None, Some(JsonValue::Object(params))))
+}
+
+fn is_token_capture_parameter_rejection(message: &str) -> bool {
+    let message = message.to_ascii_lowercase().replace(['\'', '"', '`'], "");
+    ["logprobs", "top_logprobs"].iter().any(|parameter| {
+        [
+            format!("unsupported parameter: {parameter}"),
+            format!("unsupported parameter {parameter}"),
+            format!("unknown parameter: {parameter}"),
+            format!("unknown parameter {parameter}"),
+            format!("unrecognized parameter: {parameter}"),
+            format!("unrecognized parameter {parameter}"),
+            format!("invalid parameter: {parameter}"),
+            format!("invalid parameter {parameter}"),
+            format!("{parameter} is not supported"),
+            format!("{parameter} not supported"),
+            format!("does not support {parameter}"),
+        ]
+        .iter()
+        .any(|pattern| message.contains(pattern))
+            || (message.contains("extra inputs are not permitted") && message.contains(parameter))
+    })
+}
+
 fn requested_model_matches_active_model(requested_model: &str, active_model: &str) -> bool {
     let requested_model = requested_model.trim();
     if requested_model == active_model {
@@ -727,6 +816,8 @@ fn finish_reason_for_tool_use(saw_tool_call: bool) -> FinishReason {
 /// Build a rig-core CompletionRequest from our internal types.
 #[allow(clippy::too_many_arguments)]
 fn build_rig_request(
+    provider: &str,
+    model: &str,
     preamble: Option<String>,
     mut history: Vec<RigMessage>,
     context_documents: Vec<String>,
@@ -737,6 +828,8 @@ fn build_rig_request(
     additional_params: Option<JsonValue>,
 ) -> Result<RigRequest, LlmError> {
     prepend_untrusted_context(&mut history, context_documents);
+    let (max_tokens, additional_params) =
+        with_provider_output_token_limit(provider, model, max_tokens, additional_params)?;
     // rig-core requires at least one message in chat_history
     if history.is_empty() {
         history.push(RigMessage::user("Hello"));
@@ -757,7 +850,7 @@ fn build_rig_request(
         documents: Vec::new(),
         tools,
         temperature: temperature.map(|t| t as f64),
-        max_tokens: max_tokens.map(|t| t as u64),
+        max_tokens,
         tool_choice,
         additional_params,
     })
@@ -1082,6 +1175,8 @@ where
 
         let context_documents = request.context_documents;
         let rig_req = build_rig_request(
+            &self.provider_label,
+            &self.model_name,
             preamble.clone(),
             history.clone(),
             context_documents.clone(),
@@ -1094,7 +1189,10 @@ where
 
         let response = match self.model.completion(rig_req).await {
             Ok(response) => response,
-            Err(error) if capture_params.is_some() => {
+            Err(error)
+                if capture_params.is_some()
+                    && is_token_capture_parameter_rejection(&error.to_string()) =>
+            {
                 tracing::warn!(
                     provider = %self.provider_label,
                     model = %self.model_name,
@@ -1102,6 +1200,8 @@ where
                     "Provider rejected token/logprob capture parameters; retrying without them"
                 );
                 let retry_req = build_rig_request(
+                    &self.provider_label,
+                    &self.model_name,
                     preamble,
                     history,
                     context_documents,
@@ -1232,6 +1332,8 @@ where
 
         let context_documents = request.context_documents;
         let rig_req = build_rig_request(
+            &self.provider_label,
+            &self.model_name,
             preamble.clone(),
             history.clone(),
             context_documents.clone(),
@@ -1244,7 +1346,10 @@ where
 
         let response = match self.model.completion(rig_req).await {
             Ok(response) => response,
-            Err(error) if capture_params.is_some() => {
+            Err(error)
+                if capture_params.is_some()
+                    && is_token_capture_parameter_rejection(&error.to_string()) =>
+            {
                 tracing::warn!(
                     provider = %self.provider_label,
                     model = %self.model_name,
@@ -1252,6 +1357,8 @@ where
                     "Provider rejected token/logprob capture parameters for tool completion; retrying without them"
                 );
                 let retry_req = build_rig_request(
+                    &self.provider_label,
+                    &self.model_name,
                     preamble,
                     history,
                     context_documents,
@@ -1381,6 +1488,8 @@ where
 
         let context_documents = request.context_documents;
         let rig_req = build_rig_request(
+            &self.provider_label,
+            &self.model_name,
             preamble.clone(),
             history.clone(),
             context_documents.clone(),
@@ -1393,7 +1502,10 @@ where
 
         let streaming_resp = match self.model.stream(rig_req).await {
             Ok(response) => response,
-            Err(error) if capture_params.is_some() => {
+            Err(error)
+                if capture_params.is_some()
+                    && is_token_capture_parameter_rejection(&error.to_string()) =>
+            {
                 tracing::warn!(
                     provider = %self.provider_label,
                     model = %self.model_name,
@@ -1401,6 +1513,8 @@ where
                     "Provider rejected streaming token/logprob capture parameters; retrying without them"
                 );
                 let retry_req = build_rig_request(
+                    &self.provider_label,
+                    &self.model_name,
                     preamble,
                     history,
                     context_documents,
@@ -1505,6 +1619,8 @@ where
 
         let context_documents = request.context_documents;
         let rig_req = build_rig_request(
+            &self.provider_label,
+            &self.model_name,
             preamble.clone(),
             history.clone(),
             context_documents.clone(),
@@ -1517,7 +1633,10 @@ where
 
         let streaming_resp = match self.model.stream(rig_req).await {
             Ok(response) => response,
-            Err(error) if capture_params.is_some() => {
+            Err(error)
+                if capture_params.is_some()
+                    && is_token_capture_parameter_rejection(&error.to_string()) =>
+            {
                 tracing::warn!(
                     provider = %self.provider_label,
                     model = %self.model_name,
@@ -1525,6 +1644,8 @@ where
                     "Provider rejected streaming token/logprob capture parameters for tool completion; retrying without them"
                 );
                 let retry_req = build_rig_request(
+                    &self.provider_label,
+                    &self.model_name,
                     preamble,
                     history,
                     context_documents,

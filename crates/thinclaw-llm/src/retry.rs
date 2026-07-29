@@ -24,8 +24,8 @@ use thinclaw_types::error::LlmError;
 /// (try the next provider). The question is: "could this exact same request
 /// succeed if we try again?"
 ///
-/// Retryable: `RequestFailed`, `RateLimited`, `InvalidResponse`,
-/// `SessionRenewalFailed`, `Http`, `Io`.
+/// Retryable: non-deterministic `RequestFailed`, `RateLimited`,
+/// `InvalidResponse`, `SessionRenewalFailed`, `Http`, `Io`.
 ///
 /// Non-retryable: `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`,
 /// `ModelNotAvailable`, `Json`.
@@ -51,6 +51,20 @@ fn is_deterministic_request_failure(reason: &str) -> bool {
     let normalized = reason.trim().to_ascii_lowercase();
     normalized.contains("message conversion error")
         || normalized.contains("only supports pdf documents")
+        || normalized.contains("unsupported parameter")
+        || normalized.contains("unknown parameter")
+        || normalized.contains("unrecognized parameter")
+        || normalized.contains("invalid parameter")
+        || normalized.contains("400 bad request")
+        || normalized.contains("http status 400")
+        || normalized.contains("http status: 400")
+        || normalized.contains("status code 400")
+        || normalized.contains("status: 400")
+        || normalized.contains("422 unprocessable")
+        || normalized.contains("http status 422")
+        || normalized.contains("http status: 422")
+        || normalized.contains("status code 422")
+        || normalized.contains("status: 422")
 }
 
 /// Calculate exponential backoff delay with random jitter.
@@ -257,5 +271,42 @@ impl LlmProvider for RetryProvider {
         requested_model: Option<&str>,
     ) -> TokenCaptureSupport {
         self.inner.token_capture_support_for_model(requested_model)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_failed(reason: &str) -> LlmError {
+        LlmError::RequestFailed {
+            provider: "openai".to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    #[test]
+    fn unsupported_openai_parameters_are_not_retried() {
+        let error = request_failed(
+            "400 Bad Request: Unsupported parameter: 'max_tokens' is not supported with this \
+             model. Use 'max_completion_tokens' instead.",
+        );
+        assert!(!is_retryable(&error));
+    }
+
+    #[test]
+    fn other_bad_requests_are_not_retried() {
+        assert!(!is_retryable(&request_failed(
+            "provider returned HTTP status 400 with an invalid request body"
+        )));
+        assert!(!is_retryable(&request_failed(
+            "422 Unprocessable Entity: invalid parameter value"
+        )));
+    }
+
+    #[test]
+    fn transient_provider_failures_remain_retryable() {
+        assert!(is_retryable(&request_failed("500 Internal Server Error")));
+        assert!(is_retryable(&request_failed("connection reset by peer")));
     }
 }

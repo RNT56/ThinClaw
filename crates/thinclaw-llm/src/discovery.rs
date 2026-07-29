@@ -804,6 +804,10 @@ pub fn openai_model_priority(model_id: &str) -> usize {
     let id = model_id.to_ascii_lowercase();
 
     const EXACT_PRIORITY: &[&str] = &[
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
         "gpt-5.3-codex",
         "gpt-5.2-codex",
         "gpt-5.2",
@@ -1203,6 +1207,8 @@ mod tests {
 
     #[test]
     fn test_openai_priority_order() {
+        assert!(openai_model_priority("gpt-5.6") < openai_model_priority("gpt-5.3-codex"));
+        assert!(openai_model_priority("gpt-5.6-terra") < openai_model_priority("gpt-5.3-codex"));
         assert!(openai_model_priority("gpt-5.3-codex") < openai_model_priority("gpt-4o"));
         assert!(openai_model_priority("gpt-4o") < openai_model_priority("gpt-4o-mini"));
         assert!(openai_model_priority("o3") < openai_model_priority("gpt-4.1"));

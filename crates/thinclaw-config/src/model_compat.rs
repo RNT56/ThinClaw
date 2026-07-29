@@ -441,6 +441,29 @@ mod tests {
     }
 
     #[test]
+    fn test_embedded_catalog_contains_gpt_5_6_family() {
+        let catalog = embedded_catalog();
+        let find_embedded = |model_id: &str| {
+            catalog
+                .models
+                .iter()
+                .find(|model| model.model_id == model_id)
+                .expect("GPT-5.6 family model")
+        };
+
+        let alias = find_embedded("gpt-5.6");
+        assert_eq!(alias.alias_of.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(alias.context_window, 1_050_000);
+        assert_eq!(alias.max_output_tokens, 128_000);
+
+        for model in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            let model = find_embedded(model);
+            assert!(model.supports_tools);
+            assert!(model.supports_thinking);
+        }
+    }
+
+    #[test]
     fn test_routing_quality_score_orders_known_models() {
         let opus = find_model("claude-opus-4-8")
             .unwrap()
