@@ -77,9 +77,9 @@ export function buildOnboardingSteps({
 }): Step[] {
     const steps: Step[] = ['welcome', 'style', 'mode'];
     if (mode === 'remote') steps.push('remote_setup');
-    steps.push('agent');
-    if (showEngineSetup) steps.push('engine_setup');
-    steps.push('inference', inference === 'local' ? 'models' : 'api_keys', 'permissions', 'complete');
+    steps.push('agent', 'inference');
+    if (inference === 'local' && showEngineSetup) steps.push('engine_setup');
+    steps.push(inference === 'local' ? 'models' : 'api_keys', 'permissions', 'complete');
     return steps;
 }
 
@@ -263,6 +263,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
     const handleNext = () => {
         if (step === 'agent' && !agentName.trim()) return;
+        if (step === 'engine_setup' && engineSetup.status?.state !== 'ready') return;
         if (step === 'complete') { handleFinish(); return; }
         const idx = stepList.indexOf(step);
         if (idx < stepList.length - 1) setStep(stepList[idx + 1]);
@@ -1580,7 +1581,11 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
                     <button
                         onClick={handleNext}
-                        disabled={isLoading || (step === 'agent' && !agentName.trim())}
+                        disabled={
+                            isLoading
+                            || (step === 'agent' && !agentName.trim())
+                            || (step === 'engine_setup' && engineSetup.status?.state !== 'ready')
+                        }
                         className="flex items-center gap-2 bg-primary text-primary-foreground hover:bg-primary/90 px-6 py-2.5 rounded-lg font-medium transition-all shadow-xs hover:shadow-sm"
                     >
                         {step === 'complete' ? (

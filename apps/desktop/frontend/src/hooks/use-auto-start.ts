@@ -74,6 +74,13 @@ export function useAutoStart() {
                         return;
                     }
 
+                    // Provision or repair the locked runtime before attempting
+                    // to launch inference. This is idempotent and backend-owned.
+                    const setup = await directCommands.directRuntimeEnsureEngineReady();
+                    if (setup.status === "error") {
+                        throw new Error(bridgeErrorMessage(setup.error));
+                    }
+
                     // Start the engine server (mlx-openai-server / vllm serve / etc.)
                     const result = await directCommands.directRuntimeStartEngine(cleanPath, maxContext);
                     if (result.status === "error") {

@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# uv release validated by the ThinClaw MLX/vLLM matrix on 2026-07-13.
-UV_VERSION="${UV_VERSION:-0.11.28}"
-BIN_DIR="${BACKEND_BIN_DIR:-backend/bin}"
+DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENGINE_MANIFEST="${THINCLAW_ENGINE_MANIFEST:-$DESKTOP_DIR/engine-manifest.json}"
+[[ -f "$ENGINE_MANIFEST" ]] || { echo "Missing engine manifest: $ENGINE_MANIFEST" >&2; exit 1; }
+MANIFEST_UV_VERSION="$(node -e '
+  const manifest = require(process.argv[1]);
+  process.stdout.write(manifest.uv.version);
+' "$ENGINE_MANIFEST")"
+UV_VERSION="${UV_VERSION:-$MANIFEST_UV_VERSION}"
+BIN_DIR="${BACKEND_BIN_DIR:-$DESKTOP_DIR/backend/bin}"
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
@@ -29,7 +35,7 @@ case "$OS-$ARCH" in
     ;;
 esac
 
-if [[ "$UV_VERSION" != "0.11.28" && -z "${UV_SHA256:-}" ]]; then
+if [[ "$UV_VERSION" != "$MANIFEST_UV_VERSION" && -z "${UV_SHA256:-}" ]]; then
   echo "Custom uv version '$UV_VERSION' requires UV_SHA256." >&2
   exit 1
 fi

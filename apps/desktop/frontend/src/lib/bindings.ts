@@ -3290,6 +3290,18 @@ async hideSpotlight() : Promise<void> {
     await TAURI_INVOKE("hide_spotlight");
 },
 /**
+ * Ensure the active engine is provisioned without requiring its inference
+ * process to be running. Safe to call before every automatic start.
+ */
+async directRuntimeEnsureEngineReady() : Promise<Result<null, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_ensure_engine_ready") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Returns information about the single inference engine compiled into this build.
  *
  * The frontend uses this to:
@@ -3301,20 +3313,20 @@ async directRuntimeGetActiveEngineInfo() : Promise<EngineInfo> {
     return await TAURI_INVOKE("direct_runtime_get_active_engine_info");
 },
 /**
- * Returns whether the active engine needs first-launch setup.
- *
- * - `llamacpp`: never needs setup (bundled sidecar)
- * - `ollama`: never needs setup (external daemon)
- * - `mlx` / `vllm`: need setup if the Python venv hasn't been bootstrapped yet
+ * Return the backend-owned provisioning status. Filesystem validation remains
+ * authoritative across restarts; the in-memory record supplies live progress
+ * and the last actionable failure.
  */
-async directRuntimeGetEngineSetupStatus() : Promise<EngineSetupStatus> {
-    return await TAURI_INVOKE("direct_runtime_get_engine_setup_status");
+async directRuntimeGetEngineSetupStatus() : Promise<Result<EngineSetupStatus, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_get_engine_setup_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 /**
- * Trigger first-launch bootstrap for the active engine (MLX/vLLM).
- *
- * Emits `engine_setup_progress` events:
- * `{ stage: "creating_venv" | "installing" | "complete" | "error", message: String }`
+ * Trigger first-launch bootstrap or repair for the active engine.
  */
 async directRuntimeSetupEngine() : Promise<Result<null, BridgeError>> {
     try {
@@ -3922,9 +3934,17 @@ hf_tag: string;
  */
 single_file_model: boolean }
 /**
+ * Durable backend-owned provisioning phase for the compiled local engine.
+ */
+export type EngineProvisioningState = "checking" | "unsupported" | "needs_setup" | "installing" | "ready" | "broken"
+/**
  * Setup status returned to the frontend.
  */
 export type EngineSetupStatus = {
+/**
+ * Machine-readable provisioning state.
+ */
+state: EngineProvisioningState;
 /**
  * Whether the engine needs first-launch setup (Python bootstrap).
  */
@@ -3936,7 +3956,11 @@ setup_in_progress: boolean;
 /**
  * Human-readable status message.
  */
-message: string }
+message: string;
+/**
+ * Last bounded setup failure, if any.
+ */
+error: string | null }
 /**
  * Result of starting an engine.
  */

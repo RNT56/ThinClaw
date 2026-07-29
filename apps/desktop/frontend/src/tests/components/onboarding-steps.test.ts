@@ -8,7 +8,7 @@ describe("unified desktop onboarding route", () => {
     it("includes agent identity and local model setup for a local runtime", () => {
         expect(buildOnboardingSteps({ mode: "local", inference: "local", showEngineSetup: true }))
             .toEqual([
-                "welcome", "style", "mode", "agent", "engine_setup", "inference",
+                "welcome", "style", "mode", "agent", "inference", "engine_setup",
                 "models", "permissions", "complete",
             ]);
     });

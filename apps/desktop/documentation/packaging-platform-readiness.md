@@ -1,6 +1,6 @@
 # ThinClaw Desktop Packaging And Platform Readiness
 
-Last updated: 2026-07-14
+Last updated: 2026-07-29
 
 This checklist is the P3-W3 release-readiness gate for the macOS alpha. It records what is enforced by config or tests and what still requires release operator secrets or host prerequisites.
 
@@ -18,7 +18,9 @@ The gate verifies:
 - The app identity is `ThinClaw Desktop` / `com.thinclaw.desktop`.
 - The Keychain service remains `com.thinclaw.desktop`, matching the bundle identifier.
 - Updater artifacts are enabled and updater endpoint/public key metadata exists.
-- macOS entitlements include sandbox, microphone, network client, network server, and user-selected file access.
+- macOS entitlements include microphone, network client, network server, and
+  user-selected file access, while explicitly excluding the Mac App Store
+  sandbox that would be applied to—and break—the bundled runtime helpers.
 - Engine-specific Tauri override generation declares the expected sidecars for cloud, Ollama, llama.cpp, MLX, and vLLM builds.
 - The real Chromium/llama setup scripts pass isolated clean-machine fixtures, including checksum rejection and required-sidecar layout.
 - Declared native runtimes, libraries, Chromium, and their total stay below the committed `sidecar-budgets.json` limits.
@@ -60,13 +62,13 @@ New writes must use ThinClaw identifiers and ThinClaw storage roots.
 | `mlx` | `uv` | `whisper`, `whisper-server`, `tts` | Default on Apple Silicon macOS. |
 | `vllm` | `uv` | `whisper`, `whisper-server`, `tts` | Linux CUDA only. |
 
-Chromium is included automatically when `backend/resources/chromium` exists. Set `INCLUDE_CHROMIUM=1` to require it in a release build, or `INCLUDE_CHROMIUM=0` to omit it deliberately. The release pipeline requires Chromium and explicitly sets `THINCLAW_DESKTOP_ENGINE=llamacpp` for its current universal release profile; optional voice/image sidecars are not downloaded or declared unless an operator explicitly installs them.
+Chromium is included automatically when `backend/resources/chromium` exists. Set `INCLUDE_CHROMIUM=1` to require it in a release build, or `INCLUDE_CHROMIUM=0` to omit it deliberately. The macOS release pipeline requires Chromium and builds the Apple Silicon MLX profile with macOS 14 as its minimum; optional voice/image sidecars are not downloaded or declared unless an operator explicitly installs them.
 
-For a macOS llama.cpp release candidate:
+For the default macOS Apple Silicon release candidate:
 
 ```bash
-THINCLAW_DESKTOP_ENGINE=llamacpp npm run setup:all
-INCLUDE_CHROMIUM=1 npm run tauri:build:llamacpp
+THINCLAW_DESKTOP_ENGINE=mlx npm run setup:all
+INCLUDE_CHROMIUM=1 npm run tauri:build:mlx
 ```
 
 For a local packaging smoke without updater signing secrets:
@@ -74,6 +76,16 @@ For a local packaging smoke without updater signing secrets:
 ```bash
 npm run tauri:build:cloud:unsigned
 ```
+
+For a launchable local Apple Silicon MLX build:
+
+```bash
+APPLE_SIGNING_IDENTITY=- DISABLE_UPDATER_ARTIFACTS=1 INCLUDE_CHROMIUM=1 npm run tauri:build:mlx
+bash scripts/verify_macos_mlx_bundle.sh backend/target/release/bundle/macos
+```
+
+The ad-hoc signature is for local validation only; tagged releases still
+require the Developer ID and notarization credentials enforced by CI.
 
 If `backend/bin` is empty, native sidecar builds fail in strict mode. That is intentional: run `npm run setup:ai` or an engine-specific setup script before packaging a native local build.
 
@@ -84,11 +96,15 @@ Current limits are 512 MiB per native artifact, 1 GiB for native sidecars and li
 ## Local Inference Setup
 
 - llama.cpp uses a bundled `llama-server-{target-triple}` sidecar.
-- MLX and vLLM use the bundled or discovered `uv-{target-triple}` binary and first-launch Python bootstrap.
+- MLX and vLLM use the bundled `uv-{target-triple}` binary and backend-owned,
+  hash-locked first-launch provisioning. A system `uv` is accepted only under
+  the explicit development override `THINCLAW_ALLOW_SYSTEM_UV=1`.
 - Ollama uses an external daemon and should expose read/status UI when the daemon is absent.
 - Cloud-only builds use no local inference sidecars.
 
-The alpha macOS release target is llama.cpp on Apple Silicon. MLX remains gated to macOS Apple Silicon, and vLLM remains gated to Linux CUDA.
+The macOS release target is MLX on Apple Silicon. llama.cpp remains an explicit
+builder option on its reviewed targets, and vLLM remains gated to Linux x64
+CUDA hosts that pass its preflight.
 
 ## Updater And Notarization
 
@@ -97,7 +113,10 @@ Configured:
 - `bundle.createUpdaterArtifacts = true`
 - Updater endpoint points to the GitHub release `latest.json`
 - Updater public key is present in `tauri.conf.json`
-- macOS entitlements are configured through `backend/Entitlements.plist`
+- macOS Developer ID entitlements are configured through
+  `backend/Entitlements.plist`. App Sandbox is intentionally absent because
+  this app provisions and launches signed external runtime helpers; hardened
+  runtime, notarization, and Gatekeeper validation remain required.
 
 Automated tag-release behavior:
 

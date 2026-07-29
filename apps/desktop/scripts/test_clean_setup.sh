@@ -13,11 +13,13 @@ mkdir -p \
   "$FIXTURES/chromium-windows/chrome-win"
 
 cp "$DESKTOP_DIR/scripts/setup_llama.sh" "$TMP_ROOT/setup_llama.sh"
+cp "$DESKTOP_DIR/engine-manifest.json" "$TMP_ROOT/engine-manifest.json"
 cp "$DESKTOP_DIR/backend/scripts/setup_chromium.sh" "$TMP_ROOT/setup_chromium.sh"
 mkdir -p "$TEST_APP/scripts" "$TEST_APP/backend/scripts"
 cp "$DESKTOP_DIR/scripts/generate_tauri_overrides.sh" "$TEST_APP/scripts/"
 cp "$DESKTOP_DIR/scripts/check_sidecar_budgets.mjs" "$TEST_APP/scripts/"
 cp "$DESKTOP_DIR/sidecar-budgets.json" "$TEST_APP/"
+cp "$DESKTOP_DIR/engine-manifest.json" "$TEST_APP/"
 
 printf '#!/usr/bin/env bash\necho "llama fixture 1.0"\n' > "$FIXTURES/llama/llama-server"
 chmod +x "$FIXTURES/llama/llama-server"
@@ -49,6 +51,7 @@ CHROMIUM_WINDOWS_SHA="$(checksum "$FIXTURES/chromium-windows.zip")"
 
 cd "$TEST_APP"
 BACKEND_BIN_DIR="$TEST_APP/backend/bin" \
+THINCLAW_ENGINE_MANIFEST="$TMP_ROOT/engine-manifest.json" \
 LLAMA_ASSET_NAME="llama-fixture.tar.gz" \
 LLAMA_DOWNLOAD_URL="file://$FIXTURES/llama-fixture.tar.gz" \
 LLAMA_SHA256="$LLAMA_SHA" \
@@ -104,6 +107,7 @@ TAURI_TARGET_TRIPLE="$TEST_TARGET" \
   node scripts/check_sidecar_budgets.mjs --config backend/tauri.override.json
 
 test -x "$INSTALLED_LLAMA"
+test -f "backend/bin/llama-runtime-${TEST_TARGET}.json"
 test -x backend/resources/chromium/chrome-mac/Chromium.app/Contents/MacOS/Chromium
 test -x backend/resources/chromium-linux-test/chrome-linux/chrome
 test -x backend/resources/chromium-mac-x64-test/chrome-mac/Chromium.app/Contents/MacOS/Chromium

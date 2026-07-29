@@ -258,9 +258,9 @@ jobs:
       - name: Backend advisory audit
         working-directory: apps/desktop/backend
         run: cargo deny check advisories
-      - name: Backend tests
+      - name: Backend tests (all engine profiles)
         working-directory: apps/desktop
-        run: npm run test:backend
+        run: npm run test:backend:all-engines
       - name: Swift DTO typecheck
         run: |
           if command -v swiftc >/dev/null 2>&1; then

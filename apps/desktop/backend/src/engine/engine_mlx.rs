@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use rand::{rngs::OsRng, RngCore};
+use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -18,10 +19,11 @@ use thinclaw_platform::{
 };
 use tokio::process::Command;
 
-use super::{EngineStartOptions, InferenceEngine};
+use super::{
+    EngineStartOptions, InferenceEngine, RuntimeDiagnostics, MLX_MINIMUM_MACOS,
+    MLX_OPENAI_SERVER_VERSION, PYTHON_ABI, PYTHON_VERSION, UV_VERSION,
+};
 
-const MLX_SERVER_VERSION: &str = "1.8.1";
-const PYTHON_VERSION: &str = "3.12";
 const BOOTSTRAP_MARKER: &str = ".thinclaw-mlx-bootstrap";
 const SERVED_MODEL_NAME: &str = "thinclaw-local";
 const MAX_CONTEXT_SIZE: u32 = 1_048_576;
@@ -33,7 +35,8 @@ const UTILITY_OUTPUT_LIMIT: usize = 1024 * 1024;
 const VENV_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(3 * 60);
-const RESOLUTION_CUTOFF: &str = "2026-05-04T00:00:00Z";
+const REQUIREMENTS_LOCK: &[u8] = include_bytes!("../../../runtime/mlx/requirements.lock");
+const RUNTIME_PACKAGES_JSON: &str = env!("THINCLAW_MLX_RUNTIME_PACKAGES");
 
 // `mlx-openai-server` 1.8.1 intentionally accepts any non-empty OpenAI client
 // key and has no server-side API-key option. Python imports `sitecustomize`
@@ -81,6 +84,7 @@ pub struct MlxEngine {
     served_model: Mutex<Option<String>>,
     effective_context: Mutex<Option<u32>>,
     api_token: Mutex<Option<String>>,
+    diagnostics: RuntimeDiagnostics,
 }
 
 impl MlxEngine {
@@ -95,6 +99,7 @@ impl MlxEngine {
             served_model: Mutex::new(None),
             effective_context: Mutex::new(None),
             api_token: Mutex::new(None),
+            diagnostics: RuntimeDiagnostics::default(),
         }
     }
 
@@ -129,12 +134,13 @@ impl MlxEngine {
             return Err("Configured uv path is not a regular file".to_string());
         }
 
-        find_executable_in_path("uv")
-            .and_then(|path| path.canonicalize().ok())
-            .filter(|path| path.is_file())
-            .ok_or_else(|| {
-                "uv is unavailable; install it or bundle the reviewed sidecar binary".to_string()
-            })
+        if std::env::var("THINCLAW_ALLOW_SYSTEM_UV").as_deref() == Ok("1") {
+            return find_executable_in_path("uv")
+                .and_then(|path| path.canonicalize().ok())
+                .filter(|path| path.is_file())
+                .ok_or_else(|| "The explicitly allowed system uv is unavailable".to_string());
+        }
+        Err("The packaged uv runtime asset is unavailable".to_string())
     }
 
     fn get_venv_path(&self) -> Option<PathBuf> {
@@ -154,7 +160,7 @@ impl MlxEngine {
 
     fn sitecustomize_path_for(venv: &Path) -> PathBuf {
         venv.join("lib")
-            .join(format!("python{PYTHON_VERSION}"))
+            .join(format!("python{PYTHON_ABI}"))
             .join("site-packages")
             .join("sitecustomize.py")
     }
@@ -166,7 +172,10 @@ impl MlxEngine {
     }
 
     fn expected_marker() -> String {
-        format!("mlx-openai-server={MLX_SERVER_VERSION}\npython={PYTHON_VERSION}\nauth-shim=1\n")
+        let lock_hash = hex::encode(Sha256::digest(REQUIREMENTS_LOCK));
+        format!(
+            "mlx-openai-server={MLX_OPENAI_SERVER_VERSION}\npython={PYTHON_VERSION}\nlock-sha256={lock_hash}\nrelocatable=1\nauth-shim=1\n"
+        )
     }
 
     fn regular_resolved_file(path: &Path) -> bool {
@@ -206,7 +215,7 @@ impl MlxEngine {
             .is_some_and(Self::environment_is_complete)
     }
 
-    fn hardened_uv_command(uv: &Path) -> Command {
+    fn hardened_uv_command(uv: &Path, data_root: &Path) -> Command {
         let mut command = Command::new(uv);
         for (key, _) in std::env::vars_os() {
             let name = key.to_string_lossy().to_ascii_uppercase();
@@ -222,6 +231,8 @@ impl MlxEngine {
         }
         command
             .env("UV_NO_CONFIG", "1")
+            .env("UV_CACHE_DIR", data_root.join("runtime-cache").join("uv"))
+            .env("UV_PYTHON_INSTALL_DIR", data_root.join("python"))
             .env("PYTHONNOUSERSITE", "1")
             .env("PYTHONDONTWRITEBYTECODE", "1");
         command
@@ -248,11 +259,12 @@ impl MlxEngine {
 
     async fn run_uv(
         uv: &Path,
+        data_root: &Path,
         operation: &'static str,
         args: &[std::ffi::OsString],
         timeout: Duration,
     ) -> Result<(), String> {
-        let mut command = Self::hardened_uv_command(uv);
+        let mut command = Self::hardened_uv_command(uv, data_root);
         command.args(args);
         let output = bounded_command_output(
             &mut command,
@@ -265,6 +277,156 @@ impl MlxEngine {
         if !output.status.success() {
             return Err(format!(
                 "uv {operation} failed: {}",
+                Self::clean_process_detail(&output.stderr)
+            ));
+        }
+        Ok(())
+    }
+
+    async fn verify_uv(uv: &Path, data_root: &Path) -> Result<(), String> {
+        let mut command = Self::hardened_uv_command(uv, data_root);
+        command.arg("--version");
+        let output =
+            bounded_command_output(&mut command, Duration::from_secs(10), 16 * 1024, 16 * 1024)
+                .await
+                .map_err(|error| format!("Could not inspect packaged uv: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Packaged uv version check failed: {}",
+                Self::clean_process_detail(&output.stderr)
+            ));
+        }
+        let actual = String::from_utf8_lossy(&output.stdout);
+        if !actual.trim().starts_with(&format!("uv {UV_VERSION}")) {
+            return Err(format!(
+                "Packaged uv version mismatch: expected {UV_VERSION}, got {}",
+                actual.trim()
+            ));
+        }
+        Ok(())
+    }
+
+    async fn verify_host() -> Result<(), String> {
+        if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            return Err("MLX is supported only on Apple Silicon macOS".to_string());
+        }
+        let executable = PathBuf::from("/usr/bin/sw_vers");
+        if !Self::regular_resolved_file(&executable) {
+            return Err("Could not inspect the macOS version".to_string());
+        }
+        let mut command = Command::new(executable);
+        command.arg("-productVersion");
+        let output = bounded_command_output(&mut command, Duration::from_secs(10), 4096, 4096)
+            .await
+            .map_err(|error| format!("macOS version check failed: {error}"))?;
+        let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let major = actual
+            .split('.')
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or_else(|| format!("Could not parse macOS version: {actual}"))?;
+        let minimum_major = MLX_MINIMUM_MACOS
+            .split('.')
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+            .ok_or_else(|| "Invalid MLX minimum macOS version in this build".to_string())?;
+        if major < minimum_major {
+            return Err(format!(
+                "MLX requires macOS {MLX_MINIMUM_MACOS} or newer; this host reports {actual}"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn validate_python_environment(python: &Path) -> Result<(), String> {
+        let validation = format!(
+            r#"import importlib
+import importlib.metadata
+import platform
+from fastapi import FastAPI
+
+expected = {packages}
+if platform.python_version() != "{python_version}":
+    raise RuntimeError(f"python={{platform.python_version()}}, expected {python_version}")
+auth_probe = FastAPI()
+if not auth_probe.user_middleware:
+    raise RuntimeError("ThinClaw MLX authentication middleware is inactive")
+modules = {{
+    "mlx": "mlx.core",
+    "mlx-lm": "mlx_lm",
+    "mlx-vlm": "mlx_vlm",
+    "mlx-embeddings": "mlx_embeddings",
+    "mlx-openai-server": "app",
+    "mflux": "mflux",
+    "mlx-whisper": "mlx_whisper",
+    "av": "av",
+}}
+for distribution, wanted in expected.items():
+    actual = importlib.metadata.version(distribution)
+    if actual != wanted:
+        raise RuntimeError(f"{{distribution}}={{actual}}, expected {{wanted}}")
+    importlib.import_module(modules[distribution])
+print("thinclaw-mlx-runtime-ok")
+"#,
+            packages = RUNTIME_PACKAGES_JSON,
+            python_version = PYTHON_VERSION,
+        );
+        let mut command = Command::new(python);
+        command
+            .arg("-c")
+            .arg(validation)
+            .env_remove("PYTHONPATH")
+            .env_remove("PYTHONHOME")
+            .env_remove("VIRTUAL_ENV")
+            .env("PYTHONNOUSERSITE", "1")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("HF_HUB_OFFLINE", "1")
+            .env("TRANSFORMERS_OFFLINE", "1")
+            .env("THINCLAW_MLX_API_KEY", "0".repeat(64));
+        let output = bounded_command_output(
+            &mut command,
+            Duration::from_secs(3 * 60),
+            UTILITY_OUTPUT_LIMIT,
+            UTILITY_OUTPUT_LIMIT,
+        )
+        .await
+        .map_err(|error| format!("MLX runtime validation failed: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "MLX runtime validation failed: {}",
+                Self::clean_process_detail(&output.stderr)
+            ));
+        }
+        if !String::from_utf8_lossy(&output.stdout).contains("thinclaw-mlx-runtime-ok") {
+            return Err("MLX runtime validation returned an unexpected result".to_string());
+        }
+        Ok(())
+    }
+
+    async fn validate_activated_environment(venv: &Path) -> Result<(), String> {
+        let server = Self::server_path_for(venv);
+        let mut command = Command::new(server);
+        command
+            .arg("--help")
+            .env_remove("PYTHONPATH")
+            .env_remove("PYTHONHOME")
+            .env_remove("VIRTUAL_ENV")
+            .env("PYTHONNOUSERSITE", "1")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("HF_HUB_OFFLINE", "1")
+            .env("TRANSFORMERS_OFFLINE", "1")
+            .env("THINCLAW_MLX_API_KEY", "0".repeat(64));
+        let output = bounded_command_output(
+            &mut command,
+            Duration::from_secs(60),
+            UTILITY_OUTPUT_LIMIT,
+            UTILITY_OUTPUT_LIMIT,
+        )
+        .await
+        .map_err(|error| format!("Activated MLX executable validation failed: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Activated MLX executable validation failed: {}",
                 Self::clean_process_detail(&output.stderr)
             ));
         }
@@ -285,6 +447,7 @@ impl MlxEngine {
     /// package, executable, marker, and authentication shim all validate.
     pub async fn bootstrap(&self) -> Result<(), String> {
         let _bootstrap_guard = BOOTSTRAP_LOCK.lock().await;
+        Self::verify_host().await?;
         if self.is_bootstrapped() {
             return Ok(());
         }
@@ -313,6 +476,13 @@ impl MlxEngine {
         })
         .await
         .map_err(|error| format!("Could not protect MLX data directory: {error}"))?;
+        tokio::fs::create_dir_all(parent.join("runtime-cache").join("uv"))
+            .await
+            .map_err(|error| format!("Could not create MLX runtime cache: {error}"))?;
+        tokio::fs::create_dir_all(parent.join("python"))
+            .await
+            .map_err(|error| format!("Could not create MLX Python directory: {error}"))?;
+        Self::verify_uv(&uv, &parent).await?;
 
         let staging = tempfile::Builder::new()
             .prefix(".mlx-bootstrap-")
@@ -321,6 +491,7 @@ impl MlxEngine {
         let staged_venv = staging.path().join("venv");
         Self::run_uv(
             &uv,
+            &parent,
             "venv creation",
             &[
                 "venv".into(),
@@ -328,6 +499,7 @@ impl MlxEngine {
                 PYTHON_VERSION.into(),
                 "--python-preference".into(),
                 "only-managed".into(),
+                "--relocatable".into(),
                 staged_venv.as_os_str().to_os_string(),
             ],
             VENV_TIMEOUT,
@@ -335,20 +507,22 @@ impl MlxEngine {
         .await?;
 
         let staged_python = Self::python_path_for(&staged_venv);
+        let staged_requirements = staging.path().join("requirements.lock");
+        Self::write_private_file(&staged_requirements, REQUIREMENTS_LOCK).await?;
         Self::run_uv(
             &uv,
+            &parent,
             "package installation",
             &[
                 "pip".into(),
                 "install".into(),
-                "--no-cache".into(),
+                "--require-hashes".into(),
                 "--only-binary".into(),
                 ":all:".into(),
-                "--exclude-newer".into(),
-                RESOLUTION_CUTOFF.into(),
                 "--python".into(),
                 staged_python.as_os_str().to_os_string(),
-                format!("mlx-openai-server=={MLX_SERVER_VERSION}").into(),
+                "--requirements".into(),
+                staged_requirements.as_os_str().to_os_string(),
             ],
             INSTALL_TIMEOUT,
         )
@@ -362,6 +536,7 @@ impl MlxEngine {
             .await
             .map_err(|error| format!("Could not create MLX site-packages directory: {error}"))?;
         Self::write_private_file(&shim_path, AUTH_SHIM.as_bytes()).await?;
+        Self::validate_python_environment(&staged_python).await?;
         Self::write_private_file(
             &staged_venv.join(BOOTSTRAP_MARKER),
             Self::expected_marker().as_bytes(),
@@ -392,6 +567,18 @@ impl MlxEngine {
             return Err(format!(
                 "Could not atomically activate MLX environment: {error}"
             ));
+        }
+        if let Err(error) = Self::validate_activated_environment(&final_venv).await {
+            let failed = staging.path().join("failed-venv");
+            rename_no_replace(&final_venv, &failed).map_err(|rollback_error| {
+                format!("{error}; could not stage failed MLX environment: {rollback_error}")
+            })?;
+            if had_previous {
+                rename_no_replace(&backup, &final_venv).map_err(|rollback_error| {
+                    format!("{error}; could not restore previous MLX environment: {rollback_error}")
+                })?;
+            }
+            return Err(error);
         }
         if had_previous {
             if let Err(error) = tokio::fs::remove_dir_all(&backup).await {
@@ -667,6 +854,7 @@ impl InferenceEngine for MlxEngine {
         let port = Self::find_free_port()?;
         let token = Self::generate_api_token();
         let client = Self::local_client()?;
+        self.diagnostics.reset().await;
         let mut command = Command::new(&server);
         command
             .args([
@@ -713,28 +901,38 @@ impl InferenceEngine for MlxEngine {
             .env("THINCLAW_MLX_API_KEY", &token)
             .current_dir(runtime_dir.path())
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         // Keep the process and its private cache local until authenticated
         // readiness succeeds. Cancellation drops both leases automatically.
         let mut child = OwnedChild::spawn(&mut command)
             .map_err(|error| format!("Failed to spawn MLX server: {error}"))?;
+        if let Some(stdout) = child.take_stdout() {
+            self.diagnostics
+                .capture(stdout, "stdout", vec![token.clone()]);
+        }
+        if let Some(stderr) = child.take_stderr() {
+            self.diagnostics
+                .capture(stderr, "stderr", vec![token.clone()]);
+        }
         let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
         loop {
             if tokio::time::Instant::now() >= deadline {
                 let _ = child.kill().await;
+                let diagnostics = self.diagnostics.summary().await;
                 return Err(format!(
-                    "MLX server startup exceeded its {STARTUP_TIMEOUT:?} deadline"
+                    "MLX server startup exceeded its {STARTUP_TIMEOUT:?} deadline.\n{diagnostics}"
                 ));
             }
             if let Some(status) = child
                 .try_wait()
                 .map_err(|error| format!("Failed to inspect MLX process: {error}"))?
             {
+                let diagnostics = self.diagnostics.summary().await;
                 return Err(format!(
-                    "MLX server exited during startup with code {:?}",
-                    status.code()
+                    "MLX server exited during startup with code {:?}.\n{diagnostics}",
+                    status.code(),
                 ));
             }
 
