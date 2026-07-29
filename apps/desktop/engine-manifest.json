@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-07-29",
+  "uv": {
+    "version": "0.11.28"
+  },
+  "python": {
+    "version": "3.12.13"
+  },
+  "engines": {
+    "llamacpp": {
+      "version": "b9988",
+      "supportedTargets": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc"
+      ]
+    },
+    "mlx": {
+      "version": "1.8.1",
+      "supportedTargets": [
+        "aarch64-apple-darwin"
+      ],
+      "minimumMacosVersion": "14.0",
+      "resolutionCutoff": "2026-05-04T00:00:00Z",
+      "requirementsInput": "runtime/mlx/requirements.in",
+      "requirementsLock": "runtime/mlx/requirements.lock",
+      "resolvedPackages": {
+        "mlx-openai-server": "1.8.1",
+        "mlx": "0.31.2",
+        "mlx-lm": "0.31.3",
+        "mlx-vlm": "0.4.4",
+        "mlx-embeddings": "0.0.5",
+        "mflux": "0.17.5",
+        "mlx-whisper": "0.4.3",
+        "av": "16.1.0"
+      }
+    },
+    "vllm": {
+      "version": "0.25.0",
+      "supportedTargets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "pythonVersion": "3.12.13",
+      "torchBackend": "cu129",
+      "minimumGlibcVersion": "2.31",
+      "minimumComputeCapability": "7.5",
+      "resolutionCutoff": "2026-07-20T00:00:00Z",
+      "requirementsInput": "runtime/vllm/requirements.in",
+      "requirementsLock": "runtime/vllm/requirements.lock"
+    }
+  },
+  "hostDefaults": {
+    "aarch64-apple-darwin": "mlx",
+    "x86_64-apple-darwin": "llamacpp",
+    "x86_64-unknown-linux-gnu": "llamacpp",
+    "x86_64-pc-windows-msvc": "llamacpp"
+  }
+}

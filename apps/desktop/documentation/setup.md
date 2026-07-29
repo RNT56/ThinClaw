@@ -99,7 +99,7 @@ This does everything in one go:
 | Script | npm command | What it does |
 |--------|------------|-------------|
 | `setup_chromium.sh` | `npm run setup:chromium` | Selects the pinned macOS, Linux x64, Windows x64, or Windows ARM64 Chromium snapshot for the current host and replaces the existing copy only after SHA-256 and archive-layout validation |
-| `setup_llama.sh` | `npm run setup:ai` | Downloads the validated llama.cpp sidecar and required shared libraries for the current host, verifies SHA-256 and `--version`, then installs atomically |
+| `setup_llama.sh` | `npm run setup:ai` | Stages the validated llama.cpp sidecar and libraries, verifies SHA-256 and `--version`, then publishes payloads atomically and commits a hashed runtime manifest last |
 | `setup_uv.sh` | `npm run setup:mlx` | Downloads the validated `uv` sidecar used to bootstrap MLX on Apple Silicon macOS |
 
 All setup scripts are deterministic and safe to rerun: archives are verified before the existing installation is replaced. `setup:all` selects MLX on Apple Silicon macOS and llama.cpp elsewhere, then generates the matching strict bundle override and enforces committed sidecar-size limits. Set `THINCLAW_DESKTOP_ENGINE=llamacpp`, `mlx`, `vllm`, or `ollama` to override that choice for setup, development, and builds.
@@ -183,7 +183,10 @@ npm run tauri:build:mlx
 ```
 **Bundles:** `uv` (Python manager), optional whisper-server/piper when present, Chromium when `backend/resources/chromium` exists or `INCLUDE_CHROMIUM=1`.
 **Does NOT bundle:** llama-server, sd (not needed for MLX inference).
-**First-launch behavior:** The app shows an `EngineSetupBanner` guiding the user through a one-time Python environment setup (~200 MB, 2-3 minutes).
+**First-launch behavior:** Onboarding provisions a managed Python `3.12.13`
+environment from the committed hash-locked MLX graph. Setup and repair do not
+require the inference server to be running. Automatic model start also runs the
+same idempotent readiness check.
 
 ### vLLM Build *(Linux CUDA)*
 ```bash
@@ -194,7 +197,9 @@ bash scripts/setup_uv.sh
 npm run tauri:build:vllm
 ```
 **Bundles:** `uv`, optional whisper-server/piper when present, Chromium when `backend/resources/chromium` exists or `INCLUDE_CHROMIUM=1`.
-**First-launch behavior:** Same as MLX — one-time Python bootstrap (~1 GB, 5-10 minutes).
+**First-launch behavior:** Same state machine as MLX, using the committed CUDA
+12.9 lock. Provisioning first requires Linux x64, glibc 2.31+, a working NVIDIA
+driver, and compute capability 7.5+, then validates a real CUDA allocation.
 
 ### Ollama Build
 ```bash
@@ -215,6 +220,17 @@ For an unsigned local packaging smoke without updater signing secrets:
 ```bash
 npm run tauri:build:cloud:unsigned
 ```
+
+For a launchable Apple Silicon MLX build on a developer Mac without a
+Developer ID certificate, use an ad-hoc macOS signature and disable updater
+artifacts:
+
+```bash
+APPLE_SIGNING_IDENTITY=- DISABLE_UPDATER_ARTIFACTS=1 INCLUDE_CHROMIUM=1 npm run tauri:build:mlx
+```
+
+This local signature is suitable for validation on that Mac, but it is not
+notarized or suitable for distribution.
 
 ### What `generate_tauri_overrides.sh` Does
 
@@ -408,12 +424,16 @@ apps/desktop/
   xattr -dr com.apple.quarantine backend/bin/
   ```
 - **Metal Performance**: If inference feels slow, verify that your model is fully loaded into GPU layers (configurable in Settings).
-- **MLX setup banner not appearing**: This only shows for `--features mlx` builds. With the default `llamacpp` feature, the banner is hidden.
+- **MLX setup fails**: The production app uses its bundled `uv`; it does not
+  depend on Homebrew Python or a checkout. Use **Retry Setup** to atomically
+  repair an incomplete or stale environment. macOS 14 or newer is required.
 
 ### Linux
 - **Missing shared libraries**: Ensure `libwebkit2gtk-4.1` and related packages are installed (see Prerequisites).
 - **CUDA not detected**: Verify `nvidia-smi` works and CUDA toolkit is on `PATH`.
-- **vLLM bootstrap fails**: Ensure you have sufficient disk space (~1 GB) and that `python3` is available on `PATH` (the `uv` tool needs to detect it for venv creation).
+- **vLLM bootstrap fails**: Read the reported preflight failure. ThinClaw checks
+  glibc, `nvidia-smi`, compute capability, the pinned CUDA wheel set, and a
+  PyTorch CUDA allocation. A system Python is not required.
 
 ### Windows
 - **WebView2 missing**: Download from [developer.microsoft.com](https://developer.microsoft.com/microsoft-edge/webview2/).

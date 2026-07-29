@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# llama.cpp release validated by the ThinClaw engine matrix on 2026-07-13.
-DEFAULT_TAG="b9988"
+DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENGINE_MANIFEST="${THINCLAW_ENGINE_MANIFEST:-$DESKTOP_DIR/engine-manifest.json}"
+[[ -f "$ENGINE_MANIFEST" ]] || { echo "Missing engine manifest: $ENGINE_MANIFEST" >&2; exit 1; }
+DEFAULT_TAG="$(node -e '
+  const manifest = require(process.argv[1]);
+  process.stdout.write(manifest.engines.llamacpp.version);
+' "$ENGINE_MANIFEST")"
 TAG_NAME="${1:-${LLAMA_CPP_VERSION:-$DEFAULT_TAG}}"
-BIN_DIR="${BACKEND_BIN_DIR:-backend/bin}"
+BIN_DIR="${BACKEND_BIN_DIR:-$DESKTOP_DIR/backend/bin}"
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -52,12 +57,12 @@ else
 fi
 
 DOWNLOAD_URL="${LLAMA_DOWNLOAD_URL:-https://github.com/ggml-org/llama.cpp/releases/download/${TAG_NAME}/${ASSET_NAME}}"
-mkdir -p "$BIN_DIR"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/thinclaw-llama.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 ARCHIVE="$TMP_DIR/$ASSET_NAME"
 EXTRACT_DIR="$TMP_DIR/extracted"
-mkdir -p "$EXTRACT_DIR"
+STAGED_RUNTIME="$TMP_DIR/runtime"
+mkdir -p "$EXTRACT_DIR" "$STAGED_RUNTIME"
 
 echo "Downloading llama.cpp $TAG_NAME for $OS-$ARCH..."
 curl --fail --show-error --location --retry 3 --retry-all-errors \
@@ -88,14 +93,15 @@ if [[ -z "$FOUND_BIN" ]]; then
 fi
 
 # The official archives dynamically link their adjacent runtime libraries.
-# Copy every platform library before smoke-testing the staged server.
+# Assemble and smoke-test the complete runtime away from the published bin
+# directory so an interrupted download can never look ready.
 while IFS= read -r library; do
   # Dereference release-archive symlinks so every SONAME expected by the
   # executable is a real bundled resource after Tauri packaging.
-  cp -L "$library" "$BIN_DIR/$(basename "$library")"
+  cp -L "$library" "$STAGED_RUNTIME/$(basename "$library")"
 done < <(find "$EXTRACT_DIR" \( -type f -o -type l \) \( -name '*.dylib' -o -name '*.so' -o -name '*.so.*' -o -name '*.dll' \))
 
-STAGED_TARGET="$BIN_DIR/.${TARGET_NAME}.new"
+STAGED_TARGET="$STAGED_RUNTIME/$TARGET_NAME"
 cp "$FOUND_BIN" "$STAGED_TARGET"
 if [[ "$TARGET_NAME" != *.exe ]]; then
   chmod +x "$STAGED_TARGET"
@@ -106,12 +112,68 @@ if [[ "$OS" == "Darwin" ]] && command -v install_name_tool >/dev/null 2>&1; then
 fi
 
 if [[ "$OS" == "Darwin" ]]; then
-  DYLD_LIBRARY_PATH="$BIN_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" "$STAGED_TARGET" --version >/dev/null
+  DYLD_LIBRARY_PATH="$STAGED_RUNTIME${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" "$STAGED_TARGET" --version >/dev/null
 elif [[ "$OS" == "Linux" ]]; then
-  LD_LIBRARY_PATH="$BIN_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$STAGED_TARGET" --version >/dev/null
+  LD_LIBRARY_PATH="$STAGED_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$STAGED_TARGET" --version >/dev/null
 else
-  "$STAGED_TARGET" --version >/dev/null
+  PATH="$STAGED_RUNTIME${PATH:+:$PATH}" "$STAGED_TARGET" --version >/dev/null
 fi
 
-mv -f "$STAGED_TARGET" "$BIN_DIR/$TARGET_NAME"
-echo "Installed verified llama.cpp $TAG_NAME sidecar at $BIN_DIR/$TARGET_NAME"
+RUNTIME_MANIFEST="llama-runtime-${TARGET_NAME#llama-server-}.json"
+[[ "$RUNTIME_MANIFEST" == *.exe.json ]] && RUNTIME_MANIFEST="${RUNTIME_MANIFEST/.exe.json/.json}"
+node - "$STAGED_RUNTIME" "$TAG_NAME" "$TARGET_NAME" "$EXPECTED_SHA256" > "$STAGED_RUNTIME/$RUNTIME_MANIFEST" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const [runtimeDir, version, server, archiveSha256] = process.argv.slice(2);
+const sha256 = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+const libraries = {};
+for (const name of fs.readdirSync(runtimeDir).sort()) {
+  if (name === server || name.startsWith("llama-runtime-")) continue;
+  libraries[name] = sha256(path.join(runtimeDir, name));
+}
+process.stdout.write(JSON.stringify({
+  schemaVersion: 1,
+  engine: "llamacpp",
+  version,
+  target: server.replace(/^llama-server-/, "").replace(/\.exe$/, ""),
+  archiveSha256,
+  serverSha256: sha256(path.join(runtimeDir, server)),
+  libraries,
+}, null, 2) + "\n");
+NODE
+
+mkdir -p "$BIN_DIR"
+LOCK_DIR="$BIN_DIR/.llama-setup.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "Another llama.cpp setup is already publishing into $BIN_DIR" >&2
+  exit 1
+fi
+cleanup_publish_lock() {
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+trap 'cleanup_publish_lock; rm -rf "$TMP_DIR"' EXIT
+
+# Invalidate readiness first. Every payload is then published through a
+# same-directory rename, and the hash manifest is committed last.
+rm -f "$BIN_DIR/$RUNTIME_MANIFEST"
+while IFS= read -r staged_file; do
+  name="$(basename "$staged_file")"
+  [[ "$name" == "$RUNTIME_MANIFEST" ]] && continue
+  publish_tmp="$BIN_DIR/.${name}.new"
+  cp "$staged_file" "$publish_tmp"
+  [[ "$name" == "$TARGET_NAME" && "$name" != *.exe ]] && chmod +x "$publish_tmp"
+  mv -f "$publish_tmp" "$BIN_DIR/$name"
+done < <(find "$STAGED_RUNTIME" -maxdepth 1 -type f -print)
+
+# Remove stale libraries from a previous llama.cpp release. They are generated
+# runtime assets, and leaving them adjacent to the server can change loader
+# resolution even when the new manifest does not name them.
+while IFS= read -r old_library; do
+  [[ -e "$STAGED_RUNTIME/$(basename "$old_library")" ]] || rm -f "$old_library"
+done < <(find "$BIN_DIR" -maxdepth 1 -type f \( -name '*.dylib' -o -name '*.so' -o -name '*.so.*' -o -name '*.dll' \) -print)
+
+cp "$STAGED_RUNTIME/$RUNTIME_MANIFEST" "$BIN_DIR/.${RUNTIME_MANIFEST}.new"
+mv -f "$BIN_DIR/.${RUNTIME_MANIFEST}.new" "$BIN_DIR/$RUNTIME_MANIFEST"
+cleanup_publish_lock
+echo "Installed verified llama.cpp $TAG_NAME runtime at $BIN_DIR/$TARGET_NAME"

@@ -1,0 +1,2 @@
+# ThinClaw's reviewed Linux x86_64 NVIDIA CUDA runtime.
+vllm==0.25.0

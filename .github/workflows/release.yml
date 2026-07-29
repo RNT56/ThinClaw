@@ -610,6 +610,9 @@ jobs:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      THINCLAW_DESKTOP_ENGINE: mlx
+      TAURI_TARGET_TRIPLE: aarch64-apple-darwin
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
       CI: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -703,7 +706,9 @@ jobs:
           rm -f "$certificate"
       - name: Install verified Desktop runtime assets
         working-directory: apps/desktop
-        run: THINCLAW_DESKTOP_ENGINE=llamacpp npm run setup:all
+        run: |
+          test "$(uname -m)" = "arm64"
+          npm run setup:all
       - name: Validate Desktop packaging contract
         working-directory: apps/desktop
         run: npm run validate:packaging
@@ -711,7 +716,10 @@ jobs:
         working-directory: apps/desktop
         env:
           INCLUDE_CHROMIUM: "1"
-        run: npm run tauri:build:llamacpp
+        run: npm run tauri:build:mlx
+      - name: Verify installed MLX bootstrap assets
+        working-directory: apps/desktop
+        run: bash scripts/verify_macos_mlx_bundle.sh backend/target/release/bundle/macos
       - name: Verify and collect signed Desktop artifacts
         working-directory: apps/desktop
         env:

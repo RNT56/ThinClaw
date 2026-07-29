@@ -34,7 +34,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_learning_evaluate_outcomes` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 | `thinclaw_test_connection` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 
-### Local only (199)
+### Local only (200)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -97,6 +97,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `direct_runtime_discover_embedding_dimension` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_discover_hf_models` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_download_hf_model_files` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `direct_runtime_ensure_engine_ready` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_get_active_engine_info` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_get_chat_server_config` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_get_engine_setup_status` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |

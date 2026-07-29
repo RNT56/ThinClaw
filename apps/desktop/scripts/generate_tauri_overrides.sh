@@ -20,6 +20,8 @@ INCLUDE_CHROMIUM="${INCLUDE_CHROMIUM:-auto}"
 DISABLE_UPDATER_ARTIFACTS="${DISABLE_UPDATER_ARTIFACTS:-0}"
 TARGET_TRIPLE="${TAURI_TARGET_TRIPLE:-${TARGET:-}}"
 RELEASE_VERSION="${TAURI_RELEASE_VERSION:-}"
+ENGINE_MANIFEST="${THINCLAW_ENGINE_MANIFEST:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/engine-manifest.json}"
+[[ -f "$ENGINE_MANIFEST" ]] || { echo "Missing engine manifest: $ENGINE_MANIFEST" >&2; exit 1; }
 
 if [[ -n "$RELEASE_VERSION" ]] && ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
   echo "TAURI_RELEASE_VERSION must be a SemVer without a leading v: $RELEASE_VERSION" >&2
@@ -44,6 +46,23 @@ detect_target_triple() {
 if [[ -z "$TARGET_TRIPLE" ]]; then
   TARGET_TRIPLE="$(detect_target_triple)"
 fi
+
+if [[ "$ENGINE" == "llamacpp" || "$ENGINE" == "mlx" || "$ENGINE" == "vllm" ]]; then
+  if ! node -e '
+    const manifest = require(process.argv[1]);
+    const engine = process.argv[2];
+    const target = process.argv[3];
+    if (!manifest.engines[engine]?.supportedTargets?.includes(target)) process.exit(1);
+  ' "$ENGINE_MANIFEST" "$ENGINE" "$TARGET_TRIPLE"; then
+    echo "Engine '$ENGINE' is not supported for target '${TARGET_TRIPLE:-unknown}' by engine-manifest.json" >&2
+    exit 1
+  fi
+fi
+
+MLX_MINIMUM_MACOS="$(node -e '
+  const manifest = require(process.argv[1]);
+  process.stdout.write(manifest.engines.mlx.minimumMacosVersion);
+' "$ENGINE_MANIFEST")"
 
 EXTERNAL_BINS=()
 RESOURCES=()
@@ -145,6 +164,9 @@ write_override() {
     if [[ "$DISABLE_UPDATER_ARTIFACTS" == "1" || "$DISABLE_UPDATER_ARTIFACTS" == "true" || "$DISABLE_UPDATER_ARTIFACTS" == "yes" ]]; then
       printf ',\n    "createUpdaterArtifacts": false'
     fi
+    if [[ "$ENGINE" == "mlx" && "$TARGET_TRIPLE" == "aarch64-apple-darwin" ]]; then
+      printf ',\n    "macOS": {\n      "entitlements": "Entitlements.plist",\n      "minimumSystemVersion": "%s"\n    }' "$MLX_MINIMUM_MACOS"
+    fi
     printf '\n  }\n}\n'
   } > backend/tauri.override.json
 }
@@ -171,6 +193,7 @@ esac
 case "$ENGINE" in
   llamacpp)
     add_required_sidecar "bin/llama-server"
+    add_resource_if_present "bin/llama-runtime-${TARGET_TRIPLE}.json"
     add_optional_sidecar "bin/whisper"
     add_optional_sidecar "bin/whisper-server"
     add_optional_sidecar "bin/sd"

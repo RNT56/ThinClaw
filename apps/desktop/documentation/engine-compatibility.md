@@ -1,6 +1,6 @@
 # Local engine compatibility and provenance
 
-Last verified: **2026-07-13**
+Last verified: **2026-07-29**
 
 ThinClaw treats native engines and their bootstrap tools as a tested matrix. A
 version change must update this page, the matching setup script/runtime pin, and
@@ -10,15 +10,17 @@ the focused tests in the same change.
 
 | Engine | Validated version | Supported host | Model contract | Provisioning |
 |---|---:|---|---|---|
-| llama.cpp | `b9988` | macOS arm64/x64, Linux x64, Windows x64 | GGUF v2/v3; quant types listed below | Bundled `llama-server`; release asset SHA-256 and `--version` verified before atomic install |
-| MLX service stack | `mlx-openai-server==1.8.1`, `mlx-embeddings==0.1.0`, `mflux==0.18.0`, `mlx-whisper==0.4.3` | macOS Apple Silicon | MLX safetensors directory with `config.json` | Python 3.12 venv through bundled/discovered `uv`; exact direct pins and versioned bootstrap marker |
-| vLLM | `vllm==0.25.0` | Linux x64 with NVIDIA CUDA | Hugging Face/AWQ safetensors directory | Reproducible Python 3.12 venv through `uv`; stale marker recreates the managed venv |
+| llama.cpp | `b9988` | macOS arm64/x64, Linux x64, Windows x64 | GGUF v2/v3; quant types listed below | Bundled `llama-server`; staged archive verification, runtime inventory manifest, target gate, and cross-platform loader path |
+| MLX service stack | `mlx-openai-server==1.8.1`, `mlx==0.31.2`, `mlx-lm==0.31.3`, `mlx-vlm==0.4.4`, `mlx-embeddings==0.0.5`, `mflux==0.17.5`, `mlx-whisper==0.4.3` | macOS 14+ on Apple Silicon | MLX safetensors directory with `config.json` | Managed Python `3.12.13`; hash-locked wheel graph; import self-test; lock-hash marker; bundled `uv` only |
+| vLLM | `vllm==0.25.0`, `torch==2.11.0+cu129` | Linux x64, glibc 2.31+, NVIDIA compute capability 7.5+ | Hugging Face/AWQ safetensors directory | Managed Python `3.12.13`; hash-locked CUDA 12.9 wheel graph; host preflight and CUDA allocation self-test |
 | Ollama | External; API validated with `0.31.2` | Ollama-supported hosts | Ollama model name | User-managed daemon; ThinClaw probes `/api/tags` and reports `/api/version` |
 | uv | `0.11.28` | macOS arm64/x64, Linux x64 | MLX/vLLM bootstrap tool | Bundled or runtime-downloaded asset with per-platform SHA-256, size limit, timeout, version smoke, and atomic install |
 
-The direct Python dependencies are exact pins. Their transitive resolution is
-owned by `uv`; changing any direct pin changes the bootstrap fingerprint so an
-existing managed environment cannot silently remain stale.
+`engine-manifest.json` is the authority for versions, supported targets, host
+defaults, and minimum platform versions. Both Python graphs are committed locks
+with artifact hashes and resolution cutoffs. A bootstrap marker is written only
+after the complete environment passes validation; its lock digest makes any
+dependency change trigger repair.
 
 ## GGUF and quantization contract
 
@@ -41,12 +43,12 @@ closed until the bundled sidecar is deliberately upgraded and revalidated.
 
 ## Verification boundary
 
-Automated coverage verifies setup-script syntax, exact pins/fingerprints, GGUF
-bounds and quant mapping, archive checksum handling, and every compile-time
-engine feature. A macOS arm64 download/extract/version smoke is run when the pin
-changes. Linux CUDA throughput, Ollama model execution, and cross-platform
-packaged-app execution remain release-candidate hardware checks; this document
-does not claim those external-device smokes were run locally.
+Automated coverage verifies setup-script syntax, manifest/lock alignment, GGUF
+bounds and quant mapping, archive checksum handling, target gates, and every
+compile-time engine feature. The macOS release pipeline builds the MLX variant
+and executes the installed `uv` sidecar from the `.app`. Linux CUDA model
+throughput, Ollama model execution, and non-macOS installed-app execution remain
+release-candidate hardware checks.
 
 ## Primary sources
 

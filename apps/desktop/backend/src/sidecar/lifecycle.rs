@@ -253,13 +253,61 @@ impl SidecarManager {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
+    fn current_target_triple() -> Result<&'static str> {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Ok("aarch64-apple-darwin")
+        } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+            Ok("x86_64-apple-darwin")
+        } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            Ok("x86_64-unknown-linux-gnu")
+        } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+            Ok("x86_64-pc-windows-msvc")
+        } else {
+            Err(anyhow!(
+                "This build has no reviewed llama.cpp runtime target"
+            ))
+        }
+    }
+
+    fn hash_regular_runtime_file(path: &std::path::Path) -> Result<String> {
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| anyhow!("Could not inspect {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
+            return Err(anyhow!(
+                "llama.cpp runtime file must be a non-empty regular file: {}",
+                path.display()
+            ));
+        }
+        let mut file = std::fs::File::open(path)
+            .map_err(|error| anyhow!("Could not open {}: {error}", path.display()))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| anyhow!("Could not read {}: {error}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    /// Resolve a complete, manifest-backed llama.cpp runtime. Release bundles
+    /// trust the platform/app signature for payload integrity because signing
+    /// mutates Mach-O/PE files after the source manifest is generated. Debug
+    /// builds additionally compare the source payload hashes.
     fn sidecar_library_path(app: &AppHandle) -> Result<String> {
+        let target = Self::current_target_triple()?;
+        let manifest_name = format!("llama-runtime-{target}.json");
         let mut candidates = Vec::new();
         if let Ok(resource_dir) = app.path().resource_dir() {
             candidates.push(resource_dir.join("bin"));
         }
-        candidates.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bin"));
+        if cfg!(debug_assertions) {
+            candidates.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bin"));
+        }
 
         for candidate in candidates {
             let Ok(metadata) = std::fs::symlink_metadata(&candidate) else {
@@ -271,15 +319,78 @@ impl SidecarManager {
             let resolved = candidate
                 .canonicalize()
                 .map_err(|error| anyhow!("Could not resolve sidecar library directory: {error}"))?;
-            if !resolved.join("libllama.dylib").is_file() {
+            let manifest_path = resolved.join(&manifest_name);
+            let Ok(manifest_bytes) =
+                thinclaw_platform::read_regular_file_bounded_single_link(&manifest_path, 64 * 1024)
+            else {
                 continue;
+            };
+            let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+                .map_err(|error| anyhow!("Invalid llama.cpp runtime manifest: {error}"))?;
+            if manifest
+                .get("schemaVersion")
+                .and_then(|value| value.as_u64())
+                != Some(1)
+                || manifest.get("engine").and_then(|value| value.as_str()) != Some("llamacpp")
+                || manifest.get("version").and_then(|value| value.as_str())
+                    != Some(env!("THINCLAW_LLAMA_CPP_VERSION"))
+                || manifest.get("target").and_then(|value| value.as_str()) != Some(target)
+            {
+                return Err(anyhow!(
+                    "Bundled llama.cpp runtime manifest does not match this build"
+                ));
+            }
+            let libraries = manifest
+                .get("libraries")
+                .and_then(|value| value.as_object())
+                .ok_or_else(|| anyhow!("llama.cpp runtime manifest has no library inventory"))?;
+            if cfg!(debug_assertions) {
+                let server_name = format!(
+                    "llama-server-{target}{}",
+                    if cfg!(windows) { ".exe" } else { "" }
+                );
+                let actual = Self::hash_regular_runtime_file(&resolved.join(server_name))?;
+                if manifest
+                    .get("serverSha256")
+                    .and_then(|value| value.as_str())
+                    != Some(actual.as_str())
+                {
+                    return Err(anyhow!("llama.cpp server hash does not match its manifest"));
+                }
+            }
+            for (name, expected_hash) in libraries {
+                if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+                    return Err(anyhow!(
+                        "llama.cpp runtime manifest contains an invalid path"
+                    ));
+                }
+                let library = resolved.join(name);
+                if cfg!(debug_assertions) {
+                    let actual = Self::hash_regular_runtime_file(&library)?;
+                    if expected_hash.as_str() != Some(&actual) {
+                        return Err(anyhow!("llama.cpp runtime library hash mismatch: {name}"));
+                    }
+                } else {
+                    let metadata = std::fs::symlink_metadata(&library).map_err(|error| {
+                        anyhow!("Bundled llama.cpp library {name} is unavailable: {error}")
+                    })?;
+                    if metadata.file_type().is_symlink()
+                        || !metadata.is_file()
+                        || metadata.len() == 0
+                    {
+                        return Err(anyhow!("Bundled llama.cpp library is invalid: {name}"));
+                    }
+                }
             }
             return resolved
                 .to_str()
                 .ok_or_else(|| anyhow!("Sidecar library directory is not valid UTF-8"))
                 .map(str::to_string);
         }
-        Err(anyhow!("Sidecar library directory is unavailable"))
+        Err(anyhow!(
+            "Bundled llama.cpp runtime is incomplete or does not match version {}. Reinstall or repair this ThinClaw build.",
+            env!("THINCLAW_LLAMA_CPP_VERSION")
+        ))
     }
 
     pub fn direct_runtime_start_chat_server<F>(
@@ -396,9 +507,21 @@ impl SidecarManager {
             .sidecar("llama-server")
             .map_err(|e| anyhow!("Failed to create sidecar command: {}", e))?;
 
-        // Resolve bin dir for libraries (DYLD_LIBRARY_PATH on macOS)
+        let library_path = Self::sidecar_library_path(&app)?;
         #[cfg(target_os = "macos")]
-        let command = { command.env("DYLD_LIBRARY_PATH", Self::sidecar_library_path(&app)?) };
+        let command = command.env("DYLD_LIBRARY_PATH", library_path);
+        #[cfg(target_os = "linux")]
+        let command = command.env("LD_LIBRARY_PATH", library_path);
+        #[cfg(target_os = "windows")]
+        let command = {
+            let mut paths = vec![std::path::PathBuf::from(library_path)];
+            if let Some(existing) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            let path = std::env::join_paths(paths)
+                .map_err(|error| anyhow!("Could not construct llama.cpp loader PATH: {error}"))?;
+            command.env("PATH", path.to_string_lossy())
+        };
 
         let mut args = vec![
             "--model".to_string(),
@@ -657,9 +780,21 @@ impl SidecarManager {
             .sidecar("llama-server")
             .map_err(|e| anyhow!("Failed to create sidecar command: {}", e))?;
 
-        // Resolve bin dir for libraries (DYLD_LIBRARY_PATH on macOS)
+        let library_path = Self::sidecar_library_path(&app)?;
         #[cfg(target_os = "macos")]
-        let command = { command.env("DYLD_LIBRARY_PATH", Self::sidecar_library_path(&app)?) };
+        let command = command.env("DYLD_LIBRARY_PATH", library_path);
+        #[cfg(target_os = "linux")]
+        let command = command.env("LD_LIBRARY_PATH", library_path);
+        #[cfg(target_os = "windows")]
+        let command = {
+            let mut paths = vec![std::path::PathBuf::from(library_path)];
+            if let Some(existing) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            let path = std::env::join_paths(paths)
+                .map_err(|error| anyhow!("Could not construct llama.cpp loader PATH: {error}"))?;
+            command.env("PATH", path.to_string_lossy())
+        };
 
         let mut args = vec![
             "--model".to_string(),
@@ -1026,8 +1161,21 @@ impl SidecarManager {
             .sidecar("llama-server")
             .map_err(|e| anyhow!("Failed to create sidecar command: {}", e))?;
 
+        let library_path = Self::sidecar_library_path(&app)?;
         #[cfg(target_os = "macos")]
-        let command = { command.env("DYLD_LIBRARY_PATH", Self::sidecar_library_path(&app)?) };
+        let command = command.env("DYLD_LIBRARY_PATH", library_path);
+        #[cfg(target_os = "linux")]
+        let command = command.env("LD_LIBRARY_PATH", library_path);
+        #[cfg(target_os = "windows")]
+        let command = {
+            let mut paths = vec![std::path::PathBuf::from(library_path)];
+            if let Some(existing) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            let path = std::env::join_paths(paths)
+                .map_err(|error| anyhow!("Could not construct llama.cpp loader PATH: {error}"))?;
+            command.env("PATH", path.to_string_lossy())
+        };
 
         let args = vec![
             "--model".to_string(),

@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use rand::{rngs::OsRng, RngCore};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{LazyLock, Mutex};
@@ -15,18 +16,20 @@ use thinclaw_platform::{
 };
 use tokio::process::Command;
 
-use super::{EngineStartOptions, InferenceEngine};
+use super::{
+    EngineStartOptions, InferenceEngine, RuntimeDiagnostics, PYTHON_VERSION, UV_VERSION,
+    VLLM_MINIMUM_COMPUTE_CAPABILITY, VLLM_MINIMUM_GLIBC, VLLM_TORCH_BACKEND, VLLM_VERSION,
+};
 
-const VLLM_VERSION: &str = "0.24.0";
-const PYTHON_VERSION: &str = "3.12";
 const BOOTSTRAP_MARKER: &str = ".thinclaw-vllm-bootstrap";
 const SERVED_MODEL_NAME: &str = "thinclaw-local";
 const MAX_CONTEXT_SIZE: u32 = 1_048_576;
 const UTILITY_OUTPUT_LIMIT: usize = 1024 * 1024;
 const CUDA_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const VENV_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+const REQUIREMENTS_LOCK: &[u8] = include_bytes!("../../../runtime/vllm/requirements.lock");
 
 static BOOTSTRAP_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -42,6 +45,7 @@ pub struct VllmEngine {
     api_token: Mutex<Option<String>>,
     /// Path to the bundled `uv` sidecar binary.
     uv_path: Mutex<Option<PathBuf>>,
+    diagnostics: RuntimeDiagnostics,
 }
 
 impl VllmEngine {
@@ -55,6 +59,7 @@ impl VllmEngine {
             effective_context: Mutex::new(None),
             api_token: Mutex::new(None),
             uv_path: Mutex::new(None),
+            diagnostics: RuntimeDiagnostics::default(),
         }
     }
 
@@ -82,10 +87,13 @@ impl VllmEngine {
             }
             return Err("Configured uv path is not a regular file".to_string());
         }
-        let name = if cfg!(windows) { "uv.exe" } else { "uv" };
-        find_executable_in_path(name)
-            .and_then(|path| path.canonicalize().ok())
-            .ok_or_else(|| "uv is unavailable; install or bundle a trusted uv binary".to_string())
+        if std::env::var("THINCLAW_ALLOW_SYSTEM_UV").as_deref() == Ok("1") {
+            return find_executable_in_path("uv")
+                .and_then(|path| path.canonicalize().ok())
+                .filter(|path| path.is_file())
+                .ok_or_else(|| "The explicitly allowed system uv is unavailable".to_string());
+        }
+        Err("The packaged uv runtime asset is unavailable".to_string())
     }
 
     fn get_venv_path(&self) -> Option<PathBuf> {
@@ -103,37 +111,47 @@ impl VllmEngine {
         }
     }
 
-    fn get_python_path(&self) -> Option<PathBuf> {
-        self.get_venv_path()
-            .map(|venv| Self::python_path_for(&venv))
+    fn server_path_for(venv: &Path) -> PathBuf {
+        if cfg!(windows) {
+            venv.join("Scripts").join("vllm.exe")
+        } else {
+            venv.join("bin").join("vllm")
+        }
     }
 
     fn expected_marker() -> String {
-        format!("vllm={VLLM_VERSION}\npython={PYTHON_VERSION}\n")
+        let lock_hash = hex::encode(Sha256::digest(REQUIREMENTS_LOCK));
+        format!(
+            "vllm={VLLM_VERSION}\npython={PYTHON_VERSION}\ntorch-backend={VLLM_TORCH_BACKEND}\nlock-sha256={lock_hash}\nrelocatable=1\n"
+        )
+    }
+
+    fn regular_resolved_file(path: &Path) -> bool {
+        path.canonicalize()
+            .ok()
+            .and_then(|resolved| std::fs::metadata(resolved).ok())
+            .is_some_and(|metadata| metadata.is_file())
+    }
+
+    fn environment_is_complete(venv: &Path) -> bool {
+        let marker = venv.join(BOOTSTRAP_MARKER);
+        let marker_ok =
+            std::fs::symlink_metadata(&marker).is_ok_and(|metadata| {
+                metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 512
+            }) && thinclaw_platform::read_regular_file_bounded_single_link(&marker, 512)
+                .is_ok_and(|value| value == Self::expected_marker().as_bytes());
+        marker_ok
+            && Self::regular_resolved_file(&Self::python_path_for(venv))
+            && Self::regular_resolved_file(&Self::server_path_for(venv))
     }
 
     pub fn is_bootstrapped(&self) -> bool {
-        let Some(venv) = self.get_venv_path() else {
-            return false;
-        };
-        let python = Self::python_path_for(&venv);
-        let marker = venv.join(BOOTSTRAP_MARKER);
-        // Virtual environments commonly expose python3 as a symlink to their
-        // base interpreter. Resolve it and require a regular target.
-        let python_ok = python
-            .canonicalize()
-            .ok()
-            .and_then(|resolved| std::fs::metadata(resolved).ok())
-            .is_some_and(|metadata| metadata.is_file());
-        let marker_ok =
-            std::fs::symlink_metadata(&marker).is_ok_and(|metadata| {
-                metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 256
-            }) && thinclaw_platform::read_regular_file_bounded_single_link(&marker, 256)
-                .is_ok_and(|value| value == Self::expected_marker().as_bytes());
-        python_ok && marker_ok
+        self.get_venv_path()
+            .as_deref()
+            .is_some_and(Self::environment_is_complete)
     }
 
-    fn hardened_uv_command(uv: &Path) -> Command {
+    fn hardened_uv_command(uv: &Path, data_root: &Path) -> Command {
         let mut command = Command::new(uv);
         for (key, _) in std::env::vars_os() {
             let name = key.to_string_lossy().to_ascii_uppercase();
@@ -149,6 +167,8 @@ impl VllmEngine {
         }
         command
             .env("UV_NO_CONFIG", "1")
+            .env("UV_CACHE_DIR", data_root.join("runtime-cache").join("uv"))
+            .env("UV_PYTHON_INSTALL_DIR", data_root.join("python"))
             .env("PYTHONNOUSERSITE", "1")
             .env("PYTHONDONTWRITEBYTECODE", "1");
         command
@@ -175,11 +195,12 @@ impl VllmEngine {
 
     async fn run_uv(
         uv: &Path,
+        data_root: &Path,
         operation: &'static str,
         args: &[std::ffi::OsString],
         timeout: Duration,
     ) -> Result<(), String> {
-        let mut command = Self::hardened_uv_command(uv);
+        let mut command = Self::hardened_uv_command(uv, data_root);
         command.args(args);
         let output = bounded_command_output(
             &mut command,
@@ -198,31 +219,208 @@ impl VllmEngine {
         Ok(())
     }
 
-    /// Check CUDA availability with a bounded, descendant-owned probe.
-    pub async fn has_cuda() -> bool {
-        let Some(executable) = find_executable_in_path(if cfg!(windows) {
-            "nvidia-smi.exe"
-        } else {
-            "nvidia-smi"
-        }) else {
-            return false;
+    async fn verify_uv(uv: &Path, data_root: &Path) -> Result<(), String> {
+        let mut command = Self::hardened_uv_command(uv, data_root);
+        command.arg("--version");
+        let output =
+            bounded_command_output(&mut command, Duration::from_secs(10), 16 * 1024, 16 * 1024)
+                .await
+                .map_err(|error| format!("Could not inspect packaged uv: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Packaged uv version check failed: {}",
+                Self::clean_process_detail(&output.stderr)
+            ));
+        }
+        let actual = String::from_utf8_lossy(&output.stdout);
+        if !actual.trim().starts_with(&format!("uv {UV_VERSION}")) {
+            return Err(format!(
+                "Packaged uv version mismatch: expected {UV_VERSION}, got {}",
+                actual.trim()
+            ));
+        }
+        Ok(())
+    }
+
+    fn version_at_least(actual: &str, minimum: &str) -> bool {
+        let parse = |value: &str| {
+            value
+                .split('.')
+                .take(2)
+                .map(|part| {
+                    part.chars()
+                        .take_while(|character| character.is_ascii_digit())
+                        .collect::<String>()
+                        .parse::<u32>()
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
         };
-        let mut command = Command::new(executable);
-        command.arg("--query-gpu=name").arg("--format=csv,noheader");
-        bounded_command_output(&mut command, CUDA_PROBE_TIMEOUT, 16 * 1024, 16 * 1024)
+        parse(actual) >= parse(minimum)
+    }
+
+    async fn verify_glibc() -> Result<(), String> {
+        if !cfg!(target_os = "linux") {
+            return Err("vLLM is supported only on Linux x86_64 hosts".to_string());
+        }
+        let ldd = find_executable_in_path("ldd")
+            .ok_or_else(|| "Could not inspect glibc because ldd is unavailable".to_string())?;
+        let mut command = Command::new(ldd);
+        command.arg("--version");
+        let output = bounded_command_output(&mut command, CUDA_PROBE_TIMEOUT, 16 * 1024, 16 * 1024)
             .await
-            .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+            .map_err(|error| format!("glibc version check failed: {error}"))?;
+        let detail = format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let actual = detail
+            .split_whitespace()
+            .rev()
+            .find(|value| {
+                value.split_once('.').is_some_and(|(major, minor)| {
+                    major.chars().all(|c| c.is_ascii_digit())
+                        && minor
+                            .chars()
+                            .take_while(|c| c.is_ascii_digit())
+                            .next()
+                            .is_some()
+                })
+            })
+            .ok_or_else(|| "Could not parse the host glibc version".to_string())?;
+        if !Self::version_at_least(actual, VLLM_MINIMUM_GLIBC) {
+            return Err(format!(
+                "vLLM requires glibc {VLLM_MINIMUM_GLIBC} or newer; this host reports {actual}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate that at least one visible NVIDIA GPU satisfies the reviewed
+    /// vLLM wheel's minimum compute capability.
+    async fn verify_cuda() -> Result<(), String> {
+        let executable = find_executable_in_path("nvidia-smi").ok_or_else(|| {
+            "nvidia-smi is unavailable; install a working NVIDIA driver".to_string()
+        })?;
+        let mut command = Command::new(executable);
+        command
+            .arg("--query-gpu=name,compute_cap,driver_version,memory.total")
+            .arg("--format=csv,noheader,nounits");
+        let output = bounded_command_output(&mut command, CUDA_PROBE_TIMEOUT, 64 * 1024, 16 * 1024)
+            .await
+            .map_err(|error| format!("NVIDIA GPU probe failed: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "NVIDIA GPU probe failed: {}",
+                Self::clean_process_detail(&output.stderr)
+            ));
+        }
+        let rows = String::from_utf8_lossy(&output.stdout);
+        let compatible = rows.lines().any(|line| {
+            line.split(',').nth(1).is_some_and(|capability| {
+                Self::version_at_least(capability.trim(), VLLM_MINIMUM_COMPUTE_CAPABILITY)
+            })
+        });
+        if !compatible {
+            return Err(format!(
+                "vLLM requires an NVIDIA GPU with compute capability {VLLM_MINIMUM_COMPUTE_CAPABILITY} or newer; detected: {}",
+                rows.trim()
+            ));
+        }
+        Ok(())
+    }
+
+    async fn validate_python_environment(python: &Path) -> Result<(), String> {
+        let validation = format!(
+            r#"import importlib.metadata
+import platform
+import torch
+
+if platform.python_version() != "{PYTHON_VERSION}":
+    raise RuntimeError(f"python={{platform.python_version()}}, expected {PYTHON_VERSION}")
+actual = importlib.metadata.version("vllm")
+if actual != "{VLLM_VERSION}":
+    raise RuntimeError(f"vllm={{actual}}, expected {VLLM_VERSION}")
+if not torch.cuda.is_available():
+    raise RuntimeError("PyTorch cannot access CUDA")
+probe = torch.empty(1, device="cuda")
+del probe
+print("thinclaw-vllm-runtime-ok")
+"#
+        );
+        let mut command = Command::new(python);
+        command
+            .arg("-c")
+            .arg(validation)
+            .env_remove("PYTHONPATH")
+            .env_remove("PYTHONHOME")
+            .env_remove("VIRTUAL_ENV")
+            .env("PYTHONNOUSERSITE", "1")
+            .env("PYTHONDONTWRITEBYTECODE", "1");
+        let output = bounded_command_output(
+            &mut command,
+            Duration::from_secs(3 * 60),
+            UTILITY_OUTPUT_LIMIT,
+            UTILITY_OUTPUT_LIMIT,
+        )
+        .await
+        .map_err(|error| format!("vLLM runtime validation failed: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "vLLM runtime validation failed: {}",
+                Self::clean_process_detail(&output.stderr)
+            ));
+        }
+        if !String::from_utf8_lossy(&output.stdout).contains("thinclaw-vllm-runtime-ok") {
+            return Err("vLLM runtime validation returned an unexpected result".to_string());
+        }
+        Ok(())
+    }
+
+    async fn validate_activated_environment(venv: &Path) -> Result<(), String> {
+        let server = Self::server_path_for(venv);
+        let mut command = Command::new(server);
+        command
+            .arg("--help")
+            .env_remove("PYTHONPATH")
+            .env_remove("PYTHONHOME")
+            .env_remove("VIRTUAL_ENV")
+            .env("PYTHONNOUSERSITE", "1")
+            .env("PYTHONDONTWRITEBYTECODE", "1");
+        let output = bounded_command_output(
+            &mut command,
+            Duration::from_secs(60),
+            UTILITY_OUTPUT_LIMIT,
+            UTILITY_OUTPUT_LIMIT,
+        )
+        .await
+        .map_err(|error| format!("Activated vLLM executable validation failed: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Activated vLLM executable validation failed: {}",
+                Self::clean_process_detail(&output.stderr)
+            ));
+        }
+        Ok(())
+    }
+
+    async fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+        thinclaw_platform::write_private_file_atomic_async(
+            path.to_path_buf(),
+            contents.to_vec(),
+            true,
+        )
+        .await
+        .map_err(|error| format!("Could not write {}: {error}", path.display()))
     }
 
     /// Build a complete vLLM environment off to the side and atomically swap it
     /// into place only after every step succeeds.
     pub async fn bootstrap(&self) -> Result<(), String> {
         let _bootstrap_guard = BOOTSTRAP_LOCK.lock().await;
-        if !Self::has_cuda().await {
-            return Err(
-                "CUDA not detected. vLLM requires an NVIDIA GPU with a working driver.".to_string(),
-            );
-        }
+        Self::verify_glibc().await?;
+        Self::verify_cuda().await?;
         if self.is_bootstrapped() {
             return Ok(());
         }
@@ -244,6 +442,20 @@ impl VllmEngine {
         if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
             return Err("vLLM data directory must be a real directory".to_string());
         }
+        #[cfg(unix)]
+        tokio::fs::set_permissions(&parent, {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::Permissions::from_mode(0o700)
+        })
+        .await
+        .map_err(|error| format!("Could not protect vLLM data directory: {error}"))?;
+        tokio::fs::create_dir_all(parent.join("runtime-cache").join("uv"))
+            .await
+            .map_err(|error| format!("Could not create vLLM runtime cache: {error}"))?;
+        tokio::fs::create_dir_all(parent.join("python"))
+            .await
+            .map_err(|error| format!("Could not create vLLM Python directory: {error}"))?;
+        Self::verify_uv(&uv, &parent).await?;
 
         let staging = tempfile::Builder::new()
             .prefix(".vllm-bootstrap-")
@@ -252,11 +464,15 @@ impl VllmEngine {
         let staged_venv = staging.path().join("venv");
         Self::run_uv(
             &uv,
+            &parent,
             "venv creation",
             &[
                 "venv".into(),
                 "--python".into(),
                 PYTHON_VERSION.into(),
+                "--python-preference".into(),
+                "only-managed".into(),
+                "--relocatable".into(),
                 staged_venv.as_os_str().to_os_string(),
             ],
             VENV_TIMEOUT,
@@ -264,23 +480,37 @@ impl VllmEngine {
         .await?;
 
         let staged_python = Self::python_path_for(&staged_venv);
+        let staged_requirements = staging.path().join("requirements.lock");
+        Self::write_private_file(&staged_requirements, REQUIREMENTS_LOCK).await?;
         Self::run_uv(
             &uv,
+            &parent,
             "package installation",
             &[
                 "pip".into(),
                 "install".into(),
-                "--no-cache".into(),
+                "--require-hashes".into(),
+                "--only-binary".into(),
+                ":all:".into(),
+                "--torch-backend".into(),
+                VLLM_TORCH_BACKEND.into(),
                 "--python".into(),
                 staged_python.as_os_str().to_os_string(),
-                format!("vllm=={VLLM_VERSION}").into(),
+                "--requirements".into(),
+                staged_requirements.as_os_str().to_os_string(),
             ],
             INSTALL_TIMEOUT,
         )
         .await?;
-        tokio::fs::write(staged_venv.join(BOOTSTRAP_MARKER), Self::expected_marker())
-            .await
-            .map_err(|error| format!("Could not write vLLM bootstrap marker: {error}"))?;
+        Self::validate_python_environment(&staged_python).await?;
+        Self::write_private_file(
+            &staged_venv.join(BOOTSTRAP_MARKER),
+            Self::expected_marker().as_bytes(),
+        )
+        .await?;
+        if !Self::environment_is_complete(&staged_venv) {
+            return Err("Staged vLLM environment did not pass validation".to_string());
+        }
 
         let backup = staging.path().join("previous-venv");
         let had_previous = match tokio::fs::symlink_metadata(&final_venv).await {
@@ -302,6 +532,20 @@ impl VllmEngine {
             return Err(format!(
                 "Could not atomically activate vLLM environment: {error}"
             ));
+        }
+        if let Err(error) = Self::validate_activated_environment(&final_venv).await {
+            let failed = staging.path().join("failed-venv");
+            rename_no_replace(&final_venv, &failed).map_err(|rollback_error| {
+                format!("{error}; could not stage failed vLLM environment: {rollback_error}")
+            })?;
+            if had_previous {
+                rename_no_replace(&backup, &final_venv).map_err(|rollback_error| {
+                    format!(
+                        "{error}; could not restore previous vLLM environment: {rollback_error}"
+                    )
+                })?;
+            }
+            return Err(error);
         }
         if had_previous {
             if let Err(error) = tokio::fs::remove_dir_all(&backup).await {
@@ -410,19 +654,19 @@ impl InferenceEngine for VllmEngine {
         let effective_context = model_limit
             .map(|limit| context_size.min(limit))
             .unwrap_or(context_size);
-        let python = self
-            .get_python_path()
+        let venv = self
+            .get_venv_path()
             .ok_or_else(|| "vLLM environment not configured".to_string())?;
+        let server = Self::server_path_for(&venv);
         let port = Self::find_free_port()?;
         let token = Self::generate_api_token();
         let client = Self::local_client()?;
 
-        let mut command = Command::new(&python);
+        self.diagnostics.reset().await;
+        let mut command = Command::new(&server);
         command
             .args([
-                "-m",
-                "vllm.entrypoints.openai.api_server",
-                "--model",
+                "serve",
                 &model_path_string,
                 "--served-model-name",
                 SERVED_MODEL_NAME,
@@ -440,19 +684,28 @@ impl InferenceEngine for VllmEngine {
             .env_remove("PYTHONHOME")
             .env("PYTHONNOUSERSITE", "1")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         // Keep ownership local until readiness. Cancellation of this future
         // drops `OwnedChild`, killing the complete process tree without
         // publishing a half-started runtime snapshot.
         let mut child = OwnedChild::spawn(&mut command)
             .map_err(|error| format!("Failed to spawn vLLM: {error}"))?;
+        if let Some(stdout) = child.take_stdout() {
+            self.diagnostics
+                .capture(stdout, "stdout", vec![token.clone()]);
+        }
+        if let Some(stderr) = child.take_stderr() {
+            self.diagnostics
+                .capture(stderr, "stderr", vec![token.clone()]);
+        }
         let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
         loop {
             if tokio::time::Instant::now() >= deadline {
                 let _ = child.kill().await;
+                let diagnostics = self.diagnostics.summary().await;
                 return Err(format!(
-                    "vLLM server startup exceeded its {STARTUP_TIMEOUT:?} deadline"
+                    "vLLM server startup exceeded its {STARTUP_TIMEOUT:?} deadline.\n{diagnostics}"
                 ));
             }
 
@@ -460,9 +713,10 @@ impl InferenceEngine for VllmEngine {
                 .try_wait()
                 .map_err(|error| format!("Failed to inspect vLLM process: {error}"))?
             {
+                let diagnostics = self.diagnostics.summary().await;
                 return Err(format!(
-                    "vLLM exited during startup with code {:?}",
-                    status.code()
+                    "vLLM exited during startup with code {:?}.\n{diagnostics}",
+                    status.code(),
                 ));
             }
 
@@ -612,6 +866,7 @@ mod tests {
         let python = VllmEngine::python_path_for(&venv);
         std::fs::create_dir_all(python.parent().unwrap()).unwrap();
         std::fs::write(&python, b"python").unwrap();
+        std::fs::write(VllmEngine::server_path_for(&venv), b"vllm").unwrap();
         std::fs::write(venv.join(BOOTSTRAP_MARKER), b"vllm=old\n").unwrap();
         assert!(!engine.is_bootstrapped());
         std::fs::write(venv.join(BOOTSTRAP_MARKER), VllmEngine::expected_marker()).unwrap();
@@ -625,5 +880,14 @@ mod tests {
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn host_version_comparison_enforces_reviewed_minimums() {
+        assert!(VllmEngine::version_at_least("2.31", "2.31"));
+        assert!(VllmEngine::version_at_least("2.39", "2.31"));
+        assert!(VllmEngine::version_at_least("8.0", "7.5"));
+        assert!(!VllmEngine::version_at_least("2.30", "2.31"));
+        assert!(!VllmEngine::version_at_least("7.0", "7.5"));
     }
 }

@@ -31,15 +31,15 @@ export interface EngineSetupState {
 
 export function useEngineSetup(): EngineSetupState {
     const [status, setStatus] = useState<EngineSetupStatus | null>(null);
-    const [isSettingUp, setIsSettingUp] = useState(false);
+    const [setupRequested, setSetupRequested] = useState(false);
     const [setupStage, setSetupStage] = useState("");
     const [setupMessage, setSetupMessage] = useState("");
-    const [setupComplete, setSetupComplete] = useState(false);
-    const [setupError, setSetupError] = useState<string | null>(null);
+    const [transientError, setTransientError] = useState<string | null>(null);
 
     // Check setup status on mount
     const refreshStatus = useCallback(async () => {
         directCommands.directRuntimeGetEngineSetupStatus()
+            .then(unwrap)
             .then(setStatus)
             .catch((err) => console.warn("Failed to check engine setup:", err));
     }, []);
@@ -56,12 +56,13 @@ export function useEngineSetup(): EngineSetupState {
             setSetupMessage(message);
 
             if (stage === "complete") {
-                setIsSettingUp(false);
-                setSetupComplete(true);
+                setSetupRequested(false);
                 refreshStatus();
             } else if (stage === "error") {
-                setIsSettingUp(false);
-                setSetupError(message);
+                setSetupRequested(false);
+                setTransientError(message);
+                refreshStatus();
+            } else {
                 refreshStatus();
             }
         });
@@ -72,24 +73,32 @@ export function useEngineSetup(): EngineSetupState {
     }, [refreshStatus]);
 
     const triggerSetup = useCallback(async () => {
-        setIsSettingUp(true);
-        setSetupError(null);
+        setSetupRequested(true);
+        setTransientError(null);
         setSetupStage("creating_venv");
         setSetupMessage("Starting setup...");
 
         try {
             unwrap(await directCommands.directRuntimeSetupEngine());
-            setSetupComplete(true);
-            setIsSettingUp(false);
+            setSetupRequested(false);
             await refreshStatus();
         } catch (err: any) {
-            const msg = typeof err === "string" ? err : "Setup failed";
-            setIsSettingUp(false);
-            setSetupError(msg);
+            const msg =
+                typeof err === "string"
+                    ? err
+                    : err instanceof Error
+                        ? err.message
+                        : "Setup failed";
+            setSetupRequested(false);
+            setTransientError(msg);
+            await refreshStatus();
         }
     }, [refreshStatus]);
 
-    const needsSetup = !!(status?.needs_setup && !setupComplete);
+    const isSettingUp = setupRequested || status?.state === "installing";
+    const setupComplete = status?.state === "ready";
+    const setupError = status?.error ?? transientError;
+    const needsSetup = status?.state === "needs_setup" || status?.state === "broken";
 
     return {
         status,

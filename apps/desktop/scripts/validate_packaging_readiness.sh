@@ -54,8 +54,10 @@ const updaterKey = Buffer.from(config.plugins.updater.pubkey, 'base64').toString
 if (!updaterKey.includes('minisign public key')) fail('Updater public key payload is malformed.');
 
 const entitlements = fs.readFileSync('backend/Entitlements.plist', 'utf8');
+if (entitlements.includes('<key>com.apple.security.app-sandbox</key>')) {
+  fail('Developer ID builds must not apply the App Store sandbox entitlement to external runtime helpers.');
+}
 for (const key of [
-  'com.apple.security.app-sandbox',
   'com.apple.security.network.client',
   'com.apple.security.network.server',
   'com.apple.security.device.audio-input',
@@ -154,7 +156,13 @@ NODE
 echo "== Engine override matrix =="
 for engine in none ollama llamacpp mlx vllm; do
   echo "-- $engine"
-  STRICT_SIDECARS=0 INCLUDE_CHROMIUM=auto bash scripts/generate_tauri_overrides.sh "$engine" >/tmp/thinclaw-override-"$engine".log
+  case "$engine" in
+    mlx) override_target="aarch64-apple-darwin" ;;
+    vllm) override_target="x86_64-unknown-linux-gnu" ;;
+    *) override_target="" ;;
+  esac
+  TAURI_TARGET_TRIPLE="$override_target" STRICT_SIDECARS=0 INCLUDE_CHROMIUM=auto \
+    bash scripts/generate_tauri_overrides.sh "$engine" >/tmp/thinclaw-override-"$engine".log
   ENGINE="$engine" node <<'NODE'
 const fs = require('fs');
 const engine = process.env.ENGINE;
@@ -171,6 +179,9 @@ if (!resources.includes('../../../deploy/**/*')) fail('deploy resources are not 
 if (engine === 'none' && bins.length !== 0) fail(`cloud build should not include sidecars: ${bins.join(', ')}`);
 if (engine === 'llamacpp' && !bins.includes('bin/llama-server')) fail('llama.cpp build must declare llama-server sidecar.');
 if ((engine === 'mlx' || engine === 'vllm') && !bins.includes('bin/uv')) fail(`${engine} build must declare uv sidecar.`);
+if (engine === 'mlx' && override.bundle?.macOS?.minimumSystemVersion !== '14.0') {
+  fail('MLX build must declare its reviewed minimum macOS version.');
+}
 if (engine === 'ollama' && bins.includes('bin/llama-server')) fail('ollama build must not bundle llama-server.');
 if (engine !== 'llamacpp' && resources.some(resource => resource.includes('*.dylib') || resource.includes('*.so') || resource.includes('*.dll'))) {
   fail(`${engine} build must not inherit native libraries from another engine.`);

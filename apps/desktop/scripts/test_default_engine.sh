@@ -41,4 +41,12 @@ if THINCLAW_DESKTOP_ENGINE=invalid bash "$SCRIPT" print >/dev/null 2>&1; then
   exit 1
 fi
 
+if THINCLAW_ENGINE_HOST_OS=Darwin \
+  THINCLAW_ENGINE_HOST_ARCH=arm64 \
+  THINCLAW_DESKTOP_ENGINE=vllm \
+  bash "$SCRIPT" print >/dev/null 2>&1; then
+  echo "Unsupported engine/target override unexpectedly succeeded" >&2
+  exit 1
+fi
+
 echo "Default desktop engine selection tests passed."

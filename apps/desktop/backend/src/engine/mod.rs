@@ -9,31 +9,35 @@
 use async_trait::async_trait;
 use serde::Serialize;
 use specta::Type;
+#[cfg(any(feature = "mlx", feature = "vllm"))]
+use std::collections::VecDeque;
+#[cfg(any(feature = "mlx", feature = "vllm"))]
+use std::sync::Arc;
 use tauri::Emitter;
 
-/// Engine dependency pins validated together on 2026-07-13.
-///
-/// Keep these in sync with `scripts/setup_uv.sh` and the engine compatibility
-/// matrix. Exact top-level Python pins make first-launch bootstraps repeatable;
-/// changing a fingerprint below intentionally invalidates the matching venv
-/// marker and upgrades it on the next setup run.
+/// Engine dependency pins are sourced from `apps/desktop/engine-manifest.json`
+/// by `build.rs`. Python transitive dependencies are locked with hashes in
+/// `runtime/mlx/requirements.lock`; these aliases exist only for diagnostics
+/// and focused contract tests.
+#[cfg(any(feature = "mlx", feature = "vllm", test))]
+pub(crate) const UV_VERSION: &str = env!("THINCLAW_UV_VERSION");
 #[cfg(any(feature = "mlx", test))]
-pub(crate) const UV_VERSION: &str = "0.11.28";
+pub(crate) const MLX_OPENAI_SERVER_VERSION: &str = env!("THINCLAW_MLX_SERVER_VERSION");
 #[cfg(any(feature = "mlx", test))]
-pub(crate) const MLX_OPENAI_SERVER_SPEC: &str = "mlx-openai-server==1.8.1";
-#[cfg(any(feature = "mlx", test))]
-pub(crate) const MLX_EMBEDDINGS_SPEC: &str = "mlx-embeddings==0.1.0";
-#[cfg(any(feature = "mlx", test))]
-pub(crate) const MFLUX_SPEC: &str = "mflux==0.18.0";
-#[cfg(any(feature = "mlx", test))]
-pub(crate) const MLX_WHISPER_SPEC: &str = "mlx-whisper==0.4.3";
+pub(crate) const MLX_MINIMUM_MACOS: &str = env!("THINCLAW_MLX_MINIMUM_MACOS");
 #[cfg(any(feature = "vllm", test))]
-pub(crate) const VLLM_SPEC: &str = "vllm==0.25.0";
-#[cfg(any(feature = "mlx", test))]
-pub(crate) const MLX_BOOTSTRAP_FINGERPRINT: &str =
-    "mlx-openai-server=1.8.1;mlx-embeddings=0.1.0;mflux=0.18.0;mlx-whisper=0.4.3";
+pub(crate) const VLLM_VERSION: &str = env!("THINCLAW_VLLM_VERSION");
 #[cfg(any(feature = "vllm", test))]
-pub(crate) const VLLM_BOOTSTRAP_FINGERPRINT: &str = "vllm=0.25.0;python=3.12";
+pub(crate) const VLLM_TORCH_BACKEND: &str = env!("THINCLAW_VLLM_TORCH_BACKEND");
+#[cfg(any(feature = "vllm", test))]
+pub(crate) const VLLM_MINIMUM_GLIBC: &str = env!("THINCLAW_VLLM_MINIMUM_GLIBC");
+#[cfg(any(feature = "vllm", test))]
+pub(crate) const VLLM_MINIMUM_COMPUTE_CAPABILITY: &str =
+    env!("THINCLAW_VLLM_MINIMUM_COMPUTE_CAPABILITY");
+#[cfg(any(feature = "mlx", feature = "vllm", test))]
+pub(crate) const PYTHON_VERSION: &str = env!("THINCLAW_PYTHON_VERSION");
+#[cfg(feature = "mlx")]
+pub(crate) const PYTHON_ABI: &str = env!("THINCLAW_PYTHON_ABI");
 
 // Conditionally compile engine implementations
 #[cfg(feature = "llamacpp")]
@@ -171,6 +175,83 @@ pub struct EngineStartOptions {
     pub quantize_kv: bool,
 }
 
+/// Bounded in-memory diagnostics for long-running inference servers. Keeping
+/// output out of persistent files avoids leaking ephemeral API credentials,
+/// while draining both pipes prevents child processes from blocking.
+#[derive(Clone, Default)]
+#[cfg(any(feature = "mlx", feature = "vllm"))]
+pub(crate) struct RuntimeDiagnostics {
+    lines: Arc<tokio::sync::Mutex<VecDeque<String>>>,
+}
+
+#[cfg(any(feature = "mlx", feature = "vllm"))]
+impl RuntimeDiagnostics {
+    const MAX_LINES: usize = 80;
+    const MAX_LINE_BYTES: usize = 4 * 1024;
+    const MAX_SUMMARY_BYTES: usize = 16 * 1024;
+
+    pub async fn reset(&self) {
+        self.lines.lock().await.clear();
+    }
+
+    pub fn capture<R>(&self, pipe: R, stream: &'static str, redactions: Vec<String>)
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    {
+        let lines = self.lines.clone();
+        tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(pipe);
+            loop {
+                let line =
+                    match thinclaw_platform::read_bounded_line(&mut reader, Self::MAX_LINE_BYTES)
+                        .await
+                    {
+                        Ok(Some(line)) => line,
+                        Ok(None) => break,
+                        Err(error) => {
+                            let mut guard = lines.lock().await;
+                            guard.push_back(format!("{stream}: output read failed: {error}"));
+                            break;
+                        }
+                    };
+                let mut text = line.into_lossy_text();
+                for secret in &redactions {
+                    if !secret.is_empty() {
+                        text = text.replace(secret, "[REDACTED]");
+                    }
+                }
+                let text = text
+                    .chars()
+                    .filter(|character| !character.is_control() || *character == '\t')
+                    .collect::<String>();
+                let mut guard = lines.lock().await;
+                if guard.len() == Self::MAX_LINES {
+                    guard.pop_front();
+                }
+                guard.push_back(format!("{stream}: {text}"));
+            }
+        });
+    }
+
+    pub async fn summary(&self) -> String {
+        let lines = self.lines.lock().await;
+        if lines.is_empty() {
+            "No server diagnostics were emitted.".to_string()
+        } else {
+            let combined = lines.iter().cloned().collect::<Vec<_>>().join("\n");
+            if combined.len() <= Self::MAX_SUMMARY_BYTES {
+                combined
+            } else {
+                let mut start = combined.len() - Self::MAX_SUMMARY_BYTES;
+                while !combined.is_char_boundary(start) {
+                    start += 1;
+                }
+                format!("… earlier diagnostics omitted …\n{}", &combined[start..])
+            }
+        }
+    }
+}
+
 /// Information about the active inference engine, exposed to the frontend.
 #[derive(Debug, Clone, Serialize, Type)]
 pub struct EngineInfo {
@@ -211,8 +292,8 @@ pub fn direct_runtime_get_active_engine_info() -> EngineInfo {
         return EngineInfo {
             id: "mlx".into(),
             display_name: "MLX (Apple Silicon)".into(),
-            available: true,
-            requires_setup: false, // will be checked at runtime by engine_mlx
+            available: engine_supported_on_host("mlx"),
+            requires_setup: true,
             description: "Apple's MLX framework — best performance on Apple Silicon".into(),
             hf_tag: "mlx".into(),
             single_file_model: false,
@@ -224,8 +305,8 @@ pub fn direct_runtime_get_active_engine_info() -> EngineInfo {
         return EngineInfo {
             id: "vllm".into(),
             display_name: "vLLM (CUDA)".into(),
-            available: true,
-            requires_setup: false,
+            available: engine_supported_on_host("vllm"),
+            requires_setup: true,
             description: "High-throughput inference — requires NVIDIA GPU with CUDA".into(),
             hf_tag: "awq".into(),
             single_file_model: false,
@@ -298,6 +379,15 @@ use thinclaw_runtime_contracts::{
 pub struct EngineManager {
     pub engine: tokio::sync::Mutex<Option<Box<dyn InferenceEngine>>>,
     pub app_data_dir: PathBuf,
+    provisioning: tokio::sync::RwLock<ProvisioningRecord>,
+    provisioning_lock: tokio::sync::Mutex<()>,
+}
+
+#[derive(Debug, Clone)]
+struct ProvisioningRecord {
+    state: EngineProvisioningState,
+    message: String,
+    error: Option<String>,
 }
 
 fn runtime_kind_from_engine_id(engine_id: &str) -> LocalRuntimeKind {
@@ -464,22 +554,38 @@ pub async fn local_runtime_snapshot(
     }
     drop(guard);
 
-    let setup_required = engine_needs_setup(&info, engine_manager);
+    let live_provisioning = engine_manager.provisioning.read().await.clone();
+    let provisioning = if matches!(
+        live_provisioning.state,
+        EngineProvisioningState::Installing | EngineProvisioningState::Broken
+    ) {
+        live_provisioning
+    } else {
+        derived_provisioning_state(&info, engine_manager)
+    };
+    let readiness = match provisioning.state {
+        EngineProvisioningState::Installing | EngineProvisioningState::Checking => {
+            RuntimeReadiness::Starting
+        }
+        EngineProvisioningState::NeedsSetup | EngineProvisioningState::Broken => {
+            RuntimeReadiness::SetupRequired
+        }
+        EngineProvisioningState::Unsupported => RuntimeReadiness::Unavailable,
+        EngineProvisioningState::Ready => RuntimeReadiness::Unavailable,
+    };
 
     LocalRuntimeSnapshot {
         kind,
         display_name: info.display_name,
-        readiness: if setup_required {
-            RuntimeReadiness::SetupRequired
-        } else {
-            RuntimeReadiness::Unavailable
-        },
+        readiness,
         endpoint: None,
         capabilities: Vec::new(),
         supported_capabilities: supported_capabilities_for_runtime(&info.id),
         exposure_policy: RuntimeExposurePolicy::SharedWhenEnabled,
-        unavailable_reason: Some(if setup_required {
-            "Local inference runtime requires first-launch setup".to_string()
+        unavailable_reason: Some(if provisioning.state != EngineProvisioningState::Ready {
+            provisioning
+                .error
+                .unwrap_or_else(|| provisioning.message.clone())
         } else {
             "No local chat runtime endpoint is running".to_string()
         }),
@@ -516,6 +622,12 @@ impl EngineManager {
         Self {
             engine: tokio::sync::Mutex::new(engine),
             app_data_dir,
+            provisioning: tokio::sync::RwLock::new(ProvisioningRecord {
+                state: EngineProvisioningState::Checking,
+                message: "Checking local inference runtime...".to_string(),
+                error: None,
+            }),
+            provisioning_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -566,13 +678,14 @@ impl EngineManager {
     /// Resolve the path to the `uv` binary.
     ///
     /// Search order:
-    /// 1. `backend/bin/uv-{target-triple}` (dev builds — compile-time CARGO_MANIFEST_DIR)
-    /// 2. Next to the app executable (production Tauri bundles)
-    /// 3. `uv` on system PATH
+    /// 1. Stable installed name next to the app executable (`uv` / `uv.exe`)
+    /// 2. Target-suffixed source asset in explicit development builds
+    /// 3. System PATH only when explicitly opted in for development
     ///
     /// Every result is canonicalized and checked as an executable regular file.
     /// If none is found, setup fails closed instead of executing an unverified
-    /// legacy cache or downloading an archive at runtime.
+    /// binary. Tauri removes the target suffix when it packages an external
+    /// binary, so source and installed names intentionally differ.
     #[allow(dead_code)]
     fn resolve_uv_path() -> Option<PathBuf> {
         fn checked_candidate(path: PathBuf) -> Option<PathBuf> {
@@ -591,23 +704,11 @@ impl EngineManager {
             Some(path)
         }
 
-        let target_triple = Self::current_target_triple()?;
-        let binary_name = format!("uv-{}", target_triple);
-
-        // 1. Check compile-time manifest dir (dev builds: CARGO_MANIFEST_DIR = backend/)
-        {
-            let manifest_dir = env!("CARGO_MANIFEST_DIR");
-            let dev_path = PathBuf::from(manifest_dir).join("bin").join(&binary_name);
-            if let Some(path) = checked_candidate(dev_path) {
-                tracing::info!("Using bundled uv sidecar");
-                return Some(path);
-            }
-        }
-
-        // 2. Check relative to the current exe (production builds)
+        // 1. Tauri packages `bin/uv-{target}` as `uv` (or `uv.exe`) beside
+        // the application executable.
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                let prod_path = exe_dir.join(&binary_name);
+                let prod_path = exe_dir.join(if cfg!(windows) { "uv.exe" } else { "uv" });
                 if let Some(path) = checked_candidate(prod_path) {
                     tracing::info!("Using packaged uv sidecar");
                     return Some(path);
@@ -615,12 +716,34 @@ impl EngineManager {
             }
         }
 
-        // 3. Resolve PATH without spawning `which` or trusting its output.
-        if let Some(path) =
-            thinclaw_platform::find_executable_in_path("uv").and_then(checked_candidate)
-        {
-            tracing::info!("Using uv from PATH");
-            return Some(path);
+        // 2. A compile-time source path is acceptable only for a debug build.
+        // Never let a release binary silently depend on the checkout that
+        // happened to compile it.
+        if cfg!(debug_assertions) {
+            let target_triple = Self::current_target_triple()?;
+            let binary_name = format!(
+                "uv-{target_triple}{}",
+                if cfg!(windows) { ".exe" } else { "" }
+            );
+            let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("bin")
+                .join(binary_name);
+            if let Some(path) = checked_candidate(dev_path) {
+                tracing::info!("Using development uv sidecar");
+                return Some(path);
+            }
+        }
+
+        // 3. System uv is an explicit builder/developer override, never a
+        // production fallback.
+        if std::env::var("THINCLAW_ALLOW_SYSTEM_UV").as_deref() == Ok("1") {
+            let name = if cfg!(windows) { "uv.exe" } else { "uv" };
+            if let Some(path) =
+                thinclaw_platform::find_executable_in_path(name).and_then(checked_candidate)
+            {
+                tracing::info!("Using explicitly allowed uv from PATH");
+                return Some(path);
+            }
         }
 
         tracing::warn!("uv binary is unavailable; local Python engine setup will fail closed");
@@ -642,130 +765,285 @@ impl EngineManager {
     }
 }
 
+/// Durable backend-owned provisioning phase for the compiled local engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineProvisioningState {
+    Checking,
+    Unsupported,
+    NeedsSetup,
+    Installing,
+    Ready,
+    Broken,
+}
+
 /// Setup status returned to the frontend.
 #[derive(Debug, Clone, Serialize, Type)]
 pub struct EngineSetupStatus {
+    /// Machine-readable provisioning state.
+    pub state: EngineProvisioningState,
     /// Whether the engine needs first-launch setup (Python bootstrap).
     pub needs_setup: bool,
     /// Whether setup is currently in progress.
     pub setup_in_progress: bool,
     /// Human-readable status message.
     pub message: String,
+    /// Last bounded setup failure, if any.
+    pub error: Option<String>,
 }
 
-/// Returns whether the active engine needs first-launch setup.
-///
-/// - `llamacpp`: never needs setup (bundled sidecar)
-/// - `ollama`: never needs setup (external daemon)
-/// - `mlx` / `vllm`: need setup if the Python venv hasn't been bootstrapped yet
-#[tauri::command]
-#[specta::specta]
-pub fn direct_runtime_get_engine_setup_status(
-    #[allow(unused_variables)] engine_manager: tauri::State<'_, EngineManager>,
-) -> EngineSetupStatus {
-    let info = direct_runtime_get_active_engine_info();
-    let needs_setup = engine_needs_setup(&info, &engine_manager);
-
-    EngineSetupStatus {
-        needs_setup,
-        setup_in_progress: false, // simplified — real progress tracked via events
-        message: if needs_setup {
-            format!(
-                "{} requires first-launch setup (~2 minutes)",
-                info.display_name
-            )
-        } else {
-            format!("{} is ready", info.display_name)
-        },
+fn engine_supported_on_host(engine_id: &str) -> bool {
+    match engine_id {
+        "mlx" => cfg!(all(target_os = "macos", target_arch = "aarch64")),
+        "vllm" => cfg!(all(target_os = "linux", target_arch = "x86_64")),
+        "llamacpp" | "ollama" | "none" => true,
+        _ => false,
     }
 }
 
-/// Trigger first-launch bootstrap for the active engine (MLX/vLLM).
-///
-/// Emits `engine_setup_progress` events:
-/// `{ stage: "creating_venv" | "installing" | "complete" | "error", message: String }`
+fn derived_provisioning_state(
+    info: &EngineInfo,
+    engine_manager: &EngineManager,
+) -> ProvisioningRecord {
+    if !engine_supported_on_host(&info.id) {
+        return ProvisioningRecord {
+            state: EngineProvisioningState::Unsupported,
+            message: format!("{} is unsupported on this host", info.display_name),
+            error: Some(
+                "Install a ThinClaw build containing an engine supported by this operating system and architecture"
+                    .to_string(),
+            ),
+        };
+    }
+    if engine_needs_setup(info, engine_manager) {
+        ProvisioningRecord {
+            state: EngineProvisioningState::NeedsSetup,
+            message: format!("{} requires local runtime provisioning", info.display_name),
+            error: None,
+        }
+    } else {
+        ProvisioningRecord {
+            state: EngineProvisioningState::Ready,
+            message: format!("{} runtime is installed and validated", info.display_name),
+            error: None,
+        }
+    }
+}
+
+/// Return the backend-owned provisioning status. Filesystem validation remains
+/// authoritative across restarts; the in-memory record supplies live progress
+/// and the last actionable failure.
+#[tauri::command]
+#[specta::specta]
+pub async fn direct_runtime_get_engine_setup_status(
+    engine_manager: tauri::State<'_, EngineManager>,
+) -> Result<EngineSetupStatus, crate::thinclaw::bridge::BridgeError> {
+    let info = direct_runtime_get_active_engine_info();
+    let live = engine_manager.provisioning.read().await.clone();
+    let record = if live.state == EngineProvisioningState::Installing {
+        live
+    } else {
+        let derived = derived_provisioning_state(&info, &engine_manager);
+        if live.state == EngineProvisioningState::Broken
+            && derived.state != EngineProvisioningState::Ready
+        {
+            live
+        } else {
+            derived
+        }
+    };
+    Ok(EngineSetupStatus {
+        state: record.state,
+        needs_setup: matches!(
+            record.state,
+            EngineProvisioningState::NeedsSetup | EngineProvisioningState::Broken
+        ),
+        setup_in_progress: record.state == EngineProvisioningState::Installing,
+        message: record.message,
+        error: record.error,
+    })
+}
+
+#[derive(Clone, serde::Serialize)]
+struct SetupProgress {
+    stage: String,
+    message: String,
+}
+
+fn emit_setup_progress(app: &tauri::AppHandle, stage: &str, message: &str) {
+    let _ = app.emit(
+        "engine_setup_progress",
+        SetupProgress {
+            stage: stage.to_string(),
+            message: message.to_string(),
+        },
+    );
+}
+
+async fn update_provisioning(
+    engine_manager: &EngineManager,
+    state: EngineProvisioningState,
+    message: impl Into<String>,
+    error: Option<String>,
+) {
+    *engine_manager.provisioning.write().await = ProvisioningRecord {
+        state,
+        message: message.into(),
+        error,
+    };
+}
+
+async fn provision_active_engine(
+    app: &tauri::AppHandle,
+    engine_manager: &EngineManager,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let _provisioning_guard = engine_manager.provisioning_lock.lock().await;
+    let info = direct_runtime_get_active_engine_info();
+
+    if !engine_supported_on_host(&info.id) {
+        let message = format!("{} is unsupported on this host", info.display_name);
+        update_provisioning(
+            engine_manager,
+            EngineProvisioningState::Unsupported,
+            &message,
+            Some(message.clone()),
+        )
+        .await;
+        emit_setup_progress(app, "error", &message);
+        return Err(message.into());
+    }
+
+    {
+        let engine = engine_manager.engine.lock().await;
+        if engine
+            .as_ref()
+            .and_then(|engine| engine.base_url())
+            .is_some()
+        {
+            return Err("Stop the local inference engine before repairing its runtime".into());
+        }
+    }
+
+    if !engine_needs_setup(&info, engine_manager) {
+        let message = format!("{} runtime is already ready", info.display_name);
+        update_provisioning(
+            engine_manager,
+            EngineProvisioningState::Ready,
+            &message,
+            None,
+        )
+        .await;
+        emit_setup_progress(app, "complete", &message);
+        return Ok(());
+    }
+
+    let installing_message = match info.id.as_str() {
+        "mlx" => "Installing the locked MLX runtime and Python environment...",
+        "vllm" => "Installing the validated vLLM and CUDA runtime environment...",
+        _ => "Validating the bundled local inference runtime...",
+    };
+    update_provisioning(
+        engine_manager,
+        EngineProvisioningState::Installing,
+        installing_message,
+        None,
+    )
+    .await;
+    emit_setup_progress(app, "creating_venv", installing_message);
+
+    let result: Result<(), String> = match info.id.as_str() {
+        #[cfg(feature = "mlx")]
+        "mlx" => {
+            let engine = engine_mlx::MlxEngine::new();
+            engine.set_app_data_dir(engine_manager.app_data_dir.clone());
+            if let Some(path) = EngineManager::resolve_uv_path() {
+                engine.set_uv_path(path);
+            }
+            emit_setup_progress(
+                app,
+                "installing",
+                "Installing and validating the hash-locked MLX service stack...",
+            );
+            engine.bootstrap().await
+        }
+        #[cfg(feature = "vllm")]
+        "vllm" => {
+            let engine = engine_vllm::VllmEngine::new();
+            engine.set_app_data_dir(engine_manager.app_data_dir.clone());
+            if let Some(path) = EngineManager::resolve_uv_path() {
+                engine.set_uv_path(path);
+            }
+            emit_setup_progress(
+                app,
+                "installing",
+                "Installing and validating the vLLM CUDA service stack...",
+            );
+            engine.bootstrap().await
+        }
+        _ => Ok(()),
+    };
+
+    match result {
+        Ok(()) if !engine_needs_setup(&info, engine_manager) => {
+            let message = format!("{} runtime is ready", info.display_name);
+            update_provisioning(
+                engine_manager,
+                EngineProvisioningState::Ready,
+                &message,
+                None,
+            )
+            .await;
+            emit_setup_progress(app, "complete", &message);
+            Ok(())
+        }
+        Ok(()) => {
+            let message =
+                "Provisioning finished but the runtime did not pass validation".to_string();
+            update_provisioning(
+                engine_manager,
+                EngineProvisioningState::Broken,
+                &message,
+                Some(message.clone()),
+            )
+            .await;
+            emit_setup_progress(app, "error", &message);
+            Err(message.into())
+        }
+        Err(error) => {
+            let error = error.chars().take(2_048).collect::<String>();
+            let message = format!("{} setup failed", info.display_name);
+            update_provisioning(
+                engine_manager,
+                EngineProvisioningState::Broken,
+                &message,
+                Some(error.clone()),
+            )
+            .await;
+            emit_setup_progress(app, "error", &error);
+            Err(error.into())
+        }
+    }
+}
+
+/// Trigger first-launch bootstrap or repair for the active engine.
 #[tauri::command]
 #[specta::specta]
 pub async fn direct_runtime_setup_engine(
     app: tauri::AppHandle,
-    _engine_manager: tauri::State<'_, EngineManager>,
+    engine_manager: tauri::State<'_, EngineManager>,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    let info = direct_runtime_get_active_engine_info();
+    provision_active_engine(&app, &engine_manager).await
+}
 
-    // Serialize setup against start/stop and refuse to replace an environment
-    // underneath a running interpreter. The bootstrap itself uses a staging
-    // directory, but Python can lazily import modules after server readiness.
-    let _setup_guard = _engine_manager.engine.lock().await;
-    if _setup_guard
-        .as_ref()
-        .and_then(|engine| engine.base_url())
-        .is_some()
-    {
-        return Err("Stop the local inference engine before running setup".into());
-    }
-
-    #[derive(Clone, serde::Serialize)]
-    struct SetupProgress {
-        stage: String,
-        message: String,
-    }
-
-    #[allow(unused)]
-    let emit = |stage: &str, msg: &str| {
-        let _ = app.emit(
-            "engine_setup_progress",
-            SetupProgress {
-                stage: stage.to_string(),
-                message: msg.to_string(),
-            },
-        );
-    };
-
-    match info.id.as_str() {
-        #[cfg(feature = "mlx")]
-        "mlx" => {
-            emit("creating_venv", "Setting up MLX environment...");
-
-            // Create a temporary engine for bootstrap (the managed one is behind tokio::Mutex)
-            let engine = engine_mlx::MlxEngine::new();
-            engine.set_app_data_dir(_engine_manager.app_data_dir.clone());
-            if let Some(path) = EngineManager::resolve_uv_path() {
-                engine.set_uv_path(path);
-            }
-
-            emit(
-                "installing",
-                "Installing mlx-openai-server (this may take 2-3 minutes)...",
-            );
-            engine.bootstrap().await?;
-
-            emit("complete", "MLX setup complete!");
-            Ok(())
-        }
-        #[cfg(feature = "vllm")]
-        "vllm" => {
-            emit("creating_venv", "Setting up vLLM environment...");
-
-            let engine = engine_vllm::VllmEngine::new();
-            engine.set_app_data_dir(_engine_manager.app_data_dir.clone());
-            if let Some(path) = EngineManager::resolve_uv_path() {
-                engine.set_uv_path(path);
-            }
-
-            emit(
-                "installing",
-                "Installing vLLM (this may take 5-10 minutes)...",
-            );
-            engine.bootstrap().await?;
-
-            emit("complete", "vLLM setup complete!");
-            Ok(())
-        }
-        _ => {
-            // llamacpp and ollama don't need setup
-            Ok(())
-        }
-    }
+/// Ensure the active engine is provisioned without requiring its inference
+/// process to be running. Safe to call before every automatic start.
+#[tauri::command]
+#[specta::specta]
+pub async fn direct_runtime_ensure_engine_ready(
+    app: tauri::AppHandle,
+    engine_manager: tauri::State<'_, EngineManager>,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    provision_active_engine(&app, &engine_manager).await
 }
 
 /// Start the active engine with the given model.
@@ -779,6 +1057,18 @@ pub async fn direct_runtime_start_engine(
     model_path: String,
     context_size: u32,
 ) -> Result<EngineStartResult, crate::thinclaw::bridge::BridgeError> {
+    let _provisioning_guard = engine_manager.provisioning_lock.lock().await;
+    let info = direct_runtime_get_active_engine_info();
+    if !engine_supported_on_host(&info.id) {
+        return Err(format!("{} is unsupported on this host", info.display_name).into());
+    }
+    if engine_needs_setup(&info, &engine_manager) {
+        return Err(format!(
+            "{} runtime requires provisioning before inference can start",
+            info.display_name
+        )
+        .into());
+    }
     let mut guard = engine_manager.engine.lock().await;
     let engine = guard.as_mut().ok_or("No engine configured")?;
 
@@ -880,25 +1170,58 @@ mod tests {
 
     #[test]
     fn engine_dependency_pins_and_provisioning_scripts_stay_aligned() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../../engine-manifest.json")).unwrap();
+        let mlx_lock = include_str!("../../../runtime/mlx/requirements.lock");
+        let vllm_lock = include_str!("../../../runtime/vllm/requirements.lock");
         let uv_script = include_str!("../../../scripts/setup_uv.sh");
         let llama_script = include_str!("../../../scripts/setup_llama.sh");
-        assert!(uv_script.contains(&format!("UV_VERSION:-{}", UV_VERSION)));
-        assert!(llama_script.contains("DEFAULT_TAG=\"b9988\""));
-
-        for spec in [
-            MLX_OPENAI_SERVER_SPEC,
-            MLX_EMBEDDINGS_SPEC,
-            MFLUX_SPEC,
-            MLX_WHISPER_SPEC,
-            VLLM_SPEC,
-        ] {
+        assert_eq!(manifest["uv"]["version"], UV_VERSION);
+        assert_eq!(
+            manifest["engines"]["mlx"]["version"],
+            MLX_OPENAI_SERVER_VERSION
+        );
+        assert_eq!(
+            manifest["engines"]["mlx"]["minimumMacosVersion"],
+            MLX_MINIMUM_MACOS
+        );
+        assert_eq!(manifest["engines"]["vllm"]["version"], VLLM_VERSION);
+        assert_eq!(
+            manifest["engines"]["vllm"]["torchBackend"],
+            VLLM_TORCH_BACKEND
+        );
+        assert_eq!(
+            manifest["engines"]["vllm"]["minimumGlibcVersion"],
+            VLLM_MINIMUM_GLIBC
+        );
+        assert_eq!(
+            manifest["engines"]["vllm"]["minimumComputeCapability"],
+            VLLM_MINIMUM_COMPUTE_CAPABILITY
+        );
+        assert_eq!(manifest["python"]["version"], PYTHON_VERSION);
+        assert_eq!(
+            manifest["engines"]["llamacpp"]["version"],
+            env!("THINCLAW_LLAMA_CPP_VERSION")
+        );
+        assert!(uv_script.contains("engine-manifest.json"));
+        assert!(llama_script.contains("engine-manifest.json"));
+        for (distribution, version) in manifest["engines"]["mlx"]["resolvedPackages"]
+            .as_object()
+            .unwrap()
+        {
             assert!(
-                spec.contains("=="),
-                "engine dependency must be exact: {spec}"
+                mlx_lock.contains(&format!("{distribution}=={}", version.as_str().unwrap())),
+                "{distribution} is missing from the MLX lock"
             );
         }
-        assert!(MLX_BOOTSTRAP_FINGERPRINT.contains("mlx-openai-server=1.8.1"));
-        assert!(VLLM_BOOTSTRAP_FINGERPRINT.contains("vllm=0.25.0"));
+        assert!(
+            vllm_lock.contains(&format!("vllm=={VLLM_VERSION}")),
+            "vLLM is missing from its lock"
+        );
+        assert!(
+            vllm_lock.contains("torch==2.11.0+cu129"),
+            "reviewed CUDA PyTorch build is missing from the vLLM lock"
+        );
     }
 
     #[test]

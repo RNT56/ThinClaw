@@ -252,6 +252,7 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
         "direct_runtime_download_hf_model_files",
         RouteMode::LocalOnly,
     ),
+    ("direct_runtime_ensure_engine_ready", RouteMode::LocalOnly),
     (
         "direct_runtime_get_active_engine_info",
         RouteMode::LocalOnly,

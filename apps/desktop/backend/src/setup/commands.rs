@@ -364,6 +364,7 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::toggle_spotlight,
         crate::hide_spotlight,
         // ── Engine & HF Hub ─────────────────────────────────────────────
+        crate::engine::direct_runtime_ensure_engine_ready,
         crate::engine::direct_runtime_get_active_engine_info,
         crate::engine::direct_runtime_get_engine_setup_status,
         crate::engine::direct_runtime_setup_engine,

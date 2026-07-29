@@ -1,0 +1,6 @@
+# ThinClaw's reviewed MLX service entry point.
+#
+# Transitive versions are resolved for macOS arm64/Python 3.12 into
+# requirements.lock with hashes. Do not add auxiliary pins here unless the
+# selected mlx-openai-server release declares them compatible.
+mlx-openai-server==1.8.1
