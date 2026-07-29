@@ -167,6 +167,8 @@ fn test_convert_messages_multiple_systems_concatenated() {
 #[test]
 fn build_rig_request_keeps_context_documents_out_of_preamble() {
     let request = build_rig_request(
+        "anthropic",
+        "claude-test",
         Some("Stable preamble".to_string()),
         vec![RigMessage::user("hello")],
         vec![
@@ -190,6 +192,91 @@ fn build_rig_request_keeps_context_documents_out_of_preamble() {
     assert!(history.contains("External Memory Recall"));
     assert!(history.contains("Skill Expansion"));
     assert!(request.documents.is_empty());
+}
+
+#[test]
+fn openai_gpt5_models_use_max_completion_tokens() {
+    for model in [
+        "gpt-5",
+        "gpt-5.4",
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "openai/gpt-5.6-terra",
+        "ft:gpt-5.6-terra:acme:test",
+        "gpt-6",
+    ] {
+        let request = build_rig_request(
+            "openai",
+            model,
+            None,
+            vec![RigMessage::user("hello")],
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            Some(4096),
+            Some(serde_json::json!({"logprobs": true})),
+        )
+        .expect("modern OpenAI request should build");
+
+        assert_eq!(request.max_tokens, None, "legacy field present for {model}");
+        let params = request
+            .additional_params
+            .expect("modern token limit should use additional params");
+        assert_eq!(
+            params["max_completion_tokens"], 4096,
+            "wrong modern limit for {model}"
+        );
+        assert_eq!(params["logprobs"], true, "lost existing params for {model}");
+    }
+}
+
+#[test]
+fn openai_o_series_models_use_max_completion_tokens() {
+    for model in ["o1", "o1-preview", "o3", "o3-mini", "o4-mini"] {
+        let (max_tokens, params) =
+            with_provider_output_token_limit("openai", model, Some(512), None)
+                .expect("o-series token limit should translate");
+        assert_eq!(max_tokens, None, "legacy field present for {model}");
+        assert_eq!(params.expect("modern params")["max_completion_tokens"], 512);
+    }
+}
+
+#[test]
+fn legacy_openai_and_compatible_providers_keep_max_tokens() {
+    for (provider, model) in [
+        ("openai", "gpt-4.1"),
+        ("openai", "gpt-4o"),
+        ("openai_compatible", "gpt-5.6-terra"),
+        ("anthropic", "claude-sonnet-4"),
+    ] {
+        let (max_tokens, params) =
+            with_provider_output_token_limit(provider, model, Some(1024), None)
+                .expect("legacy token limit should remain supported");
+        assert_eq!(max_tokens, Some(1024), "{provider}/{model}");
+        assert_eq!(params, None, "{provider}/{model}");
+    }
+}
+
+#[test]
+fn token_capture_fallback_only_matches_capture_parameter_rejections() {
+    assert!(is_token_capture_parameter_rejection(
+        "Unsupported parameter: 'logprobs' is not supported with this model"
+    ));
+    assert!(is_token_capture_parameter_rejection(
+        "extra inputs are not permitted: top_logprobs"
+    ));
+    assert!(!is_token_capture_parameter_rejection(
+        "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead."
+    ));
+    assert!(!is_token_capture_parameter_rejection(
+        "Unsupported parameter: 'max_tokens'. Request body also contained logprobs=true."
+    ));
+    assert!(!is_token_capture_parameter_rejection(
+        "500 Internal Server Error"
+    ));
 }
 
 #[test]

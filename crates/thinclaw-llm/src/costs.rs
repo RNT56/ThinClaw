@@ -236,6 +236,9 @@ fn pricing_per_m_to_per_token(price_per_m: f64) -> Option<Decimal> {
 fn static_model_cost(id: &str) -> Option<(Decimal, Decimal)> {
     match id {
         // OpenAI — GPT-5.x / Codex
+        "gpt-5.6" | "gpt-5.6-sol" => Some((dec!(0.000005), dec!(0.00003))),
+        "gpt-5.6-terra" => Some((dec!(0.0000025), dec!(0.000015))),
+        "gpt-5.6-luna" => Some((dec!(0.000001), dec!(0.000006))),
         "gpt-5.4" => Some((dec!(0.0000025), dec!(0.000015))),
         // `gpt-5.4-mini` / `gpt-5.4-nano` / `gpt-5.4-pro` share the same
         // family naming scheme as other GPT-5 models but have distinct prices.
@@ -401,6 +404,22 @@ mod tests {
         let (input, output) = model_cost("gpt-5.4-mini").unwrap();
         assert_eq!(input, dec!(0.00000075));
         assert_eq!(output, dec!(0.0000045));
+    }
+
+    #[test]
+    fn test_gpt_5_6_family_costs() {
+        assert_eq!(
+            model_cost("gpt-5.6-sol"),
+            Some((dec!(0.000005), dec!(0.00003)))
+        );
+        assert_eq!(
+            model_cost("openai/gpt-5.6-terra"),
+            Some((dec!(0.0000025), dec!(0.000015)))
+        );
+        assert_eq!(
+            model_cost("gpt-5.6-luna"),
+            Some((dec!(0.000001), dec!(0.000006)))
+        );
     }
 
     #[test]
