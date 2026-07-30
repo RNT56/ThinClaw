@@ -18,6 +18,7 @@ pub fn specta_builder() -> tauri_specta::Builder {
         // ── Sidecar Management ──────────────────────────────────────────
         crate::sidecar::direct_runtime_start_chat_server,
         crate::sidecar::direct_runtime_stop_chat_server,
+        crate::sidecar::direct_runtime_deactivate_model_services,
         crate::sidecar::direct_runtime_start_embedding_server,
         crate::sidecar::direct_runtime_start_summarizer_server,
         crate::sidecar::direct_runtime_get_sidecar_status,
@@ -38,19 +39,18 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::rag::direct_rag_retrieve_context,
         crate::rag::direct_rag_check_vector_index_integrity,
         // ── Model Management ────────────────────────────────────────────
-        crate::model_manager::list_models,
-        crate::model_manager::download_model,
-        crate::model_manager::cancel_download,
-        crate::model_manager::check_model_path,
-        crate::model_manager::open_models_folder,
-        crate::model_manager::delete_local_model,
+        crate::model_manager::inventory::list_models,
+        crate::model_manager::inventory::cancel_download,
+        crate::model_manager::inventory::check_model_path,
+        crate::model_manager::inventory::open_models_folder,
+        crate::model_manager::inventory::delete_local_model,
         crate::model_manager::open_url,
-        crate::model_manager::check_missing_standard_assets,
-        crate::model_manager::download_standard_asset,
-        crate::model_manager::open_standard_models_folder,
-        crate::model_manager::get_model_metadata,
-        crate::model_manager::update_remote_model_catalog,
-        crate::model_manager::get_remote_model_catalog,
+        crate::model_manager::standard_assets::check_missing_standard_assets,
+        crate::model_manager::standard_assets::download_standard_asset,
+        crate::model_manager::inventory::open_standard_models_folder,
+        crate::model_manager::standard_assets::get_model_metadata,
+        crate::model_manager::standard_assets::update_remote_model_catalog,
+        crate::model_manager::standard_assets::get_remote_model_catalog,
         // ── History ─────────────────────────────────────────────────────
         crate::history::direct_history_get_conversations,
         crate::history::direct_history_create_conversation,
@@ -367,15 +367,17 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::engine::direct_runtime_ensure_engine_ready,
         crate::engine::direct_runtime_get_active_engine_info,
         crate::engine::direct_runtime_get_engine_setup_status,
+        crate::engine::direct_runtime_list_ollama_models,
         crate::engine::direct_runtime_setup_engine,
         crate::engine::direct_runtime_snapshot,
         crate::engine::direct_runtime_start_engine,
         crate::engine::direct_runtime_stop_engine,
         crate::engine::direct_runtime_is_engine_ready,
-        crate::hf_hub::direct_runtime_discover_hf_models,
-        crate::hf_hub::direct_runtime_get_model_files,
-        crate::hf_hub::direct_runtime_download_hf_model_files,
-        crate::hf_hub::direct_runtime_discover_embedding_dimension,
+        crate::hf_hub::direct_runtime_get_hf_capabilities,
+        crate::hf_hub::direct_runtime_discover_hf_models_v2,
+        crate::hf_hub::download::direct_runtime_get_model_files_v2,
+        crate::hf_hub::download::direct_runtime_download_hf_selection,
+        crate::hf_hub::download::direct_runtime_discover_embedding_dimension,
         // ── Inference Router ────────────────────────────────────────────
         crate::inference::direct_inference_get_backends,
         crate::inference::direct_inference_update_backend,
@@ -503,6 +505,10 @@ mod tests {
         assert!(sanitized.contains(
             "async thinclawMcpGetPrompt(serverName: string, promptName: string, promptArgs: JsonValue | null)"
         ));
+        assert!(sanitized.contains(
+            "async directRuntimeDeactivateModelServices(installRoot: string, chat: boolean, embedding: boolean, summarizer: boolean, stt: boolean, image: boolean)"
+        ));
+        assert!(sanitized.contains("async deleteLocalModel(installRoot: string)"));
 
         let reserved = BTreeSet::from([
             "arguments",

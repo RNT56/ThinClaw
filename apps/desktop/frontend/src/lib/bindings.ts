@@ -51,6 +51,19 @@ async directRuntimeStopChatServer(modelPath: string) : Promise<Result<null, Brid
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Stop only the requested local services that actually use the selected
+ * backend inventory installation. A stale renderer selection can therefore
+ * never stop a different active model.
+ */
+async directRuntimeDeactivateModelServices(installRoot: string, chat: boolean, embedding: boolean, summarizer: boolean, stt: boolean, image: boolean) : Promise<Result<null, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_deactivate_model_services", { installRoot, chat, embedding, summarizer, stt, image }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async directRuntimeStartEmbeddingServer(modelPath: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("direct_runtime_start_embedding_server", { modelPath }) };
@@ -196,14 +209,6 @@ async listModels() : Promise<Result<ModelFile[], BridgeError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async downloadModel(url: string, filename: string) : Promise<Result<string, BridgeError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("download_model", { url, filename }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async cancelDownload(filename: string) : Promise<Result<null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cancel_download", { filename }) };
@@ -223,9 +228,9 @@ async openModelsFolder() : Promise<Result<null, BridgeError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async deleteLocalModel(filename: string) : Promise<Result<null, BridgeError>> {
+async deleteLocalModel(installRoot: string) : Promise<Result<null, BridgeError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_local_model", { filename }) };
+    return { status: "ok", data: await TAURI_INVOKE("delete_local_model", { installRoot }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3326,6 +3331,21 @@ async directRuntimeGetEngineSetupStatus() : Promise<Result<EngineSetupStatus, Br
 }
 },
 /**
+ * Return model identifiers currently installed in the local Ollama daemon.
+ *
+ * The command intentionally accepts no endpoint, token, or headers. Ollama
+ * discovery is limited to the unauthenticated loopback `/api/tags` endpoint
+ * and applies strict time, response-size, count, and identifier bounds.
+ */
+async directRuntimeListOllamaModels() : Promise<Result<string[], BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_list_ollama_models") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Trigger first-launch bootstrap or repair for the active engine.
  */
 async directRuntimeSetupEngine() : Promise<Result<null, BridgeError>> {
@@ -3381,19 +3401,21 @@ async directRuntimeIsEngineReady() : Promise<Result<boolean, BridgeError>> {
 }
 },
 /**
- * Search HuggingFace Hub for models compatible with the active engine.
- *
- * Uses the HF `/api/models` endpoint filtered by engine-specific tag,
- * sorted by download count (most popular first).
- *
- * `pipeline_tags` accepts multiple HF pipeline tags (e.g.
- * `["text-generation", "image-text-to-text"]`) so a single search covers
- * both text-only and multimodal LLMs.  One API request is made per tag,
- * results are merged, deduplicated by repo ID, and re-sorted by downloads.
+ * Return only the Hugging Face workflows that the compiled local runtime can
+ * actually consume. Ollama and cloud-only builds intentionally return none:
+ * downloading a raw Hub file does not import it into Ollama.
  */
-async directRuntimeDiscoverHfModels(query: string, engine: string, limit: number | null, pipelineTags: string[] | null) : Promise<Result<HfModelCard[], BridgeError>> {
+async directRuntimeGetHfCapabilities() : Promise<HfCapabilityProfileDto[]> {
+    return await TAURI_INVOKE("direct_runtime_get_hf_capabilities");
+},
+/**
+ * Backend-authoritative Hugging Face search. The caller chooses a ThinClaw
+ * task, while Rust derives the active engine, allowed Hub format, pipeline
+ * tags, and any runtime-family narrowing.
+ */
+async directRuntimeDiscoverHfModelsV2(query: string, task: HfModelTask, limit: number | null) : Promise<Result<HfModelSearchResponse, BridgeError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_discover_hf_models", { query, engine, limit, pipelineTags }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_discover_hf_models_v2", { query, task, limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3408,27 +3430,20 @@ async directRuntimeDiscoverHfModels(query: string, engine: string, limit: number
  * For MLX/vLLM repos: lists all model files (skipping README, images, etc.)
  * for a directory download.
  */
-async directRuntimeGetModelFiles(repoId: string, engine: string) : Promise<Result<ModelDownloadInfo, BridgeError>> {
+async directRuntimeGetModelFilesV2(repoId: string, task: HfModelTask) : Promise<Result<HfModelFilePlan, BridgeError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_get_model_files", { repoId, engine }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_get_model_files_v2", { repoId, task }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
 /**
- * Download one or more files from a HuggingFace repo.
- *
- * Reuses the existing streaming download infrastructure from `model_manager.rs`.
- * For single-file (GGUF): downloads the selected quant + optional mmproj.
- * For multi-file (MLX/vLLM): downloads all files preserving directory structure.
- *
- * `category` controls which subdirectory the model is saved under
- * (`LLM`, `Embedding`, `Diffusion`, `STT`, etc.). Defaults to `"LLM"`.
+ * Download one backend-produced, revision-pinned artifact selection.
  */
-async directRuntimeDownloadHfModelFiles(repoId: string, filesToDownload: string[], destSubdir: string | null, category: string | null) : Promise<Result<string, BridgeError>> {
+async directRuntimeDownloadHfSelection(request: HfDownloadSelectionRequest) : Promise<Result<HfDownloadResult, BridgeError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_download_hf_model_files", { repoId, filesToDownload, destSubdir, category }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_download_hf_selection", { request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3444,9 +3459,9 @@ async directRuntimeDownloadHfModelFiles(repoId: string, filesToDownload: string[
  * dimension *before* the embedding server starts, avoiding a wasteful
  * create-then-destroy cycle on first boot.
  */
-async directRuntimeDiscoverEmbeddingDimension(repoId: string) : Promise<Result<number | null, BridgeError>> {
+async directRuntimeDiscoverEmbeddingDimension(repoId: string, revision: string) : Promise<Result<number | null, BridgeError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_discover_embedding_dimension", { repoId }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_discover_embedding_dimension", { repoId, revision }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -4011,13 +4026,52 @@ export type GmailOAuthResult = { success: boolean; expires_in: number | null; sc
  */
 export type GmailStatusResponse = { enabled: boolean; configured: boolean; status: string; project_id: string; subscription_id: string; topic_id: string; label_filters: string[]; allowed_senders: string[]; missing_fields: string[]; oauth_configured: boolean }
 /**
- * Information about a single file in an HF repo.
+ * One immutable file in a selectable Hugging Face artifact.
  */
-export type HfFileInfo = { filename: string; size: number; size_display: string; quant_type: string | null; is_mmproj: boolean }
+export type HfArtifactFile = { path: string; size: number; size_display: string; sha256: string | null }
+export type HfArtifactLayout = "gguf_variants" | "directory"
+/**
+ * Backend-owned description of one supported engine/task combination.
+ */
+export type HfCapabilityProfileDto = { engine_id: string; task: HfModelTask; category: string; pipeline_tags: string[]; format_tag: string; layout: HfArtifactLayout; searchable: boolean; compatibility_hint: string | null }
+/**
+ * A complete loadable artifact. For sharded GGUF models, `files` contains
+ * every required shard and `primary_file` is the first shard passed to
+ * llama.cpp. Directory engines expose one artifact with no primary file.
+ */
+export type HfDownloadArtifact = { id: string; download_id: string; label: string; layout: HfArtifactLayout; files: HfArtifactFile[]; primary_file: string | null; quant_type: string | null; is_mmproj: boolean; total_size: number; total_size_display: string }
+export type HfDownloadResult = { download_id: string; repo_id: string; revision: string; engine_id: string; task: HfModelTask; category: string; artifact_id: string; companion_artifact_id: string | null; destination_dir: string; model_path: string; companion_path: string | null; downloaded_files: string[]; total_bytes: number }
+/**
+ * A request names a backend-produced artifact rather than supplying arbitrary
+ * file paths. The backend rebuilds the pinned plan before downloading.
+ */
+export type HfDownloadSelectionRequest = { repo_id: string; revision: string; task: HfModelTask; artifact_id: string; companion_artifact_id: string | null; destination_name: string | null }
 /**
  * A model card returned from HF Hub search.
  */
-export type HfModelCard = { id: string; author: string; name: string; downloads: number; likes: number; tags: string[]; last_modified: string; gated: boolean }
+export type HfModelCard = { id: string; author: string; name: string; downloads: number; likes: number; tags: string[]; last_modified: string; gated: boolean;
+/**
+ * Immutable repository commit returned by the Hub search API, when present.
+ */
+revision: string | null }
+/**
+ * Revision-pinned download choices for a repository.
+ */
+export type HfModelFilePlan = { repo_id: string; revision: string; engine_id: string; task: HfModelTask; category: string; format_tag: string; layout: HfArtifactLayout; artifacts: HfDownloadArtifact[]; companion_artifacts: HfDownloadArtifact[]; warnings: string[] }
+export type HfModelSearchResponse = { engine_id: string; task: HfModelTask; models: HfModelCard[];
+/**
+ * More same-filter Hub pages were left unvisited, or this response omitted
+ * compatible cards beyond the requested limit.
+ */
+has_more: boolean }
+/**
+ * Model tasks that ThinClaw has an actual local consumer for.
+ *
+ * This intentionally does not contain a video task: ThinClaw currently has no
+ * local video runtime, so presenting video repositories as installable would
+ * be misleading.
+ */
+export type HfModelTask = "chat" | "vision" | "embedding" | "stt" | "diffusion" | "tts"
 /**
  * Hook information for UI display
  */
@@ -4140,11 +4194,7 @@ export type ModelCapabilitySet = { streaming: boolean; tools: boolean; vision: b
 export type ModelCategory = "chat" | "embedding" | "tts" | "stt" | "diffusion" | "other"
 export type ModelDescriptor = { id: string; displayName: string; provider: string; providerName: string; category: ModelCategory; contextWindow?: number | null; maxOutputTokens?: number | null; supportsVision?: boolean; supportsTools?: boolean; supportsStreaming?: boolean; capabilities?: ModelCapabilitySet; deprecated?: boolean; pricing?: ModelPricing | null; embeddingDimensions?: number | null; metadata?: { [key in string]: string } }
 export type ModelDiscoveryResult = { providers: ProviderDiscoveryResult[]; totalModels: number; errors?: string[] }
-/**
- * Aggregated download info for a model repo, after file tree parsing.
- */
-export type ModelDownloadInfo = { repo_id: string; is_multi_file: boolean; files: HfFileInfo[]; mmproj_file: HfFileInfo | null; total_size: number; total_size_display: string }
-export type ModelFile = { name: string; size: number; path: string }
+export type ModelFile = { name: string; size: number; path: string; id: string; relative_path: string; install_root: string; category: string; task: string | null; source: string; repo_id: string | null; revision: string | null; artifact_id: string | null; companion_artifact_id: string | null; companion_path: string | null; runtime: string | null; format: string; artifact_kind: string; compatible: boolean; compatibility_reason: string | null }
 export type ModelPricing = { inputPerMillion: number | null; outputPerMillion: number | null; perImage: number | null; perMinute: number | null; per1kChars: number | null }
 /**
  * OAuth flow start result for the frontend.

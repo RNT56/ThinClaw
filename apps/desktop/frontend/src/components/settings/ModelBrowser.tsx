@@ -1,16 +1,30 @@
 import { Trash2, RefreshCw, Download, Search, CheckCircle2, FolderOpen, Globe, Loader2 } from "lucide-react";
 import * as Progress from '@radix-ui/react-progress';
 import { cn } from "../../lib/utils";
-import { commandClient } from "../../lib/command-client";
 import { useModelContext } from "../model-context";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { commands } from "../../lib/bindings";
+import { commandClient } from "../../lib/command-client";
+import { bridgeErrorMessage } from "../../lib/command-errors";
+import { directCommands } from "../../lib/generated/direct-commands";
 import { toast } from "sonner";
 import { useConfig } from "../../hooks/use-config";
 import { useCloudModels, type CloudModelEntry } from "../../hooks/use-cloud-models";
 import { HFDiscovery } from "./HFDiscovery";
 import { ActiveEngineChip } from "./ActiveEngineChip";
 import { EngineSetupBanner } from "./EngineSetupBanner";
+import {
+    buildModelDeactivationPlan,
+    buildModelLibraryCategories,
+    getVisionSelectionState,
+    isLocalSummarizerCandidate,
+    isModelOnDiskInLibrary,
+    normalizeModelLibraryCategory,
+    shouldIncludeCuratedEntryInMyModels,
+    supportsLocalSummarizer,
+} from "../../lib/model-library-view";
+import { reconcileSummarizerRuntime } from "../../lib/summarizer-runtime";
+import { useOllamaModels } from "../../hooks/use-ollama-models";
 
 /** Format a short description for a cloud-discovered model. */
 function formatCloudDescription(cm: CloudModelEntry): string {
@@ -31,8 +45,8 @@ export function ModelBrowser() {
         downloading,
         isRefreshing,
         refreshModels,
-        startDownload,
         cancelDownload,
+        deactivateModel,
         deleteModel,
         currentModelPath,
         currentEmbeddingModelPath,
@@ -49,11 +63,20 @@ export function ModelBrowser() {
         standardAssets,
         checkStandardAssets,
         downloadStandardAsset,
+        maxContext,
         engineInfo,
+        runtimeSnapshot,
     } = useModelContext();
 
     // The curated model library is GGUF-only — only relevant for llama.cpp engine
-    const isLlamaCpp = engineInfo?.id === 'llamacpp' || engineInfo?.id === 'ollama';
+    const isLlamaCpp = engineInfo?.id === 'llamacpp';
+    const isOllama = engineInfo?.id === 'ollama';
+    const {
+        models: ollamaModels,
+        status: ollamaModelsStatus,
+        error: ollamaModelsError,
+        refresh: refreshOllamaModels,
+    } = useOllamaModels(isOllama);
 
     // Trigger standard asset check on mount
     useEffect(() => {
@@ -63,9 +86,99 @@ export function ModelBrowser() {
     const [searchQuery, setSearchQuery] = useState("");
     const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
     const [activeCategory, setActiveCategory] = useState("All");
-    const [selectedModelVariants, setSelectedModelVariants] = useState<{ model: any, isOpen: boolean } | null>(null);
     const [status, setStatus] = useState<any>(null);
+    const [startingSummarizerPath, setStartingSummarizerPath] = useState<string | null>(null);
+    const [summarizerRunning, setSummarizerRunning] = useState(false);
+    const summarizerStartInFlightRef = useRef(false);
+    const summarizerStatusGenerationRef = useRef(0);
     const { config, updateConfig } = useConfig();
+    const summarizerSupported = useMemo(
+        () => supportsLocalSummarizer(engineInfo, runtimeSnapshot),
+        [engineInfo, runtimeSnapshot],
+    );
+
+    const refreshSummarizerStatus = useCallback(async (): Promise<boolean> => {
+        const generation = ++summarizerStatusGenerationRef.current;
+        if (!summarizerSupported) {
+            setSummarizerRunning(false);
+            return false;
+        }
+
+        try {
+            const sidecarStatus = await directCommands.directRuntimeGetSidecarStatus();
+            if (generation === summarizerStatusGenerationRef.current) {
+                setSummarizerRunning(sidecarStatus.summarizer_running);
+            }
+            return sidecarStatus.summarizer_running;
+        } catch (error) {
+            if (generation === summarizerStatusGenerationRef.current) {
+                setSummarizerRunning(false);
+            }
+            console.warn("Could not read summarizer status:", error);
+            return false;
+        }
+    }, [summarizerSupported]);
+
+    useEffect(() => {
+        void refreshSummarizerStatus();
+        return () => {
+            summarizerStatusGenerationRef.current += 1;
+        };
+    }, [refreshSummarizerStatus, runtimeSnapshot]);
+
+    const activateSummarizer = async (model: {
+        name: string;
+        localPath?: string | null;
+        isLocal?: boolean | null;
+        managedCategory?: string | null;
+        compatible?: boolean | null;
+    }) => {
+        if (
+            !isLocalSummarizerCandidate(model, summarizerSupported)
+            || !model.localPath
+        ) {
+            toast.error("This model cannot run as a local summarizer");
+            return;
+        }
+        if (summarizerStartInFlightRef.current) return;
+
+        summarizerStartInFlightRef.current = true;
+        summarizerStatusGenerationRef.current += 1;
+        setStartingSummarizerPath(model.localPath);
+        try {
+            await reconcileSummarizerRuntime({
+                modelPath: model.localPath,
+                contextSize: maxContext,
+                start: directCommands.directRuntimeStartSummarizerServer,
+                persistSelection: setSummarizerModelPath,
+            });
+            setSummarizerRunning(true);
+            toast.success(`${model.name} is ready as the summarizer`);
+        } catch (error) {
+            console.error("Failed to start summarizer:", error);
+            toast.error(`Could not start the summarizer: ${bridgeErrorMessage(error)}`);
+            await refreshSummarizerStatus();
+        } finally {
+            summarizerStartInFlightRef.current = false;
+            setStartingSummarizerPath(null);
+        }
+    };
+
+    const selectOllamaModel = async (model: string) => {
+        try {
+            if (config?.selected_chat_provider !== "local") {
+                await updateConfig({
+                    ...config,
+                    selected_chat_provider: "local",
+                    chat_backend: "local",
+                });
+            }
+            setModelPath(model);
+        } catch (error) {
+            console.error("Failed to select Ollama model:", error);
+            toast.error("Could not switch to the Ollama model");
+        }
+    };
 
     // Top-level tab: Discover (HF Hub, default) vs My Models (downloaded)
     const [topTab, setTopTab] = useState<"discover" | "library">("discover");
@@ -161,10 +274,10 @@ export function ModelBrowser() {
     );
 
     const unifiedModels = useMemo(() => {
-        // Curated GGUF models only for llama.cpp/ollama; cloud models always shown
-        const merged = isLlamaCpp
-            ? [...models]
-            : models.filter(m => m.category === 'Cloud');
+        // This tab is inventory-backed. The curated local catalog used mutable
+        // file URLs and basename matching, so acquisition now lives exclusively
+        // in Discover while only cloud catalog entries are merged here.
+        const merged = models.filter(shouldIncludeCuratedEntryInMyModels);
 
         // ── Merge cloud-discovered models ──────────────────────────────────
         // Convert CloudModelEntry to ExtendedModelDefinition-like shape
@@ -201,136 +314,89 @@ export function ModelBrowser() {
 
         const allMerged = [...merged, ...discoveredAsModels];
 
-        // Helper to get basename
-        const getBasename = (path: string) => path.split(/[\\/]/).pop() || path;
-
-        // Collect all component filenames from models
-        const curatedComponentFilenames = new Set(
-            models.flatMap(m => [
-                ...(m.components?.map(c => c.filename) || []),
-                ...(m.mmproj ? [m.mmproj.filename] : [])
-            ])
-        );
-
-        // Collect all variant filenames from models
-        const curatedVariantFilenames = new Set(
-            models.flatMap(m => m.variants.map(v => v.filename))
-        );
-
-        const localOnly = localModels.filter(local => {
-            const basename = getBasename(local.name);
-            return !curatedComponentFilenames.has(basename) && !curatedVariantFilenames.has(basename);
-        });
-
-        const curatedDisplay = allMerged.map(m => {
-            // A curated model is "local" if its main variant is downloaded
-            // Check if ANY variant matches a local file basename
-            const downloadedVariants = m.variants.filter(v =>
-                localModels.some(l => getBasename(l.name) === v.filename)
-            );
-
-            const isLocal = downloadedVariants.length > 0;
-            const activeVariant = downloadedVariants[0] || m.variants[0] || { filename: "" };
-            const local = localModels.find(l => getBasename(l.name) === activeVariant.filename);
-
-            // Track status of components
-            const componentsStatus = (m.components || []).map((c: any) => ({
-                ...c,
-                isDownloaded: localModels.some(l => getBasename(l.name) === c.filename)
-            }));
-
-            const mmprojStatus = m.mmproj ? {
-                ...m.mmproj,
-                isDownloaded: localModels.some(l => getBasename(l.name) === m.mmproj?.filename)
-            } : null;
-
+        const cloudDisplay = allMerged.map(m => {
+            const activeVariant = m.variants[0] || { filename: "" };
             return {
                 ...m,
-                localPath: local?.path || null,
-                isLocal: isLocal,
+                localPath: null,
+                isLocal: false,
                 isCurated: true,
-                displaySize: m.variants[0]?.size || "Cloud",
+                displaySize: activeVariant.size || "Cloud",
                 filename: activeVariant.filename,
-                relativeFilename: local?.name || activeVariant.filename,
-                componentsStatus,
-                mmprojStatus
+                relativeFilename: activeVariant.filename,
+                componentsStatus: [],
+                mmprojStatus: null,
             };
         });
 
-        const localDisplay = localOnly.map(l => {
-            const ext = l.path.split('.').pop()?.toLowerCase();
-            const pathLower = l.path.replace(/\\/g, '/').toLowerCase();
-            const nameLower = l.name.replace(/\\/g, '/').toLowerCase();
-
-            // --- Path-based category detection (most reliable) ---
-            // Models downloaded via HF discovery go into category subdirectories:
-            //   models/Embedding/..., models/STT/..., models/Diffusion/..., models/TTS/...
-            const inEmbeddingDir = nameLower.startsWith('embedding/') || pathLower.includes('/models/embedding/');
-            const inSttDir = nameLower.startsWith('stt/') || pathLower.includes('/models/stt/');
-            const inDiffusionDir = nameLower.startsWith('diffusion/') || pathLower.includes('/models/diffusion/');
-            const inTtsDir = nameLower.startsWith('tts/') || pathLower.includes('/models/tts/');
-
-            // --- Keyword heuristics (fallback for models not in category dirs) ---
-            const diffusionKeywords = ["diffusion", "flux", "sd-", "stable-diffusion", "sdxl", "sd3"];
-            const looksLikeDiffusion = !inDiffusionDir && diffusionKeywords.some(k => pathLower.includes(k) || nameLower.includes(k));
-            const isImageGen = inDiffusionDir || looksLikeDiffusion ||
-                (ext === "safetensors" || ext === "ckpt" || ext === "pt") && diffusionKeywords.some(k => pathLower.includes(k));
-
-            const embeddingKeywords = ["embed", "nomic", "bge", "bert", "stella", "e5"];
-            const isEmbedding = inEmbeddingDir || (!inSttDir && !inDiffusionDir && embeddingKeywords.some(k => pathLower.includes(k) || nameLower.includes(k)));
-
-            const sttKeywords = ["whisper", "parakeet", "voxtral"];
-            const isStt = inSttDir || (!inEmbeddingDir && !inDiffusionDir && sttKeywords.some(k => pathLower.includes(k) || nameLower.includes(k)));
-
-            const isTts = inTtsDir;
-
-            let tags: string[] = ["Local"];
-            let family = "Unknown";
-            let description = "Local Model";
-
-            if (isImageGen) {
-                tags.push("Image Gen", "Diffusion");
-                family = "Stable Diffusion";
-                description = "Local Diffusion/Image Model";
-            } else if (isEmbedding) {
-                tags.push("Embedding");
-                family = "BERT/Embedding";
-                description = "Local Embedding Model";
-            } else if (isStt) {
-                tags.push("STT");
-                family = "Whisper";
-                description = "Local Speech-to-Text Model";
-            } else if (isTts) {
-                tags.push("TTS");
-                family = "TTS";
-                description = "Local Text-to-Speech Model";
-            } else {
-                tags.push("Chat");
-                description = "Local Chat/LLM Model";
-            }
+        const localDisplay = localModels.map(l => {
+            const metadata = {
+                LLM: {
+                    tags: ["Local", "Chat"],
+                    family: "Local LLM",
+                    description: "Local Chat/LLM Model",
+                },
+                Embedding: {
+                    tags: ["Local", "Embedding"],
+                    family: "Embedding",
+                    description: "Local Embedding Model",
+                },
+                STT: {
+                    tags: ["Local", "STT"],
+                    family: "Speech-to-Text",
+                    description: "Local Speech-to-Text Model",
+                },
+                Diffusion: {
+                    tags: ["Local", "Image Gen", "Diffusion"],
+                    family: "Image Generation",
+                    description: "Local Diffusion/Image Model",
+                },
+                TTS: {
+                    tags: ["Local", "TTS"],
+                    family: "Text-to-Speech",
+                    description: "Local Text-to-Speech Model",
+                },
+            }[l.category] ?? {
+                tags: ["Local"],
+                family: "Local Model",
+                description: "Local Model",
+            };
+            const tags = [...metadata.tags];
+            if (l.task === "vision") tags.push("Vision", "Multi-modal");
+            if (!l.compatible) tags.push("Incompatible");
+            const description = l.compatibility_reason
+                ? `${metadata.description} · ${l.compatibility_reason}`
+                : metadata.description;
 
             return {
-                name: l.name.split(/[\\/]/).pop() || l.name,
+                name: l.repo_id || l.relative_path.split(/[\\/]/).pop() || l.name,
                 description,
-                filename: l.name,
+                filename: l.relative_path,
                 url: "",
                 size: l.size.toString(),
                 displaySize: (l.size / 1024 / 1024 / 1024).toFixed(2) + " GB",
                 localPath: l.path,
                 isLocal: true,
                 isCurated: false,
-                id: l.name,
-                family,
+                id: l.id,
+                family: metadata.family,
                 vram_required_gb: 0,
                 recommended_min_ram: 0,
                 tags,
                 manual_download: false,
                 info_url: undefined,
-                relativeFilename: l.name
+                relativeFilename: l.install_root,
+                category: l.category,
+                managedCategory: l.category,
+                compatible: l.compatible,
+                repoId: l.repo_id,
+                artifactId: l.artifact_id,
+                companionArtifactId: l.companion_artifact_id,
+                managedTask: l.task,
             };
         });
 
-        const allModels = [...curatedDisplay, ...localDisplay].filter(m => {
+        const allModels = [...cloudDisplay, ...localDisplay].filter(m => {
             if (searchQuery.trim() === "") return true;
             const query = searchQuery.toLowerCase();
             return (
@@ -366,10 +432,29 @@ export function ModelBrowser() {
 
     const isActive = (path: string | null) => path && currentModelPath && path === currentModelPath;
     const isEmbeddingActive = (path: string | null) => path && currentEmbeddingModelPath && path === currentEmbeddingModelPath;
-    const isVisionActive = (path: string | null) => path && currentVisionModelPath && path === currentVisionModelPath;
     const isSttActive = (path: string | null) => path && currentSttModelPath && path === currentSttModelPath;
     const isImageGenActive = (path: string | null) => path && currentImageGenModelPath && path === currentImageGenModelPath;
-    const isSummarizerActive = (path: string | null) => path && currentSummarizerModelPath && path === currentSummarizerModelPath;
+    const isSummarizerSelected = (path: string | null) => path && currentSummarizerModelPath && path === currentSummarizerModelPath;
+    const modelCategories = useMemo(
+        () => buildModelLibraryCategories({
+            hasAnyCloud,
+            isLlamaCpp,
+            summarizerSupported,
+            supportedCapabilities: runtimeSnapshot?.supportedCapabilities ?? [],
+        }),
+        [
+            hasAnyCloud,
+            isLlamaCpp,
+            runtimeSnapshot?.supportedCapabilities,
+            summarizerSupported,
+        ],
+    );
+
+    useEffect(() => {
+        setActiveCategory(current =>
+            normalizeModelLibraryCategory(current, modelCategories)
+        );
+    }, [modelCategories]);
 
     return (
         <div className="space-y-4">
@@ -404,9 +489,9 @@ export function ModelBrowser() {
                     id="tab-library"
                 >
                     My Models
-                    {localModels.length > 0 && (
+                    {(isOllama ? ollamaModels.length : localModels.length) > 0 && (
                         <span className="text-[10px] bg-muted/80 text-muted-foreground px-1.5 py-0.5 rounded-full font-mono">
-                            {localModels.length}
+                            {isOllama ? ollamaModels.length : localModels.length}
                         </span>
                     )}
                 </button>
@@ -422,6 +507,70 @@ export function ModelBrowser() {
 
             {/* Library Tab (existing content) */}
             {topTab === "library" && <>
+                {isOllama && (
+                    <div className="rounded-xl border border-border/60 bg-card/50 p-5">
+                        <div className="flex items-start justify-between gap-4">
+                            <div>
+                                <h3 className="font-semibold">Installed in Ollama</h3>
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                    Ollama owns these models. Install or remove them with Ollama, then refresh this list.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => void refreshOllamaModels()}
+                                disabled={ollamaModelsStatus === "loading"}
+                                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-semibold hover:bg-accent disabled:opacity-50"
+                            >
+                                <RefreshCw className={cn(
+                                    "h-3.5 w-3.5",
+                                    ollamaModelsStatus === "loading" && "animate-spin",
+                                )} />
+                                Refresh
+                            </button>
+                        </div>
+
+                        {ollamaModelsStatus === "loading" ? (
+                            <div className="mt-4 flex items-center text-sm text-muted-foreground">
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                Reading the Ollama library…
+                            </div>
+                        ) : ollamaModelsError ? (
+                            <div className="mt-4 rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
+                                {ollamaModelsError}
+                            </div>
+                        ) : ollamaModels.length === 0 ? (
+                            <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-sm">
+                                <p className="font-semibold text-amber-600 dark:text-amber-400">No Ollama models installed</p>
+                                <p className="mt-1 text-muted-foreground">
+                                    Run <code className="font-mono">ollama pull &lt;model&gt;</code>, then refresh.
+                                </p>
+                            </div>
+                        ) : (
+                            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                                {ollamaModels.map(model => {
+                                    const active = currentModelPath === model;
+                                    return (
+                                        <button
+                                            key={model}
+                                            type="button"
+                                            onClick={() => void selectOllamaModel(model)}
+                                            className={cn(
+                                                "flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left text-sm transition-colors",
+                                                active
+                                                    ? "border-primary/40 bg-primary/10 text-primary"
+                                                    : "border-border hover:bg-accent",
+                                            )}
+                                        >
+                                            <span className="truncate font-mono">{model}</span>
+                                            {active && <CheckCircle2 className="h-4 w-4 shrink-0" />}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                )}
                 {/* Sticky Header Container */}
                 <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm supports-backdrop-filter:bg-background/60 -mx-1 px-1 py-4 space-y-4">
                     <div className="flex flex-col gap-3">
@@ -470,10 +619,7 @@ export function ModelBrowser() {
                     </div>
 
                     <div className="flex gap-2 pb-1 overflow-x-auto w-full min-w-0 no-scrollbar mask-fade-right scroll-smooth snap-x">
-                        {(isLlamaCpp
-                            ? ["All", ...(hasAnyCloud ? ["Cloud Brains"] : []), "Chat", "Summarizer", "Diffusion", "STT", "Embedding", "Standard"]
-                            : ["All", ...(hasAnyCloud ? ["Cloud Brains"] : []), "Chat", "Diffusion", "STT", "Embedding"]
-                        ).map((cat) => (
+                        {modelCategories.map((cat) => (
                             <button
                                 key={cat}
                                 onClick={() => {
@@ -560,6 +706,7 @@ export function ModelBrowser() {
                         if (!isCloudConfigured(m)) return false;
 
                         const isCloud = (m as any).category === "Cloud";
+                        const managedCategory = (m as any).managedCategory as string | undefined;
 
                         if (activeCategory === "All") return true;
                         if (activeCategory === "Cloud Brains") return isCloud;
@@ -567,13 +714,28 @@ export function ModelBrowser() {
                         // Exclude Cloud models from all other specific (Local) tabs
                         if (isCloud) return false;
 
-                        if (activeCategory === "Chat" || activeCategory === "Summarizer") {
+                        if (activeCategory === "Summarizer") {
+                            return isLocalSummarizerCandidate(
+                                m,
+                                summarizerSupported,
+                            );
+                        }
+
+                        if (managedCategory) {
+                            if (activeCategory === "Chat") {
+                                return managedCategory === "LLM";
+                            }
+                            return managedCategory === activeCategory;
+                        }
+
+                        if (activeCategory === "Chat") {
                             // Include local LLMs
                             return !m.tags?.some(t => ["Image Gen", "STT", "Embedding"].includes(t));
                         }
                         if (activeCategory === "Diffusion") return m.tags?.includes("Image Gen");
                         if (activeCategory === "STT") return m.tags?.includes("STT");
                         if (activeCategory === "Embedding") return m.tags?.includes("Embedding");
+                        if (activeCategory === "TTS") return m.tags?.includes("TTS");
                         return true;
                     }).map((model) => {
                         const category = (model as any).category || "LLM";
@@ -585,20 +747,45 @@ export function ModelBrowser() {
                         const isDownloading = progress !== undefined;
                         const isModelActive = (model as any).category === 'Cloud' ? isActiveCloud(model) : isActive(model.localPath);
                         const isEmbedding = isEmbeddingActive(model.localPath);
-                        const isVision = isVisionActive(model.localPath);
+                        const visionSelection = getVisionSelectionState(
+                            model.localPath,
+                            currentModelPath,
+                            currentVisionModelPath,
+                        );
+                        const isVisionSelected = visionSelection.selected;
+                        const isVision = visionSelection.operational;
                         const isStt = isSttActive(model.localPath);
                         const isImageGen = isImageGenActive(model.localPath);
-                        const isSummarizer = (model as any).category === 'Cloud'
-                            ? (currentSummarizerModelPath === model.id)
-                            : isSummarizerActive(model.localPath);
-                        const isDownloaded = model.isLocal || (model as any).category === "Cloud";
+                        const isDownloaded = isModelOnDiskInLibrary(model);
                         const modelAny = model as any;
+                        const isCompatible = modelAny.compatible !== false;
+                        const canUseAsSummarizer = isLocalSummarizerCandidate(
+                            modelAny,
+                            summarizerSupported,
+                        );
+                        const isSummarizerSelectedForModel = Boolean(
+                            isSummarizerSelected(model.localPath),
+                        );
+                        const isSummarizer = canUseAsSummarizer
+                            && isSummarizerSelectedForModel
+                            && summarizerRunning;
+                        const isSummarizerStarting =
+                            startingSummarizerPath === model.localPath;
                         const rFilename = modelAny.relativeFilename || model.filename;
                         const isConfirming = confirmingDelete === rFilename;
                         const hasEmbeddingTag = model.tags && model.tags.includes("Embedding");
                         const hasVisionTag = model.tags && (model.tags.includes("Vision") || model.tags.includes("Multi-modal"));
                         const hasSttTag = model.tags && (model.tags.includes("STT") || model.family === "Whisper");
                         const hasImageGenTag = model.tags && (model.tags.includes("Image Gen") || model.family === "Stable Diffusion");
+                        const hasTtsTag = model.tags && model.tags.includes("TTS");
+                        const deactivationPlan = buildModelDeactivationPlan({
+                            chat: Boolean(isModelActive),
+                            embedding: Boolean(isEmbedding),
+                            vision: Boolean(isVisionSelected),
+                            summarizer: isSummarizerSelectedForModel,
+                            stt: Boolean(isStt),
+                            image: Boolean(isImageGen),
+                        }, engineInfo);
 
                         return (
                             <div key={model.id} className={cn(
@@ -620,6 +807,7 @@ export function ModelBrowser() {
                                                 {isImageGen && <span className="text-[10px] uppercase tracking-wider font-bold bg-muted text-muted-foreground px-2 py-0.5 rounded-md">Image Gen</span>}
                                                 {model.isCurated && model.isLocal && <span className="text-[10px] uppercase tracking-wider font-bold bg-emerald-500/5 text-emerald-600 dark:text-emerald-400 px-2 py-0.5 rounded-md border border-emerald-500/10">Installed</span>}
                                                 {!model.isCurated && <span className="text-[10px] uppercase tracking-wider font-bold bg-muted/50 text-muted-foreground/50 px-2 py-0.5 rounded-md border border-border/10">Local</span>}
+                                                {!isCompatible && <span className="text-[10px] uppercase tracking-wider font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 px-2 py-0.5 rounded-md border border-amber-500/20">Incompatible</span>}
                                                 {category === "Cloud" && (() => {
                                                     const id = model.id.toLowerCase();
                                                     const badges: [string, string][] = [
@@ -663,14 +851,10 @@ export function ModelBrowser() {
                                                     <span className="text-emerald-600/70 dark:text-emerald-400/70 font-medium">Ready</span>
                                                 ) : (
                                                     <button
-                                                        onClick={() => {
-                                                            const m = model as any;
-                                                            const variant = m.variants?.find((v: any) => v.filename === m.filename) || m.variants?.[0];
-                                                            startDownload(m, variant);
-                                                        }}
+                                                        onClick={() => setTopTab("discover")}
                                                         className="text-primary hover:text-primary/80 transition-colors font-semibold"
                                                     >
-                                                        {downloading[comp.filename] ? `${downloading[comp.filename].toFixed(0)}%` : "Download"}
+                                                        Reinstall from Discover
                                                     </button>
                                                 )}
                                             </div>
@@ -688,7 +872,6 @@ export function ModelBrowser() {
                                                 onClick={(e) => {
                                                     e.stopPropagation();
                                                     cancelDownload(fullPath);
-                                                    if (fullPath !== model.filename) cancelDownload(model.filename);
                                                 }}
                                                 className="text-destructive hover:text-destructive/80 font-medium"
                                             >
@@ -757,32 +940,37 @@ export function ModelBrowser() {
                                             {isConfirming ? "Confirm" : <Trash2 className="w-4 h-4" />}
                                         </button>
 
-                                        {model.isCurated && (model as any).variants?.length > 1 && (
+                                        {deactivationPlan.hasSelection && (
                                             <button
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    setSelectedModelVariants({ model, isOpen: true });
-                                                }}
-                                                className="bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground py-2 px-3 rounded-md transition-colors border border-border/10"
-                                                title="Get other quantizations/versions"
+                                                onClick={() => void deactivateModel(rFilename)}
+                                                className="py-2 px-3 rounded-md text-xs font-semibold text-destructive border border-destructive/20 hover:bg-destructive hover:text-destructive-foreground transition-colors"
                                             >
-                                                <FolderOpen className="w-4 h-4" />
+                                                Deactivate
                                             </button>
                                         )}
 
                                         <div className="flex flex-wrap gap-2 flex-1">
-                                            {!hasEmbeddingTag && !hasSttTag && !hasImageGenTag && (
+                                            {!hasEmbeddingTag && !hasSttTag && !hasImageGenTag && !hasTtsTag && (
                                                 <>
                                                     <button
                                                         onClick={async () => {
                                                             if (model.localPath) {
                                                                 if (config?.selected_chat_provider !== "local") {
                                                                     try {
-                                                                        const newConfig = { ...config, selected_chat_provider: "local" };
+                                                                        const newConfig = {
+                                                                            ...config,
+                                                                            selected_chat_provider: "local",
+                                                                            chat_backend: "local",
+                                                                        };
                                                                         await updateConfig(newConfig);
                                                                     } catch (e) {
                                                                         console.error(e);
+                                                                        toast.error("Could not switch to local inference");
+                                                                        return;
                                                                     }
+                                                                }
+                                                                if (hasVisionTag) {
+                                                                    setVisionModelPath(model.localPath);
                                                                 }
                                                                 setModelPath(model.localPath, (model as any).template);
                                                             }
@@ -793,35 +981,71 @@ export function ModelBrowser() {
                                                                 ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shadow-xs ring-1 ring-emerald-500/10"
                                                                 : "bg-secondary hover:bg-secondary/80 text-secondary-foreground border border-transparent shadow-xs hover:-translate-y-px"
                                                         )}
-                                                        disabled={!!isModelActive}
+                                                        disabled={!isCompatible || !!isModelActive}
                                                     >
                                                         {isModelActive ? "Active" : "Chat"}
                                                     </button>
-                                                    <button
-                                                        onClick={() => model.localPath && setSummarizerModelPath(model.localPath)}
-                                                        className={cn(
-                                                            "flex-1 py-1.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center border transition-all",
-                                                            isSummarizer
-                                                                ? "bg-muted text-muted-foreground border-border/50 cursor-default"
-                                                                : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
-                                                        )}
-                                                        disabled={!!isSummarizer}
-                                                    >
-                                                        {isSummarizer ? "Summ. Active" : "Set Summ."}
-                                                    </button>
+                                                    {canUseAsSummarizer && (
+                                                        <button
+                                                            onClick={() => void activateSummarizer(modelAny)}
+                                                            className={cn(
+                                                                "flex-1 py-1.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center border transition-all",
+                                                                isSummarizer
+                                                                    ? "bg-muted text-muted-foreground border-border/50 cursor-default"
+                                                                    : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
+                                                            )}
+                                                            disabled={
+                                                                isSummarizer
+                                                                || startingSummarizerPath !== null
+                                                            }
+                                                        >
+                                                            {isSummarizerStarting ? (
+                                                                <>
+                                                                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                                                                    Starting…
+                                                                </>
+                                                            ) : isSummarizer ? (
+                                                                "Summ. Active"
+                                                            ) : isSummarizerSelectedForModel ? (
+                                                                "Restore Summ."
+                                                            ) : (
+                                                                "Set Summ."
+                                                            )}
+                                                        </button>
+                                                    )}
                                                 </>
                                             )}
 
                                             {hasVisionTag && (
                                                 <button
-                                                    onClick={() => model.localPath && setVisionModelPath(model.localPath)}
+                                                    onClick={async () => {
+                                                        if (!model.localPath) return;
+                                                        if (config?.selected_chat_provider !== "local") {
+                                                            try {
+                                                                await updateConfig({
+                                                                    ...config,
+                                                                    selected_chat_provider: "local",
+                                                                    chat_backend: "local",
+                                                                });
+                                                            } catch (error) {
+                                                                console.error(error);
+                                                                toast.error("Could not switch to local inference");
+                                                                return;
+                                                            }
+                                                        }
+                                                        setVisionModelPath(model.localPath);
+                                                        setModelPath(
+                                                            model.localPath,
+                                                            (model as any).template,
+                                                        );
+                                                    }}
                                                     className={cn(
                                                         "flex-1 py-1.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center border transition-all",
                                                         isVision
                                                             ? "bg-muted text-muted-foreground border-border/50 cursor-default"
                                                             : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
                                                     )}
-                                                    disabled={!!isVision}
+                                                    disabled={!isCompatible || !!isVision}
                                                 >
                                                     {isVision ? "Vision Active" : "Set Vision"}
                                                 </button>
@@ -836,7 +1060,7 @@ export function ModelBrowser() {
                                                             ? "bg-muted text-muted-foreground border-border/50 cursor-default"
                                                             : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
                                                     )}
-                                                    disabled={!!isStt}
+                                                    disabled={!isCompatible || !!isStt}
                                                 >
                                                     {isStt ? "STT Active" : "Set STT"}
                                                 </button>
@@ -851,7 +1075,7 @@ export function ModelBrowser() {
                                                             ? "bg-muted text-muted-foreground border-border/50 cursor-default"
                                                             : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
                                                     )}
-                                                    disabled={!!isImageGen}
+                                                    disabled={!isCompatible || !!isImageGen}
                                                 >
                                                     {isImageGen ? "Gen Active" : "Set Image Gen"}
                                                 </button>
@@ -866,10 +1090,16 @@ export function ModelBrowser() {
                                                             ? "bg-muted text-muted-foreground border-border/50 cursor-default"
                                                             : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
                                                     )}
-                                                    disabled={!!isEmbedding}
+                                                    disabled={!isCompatible || !!isEmbedding}
                                                 >
                                                     {isEmbedding ? "Embedder Active" : "Set Embedder"}
                                                 </button>
+                                            )}
+
+                                            {hasTtsTag && (
+                                                <span className="flex-1 py-2 px-3 text-center text-xs text-muted-foreground border border-border/50 rounded-xl">
+                                                    TTS assets are configured by the speech runtime
+                                                </span>
                                             )}
                                         </div>
                                     </div>
@@ -901,10 +1131,8 @@ export function ModelBrowser() {
                                                         selected_cloud_model: modelId,
                                                         selected_model_context_size: contextSize ?? undefined,
                                                     };
+                                                    await commandClient.thinclawSaveSelectedCloudModel(modelId);
                                                     await updateConfig(newConfig);
-                                                    if (commands.thinclawSaveSelectedCloudModel) {
-                                                        await commands.thinclawSaveSelectedCloudModel(modelId);
-                                                    }
                                                     const providerName = brain === "gemini" ? "Google" : brain.charAt(0).toUpperCase() + brain.slice(1);
                                                     toast.success(`${model.name} selected as active ${providerName} Brain`);
                                                     const s = await commands.thinclawGetStatus();
@@ -923,73 +1151,16 @@ export function ModelBrowser() {
                                         >
                                             {isModelActive ? "Active" : "Select Brain"}
                                         </button>
-                                        <button
-                                            onClick={() => setSummarizerModelPath(model.id)}
-                                            className={cn(
-                                                "flex-1 py-1.5 px-3 rounded-xl text-xs font-medium flex items-center justify-center border transition-all",
-                                                isSummarizer
-                                                    ? "bg-muted text-muted-foreground border-border/50 cursor-default"
-                                                    : "border-input hover:bg-accent hover:text-accent-foreground shadow-xs"
-                                            )}
-                                            disabled={!!isSummarizer}
-                                        >
-                                            {isSummarizer ? "Summ. Active" : "Set Summ."}
-                                        </button>
                                     </div>
                                 ) : (
                                     <div className="flex gap-2">
-                                        {(isModelActive || isEmbedding || isVision || isStt || isImageGen || isSummarizer) && (
-                                            <button
-                                                onClick={async () => {
-                                                    if (isModelActive) {
-                                                        if ((model as any).category === 'Cloud') {
-                                                            // For cloud models, deactivation means switching back to Local Neural Link
-                                                            const newConfig = { ...config, selected_chat_provider: null, selected_cloud_model: null };
-                                                            await updateConfig(newConfig);
-                                                            if (commands.thinclawSaveSelectedCloudModel) {
-                                                                await commands.thinclawSaveSelectedCloudModel(null);
-                                                            }
-                                                            toast.success("Switched to Local Neural Link");
-                                                            const s = await commands.thinclawGetStatus();
-                                                            if (s.status === 'ok') setStatus(s.data);
-                                                        } else {
-                                                            setModelPath("");
-                                                        }
-                                                    }
-                                                    if (isEmbedding) setEmbeddingModelPath("");
-                                                    if (isVision) setVisionModelPath("");
-                                                    if (isStt) setSttModelPath("");
-                                                    if (isImageGen) setImageGenModelPath("");
-                                                    if (isSummarizer) setSummarizerModelPath("");
-                                                }}
-                                                className="flex-1 py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider transition-all bg-destructive/10 text-destructive border border-destructive/20 hover:bg-destructive hover:text-destructive-foreground"
-                                            >
-                                                Deactivate
-                                            </button>
-                                        )}
-
-                                        {(!isModelActive || !isEmbedding || !isVision || !isStt || !isImageGen || !isSummarizer) && (
-                                            <button
-                                                onClick={() => {
-                                                    if (model.isCurated && (model as any).manual_download) {
-                                                        const url = (model as any).info_url || (model as any).url;
-                                                        if (url) commandClient.openUrl(url);
-                                                    } else if (model.isCurated && (model as any).variants?.length > 1) {
-                                                        setSelectedModelVariants({ model, isOpen: true });
-                                                    } else if (model.isCurated && (model as any).variants?.length === 1) {
-                                                        startDownload(model as any, (model as any).variants[0]);
-                                                    } else {
-                                                        // Local model or legacy handled by select buttons
-                                                    }
-                                                }}
-                                                className="w-full border border-primary/30 hover:bg-primary hover:text-primary-foreground text-primary py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center transition-all shadow-xs hover:-translate-y-px"
-                                            >
-                                                <Download className="w-4 h-4 mr-2" />
-                                                {model.isCurated && (model as any).manual_download
-                                                    ? "Manual Download"
-                                                    : (model.isCurated && (model as any).variants?.length > 1 ? "Select Quantization" : "Download")}
-                                            </button>
-                                        )}
+                                        <button
+                                            onClick={() => setTopTab("discover")}
+                                            className="w-full border border-primary/30 hover:bg-primary hover:text-primary-foreground text-primary py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center transition-all shadow-xs hover:-translate-y-px"
+                                        >
+                                            <Download className="w-4 h-4 mr-2" />
+                                            Browse in Discover
+                                        </button>
                                     </div>
                                 )}
                             </div>
@@ -1025,116 +1196,6 @@ export function ModelBrowser() {
                                 </button>
                             </>
                         )}
-                    </div>
-                )}
-
-                {/* Quantization selection modal */}
-                {selectedModelVariants?.isOpen && selectedModelVariants.model && (
-                    <div className="fixed inset-0 z-100 flex items-center justify-center p-4">
-                        <div className="absolute inset-0 bg-background/80 backdrop-blur-xs" onClick={() => setSelectedModelVariants(null)} />
-                        <div className="relative bg-card border border-white/10 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-200">
-                            <div className="p-6 space-y-4">
-                                <div>
-                                    <h3 className="text-xl font-bold">{selectedModelVariants.model.name}</h3>
-                                    <p className="text-sm text-muted-foreground">Select a quantization variant to download.</p>
-                                </div>
-
-                                <div className="space-y-2 max-h-[400px] overflow-y-auto pr-2">
-                                    {selectedModelVariants.model.variants.map((v: any) => {
-                                        // Use basename matching to support subfolders
-                                        const isLocal = localModels.some(l => (l.name.split(/[\\/]/).pop() || l.name) === v.filename);
-
-                                        // Robust progress lookup
-                                        const category = (selectedModelVariants.model as any).category || "LLM";
-                                        const sanitizedName = selectedModelVariants.model.name.replace(/[^a-zA-Z0-9-_]/g, "_");
-                                        const fullPath = `${category}/${sanitizedName}/${v.filename}`;
-                                        const progress = downloading[fullPath] ?? downloading[v.filename];
-
-                                        const isDownloading = progress !== undefined;
-
-                                        const isVariantActive = (selectedModelVariants.model as any).category === 'Cloud'
-                                            ? isActiveCloud(selectedModelVariants.model)
-                                            : (isLocal && localModels.find(l => (l.name.split(/[\\/]/).pop() || l.name) === v.filename)?.path === currentModelPath);
-
-                                        return (
-                                            <button
-                                                key={v.filename}
-                                                disabled={(isLocal && !isVariantActive) || isDownloading}
-                                                onClick={() => {
-                                                    if (isVariantActive) return;
-                                                    startDownload(selectedModelVariants.model, v);
-                                                    setSelectedModelVariants(null);
-                                                }}
-                                                className={cn(
-                                                    "w-full flex items-center justify-between p-4 rounded-xl border transition-all text-left group",
-                                                    (isLocal && !isVariantActive)
-                                                        ? "bg-muted/50 border-border/50 opacity-60 cursor-default"
-                                                        : isDownloading
-                                                            ? "bg-primary/5 border-primary/20 animate-pulse"
-                                                            : "bg-card border-border/50 hover:bg-accent hover:border-border",
-                                                    isVariantActive && "border-primary/50 bg-primary/5"
-                                                )}
-                                            >
-                                                <div className="space-y-1">
-                                                    <div className="font-semibold flex items-center gap-2">
-                                                        {v.name}
-                                                        {isLocal && <span className="text-[9px] uppercase tracking-wider font-bold bg-emerald-500/5 text-emerald-600 dark:text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/10 ml-2">Installed</span>}
-                                                    </div>
-                                                    <div className="text-[10px] text-muted-foreground uppercase font-mono">{v.filename}</div>
-                                                    <div className="flex gap-2 text-[10px] font-medium text-muted-foreground">
-                                                        <span>{v.vram_required_gb}GB VRAM</span>
-                                                        <span>•</span>
-                                                        <span>{v.size}</span>
-                                                    </div>
-                                                    <div className="flex flex-wrap gap-1.5 mt-1.5">
-                                                        <span className={cn(
-                                                            "text-[10px] px-2 py-0.5 rounded-full uppercase font-bold tracking-wider border",
-                                                            category === "Cloud" ? "bg-indigo-500/10 text-indigo-500 border-indigo-500/20" :
-                                                                category === "Diffusion" ? "bg-pink-500/10 text-pink-500 border-pink-500/20" :
-                                                                    category === "STT" ? "bg-amber-500/10 text-amber-500 border-amber-500/20" :
-                                                                        category === "Embedding" ? "bg-cyan-500/10 text-cyan-500 border-cyan-500/20" :
-                                                                            "bg-primary/10 text-primary border-primary/20"
-                                                        )}>
-                                                            {category === "Cloud" ? (
-                                                                selectedModelVariants.model.id.toLowerCase().startsWith("anthropic") ? "Anthropic" :
-                                                                    selectedModelVariants.model.id.toLowerCase().startsWith("openai") ? "OpenAI" :
-                                                                        (selectedModelVariants.model.id.toLowerCase().startsWith("google") || selectedModelVariants.model.id.toLowerCase().startsWith("gemini")) ? "Google" :
-                                                                            selectedModelVariants.model.id.toLowerCase().startsWith("groq") ? "Groq" :
-                                                                                selectedModelVariants.model.id.toLowerCase().startsWith("openrouter") ? "OpenRouter" : "Cloud"
-                                                            ) : category}
-                                                        </span>
-                                                        {selectedModelVariants.model.tags?.map((tag: string) => (
-                                                            <span key={tag} className="text-[10px] bg-muted text-muted-foreground px-2 py-0.5 rounded-full border border-border/50">
-                                                                {tag}
-                                                            </span>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                                <div className="flex items-center gap-2">
-                                                    {isVariantActive ? (
-                                                        <div className="flex items-center gap-1.5 px-2.5 py-1 bg-primary/10 text-primary rounded-full text-[10px] font-bold uppercase tracking-wider border border-primary/20">
-                                                            <CheckCircle2 className="w-3.5 h-3.5" />
-                                                            Active
-                                                        </div>
-                                                    ) : (
-                                                        !isLocal && !isDownloading && (
-                                                            <Download className="w-4 h-4 text-primary opacity-0 group-hover:opacity-100 transition-opacity" />
-                                                        )
-                                                    )}
-                                                </div>
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-
-                                <button
-                                    onClick={() => setSelectedModelVariants(null)}
-                                    className="w-full py-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
-                                >
-                                    Cancel
-                                </button>
-                            </div>
-                        </div>
                     </div>
                 )}
 

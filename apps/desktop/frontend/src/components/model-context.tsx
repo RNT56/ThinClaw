@@ -2,17 +2,36 @@ import React, { createContext, useContext, useEffect, useState, useCallback, use
 import { appDataDir } from "@tauri-apps/api/path";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
-import { ModelFile, SystemSpecs, commands, StandardAsset, EngineInfo, LocalRuntimeSnapshot } from "../lib/bindings";
+import {
+    ModelFile,
+    SystemSpecs,
+    commands,
+    StandardAsset,
+    EngineInfo,
+    LocalRuntimeSnapshot,
+    HfDownloadSelectionRequest,
+    HfDownloadResult,
+    HfModelCard,
+} from "../lib/bindings";
 import { directCommands } from "../lib/generated/direct-commands";
 import { commandClient } from "../lib/command-client";
 import { unwrapResult } from "../lib/guards";
 import { getMigratedLocalStorageItem, isOnboardingInProgress, setMigratedLocalStorageItem } from "../lib/local-storage-migration";
 import { bridgeErrorMessage } from "../lib/command-errors";
+import { hfDownloadSelectionFingerprint } from "../lib/hf-models";
+import {
+    isModelPathAffectedByRemoval,
+    modelRemovalPaths,
+    selectedModelRolesForRemoval,
+    selectedRolesForModelRemoval,
+    type ModelSelectionSnapshot,
+} from "../lib/model-library-view";
+import { loadInitialModelState } from "../lib/model-initialization";
 
-import { MODEL_LIBRARY, ExtendedModelDefinition as ModelDefinition, ModelVariant } from "../lib/model-library";
+import { MODEL_LIBRARY, ExtendedModelDefinition as ModelDefinition } from "../lib/model-library";
 
 // Enhanced Model Definitions interface re-export for convenience if needed, or just import from lib
-export type { ModelVariant, ModelDefinition };
+export type { ModelDefinition };
 export { MODEL_LIBRARY };
 
 
@@ -24,18 +43,6 @@ interface DownloadEvent {
     total: number;
     downloaded: number;
     percentage: number;
-}
-
-// Persistent discovery state — survives tab switches
-interface HfModelCard {
-    id: string;
-    author: string;
-    name: string;
-    downloads: number;
-    likes: number;
-    tags: string[];
-    last_modified: string;
-    gated: boolean;
 }
 
 interface RepoProgressInfo {
@@ -51,6 +58,8 @@ interface DiscoveryState {
     searchQuery: string;
     results: HfModelCard[];
     hasSearched: boolean;
+    /** The backend stopped at the requested/bounded result window. */
+    hasMore: boolean;
     expandedModel: string | null;
     downloadingFiles: Set<string>;
     repoProgress: Record<string, RepoProgressInfo>;
@@ -77,13 +86,17 @@ interface ModelContextType {
     setSttModelPath: (path: string) => void;
     setImageGenModelPath: (path: string) => void;
     setSummarizerModelPath: (path: string) => void;
-    refreshModels: () => Promise<ModelFile[]>;
-    startDownload: (model: ModelDefinition, variant?: ModelVariant) => Promise<void>;
+    /**
+     * Returns the accepted inventory, or null when the request failed or was
+     * superseded by a newer refresh.
+     */
+    refreshModels: () => Promise<ModelFile[] | null>;
     downloadSpeed: string;
     selectModel: (modelId: string) => void;
     activeCategory: string;
     setActiveCategory: (category: string) => void;
     cancelDownload: (filename: string) => Promise<void>;
+    deactivateModel: (installRoot: string) => Promise<void>;
     deleteModel: (filename: string) => Promise<void>;
     isRefreshing: boolean;
     systemSpecs: SystemSpecs | null;
@@ -95,12 +108,19 @@ interface ModelContextType {
     setMaxContext: (size: number) => void;
     isRestarting: boolean;
     setIsRestarting: (val: boolean) => void;
-    /** Download files from HuggingFace Hub (used by HFDiscovery) */
-    downloadHfFiles: (repoId: string, files: string[], destSubdir?: string | null, category?: string) => Promise<void>;
+    /** Download one backend-validated Hugging Face artifact selection. */
+    downloadHfSelection: (
+        request: HfDownloadSelectionRequest,
+        downloadId: string,
+    ) => Promise<HfDownloadResult>;
     /** Active inference engine info (null while loading) */
     engineInfo: EngineInfo | null;
     /** Public local runtime snapshot; endpoint secrets are redacted by the backend. */
     runtimeSnapshot: LocalRuntimeSnapshot | null;
+    /**
+     * Returns the accepted snapshot, or null when the request failed or was
+     * superseded by a newer refresh. A stale completion is never returned.
+     */
     refreshRuntimeSnapshot: () => Promise<LocalRuntimeSnapshot | null>;
     /** Persistent HF discovery state (survives tab switches) */
     discoveryState: DiscoveryState;
@@ -144,29 +164,42 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     const [models] = useState<ModelDefinition[]>(MODEL_LIBRARY);
     const [engineInfo, setEngineInfo] = useState<EngineInfo | null>(null);
     const [runtimeSnapshot, setRuntimeSnapshot] = useState<LocalRuntimeSnapshot | null>(null);
+    const runtimeSnapshotGenerationRef = useRef(0);
+    const modelInventoryGenerationRef = useRef(0);
 
     // Persistent discovery state — lifted from HFDiscovery so it survives tab switches
     const [discoveryState, setDiscoveryState] = useState<DiscoveryState>({
         searchQuery: "",
         results: [],
         hasSearched: false,
+        hasMore: false,
         expandedModel: null,
         downloadingFiles: new Set(),
         repoProgress: {},
     });
 
     const refreshRuntimeSnapshot = useCallback(async (): Promise<LocalRuntimeSnapshot | null> => {
+        const generation = ++runtimeSnapshotGenerationRef.current;
         try {
             const result = await directCommands.directRuntimeSnapshot();
             if (result.status === "ok") {
-                setRuntimeSnapshot(result.data);
-                return result.data;
+                if (generation === runtimeSnapshotGenerationRef.current) {
+                    setRuntimeSnapshot(result.data);
+                    return result.data;
+                }
+                return null;
             }
-            console.warn("Failed to get runtime snapshot:", result.error);
+            if (generation === runtimeSnapshotGenerationRef.current) {
+                console.warn("Failed to get runtime snapshot:", result.error);
+            }
         } catch (err) {
-            console.warn("Failed to get runtime snapshot:", err);
+            if (generation === runtimeSnapshotGenerationRef.current) {
+                console.warn("Failed to get runtime snapshot:", err);
+            }
         }
-        setRuntimeSnapshot(null);
+        if (generation === runtimeSnapshotGenerationRef.current) {
+            setRuntimeSnapshot(null);
+        }
         return null;
     }, []);
 
@@ -247,11 +280,34 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         return getMigratedLocalStorageItem('summarizerModelPath') || DEFAULT_PATH;
     });
 
+    const selectedModelPathsRef = useRef<ModelSelectionSnapshot>({
+        chat: currentModelPath,
+        embedding: currentEmbeddingModelPath,
+        vision: currentVisionModelPath,
+        stt: currentSttModelPath,
+        diffusion: currentImageGenModelPath,
+        summarizer: currentSummarizerModelPath,
+    });
+    const deletingModelPathsRef = useRef<Set<string>>(new Set());
+    const mutatingModelRootsRef = useRef<Set<string>>(new Set());
+    const mutatingModelPathsRef = useRef<Set<string>>(new Set());
+
     const [currentModelTemplate, _setCurrentModelTemplate] = useState<string>(() => {
         return getMigratedLocalStorageItem('modelTemplate') || "chatml";
     });
 
     const setModelPath = useCallback((path: string, template?: string) => {
+        if (
+            path
+            && (
+                isModelPathAffectedByRemoval(path, deletingModelPathsRef.current)
+                || isModelPathAffectedByRemoval(path, mutatingModelPathsRef.current)
+            )
+        ) {
+            toast.error("This model is currently being changed");
+            return;
+        }
+        selectedModelPathsRef.current.chat = path;
         _setCurrentModelPath(path);
         setMigratedLocalStorageItem('modelPath', path);
         if (template) {
@@ -272,26 +328,81 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const setEmbeddingModelPath = useCallback((path: string) => {
+        if (
+            path
+            && (
+                isModelPathAffectedByRemoval(path, deletingModelPathsRef.current)
+                || isModelPathAffectedByRemoval(path, mutatingModelPathsRef.current)
+            )
+        ) {
+            toast.error("This model is currently being changed");
+            return;
+        }
+        selectedModelPathsRef.current.embedding = path;
         _setCurrentEmbeddingModelPath(path);
         setMigratedLocalStorageItem('embeddingModelPath', path);
     }, []);
 
     const setVisionModelPath = useCallback((path: string) => {
+        if (
+            path
+            && (
+                isModelPathAffectedByRemoval(path, deletingModelPathsRef.current)
+                || isModelPathAffectedByRemoval(path, mutatingModelPathsRef.current)
+            )
+        ) {
+            toast.error("This model is currently being changed");
+            return;
+        }
+        selectedModelPathsRef.current.vision = path;
         _setCurrentVisionModelPath(path);
         setMigratedLocalStorageItem('visionModelPath', path);
     }, []);
 
     const setSttModelPath = useCallback((path: string) => {
+        if (
+            path
+            && (
+                isModelPathAffectedByRemoval(path, deletingModelPathsRef.current)
+                || isModelPathAffectedByRemoval(path, mutatingModelPathsRef.current)
+            )
+        ) {
+            toast.error("This model is currently being changed");
+            return;
+        }
+        selectedModelPathsRef.current.stt = path;
         _setCurrentSttModelPath(path);
         setMigratedLocalStorageItem('sttModelPath', path);
     }, []);
 
     const setImageGenModelPath = useCallback((path: string) => {
+        if (
+            path
+            && (
+                isModelPathAffectedByRemoval(path, deletingModelPathsRef.current)
+                || isModelPathAffectedByRemoval(path, mutatingModelPathsRef.current)
+            )
+        ) {
+            toast.error("This model is currently being changed");
+            return;
+        }
+        selectedModelPathsRef.current.diffusion = path;
         _setCurrentImageGenModelPath(path);
         setMigratedLocalStorageItem('imageGenModelPath', path);
     }, []);
 
     const setSummarizerModelPath = useCallback((path: string) => {
+        if (
+            path
+            && (
+                isModelPathAffectedByRemoval(path, deletingModelPathsRef.current)
+                || isModelPathAffectedByRemoval(path, mutatingModelPathsRef.current)
+            )
+        ) {
+            toast.error("This model is currently being changed");
+            return;
+        }
+        selectedModelPathsRef.current.summarizer = path;
         _setCurrentSummarizerModelPath(path);
         setMigratedLocalStorageItem('summarizerModelPath', path);
     }, []);
@@ -306,159 +417,73 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         setMigratedLocalStorageItem('maxContext', size.toString());
     }, []);
 
-    const refreshModels = useCallback(async () => {
+    const refreshModels = useCallback(async (): Promise<ModelFile[] | null> => {
+        const generation = ++modelInventoryGenerationRef.current;
         setIsRefreshing(true);
         try {
             const models = await commandClient.listModels();
-            setLocalModels(models);
-            return models;
+            if (generation === modelInventoryGenerationRef.current) {
+                setLocalModels(models);
+                return models;
+            }
+            return null;
         } catch (e) {
-            console.error("Failed to list models", e);
-            toast.error("Failed to list models");
-            return [];
+            if (generation === modelInventoryGenerationRef.current) {
+                console.error("Failed to list models", e);
+                toast.error("Failed to list models");
+            }
+            return null;
         } finally {
-            setIsRefreshing(false);
-        }
-    }, []);
-
-    const startDownload = useCallback(async (model: ModelDefinition, variant?: ModelVariant) => {
-        const v = variant || (model.variants && model.variants.length > 0 ? model.variants[0] : null);
-
-        if (!v) {
-            toast.error("Invalid model selected: No variants found.");
-            return;
-        }
-
-        // Check for Hugging Face Token if gated
-        if (model.gated) {
-            try {
-                const tokenResult = await commands.getHfToken();
-                if (tokenResult.status === "error" || !tokenResult.data) {
-                    toast.error("Token Required", {
-                        description: "This model requires a Hugging Face token. Please add it in Settings > Secrets.",
-                        action: {
-                            label: "Open Settings",
-                            onClick: () => {
-                                window.dispatchEvent(new CustomEvent('open-settings', { detail: 'secrets' }));
-                            }
-                        },
-                        duration: 8000,
-                    });
-                    return;
-                }
-            } catch (e) {
-                console.error("Failed to check HF token", e);
+            if (generation === modelInventoryGenerationRef.current) {
+                setIsRefreshing(false);
             }
-        }
-
-        // Determine target path: {category}/{model_name_sanitized}/{filename}
-        const category = model.category || "LLM";
-        const sanitizedName = model.name.replace(/[^a-zA-Z0-9-_]/g, "_");
-        const getTargetPath = (filename: string) => `${category}/${sanitizedName}/${filename}`;
-
-        const mainFullPath = getTargetPath(v.filename);
-
-        // Guard against duplicate downloads — check ref buffer too
-        if (downloadPctBufferRef.current[mainFullPath] !== undefined) return;
-
-        console.log("Starting download for", mainFullPath);
-        setDownloading(prev => ({ ...prev, [mainFullPath]: 0 }));
-        toast.info(`Starting download: ${model.name} (${v.name})`);
-
-        try {
-            // Components handling (e.g. CLIP/VAE)
-            if (model.components) {
-                for (const comp of model.components) {
-                    const compFullPath = getTargetPath(comp.filename);
-                    if (downloadPctBufferRef.current[compFullPath] === undefined) {
-                        console.log(`Starting component download: ${comp.filename} -> ${compFullPath}`);
-                        setDownloading(prev => ({ ...prev, [compFullPath]: 0 }));
-                        commandClient.downloadModel(comp.url, compFullPath).catch(e => {
-                            console.error(`Component download failed: ${comp.filename}`, e);
-                            setDownloading(prev => {
-                                const c = { ...prev };
-                                delete c[compFullPath];
-                                return c;
-                            });
-                        });
-                    }
-                }
-            }
-
-            // Projector handling
-            if (model.mmproj) {
-                const projFullPath = getTargetPath(model.mmproj.filename);
-                if (downloadPctBufferRef.current[projFullPath] === undefined) {
-                    setDownloading(prev => ({ ...prev, [projFullPath]: 0 }));
-                    commandClient.downloadModel(model.mmproj.url, projFullPath).catch(e => {
-                        console.error("Projector download failed", e);
-                        setDownloading(prev => {
-                            const c = { ...prev };
-                            delete c[projFullPath];
-                            return c;
-                        });
-                    });
-                }
-            }
-
-            await commandClient.downloadModel(v.url, mainFullPath);
-        } catch (e) {
-            console.error("Download failed to start:", e);
-            toast.error(`Failed to start download: ${e}`);
-            setDownloading(prev => {
-                const c = { ...prev };
-                delete c[mainFullPath];
-                return c;
-            });
         }
     }, []);
 
     // Check hardware and recommend model on first empty run
     useEffect(() => {
-        const checkHardware = async () => {
-            try {
-                // Fetch System Specs
-                const specs = await commands.getSystemSpecs();
-                if (specs) {
-                    setSystemSpecs(specs);
+        const initializeModelsAndHardware = async () => {
+            const {
+                inventory: localFiles,
+                specs,
+                specsError,
+            } = await loadInitialModelState({
+                refreshInventory: refreshModels,
+                getSystemSpecs: commands.getSystemSpecs,
+            });
+            if (specs) setSystemSpecs(specs);
+            if (specsError) {
+                console.error("Failed to init system specs:", specsError);
+            }
+            if (!specs || localFiles === null) return;
 
-                    // Check if we need to recommend
-                    const hasChecked = getMigratedLocalStorageItem('firstRunCheck');
-                    const localFiles = await refreshModels();
-
-                    if (!hasChecked && localFiles.length === 0) {
-                        // Skip if onboarding wizard is handling model selection
-                        if (isOnboardingInProgress()) {
-                            setMigratedLocalStorageItem('firstRunCheck', "true");
-                            return;
-                        }
-                        const ramGB = specs.total_memory / (1024 * 1024 * 1024);
-
-                        let recommendedId = "qwen3-vl-4b-instruct"; // Safe default for < 8GB
-                        if (ramGB >= 24) recommendedId = "gemma-3-27b-it-qat";
-                        else if (ramGB >= 8) recommendedId = "gemma-3-12b-it-qat";
-
-                        const model = models.find(m => m.id === recommendedId);
-
-                        if (model) {
-                            toast("Hardware Detected", {
-                                description: `We recommend ${model.name} for your system (${Math.round(ramGB)}GB RAM).`,
-                                action: {
-                                    label: "Download",
-                                    onClick: () => startDownload(model, model.variants[0])
-                                },
-                                duration: 10000,
-                            });
-                        }
-                        setMigratedLocalStorageItem('firstRunCheck', "true");
-                    }
+            // Check if we need to recommend
+            const hasChecked = getMigratedLocalStorageItem('firstRunCheck');
+            if (!hasChecked && localFiles.length === 0) {
+                // Skip if onboarding wizard is handling model selection
+                if (isOnboardingInProgress()) {
+                    setMigratedLocalStorageItem('firstRunCheck', "true");
+                    return;
                 }
-            } catch (error) {
-                console.error("Failed to init system specs:", error);
+                const ramGB = specs.total_memory / (1024 * 1024 * 1024);
+
+                let recommendedId = "qwen3-vl-4b-instruct"; // Safe default for < 8GB
+                if (ramGB >= 24) recommendedId = "gemma-3-27b-it-qat";
+                else if (ramGB >= 8) recommendedId = "gemma-3-12b-it-qat";
+
+                const model = models.find(m => m.id === recommendedId);
+
+                if (model) {
+                    toast("Hardware Detected", {
+                        description: `We recommend ${model.name} for your system (${Math.round(ramGB)}GB RAM). Open Models → Discover to choose a validated, revision-pinned artifact.`,
+                        duration: 10000,
+                    });
+                }
+                setMigratedLocalStorageItem('firstRunCheck', "true");
             }
         };
 
-        checkHardware();
+        initializeModelsAndHardware();
 
         // Polling loop for real-time resource tracking (30 second default)
         const interval = setInterval(async () => {
@@ -471,7 +496,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         }, 30000);
 
         return () => clearInterval(interval);
-    }, [refreshModels, startDownload]);
+    }, [models, refreshModels]);
 
     // -----------------------------------------------------------------------
     // Throttled progress buffer — prevents per-chunk re-renders of the entire
@@ -481,6 +506,13 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     const progressBufferRef = useRef<Record<string, RepoProgressInfo>>({});
     const downloadPctBufferRef = useRef<Record<string, number>>({});
     const progressFlushTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+    const hfDownloadPromisesRef = useRef<Map<string, {
+        fingerprint: string;
+        promise: Promise<HfDownloadResult>;
+    }>>(new Map());
+    const standardDownloadPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
+    const locallyOwnedDownloadsRef = useRef<Set<string>>(new Set());
+    const finalizedDownloadIdsRef = useRef<Set<string>>(new Set());
 
     // Start/stop the flush timer based on active downloads
     useEffect(() => {
@@ -533,6 +565,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     useEffect(() => {
         const unlisten = listen<DownloadEvent>("download_progress", (event) => {
             const { filename, percentage } = event.payload;
+            if (finalizedDownloadIdsRef.current.has(filename)) return;
 
             // Buffer percentage — flushed to state by the timer above
             downloadPctBufferRef.current[filename] = percentage;
@@ -552,45 +585,30 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
                         ...(payload.current_file ? { [payload.current_file]: payload.file_percentage ?? 0 } : {}),
                     },
                 };
-            } else {
-                // Per-file progress event — update filePct in matching repos
-                for (const rp of Object.values(progressBufferRef.current)) {
-                    if (rp.currentFile === filename || filename.includes('/')) {
-                        continue;
-                    }
-                    rp.filePct = { ...rp.filePct, [filename]: percentage };
-                }
             }
 
             if (event.payload.percentage >= 100) {
-                // Download complete
-                console.log("Download complete event for", event.payload.filename);
-                // Ensure refresh happens after a slight delay to allow filesystem to settle/close handle
-                setTimeout(() => {
-                    refreshModels();
-                    // Clean up buffers for completed download
-                    delete downloadPctBufferRef.current[event.payload.filename];
-                    setDownloading(prev => {
-                        const copy = { ...prev };
-                        delete copy[event.payload.filename];
-                        return copy;
-                    });
-                    // Clean up discovery state for completed repo downloads
-                    if (event.payload.filename.includes('/')) {
-                        setTimeout(() => {
-                            // Flush any remaining buffer for this repo first
-                            delete progressBufferRef.current[event.payload.filename];
-                            setDiscoveryState(prev => {
-                                const rp = { ...prev.repoProgress };
-                                delete rp[event.payload.filename];
-                                const df = new Set(prev.downloadingFiles);
-                                df.delete(event.payload.filename);
-                                return { ...prev, repoProgress: rp, downloadingFiles: df };
-                            });
-                        }, 1500);
-                    }
-                    toast.success(`Download complete: ${event.payload.filename} `);
-                }, 1000);
+                if (!locallyOwnedDownloadsRef.current.has(filename)) {
+                    setTimeout(() => {
+                        if (locallyOwnedDownloadsRef.current.has(filename)) return;
+                        finalizedDownloadIdsRef.current.add(filename);
+                        delete downloadPctBufferRef.current[filename];
+                        delete progressBufferRef.current[filename];
+                        setDownloading(previous => {
+                            const next = { ...previous };
+                            delete next[filename];
+                            return next;
+                        });
+                        setDiscoveryState(previous => {
+                            const repoProgress = { ...previous.repoProgress };
+                            delete repoProgress[filename];
+                            const downloadingFiles = new Set(previous.downloadingFiles);
+                            downloadingFiles.delete(filename);
+                            return { ...previous, repoProgress, downloadingFiles };
+                        });
+                        refreshModels();
+                    }, 250);
+                }
             }
         });
 
@@ -603,78 +621,289 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     const cancelDownload = useCallback(async (filename: string) => {
         try {
             await commandClient.cancelDownload(filename);
-            // Also try cancelling potential mmproj
-            await commandClient.cancelDownload(`${filename}.mmproj`);
-            toast.info("Download cancelled");
+            toast.info("Cancellation requested");
         } catch (e) {
             console.warn("Backend cancel failed (task might be finished):", e);
         } finally {
-            delete downloadPctBufferRef.current[filename];
-            setDownloading(prev => {
-                const copy = { ...prev };
-                delete copy[filename];
-                return copy;
-            });
+            if (!locallyOwnedDownloadsRef.current.has(filename)) {
+                finalizedDownloadIdsRef.current.add(filename);
+                delete downloadPctBufferRef.current[filename];
+                delete progressBufferRef.current[filename];
+                setDownloading(prev => {
+                    const copy = { ...prev };
+                    delete copy[filename];
+                    return copy;
+                });
+                setDiscoveryState(previous => {
+                    const repoProgress = { ...previous.repoProgress };
+                    delete repoProgress[filename];
+                    const downloadingFiles = new Set(previous.downloadingFiles);
+                    downloadingFiles.delete(filename);
+                    return { ...previous, repoProgress, downloadingFiles };
+                });
+            }
         }
     }, []);
 
+    const deactivateModel = useCallback(async (installRoot: string) => {
+        if (mutatingModelRootsRef.current.has(installRoot)) {
+            toast.info("This model is already being changed");
+            return;
+        }
+        const model = localModels.find(candidate => candidate.install_root === installRoot);
+        if (!model) {
+            toast.error("The selected model is no longer in the local inventory");
+            return;
+        }
+        const affectedPaths = modelRemovalPaths(model);
+        const roles = selectedModelRolesForRemoval(
+            affectedPaths,
+            selectedModelPathsRef.current,
+        );
+        if (!Object.values(roles).some(Boolean)) return;
+
+        mutatingModelRootsRef.current.add(installRoot);
+        for (const path of affectedPaths) mutatingModelPathsRef.current.add(path);
+        try {
+            unwrapResult(
+                await directCommands.directRuntimeDeactivateModelServices(
+                    installRoot,
+                    roles.chat,
+                    roles.embedding,
+                    roles.summarizer,
+                    roles.stt,
+                    roles.image,
+                ),
+                "stop local model services",
+            );
+
+            // Compare after the awaited backend operation. A different model
+            // selected in the meantime must never be erased by a stale action.
+            const latest = selectedModelPathsRef.current;
+            if (isModelPathAffectedByRemoval(latest.chat, affectedPaths)) {
+                setModelPath(DEFAULT_PATH);
+            }
+            if (isModelPathAffectedByRemoval(latest.embedding, affectedPaths)) {
+                setEmbeddingModelPath(DEFAULT_PATH);
+            }
+            if (isModelPathAffectedByRemoval(latest.vision, affectedPaths)) {
+                setVisionModelPath(DEFAULT_PATH);
+            }
+            if (isModelPathAffectedByRemoval(latest.stt, affectedPaths)) {
+                setSttModelPath(DEFAULT_PATH);
+            }
+            if (isModelPathAffectedByRemoval(latest.diffusion, affectedPaths)) {
+                setImageGenModelPath(DEFAULT_PATH);
+            }
+            if (isModelPathAffectedByRemoval(latest.summarizer, affectedPaths)) {
+                setSummarizerModelPath(DEFAULT_PATH);
+            }
+            await refreshRuntimeSnapshot();
+            toast.success("Model deactivated");
+        } catch (error) {
+            toast.error("Could not deactivate model", {
+                description: bridgeErrorMessage(error),
+            });
+        } finally {
+            mutatingModelRootsRef.current.delete(installRoot);
+            for (const path of affectedPaths) mutatingModelPathsRef.current.delete(path);
+        }
+    }, [
+        localModels,
+        refreshRuntimeSnapshot,
+        setEmbeddingModelPath,
+        setImageGenModelPath,
+        setModelPath,
+        setSttModelPath,
+        setSummarizerModelPath,
+        setVisionModelPath,
+    ]);
+
     const deleteModel = useCallback(async (filename: string) => {
+        if (mutatingModelRootsRef.current.has(filename)) {
+            toast.info("This model is already being changed");
+            return;
+        }
+        const model = localModels.find(candidate => candidate.install_root === filename);
+        const removedSelections = modelRemovalPaths(model);
+        const selectedRoles = selectedRolesForModelRemoval(
+            removedSelections,
+            selectedModelPathsRef.current,
+        );
+
+        // Never unlink files that a local runtime may still have mapped or may
+        // lazily read. The role can be deactivated from the same model card.
+        if (selectedRoles.length > 0) {
+            toast.error("Deactivate this model before deleting it", {
+                description: `It is still selected for ${selectedRoles.join(", ")}.`,
+            });
+            return;
+        }
+
+        mutatingModelRootsRef.current.add(filename);
+        for (const path of removedSelections) deletingModelPathsRef.current.add(path);
+        for (const path of removedSelections) mutatingModelPathsRef.current.add(path);
         try {
             await commandClient.deleteLocalModel(filename);
-            toast.success("Model deleted");
+            if (model) {
+                // Defensive cleanup for a preference changed concurrently
+                // while the backend deletion was in progress.
+                const latestSelections = selectedModelPathsRef.current;
+                if (isModelPathAffectedByRemoval(latestSelections.chat, removedSelections)) {
+                    setModelPath(DEFAULT_PATH);
+                }
+                if (isModelPathAffectedByRemoval(latestSelections.embedding, removedSelections)) {
+                    setEmbeddingModelPath(DEFAULT_PATH);
+                }
+                if (isModelPathAffectedByRemoval(latestSelections.vision, removedSelections)) {
+                    setVisionModelPath(DEFAULT_PATH);
+                }
+                if (isModelPathAffectedByRemoval(latestSelections.stt, removedSelections)) {
+                    setSttModelPath(DEFAULT_PATH);
+                }
+                if (isModelPathAffectedByRemoval(latestSelections.diffusion, removedSelections)) {
+                    setImageGenModelPath(DEFAULT_PATH);
+                }
+                if (isModelPathAffectedByRemoval(latestSelections.summarizer, removedSelections)) {
+                    setSummarizerModelPath(DEFAULT_PATH);
+                }
+            }
             await refreshModels();
+            toast.success("Model deleted");
         } catch (e) {
             console.error("Delete failed:", e);
             toast.error(`Failed to delete: ${e} `);
-        }
-    }, [refreshModels]);
-
-    // Download files from HuggingFace Hub (shared via context)
-    const downloadHfFiles = useCallback(async (repoId: string, files: string[], destSubdir?: string | null, category?: string) => {
-        // Track each file in the global download state
-        const trackKey = files.length === 1 ? files[0] : repoId;
-        setDownloading(prev => ({ ...prev, [trackKey]: 0 }));
-
-        try {
-            unwrapResult(
-                await directCommands.directRuntimeDownloadHfModelFiles(
-                    repoId,
-                    files,
-                    destSubdir ?? null,
-                    category ?? null
-                ),
-                "HuggingFace model download"
-            );
-            toast.success(`Downloaded: ${files.length === 1 ? files[0] : repoId}`);
-            refreshModels();
-        } catch (e: any) {
-            const msg = typeof e === "string" ? e : "Download failed";
-            toast.error(msg);
         } finally {
-            delete downloadPctBufferRef.current[trackKey];
-            setDownloading(prev => {
-                const copy = { ...prev };
-                delete copy[trackKey];
-                return copy;
-            });
+            mutatingModelRootsRef.current.delete(filename);
+            for (const path of removedSelections) deletingModelPathsRef.current.delete(path);
+            for (const path of removedSelections) mutatingModelPathsRef.current.delete(path);
         }
+    }, [
+        localModels,
+        refreshModels,
+        setEmbeddingModelPath,
+        setImageGenModelPath,
+        setModelPath,
+        setSttModelPath,
+        setSummarizerModelPath,
+        setVisionModelPath,
+    ]);
+
+    // Download a backend-produced artifact selection. The download ID is
+    // emitted by the backend on every progress event and is the only tracking
+    // key used across context and discovery UI.
+    const downloadHfSelection = useCallback(async (
+        request: HfDownloadSelectionRequest,
+        downloadId: string,
+    ): Promise<HfDownloadResult> => {
+        const requestFingerprint = hfDownloadSelectionFingerprint(request);
+        const existing = hfDownloadPromisesRef.current.get(downloadId);
+        if (existing) {
+            if (existing.fingerprint !== requestFingerprint) {
+                const message =
+                    "A different selection for this Hugging Face artifact is already downloading";
+                toast.error("Hugging Face download conflict", { description: message });
+                throw new Error(message);
+            }
+            return existing.promise;
+        }
+
+        finalizedDownloadIdsRef.current.delete(downloadId);
+        locallyOwnedDownloadsRef.current.add(downloadId);
+        setDownloading(prev => ({ ...prev, [downloadId]: 0 }));
+        setDiscoveryState(prev => ({
+            ...prev,
+            downloadingFiles: new Set([...prev.downloadingFiles, downloadId]),
+        }));
+
+        let operation: Promise<HfDownloadResult>;
+        operation = (async () => {
+            try {
+                const result = unwrapResult(
+                    await directCommands.directRuntimeDownloadHfSelection(request),
+                    "HuggingFace model download"
+                );
+                if (result.download_id !== downloadId) {
+                    throw new Error("HuggingFace download returned an unexpected progress identity");
+                }
+                await refreshModels();
+                toast.success(`Downloaded ${result.repo_id}`);
+                return result;
+            } catch (error) {
+                const message = bridgeErrorMessage(error);
+                if (message.toLowerCase().includes("cancel")) {
+                    toast.info("Hugging Face download cancelled");
+                } else {
+                    toast.error("HuggingFace download failed", {
+                        description: message,
+                    });
+                }
+                throw error;
+            } finally {
+                if (
+                    hfDownloadPromisesRef.current.get(downloadId)?.fingerprint
+                    === requestFingerprint
+                ) {
+                    hfDownloadPromisesRef.current.delete(downloadId);
+                    locallyOwnedDownloadsRef.current.delete(downloadId);
+                    finalizedDownloadIdsRef.current.add(downloadId);
+                    delete downloadPctBufferRef.current[downloadId];
+                    delete progressBufferRef.current[downloadId];
+                    setDownloading(prev => {
+                        const copy = { ...prev };
+                        delete copy[downloadId];
+                        return copy;
+                    });
+                    setDiscoveryState(prev => {
+                        const repoProgress = { ...prev.repoProgress };
+                        delete repoProgress[downloadId];
+                        const downloadingFiles = new Set(prev.downloadingFiles);
+                        downloadingFiles.delete(downloadId);
+                        return { ...prev, repoProgress, downloadingFiles };
+                    });
+                }
+            }
+        })();
+        hfDownloadPromisesRef.current.set(downloadId, {
+            fingerprint: requestFingerprint,
+            promise: operation,
+        });
+        return operation;
     }, [refreshModels]);
 
     const downloadStandardAsset = useCallback(async (filename: string) => {
-        if (downloading[filename]) return;
+        if (standardDownloadPromisesRef.current.has(filename)) {
+            return standardDownloadPromisesRef.current.get(filename);
+        }
+
+        finalizedDownloadIdsRef.current.delete(filename);
+        locallyOwnedDownloadsRef.current.add(filename);
         setDownloading(prev => ({ ...prev, [filename]: 0 }));
         toast.info(`Downloading Standard Asset: ${filename}`);
-        try {
-            await commands.downloadStandardAsset(filename);
-        } catch (e) {
-            toast.error(`Standard Asset Download Failed: ${e}`);
-            setDownloading(prev => {
-                const c = { ...prev };
-                delete c[filename];
-                return c;
-            });
-        }
-    }, [downloading]);
+        let operation: Promise<void>;
+        operation = (async () => {
+            try {
+                await commandClient.downloadStandardAsset(filename);
+                await checkStandardAssets();
+                toast.success(`Downloaded ${filename}`);
+            } catch (e) {
+                toast.error(`Standard Asset Download Failed: ${bridgeErrorMessage(e)}`);
+            } finally {
+                standardDownloadPromisesRef.current.delete(filename);
+                locallyOwnedDownloadsRef.current.delete(filename);
+                finalizedDownloadIdsRef.current.add(filename);
+                delete downloadPctBufferRef.current[filename];
+                delete progressBufferRef.current[filename];
+                setDownloading(prev => {
+                    const copy = { ...prev };
+                    delete copy[filename];
+                    return copy;
+                });
+            }
+        })();
+        standardDownloadPromisesRef.current.set(filename, operation);
+        return operation;
+    }, [checkStandardAssets]);
 
     // -----------------------------------------------------------------------
     // Memoized context values — split into stable state vs hot progress
@@ -697,12 +926,12 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         setImageGenModelPath,
         setSummarizerModelPath,
         refreshModels,
-        startDownload,
         downloadSpeed,
         selectModel,
         activeCategory,
         setActiveCategory,
         cancelDownload,
+        deactivateModel,
         deleteModel,
         isRefreshing,
         modelsDir,
@@ -714,7 +943,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         setMaxContext,
         isRestarting,
         setIsRestarting,
-        downloadHfFiles,
+        downloadHfSelection,
         engineInfo,
         runtimeSnapshot,
         refreshRuntimeSnapshot,
@@ -723,10 +952,10 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         currentEmbeddingModelPath, currentVisionModelPath, currentSttModelPath,
         currentImageGenModelPath, currentSummarizerModelPath, currentModelTemplate,
         setModelPath, setEmbeddingModelPath, setVisionModelPath, setSttModelPath,
-        setImageGenModelPath, setSummarizerModelPath, refreshModels, startDownload,
-        downloadSpeed, selectModel, activeCategory, cancelDownload, deleteModel,
+        setImageGenModelPath, setSummarizerModelPath, refreshModels,
+        downloadSpeed, selectModel, activeCategory, cancelDownload, deactivateModel, deleteModel,
         isRefreshing, modelsDir, systemSpecs, standardAssets, checkStandardAssets,
-        downloadStandardAsset, maxContext, isRestarting, downloadHfFiles, engineInfo,
+        downloadStandardAsset, maxContext, isRestarting, downloadHfSelection, engineInfo,
         runtimeSnapshot, refreshRuntimeSnapshot,
     ]);
 

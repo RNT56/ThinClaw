@@ -1,904 +1,1003 @@
 /**
- * HuggingFace Hub Model Discovery Component
- *
- * Live search of HuggingFace models, filtered by the build's inference engine.
- * Shows model cards with downloads/likes, and for GGUF models provides a
- * quantization picker. For MLX/vLLM, shows total directory size.
- *
- * All persistent state (search results, downloads, progress) lives in
- * ModelContext.discoveryState so it survives tab switches.
- *
- * Features:
- * - Downloading models pinned to top of results
- * - Auto-expand of downloading model card on remount
- * - Per-file progress bars for multi-file downloads
- * - "Downloaded" badge for models already on disk
+ * Hugging Face model discovery backed by ThinClaw's runtime capability and
+ * artifact-plan APIs. The frontend never invents compatibility, categories,
+ * file groups, or destination paths.
  */
 import {
-    Search,
-    Download,
-    Heart,
+    AlertTriangle,
     ArrowDownToLine,
-    Loader2,
-    Shield,
-    ExternalLink,
-    ChevronDown,
-    Info,
     CheckCircle2,
-    Pin,
-    Type,
-    Eye,
-    Layers,
+    ChevronDown,
     Database,
+    Download,
+    ExternalLink,
+    Eye,
+    Heart,
     Image,
+    Info,
+    Loader2,
     Mic,
-    Video,
+    RefreshCw,
+    Search,
+    Shield,
+    Type,
 } from "lucide-react";
-import { cn } from "../../lib/utils";
-import { commandClient } from "../../lib/command-client";
-import { useModelContext } from "../model-context";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { EngineInfo } from "../../lib/bindings";
+import type {
+    EngineInfo,
+    HfCapabilityProfileDto,
+    HfDownloadArtifact,
+    HfModelCard,
+    HfModelFilePlan,
+} from "../../lib/bindings";
+import { commandClient } from "../../lib/command-client";
 import { directCommands } from "../../lib/generated/direct-commands";
 import { unwrapResult } from "../../lib/guards";
+import {
+    createRequestGenerationGuard,
+    createHfSearchCache,
+    classifyHfHubError,
+    effectiveHfCompanionArtifactId,
+    findInstalledArtifactSelection,
+    filtersFromProfiles,
+    huggingFaceRepositoryUrl,
+    isRepositoryInstalled,
+    mergeHfModelCards,
+    requiresHfCompanionArtifact,
+    type HfHubRemediationKind,
+    type HfModelTaskId,
+} from "../../lib/hf-models";
+import { cn } from "../../lib/utils";
+import { useModelContext } from "../model-context";
 
-// ---------------------------------------------------------------------------
-// Types (match backend via specta)
-// ---------------------------------------------------------------------------
-
-interface HfModelCard {
-    id: string;
-    author: string;
-    name: string;
-    downloads: number;
-    likes: number;
-    tags: string[];
-    last_modified: string;
-    gated: boolean;
+interface FilePlanState {
+    status: "loading" | "ready" | "error";
+    plan?: HfModelFilePlan;
+    error?: string;
 }
 
-interface HfFileInfo {
-    filename: string;
-    size: number;
-    size_display: string;
-    quant_type: string | null;
-    is_mmproj: boolean;
+const TRENDING_INITIAL_LIMIT = 15;
+const QUERY_INITIAL_LIMIT = 20;
+const SEARCH_PAGE_SIZE = 20;
+const MAX_SEARCH_LIMIT = 100;
+const TRENDING_CACHE_TTL_MS = 5 * 60 * 1_000;
+const HF_TOKEN_SETTINGS_URL = "https://huggingface.co/settings/tokens";
+const trendingSearchCache = createHfSearchCache<HfModelCard>(
+    TRENDING_CACHE_TTL_MS,
+);
+
+interface SearchWindow {
+    requestKey: string;
+    requestedLimit: number;
 }
 
-interface ModelDownloadInfo {
-    repo_id: string;
-    is_multi_file: boolean;
-    files: HfFileInfo[];
-    mmproj_file: HfFileInfo | null;
-    total_size: number;
-    total_size_display: string;
+function formatDownloads(value: number): string {
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+    return value.toString();
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function formatDownloads(n: number): string {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-    return n.toString();
+function boundedProgress(value: number | undefined): number | null {
+    if (value === undefined) return null;
+    if (!Number.isFinite(value)) return 0;
+    return Math.min(100, Math.max(0, value));
 }
 
-/** Sanitize a HF repo ID to the directory name used on disk */
-function sanitizeRepoId(repoId: string): string {
-    return repoId.replace(/\//g, "_");
+function taskIcon(task: HfModelTaskId) {
+    switch (task) {
+        case "vision":
+            return Eye;
+        case "embedding":
+            return Database;
+        case "stt":
+            return Mic;
+        case "diffusion":
+            return Image;
+        default:
+            return Type;
+    }
 }
 
-// Pipeline filter definitions — maps UI filter to HF pipeline_tag(s)
-type PipelineFilterId = 'all' | 'text' | 'vision' | 'embedding' | 'diffusion' | 'stt' | 'video';
-
-interface PipelineFilterDef {
-    id: PipelineFilterId;
-    label: string;
-    icon: typeof Layers;
-    tags: string[];
-    placeholder: string;
-    /** Download category folder name — null means default (LLM) */
-    downloadCategory: string | null;
-    /** Default search query per engine — uses this for trending when empty. Key = engine id, '*' = all engines. */
-    defaultQuery?: Record<string, string>;
+function errorMessage(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    return typeof error === "string" ? error : "Unknown Hugging Face error";
 }
 
-const PIPELINE_FILTERS: PipelineFilterDef[] = [
-    { id: 'all', label: 'All LLMs', icon: Layers, tags: ['text-generation', 'image-text-to-text'], placeholder: 'Search LLMs... (e.g. llama, qwen, gemma)', downloadCategory: null },
-    { id: 'text', label: 'Text', icon: Type, tags: ['text-generation'], placeholder: 'Search text models... (e.g. llama, qwen, ministral)', downloadCategory: null },
-    { id: 'vision', label: 'Vision', icon: Eye, tags: ['image-text-to-text'], placeholder: 'Search vision models... (e.g. pixtral, llava, gemma)', downloadCategory: null },
-    { id: 'embedding', label: 'Embedding', icon: Database, tags: ['feature-extraction', 'sentence-similarity'], placeholder: 'Search embedding models... (e.g. bge, nomic, gte, qwen)', downloadCategory: 'Embedding' },
-    { id: 'diffusion', label: 'Diffusion', icon: Image, tags: ['text-to-image', 'image-to-image'], placeholder: 'Search diffusion models... (e.g. flux, stable-diffusion, sdxl)', downloadCategory: 'Diffusion' },
-    {
-        id: 'stt',
-        label: 'STT',
-        icon: Mic,
-        tags: ['automatic-speech-recognition'],
-        placeholder: 'Search speech models... (e.g. mlx-community/whisper-large-v3-turbo)',
-        downloadCategory: 'STT',
-        // For MLX engine: default to mlx-community whisper collection so users see compatible models immediately
-        defaultQuery: { mlx: 'mlx-community whisper', '*': '' },
-    },
-    { id: 'video', label: 'Video', icon: Video, tags: ['text-to-video'], placeholder: 'Search video gen models... (e.g. mochi, ltx-video)', downloadCategory: 'Diffusion' },
-];
+interface HfRemediationProps {
+    kind: HfHubRemediationKind;
+    onOpenUrl: (url: string) => void;
+    repoUrl?: string | null;
+    onRetry?: () => void;
+}
 
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
+function HfRemediation({
+    kind,
+    onOpenUrl,
+    repoUrl,
+    onRetry,
+}: HfRemediationProps) {
+    const isRateLimit = kind === "rate-limit";
+    return (
+        <div
+            className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-muted-foreground"
+            data-testid={`hf-${kind}-remediation`}
+            role="note"
+        >
+            <div className="flex gap-2">
+                <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
+                <div>
+                    <p className="font-semibold text-foreground">
+                        {isRateLimit ? "Hugging Face request limit reached" : "Hugging Face access required"}
+                    </p>
+                    <p className="mt-1">
+                        {isRateLimit
+                            ? "Wait briefly and retry. A Hugging Face read token can also provide higher authenticated limits."
+                            : "Open the repository and accept its license or request access. Then create a read token and save it under Settings → Secrets → Hugging Face Token."}
+                    </p>
+                </div>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-3 pl-5">
+                {repoUrl && (
+                    <button
+                        type="button"
+                        onClick={() => onOpenUrl(repoUrl)}
+                        className="inline-flex items-center gap-1 font-semibold text-primary hover:underline"
+                        data-testid="hf-open-access-page"
+                    >
+                        <ExternalLink className="h-3 w-3" />
+                        Open access page
+                    </button>
+                )}
+                <button
+                    type="button"
+                    onClick={() => onOpenUrl(HF_TOKEN_SETTINGS_URL)}
+                    className="inline-flex items-center gap-1 font-semibold text-primary hover:underline"
+                    data-testid="hf-open-token-settings"
+                >
+                    <ExternalLink className="h-3 w-3" />
+                    Create or manage token
+                </button>
+                {onRetry && (
+                    <button
+                        type="button"
+                        onClick={onRetry}
+                        className="inline-flex items-center gap-1 font-semibold text-primary hover:underline"
+                    >
+                        <RefreshCw className="h-3 w-3" />
+                        Retry
+                    </button>
+                )}
+            </div>
+        </div>
+    );
+}
 
 export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
     const {
         downloading,
-        downloadHfFiles,
+        downloadHfSelection,
+        cancelDownload,
         engineInfo: contextEngineInfo,
         discoveryState,
         setDiscoveryState,
         localModels,
     } = useModelContext();
-
-    // Engine info — prefer context, fallback to direct invoke
     const [localEngineInfo, setLocalEngineInfo] = useState<EngineInfo | null>(null);
     const engineInfo = contextEngineInfo ?? localEngineInfo;
-
-    // Use persistent state from context
-    const { searchQuery, results, hasSearched, expandedModel, downloadingFiles, repoProgress } =
+    const {
+        searchQuery,
+        results,
+        hasSearched,
+        hasMore,
+        expandedModel,
+        downloadingFiles,
+        repoProgress,
+    } =
         discoveryState;
 
-    // Pipeline type filter
-    const [pipelineFilter, setPipelineFilter] = useState<PipelineFilterId>('all');
-    const activeFilterDef = PIPELINE_FILTERS.find(f => f.id === pipelineFilter) ?? PIPELINE_FILTERS[0];
+    const [profiles, setProfiles] = useState<HfCapabilityProfileDto[]>([]);
+    const [profilesLoading, setProfilesLoading] = useState(true);
+    const [profilesError, setProfilesError] = useState<string | null>(null);
+    const [profilesAttempt, setProfilesAttempt] = useState(0);
+    const filters = useMemo(
+        () => filtersFromProfiles(profiles, engineInfo?.id),
+        [profiles, engineInfo?.id],
+    );
+    const [activeTask, setActiveTask] = useState<HfModelTaskId | null>(null);
+    const activeFilter = filters.find(filter => filter.task === activeTask) ?? filters[0] ?? null;
 
-    // Local-only ephemeral state
-    const [isSearching, setIsSearching] = useState(false);
     const [debouncedQuery, setDebouncedQuery] = useState(searchQuery);
-    const [fileInfoCache, setFileInfoCache] = useState<Record<string, ModelDownloadInfo>>({});
+    const [debounceAttempt, setDebounceAttempt] = useState(0);
+    const [isSearching, setIsSearching] = useState(false);
+    const [searchError, setSearchError] = useState<string | null>(null);
+    const [searchAttempt, setSearchAttempt] = useState(0);
+    const [searchWindow, setSearchWindow] = useState<SearchWindow | null>(null);
+    const [isLoadingMore, setIsLoadingMore] = useState(false);
+    const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+    const [filePlans, setFilePlans] = useState<Record<string, FilePlanState>>({});
+    const [selectedCompanions, setSelectedCompanions] = useState<Record<string, string>>({});
+    const searchGuard = useRef(createRequestGenerationGuard());
+    const lastRawQuery = useRef(searchQuery);
 
-    const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const setSearchQuery = useCallback((query: string) => {
+        // Invalidate in the input event itself. Waiting for a passive effect
+        // leaves a small window where a just-finished old request can paint
+        // results that no longer match the visible query.
+        searchGuard.current.invalidate();
+        setIsSearching(true);
+        setSearchError(null);
+        setIsLoadingMore(false);
+        setLoadMoreError(null);
+        setDiscoveryState(previous => ({ ...previous, searchQuery: query }));
+    }, [setDiscoveryState]);
+    const setSearchResults = useCallback((models: HfModelCard[], more: boolean) => {
+        setDiscoveryState(previous => ({
+            ...previous,
+            results: models,
+            hasMore: more,
+        }));
+    }, [setDiscoveryState]);
+    const setExpandedModel = useCallback((repoId: string | null) => {
+        setDiscoveryState(previous => ({ ...previous, expandedModel: repoId }));
+    }, [setDiscoveryState]);
+    const selectTask = useCallback((task: HfModelTaskId) => {
+        if (task === activeFilter?.task) return;
+        searchGuard.current.invalidate();
+        setIsSearching(true);
+        setSearchError(null);
+        setIsLoadingMore(false);
+        setLoadMoreError(null);
+        setSearchResults([], false);
+        setActiveTask(task);
+    }, [activeFilter?.task, setSearchResults]);
 
-    // -----------------------------------------------------------------------
-    // Derived: which models are already downloaded locally?
-    // -----------------------------------------------------------------------
-    const downloadedRepoIds = useMemo(() => {
-        const ids = new Set<string>();
-        for (const m of localModels) {
-            // m.path looks like ".../models/LLM/google_gemma-3-4b-it"
-            // Extract the last path segment and compare to sanitized repo IDs
-            const segments = m.path.replace(/\\/g, "/").split("/");
-            const dirName = segments[segments.length - 1] || segments[segments.length - 2];
-            if (dirName) ids.add(dirName);
+    useEffect(() => {
+        if (!contextEngineInfo) {
+            directCommands.directRuntimeGetActiveEngineInfo()
+                .then(setLocalEngineInfo)
+                .catch(error => console.error("Failed to get engine info:", error));
         }
-        return ids;
-    }, [localModels]);
-
-    const isModelDownloaded = useCallback(
-        (repoId: string) => downloadedRepoIds.has(sanitizeRepoId(repoId)),
-        [downloadedRepoIds]
-    );
-
-    // -----------------------------------------------------------------------
-    // Derived: sort results with downloading pinned to top, then downloaded next
-    // -----------------------------------------------------------------------
-    const sortedResults = useMemo(() => {
-        if (results.length === 0) return results;
-
-        return [...results].sort((a, b) => {
-            const aDown = downloadingFiles.has(a.id) ? 2 : 0;
-            const bDown = downloadingFiles.has(b.id) ? 2 : 0;
-            const aLocal = isModelDownloaded(a.id) ? 1 : 0;
-            const bLocal = isModelDownloaded(b.id) ? 1 : 0;
-            // Higher priority first
-            return (bDown + bLocal) - (aDown + aLocal);
-        });
-    }, [results, downloadingFiles, isModelDownloaded]);
-
-    // -----------------------------------------------------------------------
-    // Setters that write through to context
-    // -----------------------------------------------------------------------
-    const setSearchQuery = useCallback(
-        (q: string) => {
-            setDiscoveryState((prev) => ({ ...prev, searchQuery: q }));
-        },
-        [setDiscoveryState]
-    );
-
-    const setResults = useCallback(
-        (r: HfModelCard[]) => {
-            setDiscoveryState((prev) => ({ ...prev, results: r }));
-        },
-        [setDiscoveryState]
-    );
-
-    const setHasSearched = useCallback(
-        (v: boolean) => {
-            setDiscoveryState((prev) => ({ ...prev, hasSearched: v }));
-        },
-        [setDiscoveryState]
-    );
-
-    const setExpandedModel = useCallback(
-        (id: string | null) => {
-            setDiscoveryState((prev) => ({ ...prev, expandedModel: id }));
-        },
-        [setDiscoveryState]
-    );
-
-    const setDownloadingFiles = useCallback(
-        (updater: (prev: Set<string>) => Set<string>) => {
-            setDiscoveryState((prev) => ({
-                ...prev,
-                downloadingFiles: updater(prev.downloadingFiles),
-            }));
-        },
-        [setDiscoveryState]
-    );
-
-    // Fallback engine info load if context doesn't have it yet
-	    useEffect(() => {
-	        if (!contextEngineInfo) {
-	            directCommands.directRuntimeGetActiveEngineInfo()
-	                .then(setLocalEngineInfo)
-	                .catch((err) => console.error("Failed to get engine info:", err));
-	        }
     }, [contextEngineInfo]);
 
-    // -----------------------------------------------------------------------
-    // File info loading (with cache) — declared before the auto-expand effect
-    // -----------------------------------------------------------------------
-    const loadFileInfoDirect = useCallback(
-        async (repoId: string) => {
-            if (!engineInfo) return;
-            try {
-                const info = unwrapResult(
-                    await directCommands.directRuntimeGetModelFiles(repoId, engineInfo.id),
-                    "HuggingFace model files"
-                );
-                setFileInfoCache((prev) => ({ ...prev, [repoId]: info }));
-            } catch (err: any) {
-                console.error("Failed to load file tree:", err);
-                toast.error("Failed to load model files");
-            }
-        },
-        [engineInfo]
-    );
-
-    // -----------------------------------------------------------------------
-    // On becoming visible: auto-expand first downloading model & restore info
-    // -----------------------------------------------------------------------
     useEffect(() => {
-        if (!isVisible || !engineInfo) return;
-
-        // If there's an actively downloading model, pin + expand it
-        if (downloadingFiles.size > 0) {
-            const firstDownloading = [...downloadingFiles].find((id) =>
-                results.some((r) => r.id === id)
-            );
-            if (firstDownloading) {
-                // Expand the card if not already expanded
-                if (expandedModel !== firstDownloading) {
-                    setExpandedModel(firstDownloading);
+        let cancelled = false;
+        setProfilesLoading(true);
+        setProfilesError(null);
+        directCommands.directRuntimeGetHfCapabilities()
+            .then(value => {
+                if (!cancelled) setProfiles(value);
+            })
+            .catch(error => {
+                if (!cancelled) {
+                    setProfiles([]);
+                    setProfilesError(errorMessage(error));
                 }
-                // Load file info if missing (e.g. cache lost on remount)
-                if (!fileInfoCache[firstDownloading]) {
-                    loadFileInfoDirect(firstDownloading);
-                }
-            }
-        } else if (expandedModel && !fileInfoCache[expandedModel]) {
-            // No active downloads but a card is expanded without file info —
-            // reload it (handles returning to an expanded non-downloading card)
-            loadFileInfoDirect(expandedModel);
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isVisible]); // Only trigger when tab visibility changes
-
-    // Debounce search input
-    useEffect(() => {
-        if (debounceTimer.current) clearTimeout(debounceTimer.current);
-        debounceTimer.current = setTimeout(() => {
-            setDebouncedQuery(searchQuery);
-        }, 350);
+            })
+            .finally(() => {
+                if (!cancelled) setProfilesLoading(false);
+            });
         return () => {
-            if (debounceTimer.current) clearTimeout(debounceTimer.current);
+            cancelled = true;
         };
+    }, [engineInfo?.id, profilesAttempt]);
+
+    useEffect(() => {
+        if (filters.length === 0) {
+            setActiveTask(null);
+            return;
+        }
+        if (!activeTask || !filters.some(filter => filter.task === activeTask)) {
+            setActiveTask(filters[0].task);
+        }
+    }, [activeTask, filters]);
+
+    useEffect(() => {
+        if (lastRawQuery.current === searchQuery) return;
+        lastRawQuery.current = searchQuery;
+        // Invalidate immediately so an old response cannot flash while the new
+        // query is still inside the debounce window.
+        searchGuard.current.invalidate();
+        setIsSearching(true);
+        setSearchError(null);
+        setIsLoadingMore(false);
+        setLoadMoreError(null);
+        const timer = window.setTimeout(() => {
+            setDebouncedQuery(searchQuery);
+            // A user can type and return to the already-debounced value before
+            // this timer fires. The value setter is then a no-op, so this
+            // generation still has to trigger a replacement search/cache read.
+            setDebounceAttempt(attempt => attempt + 1);
+        }, 350);
+        return () => window.clearTimeout(timer);
     }, [searchQuery]);
 
-    // Cache of auto-populated trending results per filter (avoid re-fetching)
-    const [trendingCache, setTrendingCache] = useState<Record<PipelineFilterId, HfModelCard[]>>({} as any);
-    const [isTrending, setIsTrending] = useState(false);
-
-    // Trigger search when debounced query or pipeline filter changes
-    // When query is empty, auto-populate with trending models for the active filter
     useEffect(() => {
-        if (!engineInfo) return;
-
-        const pipelineTags: string[] = activeFilterDef.tags;
-
-        // Empty query → auto-populate with trending models
-        if (!debouncedQuery.trim()) {
-            // Check cache first
-            if (trendingCache[pipelineFilter] && trendingCache[pipelineFilter].length > 0) {
-                setResults(trendingCache[pipelineFilter]);
-                setHasSearched(true);
-                setIsTrending(true);
-                return;
-            }
-
-            const fetchTrending = async () => {
-                setIsSearching(true);
-                setIsTrending(true);
-                try {
-                    // Use engine-specific default query if defined (e.g. 'mlx-community whisper' for MLX+STT)
-                    const defaultQueryMap = activeFilterDef.defaultQuery || {};
-                    const defaultQ = defaultQueryMap[engineInfo.id] ?? defaultQueryMap['*'] ?? '';
-
-                    const models = unwrapResult(
-                        await directCommands.directRuntimeDiscoverHfModels(
-                            defaultQ,
-                            engineInfo.id,
-                            15,
-                            pipelineTags
-                        ),
-                        "HuggingFace trending models"
-                    );
-                    setResults(models);
-                    setHasSearched(true);
-                    // Cache the results for this filter
-                    setTrendingCache(prev => ({ ...prev, [pipelineFilter]: models }));
-                } catch (err: any) {
-                    console.error("HF trending fetch failed:", err);
-                    // Don't toast for initial load failures — not critical
-                    setResults([]);
-                    setHasSearched(false);
-                } finally {
-                    setIsSearching(false);
-                }
-            };
-
-            fetchTrending();
+        if (!isVisible || !engineInfo || !activeFilter) return;
+        const cacheKey = `${engineInfo.id}:${activeFilter.task}`;
+        const query = debouncedQuery.trim();
+        // A task/engine/visibility change can rerun this effect while an input
+        // edit is still debouncing. Do not search or restore cached cards for
+        // a query different from the text the user currently sees.
+        if (query !== searchQuery.trim()) return;
+        const generation = searchGuard.current.begin();
+        const requestKey = JSON.stringify([engineInfo.id, activeFilter.task, query]);
+        const cached = !query ? trendingSearchCache.get(cacheKey) : undefined;
+        if (cached) {
+            setSearchResults([...cached.models], cached.hasMore);
+            setDiscoveryState(previous => ({ ...previous, hasSearched: true }));
+            setSearchWindow({
+                requestKey,
+                requestedLimit: cached.requestedLimit,
+            });
+            setSearchError(null);
+            setIsSearching(false);
+            setIsLoadingMore(false);
+            setLoadMoreError(null);
             return;
         }
 
-        // Non-empty query → regular search
-        setIsTrending(false);
-
-        const doSearch = async () => {
-            setIsSearching(true);
-            setHasSearched(true);
-            try {
-                const models = unwrapResult(
-                    await directCommands.directRuntimeDiscoverHfModels(
-                        debouncedQuery,
-                        engineInfo.id,
-                        20,
-                        pipelineTags
-                    ),
-                    "HuggingFace model search"
-                );
-                setResults(models);
-            } catch (err: any) {
-                console.error("HF search failed:", err);
-                toast.error(typeof err === "string" ? err : "HuggingFace search failed");
-                setResults([]);
-            } finally {
-                setIsSearching(false);
+        const requestedLimit = query ? QUERY_INITIAL_LIMIT : TRENDING_INITIAL_LIMIT;
+        setIsSearching(true);
+        setIsLoadingMore(false);
+        setSearchError(null);
+        setLoadMoreError(null);
+        setSearchWindow({ requestKey, requestedLimit });
+        setSearchResults([], false);
+        void directCommands.directRuntimeDiscoverHfModelsV2(
+            query,
+            activeFilter.task,
+            requestedLimit,
+        ).then(result => {
+            const response = unwrapResult(result, "Hugging Face model search");
+            if (!searchGuard.current.isCurrent(generation)) return;
+            if (
+                response.engine_id !== engineInfo.id
+                || response.task !== activeFilter.task
+            ) {
+                throw new Error("Hugging Face search returned results for a different runtime filter");
             }
-        };
-
-        doSearch();
-    }, [debouncedQuery, engineInfo, pipelineFilter]);
-
-    // Toggle expand
-    const handleExpand = useCallback(
-        (repoId: string) => {
-            if (expandedModel === repoId) {
-                setExpandedModel(null);
-            } else {
-                setExpandedModel(repoId);
-                if (!fileInfoCache[repoId]) {
-                    loadFileInfoDirect(repoId);
-                }
-            }
-        },
-        [expandedModel, loadFileInfoDirect, fileInfoCache]
-    );
-
-    // Download a single GGUF file (+ optional mmproj)
-    const handleDownloadSingle = useCallback(
-        async (repoId: string, file: HfFileInfo, mmproj?: HfFileInfo | null) => {
-            const files = [file.filename];
-            if (mmproj) files.push(mmproj.filename);
-
-            setDownloadingFiles((prev) => new Set([...prev, file.filename]));
-
-            try {
-                await downloadHfFiles(repoId, files, null, activeFilterDef.downloadCategory ?? undefined);
-            } finally {
-                setDownloadingFiles((prev) => {
-                    const next = new Set(prev);
-                    next.delete(file.filename);
-                    return next;
+            setSearchResults(response.models, response.has_more);
+            setDiscoveryState(previous => ({ ...previous, hasSearched: true }));
+            if (!query) {
+                trendingSearchCache.set(cacheKey, {
+                    models: response.models,
+                    hasMore: response.has_more,
+                    requestedLimit,
                 });
             }
-        },
-        [downloadHfFiles, activeFilterDef]
-    );
+        }).catch(error => {
+            if (!searchGuard.current.isCurrent(generation)) return;
+            const message = errorMessage(error);
+            setSearchError(message);
+            setSearchResults([], false);
+            if (query) toast.error("Hugging Face search failed", { description: message });
+        }).finally(() => {
+            if (searchGuard.current.isCurrent(generation)) setIsSearching(false);
+        });
 
-    // Download all files (MLX/vLLM directory) — track by repoId
-    const handleDownloadAll = useCallback(
-        async (repoId: string, files: HfFileInfo[]) => {
-            const filenames = files.map((f) => f.filename);
-            setDownloadingFiles((prev) => new Set([...prev, repoId]));
+        return () => searchGuard.current.invalidate();
+    }, [
+        activeFilter?.task,
+        debounceAttempt,
+        debouncedQuery,
+        engineInfo?.id,
+        isVisible,
+        searchAttempt,
+        setDiscoveryState,
+        setSearchResults,
+    ]);
 
-            try {
-                await downloadHfFiles(repoId, filenames, null, activeFilterDef.downloadCategory ?? undefined);
-            } finally {
-                // repoProgress listener handles cleanup after 100%
-            }
-        },
-        [downloadHfFiles, activeFilterDef]
-    );
-
-    // Open external URL
-    const openExternal = useCallback((url: string) => {
-        commandClient.openUrl(url).catch((err) =>
-            console.warn("open_url failed:", err)
-        );
+    const retrySearch = useCallback(() => {
+        searchGuard.current.invalidate();
+        setSearchAttempt(attempt => attempt + 1);
     }, []);
 
-    // -----------------------------------------------------------------------
-    // Render
-    // -----------------------------------------------------------------------
-    return (
-        <div className="space-y-4">
-            {/* Engine Badge + Model Type Filter */}
-            <div className="flex items-center justify-between gap-3">
-                {engineInfo && (
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/30 px-3 py-2 rounded-xl border border-border/30 flex-1 min-w-0">
-                        <Info className="w-3.5 h-3.5 text-primary/60 shrink-0" />
-                        <span className="truncate">
-                            Searching for{" "}
-                            <span className="font-semibold text-foreground">
-                                {engineInfo.hf_tag.toUpperCase()}
-                            </span>{" "}
-                            models compatible with{" "}
-                            <span className="font-semibold text-foreground">
-                                {engineInfo.display_name}
-                            </span>
-                        </span>
-                    </div>
-                )}
+    const loadMore = useCallback(async () => {
+        if (
+            !engineInfo
+            || !activeFilter
+            || isSearching
+            || isLoadingMore
+            || !hasMore
+        ) {
+            return;
+        }
+        const query = debouncedQuery.trim();
+        if (query !== searchQuery.trim()) return;
 
-                {/* Pipeline Type Scrollable Filter Bar */}
-                <div className="flex gap-1.5 overflow-x-auto no-scrollbar shrink-0" id="hf-pipeline-filter">
-                    {PIPELINE_FILTERS.map(({ id, label, icon: Icon }) => (
-                        <button
-                            key={id}
-                            onClick={() => setPipelineFilter(id)}
-                            className={cn(
-                                "flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all duration-200 whitespace-nowrap border shrink-0",
-                                pipelineFilter === id
-                                    ? "bg-foreground text-background border-foreground shadow-xs"
-                                    : "bg-muted/40 text-muted-foreground border-transparent hover:bg-muted hover:text-foreground"
-                            )}
-                            id={`hf-filter-${id}`}
-                        >
-                            <Icon className="w-3 h-3" />
-                            <span>{label}</span>
-                        </button>
-                    ))}
+        const requestKey = JSON.stringify([engineInfo.id, activeFilter.task, query]);
+        const currentLimit = searchWindow?.requestKey === requestKey
+            ? searchWindow.requestedLimit
+            : Math.max(
+                query ? QUERY_INITIAL_LIMIT : TRENDING_INITIAL_LIMIT,
+                results.length,
+            );
+        const requestedLimit = Math.min(
+            MAX_SEARCH_LIMIT,
+            Math.max(currentLimit + SEARCH_PAGE_SIZE, results.length + SEARCH_PAGE_SIZE),
+        );
+        if (requestedLimit <= currentLimit) return;
+
+        const generation = searchGuard.current.begin();
+        setIsLoadingMore(true);
+        setLoadMoreError(null);
+        try {
+            const response = unwrapResult(
+                await directCommands.directRuntimeDiscoverHfModelsV2(
+                    query,
+                    activeFilter.task,
+                    requestedLimit,
+                ),
+                "Hugging Face model search",
+            );
+            if (!searchGuard.current.isCurrent(generation)) return;
+            if (
+                response.engine_id !== engineInfo.id
+                || response.task !== activeFilter.task
+            ) {
+                throw new Error("Hugging Face search returned results for a different runtime filter");
+            }
+
+            const merged = mergeHfModelCards(results, response.models)
+                .slice(0, requestedLimit);
+            setSearchResults(merged, response.has_more);
+            setSearchWindow({ requestKey, requestedLimit });
+            if (!query) {
+                trendingSearchCache.set(
+                    `${engineInfo.id}:${activeFilter.task}`,
+                    {
+                        models: merged,
+                        hasMore: response.has_more,
+                        requestedLimit,
+                    },
+                );
+            }
+        } catch (error) {
+            if (!searchGuard.current.isCurrent(generation)) return;
+            setLoadMoreError(errorMessage(error));
+        } finally {
+            if (searchGuard.current.isCurrent(generation)) setIsLoadingMore(false);
+        }
+    }, [
+        activeFilter,
+        debouncedQuery,
+        engineInfo,
+        hasMore,
+        isLoadingMore,
+        isSearching,
+        results,
+        searchQuery,
+        searchWindow,
+        setSearchResults,
+    ]);
+
+    useEffect(() => {
+        setFilePlans({});
+        setSelectedCompanions({});
+        setExpandedModel(null);
+    }, [activeFilter?.task, engineInfo?.id, setExpandedModel]);
+
+    const planKey = useCallback(
+        (repoId: string) => `${engineInfo?.id ?? "none"}:${activeFilter?.task ?? "none"}:${repoId}`,
+        [activeFilter?.task, engineInfo?.id],
+    );
+
+    const loadPlan = useCallback(async (repoId: string) => {
+        if (!activeFilter || !engineInfo) return;
+        const key = planKey(repoId);
+        setFilePlans(previous => ({
+            ...previous,
+            [key]: { status: "loading" },
+        }));
+        try {
+            const plan = unwrapResult(
+                await directCommands.directRuntimeGetModelFilesV2(repoId, activeFilter.task),
+                "Hugging Face artifact plan",
+            );
+            if (
+                plan.repo_id !== repoId
+                || plan.engine_id !== engineInfo.id
+                || plan.task !== activeFilter.task
+            ) {
+                throw new Error(
+                    "Hugging Face artifact plan returned a different repository or runtime filter",
+                );
+            }
+            setFilePlans(previous => ({
+                ...previous,
+                [key]: { status: "ready", plan },
+            }));
+        } catch (error) {
+            setFilePlans(previous => ({
+                ...previous,
+                [key]: { status: "error", error: errorMessage(error) },
+            }));
+        }
+    }, [activeFilter, engineInfo, planKey]);
+
+    const toggleExpanded = useCallback((repoId: string) => {
+        if (expandedModel === repoId) {
+            setExpandedModel(null);
+            return;
+        }
+        setExpandedModel(repoId);
+        const current = filePlans[planKey(repoId)];
+        if (!current || current.status === "error") void loadPlan(repoId);
+    }, [expandedModel, filePlans, loadPlan, planKey, setExpandedModel]);
+
+    const downloadArtifact = useCallback(async (
+        plan: HfModelFilePlan,
+        artifact: HfDownloadArtifact,
+    ) => {
+        const companionKey = JSON.stringify([
+            plan.repo_id,
+            plan.revision,
+            plan.task,
+            artifact.id,
+        ]);
+        const companionArtifactId = effectiveHfCompanionArtifactId(
+            plan,
+            selectedCompanions[companionKey],
+        );
+        if (requiresHfCompanionArtifact(plan) && !companionArtifactId) {
+            throw new Error(
+                `No compatible vision projector is available for ${plan.repo_id}`,
+            );
+        }
+        await downloadHfSelection({
+            repo_id: plan.repo_id,
+            revision: plan.revision,
+            task: plan.task,
+            artifact_id: artifact.id,
+            companion_artifact_id: companionArtifactId,
+            destination_name: null,
+        }, artifact.download_id);
+    }, [downloadHfSelection, selectedCompanions]);
+
+    const openHfUrl = useCallback((url: string) => {
+        void commandClient.openUrl(url).catch(error => {
+            toast.error("Could not open Hugging Face", {
+                description: errorMessage(error),
+            });
+        });
+    }, []);
+
+    const openRepository = useCallback((repoId: string) => {
+        const url = huggingFaceRepositoryUrl(repoId);
+        if (!url) {
+            toast.error("Invalid Hugging Face repository link");
+            return;
+        }
+        openHfUrl(url);
+    }, [openHfUrl]);
+
+    const sortedResults = useMemo(() => {
+        return [...results].sort((left, right) => {
+            const leftPlan = filePlans[planKey(left.id)]?.plan;
+            const rightPlan = filePlans[planKey(right.id)]?.plan;
+            const leftDownloading = leftPlan?.artifacts.some(
+                artifact => downloadingFiles.has(artifact.download_id),
+            ) ? 2 : 0;
+            const rightDownloading = rightPlan?.artifacts.some(
+                artifact => downloadingFiles.has(artifact.download_id),
+            ) ? 2 : 0;
+            const leftInstalled = isRepositoryInstalled(localModels, left.id) ? 1 : 0;
+            const rightInstalled = isRepositoryInstalled(localModels, right.id) ? 1 : 0;
+            return (rightDownloading + rightInstalled) - (leftDownloading + leftInstalled);
+        });
+    }, [downloadingFiles, filePlans, localModels, planKey, results]);
+    const currentRequestKey = engineInfo && activeFilter
+        ? JSON.stringify([engineInfo.id, activeFilter.task, debouncedQuery.trim()])
+        : null;
+    const reachedSearchLimit = Boolean(
+        currentRequestKey
+        && searchWindow?.requestKey === currentRequestKey
+        && searchWindow.requestedLimit >= MAX_SEARCH_LIMIT,
+    );
+    const searchRemediation = searchError
+        ? classifyHfHubError(searchError)
+        : null;
+    const loadMoreRemediation = loadMoreError
+        ? classifyHfHubError(loadMoreError)
+        : null;
+
+    if (profilesLoading) {
+        return (
+            <div className="flex items-center justify-center py-16 text-sm text-muted-foreground">
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Loading runtime model support…
+            </div>
+        );
+    }
+
+    if (profilesError) {
+        return (
+            <div className="rounded-xl border border-destructive/20 bg-destructive/5 p-5 text-sm">
+                <div className="flex items-center gap-2 font-semibold text-destructive">
+                    <AlertTriangle className="w-4 h-4" /> Could not load model capabilities
+                </div>
+                <p className="mt-2 text-muted-foreground">{profilesError}</p>
+                <button
+                    onClick={() => setProfilesAttempt(attempt => attempt + 1)}
+                    className="mt-3 inline-flex items-center gap-1 font-semibold text-primary"
+                >
+                    <RefreshCw className="w-3.5 h-3.5" /> Retry
+                </button>
+            </div>
+        );
+    }
+
+    if (!engineInfo || filters.length === 0) {
+        const isOllama = engineInfo?.id === "ollama";
+        return (
+            <div className="rounded-xl border border-border/60 bg-muted/20 p-6 text-sm">
+                <div className="flex items-center gap-2 font-semibold">
+                    <Info className="w-4 h-4 text-primary" />
+                    {isOllama ? "Ollama manages its own model library" : "No local model runtime"}
+                </div>
+                <p className="mt-2 text-muted-foreground">
+                    {isOllama
+                        ? "Raw Hugging Face files are not imported into Ollama. Use Ollama’s pull/create workflow, then select the model from its library."
+                        : "This build uses cloud inference and cannot install Hugging Face models locally."}
+                </p>
+            </div>
+        );
+    }
+
+    return (
+        <div
+            className="space-y-4"
+            aria-busy={isSearching || isLoadingMore}
+        >
+            <div className="flex items-center justify-between gap-3">
+                <div>
+                    <h3 className="font-semibold">Hugging Face Models</h3>
+                    <p className="text-xs text-muted-foreground">
+                        Compatible with {engineInfo.display_name}; artifacts are validated before download
+                    </p>
+                </div>
+                <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                    <Shield className="w-3 h-3" />
+                    {activeFilter?.formatTag.toUpperCase()}
                 </div>
             </div>
 
-            {/* Search Input */}
-            <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <input
-                    type="text"
-                    placeholder={activeFilterDef.placeholder}
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2.5 text-sm bg-background border border-border/50 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-primary/20 transition-all text-foreground placeholder:text-muted-foreground/50"
-                    id="hf-search-input"
-                />
-                {isSearching && (
-                    <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground animate-spin" />
-                )}
+            <div className="flex gap-2 overflow-x-auto pb-1">
+                {filters.map(filter => {
+                    const Icon = taskIcon(filter.task);
+                    return (
+                        <button
+                            key={filter.task}
+                            type="button"
+                            onClick={() => selectTask(filter.task)}
+                            aria-pressed={activeFilter?.task === filter.task}
+                            aria-label={`Show ${filter.label} models for ${engineInfo.display_name}`}
+                            className={cn(
+                                "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs whitespace-nowrap border transition-colors",
+                                activeFilter?.task === filter.task
+                                    ? "bg-foreground text-background border-foreground"
+                                    : "bg-muted/50 text-muted-foreground border-transparent hover:text-foreground",
+                            )}
+                        >
+                            <Icon className="w-3 h-3" /> {filter.label}
+                        </button>
+                    );
+                })}
             </div>
 
-            {/* Trending header when showing auto-populated results */}
-            {isTrending && sortedResults.length > 0 && !isSearching && (
-                <div className="flex items-center gap-2 text-xs text-muted-foreground/60 mb-1">
-                    <Heart className="w-3 h-3" />
-                    <span>Popular {activeFilterDef.label} models</span>
+            {activeFilter?.compatibilityHint && (
+                <div className="flex gap-2 rounded-lg border border-blue-500/15 bg-blue-500/5 p-3 text-xs text-muted-foreground">
+                    <Info className="w-3.5 h-3.5 shrink-0 text-blue-500" />
+                    {activeFilter.compatibilityHint}
                 </div>
             )}
 
-            {/* Results */}
-            <div className="grid gap-3">
-                {sortedResults.map((model) => {
-                    const isExpanded = expandedModel === model.id;
-                    const rp = repoProgress[model.id];
-                    const isDownloading = downloadingFiles.has(model.id);
-                    const isDownloaded = isModelDownloaded(model.id);
-                    const fileInfo = fileInfoCache[model.id] ?? null;
-                    const isVision = model.tags.some((t) => t === "image-text-to-text");
-                    const isEmbeddingModel = model.tags.some((t) => t === "feature-extraction" || t === "sentence-similarity");
-                    const isDiffusionModel = model.tags.some((t) => t === "text-to-image" || t === "image-to-image");
-                    const isSttModel = model.tags.some((t) => t === "automatic-speech-recognition");
-                    const isVideoModel = model.tags.some((t) => t === "text-to-video");
-                    const categoryBadge = isEmbeddingModel ? { label: 'Embedding', icon: Database, color: 'cyan' }
-                        : isDiffusionModel ? { label: 'Diffusion', icon: Image, color: 'pink' }
-                            : isSttModel ? { label: 'STT', icon: Mic, color: 'amber' }
-                                : isVideoModel ? { label: 'Video', icon: Video, color: 'rose' }
-                                    : null;
+            <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <input
+                    type="search"
+                    value={searchQuery}
+                    onChange={event => setSearchQuery(event.target.value)}
+                    placeholder={activeFilter?.placeholder}
+                    aria-label="Search Hugging Face models"
+                    autoComplete="off"
+                    className="w-full rounded-xl border border-border/60 bg-muted/30 py-2.5 pl-10 pr-10 text-sm outline-hidden focus:ring-1 focus:ring-primary/30"
+                />
+                {isSearching && (
+                    <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 animate-spin text-muted-foreground" />
+                )}
+            </div>
 
+            {searchError && !isSearching && (
+                <div className="space-y-2">
+                    <div
+                        className="rounded-lg border border-destructive/20 bg-destructive/5 p-4 text-sm"
+                        role="alert"
+                    >
+                        <p className="text-destructive">{searchError}</p>
+                        {!searchRemediation && (
+                            <button
+                                type="button"
+                                onClick={retrySearch}
+                                className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-primary"
+                            >
+                                <RefreshCw className="h-3 w-3" /> Retry search
+                            </button>
+                        )}
+                    </div>
+                    {searchRemediation && (
+                        <HfRemediation
+                            kind={searchRemediation}
+                            onOpenUrl={openHfUrl}
+                            onRetry={retrySearch}
+                        />
+                    )}
+                </div>
+            )}
+
+            {!isSearching && hasSearched && !searchError && sortedResults.length === 0 && (
+                <div className="py-12 text-center text-sm text-muted-foreground">
+                    No runtime-compatible models found.
+                </div>
+            )}
+
+            <div className="grid gap-3">
+                {sortedResults.map((model, index) => {
+                    const key = planKey(model.id);
+                    const planState = filePlans[key];
+                    const plan = planState?.plan;
+                    const repositoryUrl = huggingFaceRepositoryUrl(model.id);
+                    const detailsId = `hf-model-details-${index}`;
+                    const planRemediation = planState?.error
+                        ? classifyHfHubError(planState.error)
+                        : null;
+                    const installedRepo = isRepositoryInstalled(localModels, model.id);
+                    const hasActiveDownload = plan?.artifacts.some(
+                        artifact => downloadingFiles.has(artifact.download_id),
+                    ) ?? false;
                     return (
                         <div
                             key={model.id}
                             className={cn(
-                                "border rounded-xl bg-card/40 hover:bg-card/60 transition-all duration-300 overflow-hidden shadow-xs",
-                                isDownloading
-                                    ? "border-primary/40 ring-1 ring-primary/10 bg-primary/2"
-                                    : isDownloaded
-                                        ? "border-green-500/30"
-                                        : "border-border/50"
+                                "rounded-xl border bg-card/40 transition-colors",
+                                hasActiveDownload ? "border-primary/40" : "border-border/50",
                             )}
+                            data-testid="hf-model-card"
+                            data-repo-id={model.id}
                         >
-                            {/* Card Header */}
                             <button
-                                onClick={() => handleExpand(model.id)}
-                                className="w-full text-left p-4 flex items-start justify-between gap-3"
-                                id={`hf-model-${model.id.replace("/", "-")}`}
+                                type="button"
+                                onClick={() => toggleExpanded(model.id)}
+                                aria-expanded={expandedModel === model.id}
+                                aria-controls={detailsId}
+                                aria-label={`${expandedModel === model.id ? "Collapse" : "Expand"} ${model.id}`}
+                                className="w-full p-4 text-left flex items-start gap-3"
                             >
-                                <div className="min-w-0 flex-1">
-                                    <h3 className="font-semibold text-sm mb-1 flex items-center gap-2 flex-wrap">
-                                        <span className="truncate max-w-[300px]">
-                                            {model.name}
-                                        </span>
-
-                                        {/* Vision badge */}
-                                        {isVision && (
-                                            <span className="text-[9px] uppercase tracking-wider font-bold bg-violet-500/10 text-violet-600 dark:text-violet-400 px-1.5 py-0.5 rounded border border-violet-500/20 flex items-center gap-1 shrink-0">
-                                                <Eye className="w-2.5 h-2.5" />
-                                                Vision
-                                            </span>
-                                        )}
-
-                                        {/* Category badge (non-LLM models) */}
-                                        {categoryBadge && (
-                                            <span className={cn(
-                                                "text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded border flex items-center gap-1 shrink-0",
-                                                categoryBadge.color === 'cyan' && 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
-                                                categoryBadge.color === 'pink' && 'bg-pink-500/10 text-pink-600 dark:text-pink-400 border-pink-500/20',
-                                                categoryBadge.color === 'amber' && 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
-                                                categoryBadge.color === 'rose' && 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20',
-                                            )}>
-                                                <categoryBadge.icon className="w-2.5 h-2.5" />
-                                                {categoryBadge.label}
-                                            </span>
-                                        )}
-
-                                        {/* Downloaded badge */}
-                                        {isDownloaded && !isDownloading && (
-                                            <span className="text-[9px] uppercase tracking-wider font-bold bg-green-500/10 text-green-600 dark:text-green-400 px-1.5 py-0.5 rounded border border-green-500/20 flex items-center gap-1 shrink-0">
-                                                <CheckCircle2 className="w-2.5 h-2.5" />
-                                                Downloaded
-                                            </span>
-                                        )}
-
-                                        {/* Gated badge */}
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2">
+                                        <span className="font-semibold truncate">{model.id}</span>
                                         {model.gated && (
-                                            <span className="text-[9px] uppercase tracking-wider font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded border border-amber-500/20 flex items-center gap-1 shrink-0">
-                                                <Shield className="w-2.5 h-2.5" />
-                                                Gated
-                                            </span>
+                                            <span className="text-[9px] font-bold text-amber-500 border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 rounded">GATED</span>
                                         )}
-
-                                        {/* Active download badge (visible when collapsed) */}
-                                        {isDownloading && !isExpanded && rp && (
-                                            <span className="text-[9px] font-bold bg-primary/10 text-primary px-1.5 py-0.5 rounded border border-primary/20 flex items-center gap-1 shrink-0 animate-pulse">
-                                                <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                                                {rp.pct.toFixed(0)}%
-                                            </span>
+                                        {installedRepo && (
+                                            <span className="text-[9px] font-bold text-emerald-500 border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.5 rounded">ON DISK</span>
                                         )}
-
-                                        {/* Pinned indicator for downloading models */}
-                                        {isDownloading && (
-                                            <Pin className="w-3 h-3 text-primary/50 shrink-0 rotate-45" />
-                                        )}
-                                    </h3>
-                                    <p className="text-xs text-muted-foreground/70 truncate">
-                                        {model.author}
-                                    </p>
-                                    <div className="flex items-center gap-3 mt-2 text-[11px] text-muted-foreground/60">
-                                        <span className="flex items-center gap-1">
-                                            <ArrowDownToLine className="w-3 h-3" />
-                                            {formatDownloads(model.downloads)}
-                                        </span>
-                                        <span className="flex items-center gap-1">
-                                            <Heart className="w-3 h-3" />
-                                            {formatDownloads(model.likes)}
-                                        </span>
                                     </div>
-
-                                    {/* Compact progress bar when collapsed & downloading */}
-                                    {isDownloading && !isExpanded && rp && (
-                                        <div className="relative overflow-hidden bg-secondary rounded-full w-full h-1.5 mt-2">
-                                            <div
-                                                className="bg-primary h-full rounded-full transition-all duration-300 ease-out"
-                                                style={{ width: `${rp.pct || 0}%` }}
-                                            />
-                                        </div>
-                                    )}
+                                    <div className="mt-1 flex gap-3 text-[11px] text-muted-foreground">
+                                        <span className="flex items-center gap-1"><ArrowDownToLine className="w-3 h-3" />{formatDownloads(model.downloads)}</span>
+                                        <span className="flex items-center gap-1"><Heart className="w-3 h-3" />{model.likes}</span>
+                                    </div>
                                 </div>
-                                <ChevronDown
-                                    className={cn(
-                                        "w-4 h-4 text-muted-foreground/50 transition-transform duration-200 shrink-0 mt-1",
-                                        isExpanded && "rotate-180"
-                                    )}
-                                />
+                                <ChevronDown className={cn(
+                                    "w-4 h-4 text-muted-foreground transition-transform",
+                                    expandedModel === model.id && "rotate-180",
+                                )} />
                             </button>
 
-                            {/* Expanded: File Tree / Quant Picker */}
-                            {isExpanded && (
-                                <div className="border-t border-border/30 p-4 bg-muted/10">
-                                    {!fileInfo ? (
-                                        <div className="flex items-center justify-center py-6 text-sm text-muted-foreground gap-2">
-                                            <Loader2 className="w-4 h-4 animate-spin" />
-                                            Loading files...
+                            {expandedModel === model.id && (
+                                <div
+                                    id={detailsId}
+                                    className="border-t border-border/40 p-4 space-y-3"
+                                >
+                                    {repositoryUrl && (
+                                        <button
+                                            type="button"
+                                            onClick={() => openRepository(model.id)}
+                                            aria-label={`Open ${model.id} on Hugging Face`}
+                                            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-primary"
+                                        >
+                                            <ExternalLink className="w-3 h-3" /> View repository
+                                        </button>
+                                    )}
+
+                                    {model.gated && planState?.status !== "ready" && (
+                                        <HfRemediation
+                                            kind="access"
+                                            onOpenUrl={openHfUrl}
+                                            repoUrl={repositoryUrl}
+                                        />
+                                    )}
+
+                                    {planState?.status === "loading" && (
+                                        <div className="flex items-center py-4 text-xs text-muted-foreground">
+                                            <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" /> Resolving revision and artifacts…
                                         </div>
-                                    ) : (
-                                        <div className="space-y-3">
-                                            {/* Total size badge */}
-                                            <div className="flex items-center justify-between text-xs text-muted-foreground">
-                                                <span>
-                                                    {fileInfo.files.length} file
-                                                    {fileInfo.files.length !== 1 ? "s" : ""}
-                                                </span>
-                                                {!fileInfo.is_multi_file && (
-                                                    <span className="font-mono bg-muted/50 px-2 py-0.5 rounded border border-border/10">
-                                                        Total: {fileInfo.total_size_display}
-                                                    </span>
-                                                )}
-                                            </div>
+                                    )}
 
-                                            {/* mmproj indicator */}
-                                            {fileInfo.mmproj_file && (
-                                                <div className="text-[11px] bg-indigo-500/5 text-indigo-500 border border-indigo-500/10 rounded-lg px-3 py-1.5 flex items-center gap-2">
-                                                    <Info className="w-3 h-3" />
-                                                    Vision projector will be included:{" "}
-                                                    <span className="font-mono">
-                                                        {fileInfo.mmproj_file.filename}
-                                                    </span>
-                                                    <span className="font-mono text-muted-foreground">
-                                                        ({fileInfo.mmproj_file.size_display})
-                                                    </span>
-                                                </div>
-                                            )}
-
-                                            {/* Already downloaded notice */}
-                                            {isDownloaded && !isDownloading && (
-                                                <div className="text-[11px] bg-green-500/5 text-green-600 dark:text-green-400 border border-green-500/10 rounded-lg px-3 py-2 flex items-center gap-2">
-                                                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                                                    This model is already downloaded and available in your Library.
-                                                </div>
-                                            )}
-
-                                            {/* File list */}
-                                            {fileInfo.is_multi_file ? (
-                                                // MLX/vLLM: Download all button + per-file progress
-                                                <div className="space-y-2">
-                                                    <div className="max-h-[200px] overflow-y-auto space-y-1 pr-1">
-                                                        {fileInfo.files.map((f) => {
-                                                            const isCurrentFile =
-                                                                rp?.currentFile === f.filename;
-                                                            const filePct =
-                                                                rp?.filePct?.[f.filename];
-                                                            const isFileComplete =
-                                                                filePct !== undefined &&
-                                                                filePct >= 100;
-
-                                                            return (
-                                                                <div
-                                                                    key={f.filename}
-                                                                    className="py-1 px-2 rounded hover:bg-muted/30"
-                                                                >
-                                                                    <div className="flex items-center justify-between text-[11px]">
-                                                                        <span
-                                                                            className={cn(
-                                                                                "truncate font-mono max-w-[250px] transition-colors",
-                                                                                isCurrentFile
-                                                                                    ? "text-primary font-semibold"
-                                                                                    : isFileComplete
-                                                                                        ? "text-green-500"
-                                                                                        : "text-muted-foreground"
-                                                                            )}
-                                                                        >
-                                                                            {f.filename}
-                                                                        </span>
-                                                                        <div className="flex items-center gap-2 shrink-0 ml-2">
-                                                                            {filePct !==
-                                                                                undefined &&
-                                                                                filePct < 100 && (
-                                                                                    <span className="text-[10px] font-mono text-primary/70 tabular-nums">
-                                                                                        {filePct.toFixed(
-                                                                                            0
-                                                                                        )}
-                                                                                        %
-                                                                                    </span>
-                                                                                )}
-                                                                            {isFileComplete && (
-                                                                                <span className="text-[10px] text-green-500">
-                                                                                    ✓
-                                                                                </span>
-                                                                            )}
-                                                                            <span className="font-mono text-muted-foreground/50">
-                                                                                {f.size_display}
-                                                                            </span>
-                                                                        </div>
-                                                                    </div>
-                                                                    {/* Per-file progress bar */}
-                                                                    {filePct !== undefined &&
-                                                                        filePct < 100 && (
-                                                                            <div className="relative overflow-hidden bg-secondary rounded-full w-full h-1 mt-1">
-                                                                                <div
-                                                                                    className="bg-primary/60 h-full rounded-full transition-all duration-300 ease-out"
-                                                                                    style={{
-                                                                                        width: `${filePct || 0}%`,
-                                                                                    }}
-                                                                                />
-                                                                            </div>
-                                                                        )}
-                                                                </div>
-                                                            );
-                                                        })}
-                                                    </div>
-
-                                                    {/* Overall progress bar for multi-file downloads */}
-                                                    {rp && (
-                                                        <div className="space-y-1">
-                                                            <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-                                                                <span className="truncate font-mono max-w-[220px] text-primary/70">
-                                                                    {rp.currentFile ||
-                                                                        "Preparing..."}
-                                                                </span>
-                                                                <span className="shrink-0 ml-2 tabular-nums">
-                                                                    {rp.fileIndex + 1}/
-                                                                    {rp.fileCount} ·{" "}
-                                                                    {rp.pct.toFixed(0)}%
-                                                                </span>
-                                                            </div>
-                                                            <div className="relative overflow-hidden bg-secondary rounded-full w-full h-2">
-                                                                <div
-                                                                    className="bg-primary h-full rounded-full transition-all duration-300 ease-out"
-                                                                    style={{
-                                                                        width: `${rp.pct || 0}%`,
-                                                                    }}
-                                                                />
-                                                            </div>
-                                                        </div>
-                                                    )}
-
-                                                    <button
-                                                        onClick={() =>
-                                                            handleDownloadAll(
-                                                                model.id,
-                                                                fileInfo.files
-                                                            )
-                                                        }
-                                                        disabled={
-                                                            isDownloading || isDownloaded
-                                                        }
-                                                        className={cn(
-                                                            "w-full border border-primary/30 hover:bg-primary hover:text-primary-foreground text-primary py-2.5 px-4 rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center transition-all shadow-xs hover:-translate-y-px",
-                                                            (isDownloading || isDownloaded) &&
-                                                            "opacity-50 cursor-not-allowed hover:translate-y-0"
-                                                        )}
-                                                    >
-                                                        {isDownloading ? (
-                                                            <>
-                                                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />{" "}
-                                                                Downloading...
-                                                            </>
-                                                        ) : isDownloaded ? (
-                                                            <>
-                                                                <CheckCircle2 className="w-4 h-4 mr-2" />{" "}
-                                                                Already Downloaded
-                                                            </>
-                                                        ) : (
-                                                            <>
-                                                                <Download className="w-4 h-4 mr-2" />{" "}
-                                                                Download All (
-                                                                {fileInfo.total_size_display})
-                                                            </>
-                                                        )}
-                                                    </button>
-                                                </div>
-                                            ) : (
-                                                // GGUF: Quantization picker
-                                                <div className="space-y-1.5">
-                                                    {fileInfo.files.map((f) => {
-                                                        const isDownloadingThis =
-                                                            downloadingFiles.has(f.filename);
-                                                        const fileProgress =
-                                                            downloading[f.filename];
-
-                                                        return (
-                                                            <div
-                                                                key={f.filename}
-                                                                className="flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-muted/30 transition-colors"
-                                                            >
-                                                                <div className="flex-1 min-w-0">
-                                                                    <div className="flex items-center gap-2">
-                                                                        {f.quant_type && (
-                                                                            <span className="text-[10px] font-bold uppercase tracking-wider bg-primary/10 text-primary px-1.5 py-0.5 rounded border border-primary/20 shrink-0">
-                                                                                {f.quant_type}
-                                                                            </span>
-                                                                        )}
-                                                                        <span className="text-[11px] font-mono text-muted-foreground truncate">
-                                                                            {f.filename}
-                                                                        </span>
-                                                                    </div>
-                                                                    {fileProgress !== undefined && (
-                                                                        <div className="relative overflow-hidden bg-secondary rounded-full w-full h-1.5 mt-1">
-                                                                            <div
-                                                                                className="bg-primary h-full rounded-full transition-all duration-500 ease-in-out"
-                                                                                style={{
-                                                                                    width: `${fileProgress || 0}%`,
-                                                                                }}
-                                                                            />
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                                <span className="text-[10px] font-mono text-muted-foreground/50 shrink-0">
-                                                                    {f.size_display}
-                                                                </span>
-                                                                <button
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        handleDownloadSingle(
-                                                                            model.id,
-                                                                            f,
-                                                                            fileInfo.mmproj_file
-                                                                        );
-                                                                    }}
-                                                                    disabled={isDownloadingThis}
-                                                                    className={cn(
-                                                                        "p-1.5 rounded-lg transition-all shrink-0",
-                                                                        isDownloadingThis
-                                                                            ? "opacity-50 cursor-not-allowed"
-                                                                            : "hover:bg-primary/10 text-muted-foreground hover:text-primary"
-                                                                    )}
-                                                                    title={`Download ${f.quant_type || f.filename}`}
-                                                                >
-                                                                    {isDownloadingThis ? (
-                                                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                                                    ) : (
-                                                                        <Download className="w-3.5 h-3.5" />
-                                                                    )}
-                                                                </button>
-                                                            </div>
-                                                        );
-                                                    })}
-                                                </div>
-                                            )}
-
-                                            {/* Open on HF */}
+                                    {planState?.status === "error" && (
+                                        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs">
+                                            <p className="text-destructive">{planState.error}</p>
                                             <button
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    openExternal(
-                                                        `https://huggingface.co/${model.id}`
-                                                    );
-                                                }}
-                                                className="flex items-center gap-1.5 text-[11px] text-muted-foreground/50 hover:text-primary transition-colors mt-2 cursor-pointer"
+                                                type="button"
+                                                onClick={() => void loadPlan(model.id)}
+                                                aria-label={`Retry artifact plan for ${model.id}`}
+                                                className="mt-2 inline-flex items-center gap-1 font-semibold text-primary"
                                             >
-                                                <ExternalLink className="w-3 h-3" />
-                                                View on HuggingFace
+                                                <RefreshCw className="w-3 h-3" /> Retry
                                             </button>
                                         </div>
                                     )}
+
+                                    {planRemediation && !model.gated && (
+                                        <HfRemediation
+                                            kind={planRemediation}
+                                            onOpenUrl={openHfUrl}
+                                            repoUrl={
+                                                planRemediation === "access"
+                                                    ? repositoryUrl
+                                                    : null
+                                            }
+                                        />
+                                    )}
+
+                                    {plan?.warnings.map(warning => (
+                                        <div key={warning} className="flex gap-2 text-xs text-amber-600 dark:text-amber-400">
+                                            <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {warning}
+                                        </div>
+                                    ))}
+
+                                    {plan?.artifacts.map(artifact => {
+                                        const companionKey = JSON.stringify([
+                                            plan.repo_id,
+                                            plan.revision,
+                                            plan.task,
+                                            artifact.id,
+                                        ]);
+                                        const companionRequired =
+                                            requiresHfCompanionArtifact(plan);
+                                        const companionArtifactId =
+                                            effectiveHfCompanionArtifactId(
+                                                plan,
+                                                selectedCompanions[companionKey],
+                                            );
+                                        const missingRequiredCompanion =
+                                            companionRequired && !companionArtifactId;
+                                        const installed = Boolean(findInstalledArtifactSelection(
+                                            localModels,
+                                            {
+                                                repoId: plan.repo_id,
+                                                revision: plan.revision,
+                                                engineId: plan.engine_id,
+                                                task: plan.task,
+                                                artifactId: artifact.id,
+                                                companionArtifactId,
+                                            },
+                                        ));
+                                        const active = downloadingFiles.has(artifact.download_id);
+                                        const progress = downloading[artifact.download_id];
+                                        const detailedProgress = repoProgress[artifact.download_id];
+                                        const visibleProgress = boundedProgress(
+                                            detailedProgress?.pct ?? progress,
+                                        );
+                                        return (
+                                            <div key={artifact.id} className="rounded-lg border border-border/50 bg-muted/20 p-3 space-y-2">
+                                                <div className="flex items-start justify-between gap-3">
+                                                    <div className="min-w-0">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-xs font-semibold">{artifact.label}</span>
+                                                            {artifact.files.length > 1 && (
+                                                                <span className="text-[9px] text-muted-foreground">{artifact.files.length} shards</span>
+                                                            )}
+                                                        </div>
+                                                        <p className="text-[10px] font-mono text-muted-foreground truncate">
+                                                            {artifact.primary_file ?? "Complete repository"}
+                                                        </p>
+                                                    </div>
+                                                    <span className="text-[10px] font-mono text-muted-foreground shrink-0">
+                                                        {artifact.total_size_display}
+                                                    </span>
+                                                </div>
+
+                                                {plan.companion_artifacts.length > 0 && (
+                                                    <label className="block text-[10px] text-muted-foreground">
+                                                        Vision projector {companionRequired ? "(required)" : "(optional)"}
+                                                        <select
+                                                            value={companionArtifactId ?? ""}
+                                                            onChange={event => setSelectedCompanions(previous => ({
+                                                                ...previous,
+                                                                [companionKey]: event.target.value,
+                                                            }))}
+                                                            className="mt-1 w-full rounded-md border border-border/60 bg-background px-2 py-1.5 text-xs"
+                                                            disabled={active}
+                                                        >
+                                                            {!companionRequired && (
+                                                                <option value="">No projector</option>
+                                                            )}
+                                                            {plan.companion_artifacts.map(companion => (
+                                                                <option key={companion.id} value={companion.id}>
+                                                                    {companion.label} · {companion.total_size_display}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                    </label>
+                                                )}
+
+                                                {missingRequiredCompanion && (
+                                                    <div className="flex gap-2 text-xs text-destructive">
+                                                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                                        This vision model has no compatible projector and cannot be installed.
+                                                    </div>
+                                                )}
+
+                                                {visibleProgress !== null && (
+                                                    <div className="space-y-1">
+                                                        <div className="flex justify-between text-[10px] text-muted-foreground">
+                                                            <span className="truncate">{detailedProgress?.currentFile || "Preparing…"}</span>
+                                                            <span>{Math.round(visibleProgress)}%</span>
+                                                        </div>
+                                                        <div
+                                                            className="h-1.5 overflow-hidden rounded-full bg-secondary"
+                                                            role="progressbar"
+                                                            aria-label={`Downloading ${artifact.label} from ${model.id}`}
+                                                            aria-valuemin={0}
+                                                            aria-valuemax={100}
+                                                            aria-valuenow={Math.round(visibleProgress)}
+                                                        >
+                                                            <div
+                                                                className="h-full bg-primary transition-all"
+                                                                style={{ width: `${visibleProgress}%` }}
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        if (active) {
+                                                            void cancelDownload(artifact.download_id);
+                                                        } else {
+                                                            void downloadArtifact(plan, artifact).catch(() => undefined);
+                                                        }
+                                                    }}
+                                                    disabled={installed || missingRequiredCompanion}
+                                                    aria-label={
+                                                        active
+                                                            ? `Cancel download of ${artifact.label} from ${model.id}`
+                                                            : installed
+                                                                ? `${artifact.label} from ${model.id} is installed`
+                                                                : `Download ${artifact.label} from ${model.id}`
+                                                    }
+                                                    className={cn(
+                                                        "w-full rounded-lg border py-2 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors",
+                                                        installed
+                                                            ? "border-border text-muted-foreground opacity-60"
+                                                            : active
+                                                                ? "border-destructive/30 text-destructive hover:bg-destructive hover:text-destructive-foreground"
+                                                                : "border-primary/30 text-primary hover:bg-primary hover:text-primary-foreground",
+                                                    )}
+                                                >
+                                                    {active ? (
+                                                        <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Cancel download</>
+                                                    ) : installed ? (
+                                                        <><CheckCircle2 className="w-3.5 h-3.5" /> Installed</>
+                                                    ) : (
+                                                        <><Download className="w-3.5 h-3.5" /> Download this artifact</>
+                                                    )}
+                                                </button>
+                                            </div>
+                                        );
+                                    })}
                                 </div>
                             )}
                         </div>
@@ -906,34 +1005,60 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                 })}
             </div>
 
-            {/* Empty states */}
-            {hasSearched && !isSearching && results.length === 0 && debouncedQuery.trim() && (
-                <div className="text-center py-8 text-muted-foreground text-sm">
-                    No models found for &quot;{debouncedQuery}&quot;. Try a different search term.
+            {!isSearching && loadMoreError && (
+                <div className="space-y-2">
+                    <div
+                        className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs"
+                        role="alert"
+                    >
+                        <span className="text-destructive">
+                            Could not load more models: {loadMoreError}
+                        </span>
+                    </div>
+                    {loadMoreRemediation && (
+                        <HfRemediation
+                            kind={loadMoreRemediation}
+                            onOpenUrl={openHfUrl}
+                            onRetry={() => void loadMore()}
+                        />
+                    )}
                 </div>
             )}
 
-            {/* Loading state for initial trending fetch */}
-            {!hasSearched && isSearching && (
-                <div className="text-center py-12 text-muted-foreground/50 text-sm space-y-2">
-                    <Loader2 className="w-6 h-6 mx-auto mb-3 animate-spin opacity-40" />
-                    <p>Loading popular {activeFilterDef.label} models...</p>
-                </div>
+            {!isSearching
+                && !searchError
+                && hasMore
+                && !reachedSearchLimit
+                && (
+                <button
+                    type="button"
+                    onClick={() => void loadMore()}
+                    disabled={isLoadingMore}
+                    aria-label="Load more Hugging Face models"
+                    data-testid="hf-load-more"
+                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5 text-xs font-semibold text-primary transition-colors hover:bg-muted/40 disabled:cursor-wait disabled:opacity-70"
+                >
+                    {isLoadingMore ? (
+                        <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Loading more compatible models…
+                        </>
+                    ) : (
+                        <>
+                            <ChevronDown className="h-3.5 w-3.5" />
+                            Load more compatible models
+                        </>
+                    )}
+                </button>
             )}
 
-            {/* Fallback: no trending results loaded and not searching */}
-            {!hasSearched && !isSearching && results.length === 0 && (
-                <div className="text-center py-12 text-muted-foreground/50 text-sm space-y-2">
-                    <Search className="w-8 h-8 mx-auto mb-3 opacity-30" />
-                    <p>Search for {activeFilterDef.label} models</p>
-                    <p className="text-xs opacity-60">
-                        {pipelineFilter === 'embedding' ? 'Try "bge", "nomic", "gte", or "qwen-embedding"'
-                            : pipelineFilter === 'diffusion' ? 'Try "flux", "stable-diffusion", or "sdxl"'
-                                : pipelineFilter === 'stt' ? 'Try "whisper", "parakeet", or "voxtral"'
-                                    : pipelineFilter === 'video' ? 'Try "mochi", "ltx-video", or "cogvideo"'
-                                        : 'Try "llama", "qwen", "gemma", or "phi"'
-                        }
-                    </p>
+            {!isSearching
+                && !searchError
+                && hasMore
+                && reachedSearchLimit
+                && (
+                <div className="rounded-lg border border-border/50 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                    Reached the {MAX_SEARCH_LIMIT}-result search window. Refine the search to explore more compatible models.
                 </div>
             )}
         </div>

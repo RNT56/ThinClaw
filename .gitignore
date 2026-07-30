@@ -85,6 +85,7 @@ apps/desktop/node_modules/
 apps/desktop/dist/
 apps/desktop/frontend/dist/
 apps/desktop/frontend/.vite/
+apps/desktop/test-artifacts/
 apps/desktop/backend/bin/
 apps/desktop/backend/gen/
 apps/desktop/backend/resources/chromium/

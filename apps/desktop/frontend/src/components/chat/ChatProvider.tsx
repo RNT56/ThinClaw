@@ -31,6 +31,15 @@ import { listen } from '@tauri-apps/api/event';
 import { SettingsPage } from '../settings/SettingsSidebar';
 import { findStyle, STYLE_LIBRARY } from '../../lib/style-library';
 import { bridgeErrorMessage } from '../../lib/command-errors';
+import {
+    isCompatibleManagedModelForCategory,
+    resolveCompatibleManagedModel,
+} from '../../lib/hf-models';
+import { startLocalChatRuntime } from '../../lib/local-runtime-start';
+import {
+    requireLocalImageModelPath,
+    startLocalImageRuntime,
+} from '../../lib/local-image-runtime';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -43,6 +52,7 @@ export interface ChatLayoutState {
     messages: ReturnType<typeof useChat>['messages'];
     isStreaming: boolean;
     sendMessage: ReturnType<typeof useChat>['sendMessage'];
+    startServer: ReturnType<typeof useChat>['startServer'];
     clearMessages: () => void;
     conversations: ReturnType<typeof useChat>['conversations'];
     loadConversation: ReturnType<typeof useChat>['loadConversation'];
@@ -226,6 +236,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         messages,
         isStreaming,
         sendMessage,
+        startServer,
         clearMessages,
         conversations,
         loadConversation,
@@ -264,6 +275,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         currentSttModelPath,
         isRestarting,
         maxContext,
+        engineInfo,
     } = useModelContext();
     const { isRecording, startRecording, stopRecording } = useAudioRecorder();
 
@@ -321,7 +333,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         () => !!(userCfg?.selected_chat_provider && userCfg.selected_chat_provider !== 'local'),
         [userCfg?.selected_chat_provider]
     );
-    const canSee = isVisionCapable(modelPath);
+    const activeInventoryModel = localModels.find(model => model.path === modelPath);
+    const canSee = isVisionCapable(modelPath, activeInventoryModel);
     const isRagCapable = !!currentEmbeddingModelPath;
 
     const lastUserIndex = useMemo(() => {
@@ -543,19 +556,16 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     const handleGenerateImage = useCallback(async () => {
         if (!input.trim()) { toast.error('Please enter a prompt.'); return; }
 
-        let modelPathToUse = currentImageGenModelPath;
+        const modelPathToUse = resolveCompatibleManagedModel(
+            localModels,
+            'Diffusion',
+            currentImageGenModelPath,
+        )?.path;
         if (!modelPathToUse) {
-            const found = localModels.find(m =>
-                m.name.toLowerCase().includes('flux') ||
-                m.name.toLowerCase().includes('sd') ||
-                m.name.toLowerCase().includes('diffusion')
-            );
-            if (found) {
-                modelPathToUse = found.path;
-            } else {
-                toast.error('No image generation model found.', { description: 'Please download a Flux or SD model.' });
-                return;
-            }
+            toast.error('No compatible image generation model found.', {
+                description: 'Download a diffusion model in Models → Discover.',
+            });
+            return;
         }
 
         if (!imageRunning) {
@@ -611,12 +621,22 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 if (chatModel && chatModel !== 'auto') {
                     const tId = toast.loading('Resuming Chat Server...');
                     try {
-                        let mmproj = null;
+                        let mmproj =
+                            localModels.find(model => model.path === chatModel)?.companion_path
+                            ?? null;
                         const mDef = models.find(m => m.variants.some(v => chatModel.endsWith(v.filename)));
-                        if (mDef && mDef.mmproj && modelsDir) {
+                        if (!mmproj && mDef && mDef.mmproj && modelsDir) {
                             mmproj = await join(modelsDir, mDef.mmproj.filename);
                         }
-                        await directCommands.directRuntimeStartChatServer(chatModel, maxContext, currentModelTemplate, mmproj, false, false, false);
+                        await startLocalChatRuntime({
+                            engine: engineInfo,
+                            modelPath: chatModel,
+                            contextSize: maxContext,
+                            template: currentModelTemplate,
+                            mmproj,
+                            mlock: userCfg?.mlock ?? false,
+                            quantizeKv: userCfg?.quantize_kv ?? false,
+                        });
                         toast.success('Chat Ready', { id: tId });
                     } catch (e) {
                         console.warn('Failed to resume chat', e);
@@ -629,7 +649,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             setIsImageMode(true);
             toast.error('Generation Failed', { description: String(e) });
         }
-    }, [input, imageRunning, currentImageGenModelPath, localModels, modelsDir, models, sendImagePrompt, activeStyleId, imageSteps, cfgScale, maxContext, currentModelTemplate, modelPath]);
+    }, [input, imageRunning, currentImageGenModelPath, localModels, modelsDir, models, sendImagePrompt, activeStyleId, imageSteps, cfgScale, maxContext, currentModelTemplate, modelPath, engineInfo, userCfg?.mlock, userCfg?.quantize_kv]);
 
     const handleSend = useCallback(async () => {
         if (mentionQuery !== null) return;
@@ -642,17 +662,45 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             try {
                 if (modelPath === 'auto') {
                     const isComplex = input.length > 100 || attachedImages.length > 0 || ingestedFiles.length > 0;
-                    const sorted = [...localModels].sort((a, b) => a.size - b.size);
-                    let bestModel = localModels[0];
+                    const sorted = localModels
+                        .filter(model => isCompatibleManagedModelForCategory(model, 'LLM'))
+                        .sort((a, b) => a.size - b.size);
+                    let bestModel = sorted[0];
                     if (sorted.length > 0) bestModel = isComplex ? sorted[sorted.length - 1] : sorted[0];
                     if (bestModel) {
                         toast.loading(`Auto-switching to ${bestModel.name}...`, { id: tId });
-                        await directCommands.directRuntimeStartChatServer(bestModel.path, maxContext, currentModelTemplate, null, false, false, false);
+                        await startLocalChatRuntime({
+                            engine: engineInfo,
+                            modelPath: bestModel.path,
+                            contextSize: maxContext,
+                            template: currentModelTemplate,
+                            mmproj: bestModel.companion_path,
+                            mlock: userCfg?.mlock ?? false,
+                            quantizeKv: userCfg?.quantize_kv ?? false,
+                        });
                     } else {
-                        throw new Error('No local models found.');
+                        throw new Error('No compatible local chat models found.');
                     }
                 } else {
-                    await directCommands.directRuntimeStartChatServer(modelPath, maxContext, currentModelTemplate, null, false, false, false);
+                    const selectedModel = localModels.find(model => model.path === modelPath);
+                    if (
+                        engineInfo?.id !== 'ollama'
+                        && (
+                            !selectedModel
+                            || !isCompatibleManagedModelForCategory(selectedModel, 'LLM')
+                        )
+                    ) {
+                        throw new Error('The selected local chat model is unavailable or incompatible.');
+                    }
+                    await startLocalChatRuntime({
+                        engine: engineInfo,
+                        modelPath,
+                        contextSize: maxContext,
+                        template: currentModelTemplate,
+                        mmproj: selectedModel?.companion_path ?? null,
+                        mlock: userCfg?.mlock ?? false,
+                        quantizeKv: userCfg?.quantize_kv ?? false,
+                    });
                 }
                 toast.success('Ready', { id: tId });
             } catch (e) {
@@ -684,7 +732,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             setAttachedImages(currentImages);
             setIngestedFiles(currentDocs);
         }
-    }, [input, isImageMode, handleGenerateImage, isCloudProvider, modelRunning, modelPath, attachedImages, ingestedFiles, isStreaming, currentConversationId, localModels, maxContext, currentModelTemplate, sendMessage, conversations, selectedProjectId, mentionQuery, isWebSearchEnabled]);
+    }, [input, isImageMode, handleGenerateImage, isCloudProvider, modelRunning, modelPath, attachedImages, ingestedFiles, isStreaming, currentConversationId, localModels, maxContext, currentModelTemplate, sendMessage, conversations, selectedProjectId, mentionQuery, isWebSearchEnabled, engineInfo, userCfg?.mlock, userCfg?.quantize_kv]);
 
     const onDrop = useCallback(async (acceptedFiles: File[]) => {
         const totalFiles = attachedImages.length + ingestedFiles.length + acceptedFiles.length;
@@ -774,22 +822,26 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
     const handleMicClick = useCallback(async () => {
         if (!isRecording) {
-            if (!sttRunning) {
-                if (currentSttModelPath) {
-                    const tId = toast.loading('Starting STT Engine...');
-                    try {
-                        const res = await directCommands.directRuntimeStartSttServer(currentSttModelPath);
-                        if (res.status !== 'ok') throw new Error(bridgeErrorMessage(res.error));
-                        await new Promise(r => setTimeout(r, 2000));
-                        toast.success('STT Engine Ready', { id: tId });
-                    } catch (e) {
-                        toast.error('Failed to start STT', { id: tId, description: String(e) });
-                        return;
-                    }
+            if (!currentSttModelPath) {
+                toast.error('No STT Model Selected', { description: 'Please select a model in settings.' });
+                return;
+            }
+
+            // Always reconcile the running target with the current selection.
+            // The backend treats an already-active target as a no-op and
+            // replaces a different target atomically.
+            const tId = !sttRunning ? toast.loading('Starting STT Engine...') : undefined;
+            try {
+                const res = await directCommands.directRuntimeStartSttServer(currentSttModelPath);
+                if (res.status !== 'ok') throw new Error(bridgeErrorMessage(res.error));
+                if (tId !== undefined) toast.success('STT Engine Ready', { id: tId });
+            } catch (e) {
+                if (tId !== undefined) {
+                    toast.error('Failed to start STT', { id: tId, description: String(e) });
                 } else {
-                    toast.error('No STT Model Selected', { description: 'Please select a model in settings.' });
-                    return;
+                    toast.error('Failed to switch STT model', { description: String(e) });
                 }
+                return;
             }
             try { await startRecording(); } catch (e) {
                 console.error('Microphone access error:', e);
@@ -858,12 +910,15 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         setImagineGenerating(true);
         setGenerationProgress({ stage: 'Initializing', progress: 0, text: 'Starting generation...' } as any);
         try {
-            const resolvedModelPath = currentImageGenModelPath ||
-                localModels.find(m =>
-                    m.name.toLowerCase().includes('flux') ||
-                    m.name.toLowerCase().includes('sd') ||
-                    m.name.toLowerCase().includes('diffusion')
-                )?.path;
+            const resolvedModelPath = resolveCompatibleManagedModel(
+                localModels,
+                'Diffusion',
+                currentImageGenModelPath,
+            )?.path;
+            const localModelPath = requireLocalImageModelPath(
+                options.provider,
+                resolvedModelPath,
+            );
 
             let finalPrompt = prompt;
 
@@ -879,11 +934,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             }
 
             if (options.provider === 'local' && !imageRunning) {
-                if (resolvedModelPath) {
-                    setGenerationProgress({ stage: 'Initializing', progress: 0.1, text: 'Warming up diffusion engine...' } as any);
-                    await directCommands.directRuntimeStartImageServer(resolvedModelPath);
-                    await new Promise(r => setTimeout(r, 1000));
-                }
+                setGenerationProgress({ stage: 'Initializing', progress: 0.1, text: 'Warming up diffusion engine...' } as any);
+                await startLocalImageRuntime({
+                    modelPath: localModelPath!,
+                    start: path => directCommands.directRuntimeStartImageServer(path),
+                });
+                await new Promise(r => setTimeout(r, 1000));
             }
 
             const result = await directImagineGenerate({
@@ -894,7 +950,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 styleId: options.styleId,
                 stylePrompt: options.styleId ? findStyle(options.styleId)?.promptSnippet : undefined,
                 sourceImages: options.sourceImages,
-                model: options.provider === 'local' ? (resolvedModelPath || undefined) : undefined,
+                model: localModelPath,
                 steps: options.steps,
             });
             setLastGeneratedImage(convertFileSrc(result.filePath));
@@ -910,7 +966,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     // ---- Context value -----------------------------------------------------
     const value: ChatLayoutState = {
         // chat hook
-        messages, isStreaming, sendMessage, clearMessages, conversations, loadConversation,
+        messages, isStreaming, sendMessage, startServer, clearMessages, conversations, loadConversation,
         loadMoreMessages, currentConversationId, directHistoryDeleteConversation, loadingHistory, hasMore,
         isLoadingMore, ingestFile, modelRunning, sttRunning, imageRunning, createNewConversation,
         sendImagePrompt, regenerate, autoMode, setAutoMode, moveConversation,

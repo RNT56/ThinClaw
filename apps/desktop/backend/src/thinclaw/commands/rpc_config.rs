@@ -964,9 +964,9 @@ pub async fn thinclaw_save_cloud_config(
 
 #[cfg(test)]
 mod tests {
-    use super::validated_config_patch;
     #[cfg(feature = "runtime-libsql")]
     use super::open_stopped_settings_store;
+    use super::validated_config_patch;
 
     #[test]
     fn config_patch_requires_a_bounded_object() {

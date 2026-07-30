@@ -56,7 +56,10 @@ pub(super) async fn prepare_restore_staging_dir(
     validate_path_beneath(app_data_dir, staging_dir, false)
 }
 
-pub(super) async fn discard_restore_staging(app_data_dir: &Path, staging_dir: &Path) -> Result<(), String> {
+pub(super) async fn discard_restore_staging(
+    app_data_dir: &Path,
+    staging_dir: &Path,
+) -> Result<(), String> {
     validate_path_beneath(app_data_dir, staging_dir, false)?;
     let metadata = tokio::fs::symlink_metadata(staging_dir)
         .await
@@ -180,7 +183,11 @@ pub(super) fn checked_join_beneath(root: &Path, relative_path: &Path) -> Result<
     Ok(target)
 }
 
-pub(super) fn validate_path_beneath(root: &Path, target: &Path, allow_missing: bool) -> Result<(), String> {
+pub(super) fn validate_path_beneath(
+    root: &Path,
+    target: &Path,
+    allow_missing: bool,
+) -> Result<(), String> {
     let root_metadata = std::fs::symlink_metadata(root).map_err(|error| {
         format!(
             "Failed to inspect restore root '{}': {error}",
@@ -356,7 +363,11 @@ pub(super) async fn write_new_file(path: &Path, data: &[u8]) -> Result<(), Strin
     Ok(())
 }
 
-pub(super) async fn copy_to_new_file(source: &Path, destination: &Path, expected: u64) -> Result<(), String> {
+pub(super) async fn copy_to_new_file(
+    source: &Path,
+    destination: &Path,
+    expected: u64,
+) -> Result<(), String> {
     let (mut source_file, source_metadata) =
         open_regular_file_nofollow(source, "staged restore source").await?;
     if source_metadata.len() != expected || expected > MAX_ARCHIVE_FILE_BYTES as u64 {
@@ -431,7 +442,10 @@ pub(super) async fn copy_to_new_file(source: &Path, destination: &Path, expected
     Ok(())
 }
 
-pub(super) async fn publish_restore_temp(temp_path: &Path, destination_path: &Path) -> Result<(), String> {
+pub(super) async fn publish_restore_temp(
+    temp_path: &Path,
+    destination_path: &Path,
+) -> Result<(), String> {
     let existing = match tokio::fs::symlink_metadata(destination_path).await {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             let _ = tokio::fs::remove_file(temp_path).await;
@@ -646,7 +660,10 @@ pub(super) async fn regular_file_exists(path: &Path, label: &str) -> Result<bool
     }
 }
 
-pub(super) async fn remove_regular_file_if_present(path: &Path, label: &str) -> Result<bool, String> {
+pub(super) async fn remove_regular_file_if_present(
+    path: &Path,
+    label: &str,
+) -> Result<bool, String> {
     if !regular_file_exists(path, label).await? {
         return Ok(false);
     }

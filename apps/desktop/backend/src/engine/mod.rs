@@ -352,6 +352,28 @@ pub fn direct_runtime_get_active_engine_info() -> EngineInfo {
     }
 }
 
+/// Return model identifiers currently installed in the local Ollama daemon.
+///
+/// The command intentionally accepts no endpoint, token, or headers. Ollama
+/// discovery is limited to the unauthenticated loopback `/api/tags` endpoint
+/// and applies strict time, response-size, count, and identifier bounds.
+#[tauri::command]
+#[specta::specta]
+pub async fn direct_runtime_list_ollama_models(
+) -> Result<Vec<String>, crate::thinclaw::bridge::BridgeError> {
+    #[cfg(feature = "ollama")]
+    {
+        return engine_ollama::list_installed_models()
+            .await
+            .map_err(Into::into);
+    }
+
+    #[cfg(not(feature = "ollama"))]
+    {
+        Err("This desktop build does not use the Ollama runtime".into())
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn direct_runtime_snapshot(
@@ -378,6 +400,8 @@ use thinclaw_runtime_contracts::{
 /// Registered as `app.manage(EngineManager::new(app_data_dir))` in `lib.rs`.
 pub struct EngineManager {
     pub engine: tokio::sync::Mutex<Option<Box<dyn InferenceEngine>>>,
+    /// Canonical local model artifact currently served by `engine`.
+    active_model_path: tokio::sync::Mutex<Option<PathBuf>>,
     pub app_data_dir: PathBuf,
     provisioning: tokio::sync::RwLock<ProvisioningRecord>,
     provisioning_lock: tokio::sync::Mutex<()>,
@@ -621,6 +645,7 @@ impl EngineManager {
 
         Self {
             engine: tokio::sync::Mutex::new(engine),
+            active_model_path: tokio::sync::Mutex::new(None),
             app_data_dir,
             provisioning: tokio::sync::RwLock::new(ProvisioningRecord {
                 state: EngineProvisioningState::Checking,
@@ -629,6 +654,63 @@ impl EngineManager {
             }),
             provisioning_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    pub(crate) async fn stop_active_engine_locked(&self) -> Result<(), String> {
+        let mut engine = self.engine.lock().await;
+        let result = match engine.as_mut() {
+            Some(engine) => engine.stop().await,
+            None => Ok(()),
+        };
+        // A failed process-tree kill can still consume the engine handle and
+        // clear its endpoint state. Never retain a stale target after stop was
+        // attempted.
+        *self.active_model_path.lock().await = None;
+        result
+    }
+
+    /// Replace the currently served model under the caller-held global model
+    /// lifecycle lock. MLX and vLLM deliberately reject a second `start`, so
+    /// every entry point must use this stop-then-start boundary rather than
+    /// relying on individual frontend callers to orchestrate a restart.
+    async fn replace_active_engine_locked(
+        &self,
+        model_path: &str,
+        canonical_model_path: Option<PathBuf>,
+        context_size: u32,
+        options: EngineStartOptions,
+    ) -> Result<(u16, String), String> {
+        let mut engine = self.engine.lock().await;
+        let engine = engine.as_mut().ok_or("No engine configured")?;
+        let stop_result = engine.stop().await;
+        *self.active_model_path.lock().await = None;
+        stop_result?;
+
+        let endpoint = engine.start(model_path, context_size, options).await?;
+        *self.active_model_path.lock().await = canonical_model_path;
+        Ok(endpoint)
+    }
+
+    /// Stop the engine only when its backend-owned canonical model path is the
+    /// selected install root or a file within that root. The caller holds the
+    /// shared model lifecycle lock.
+    pub(crate) async fn stop_if_using_install_locked(
+        &self,
+        install_root: &Path,
+    ) -> Result<bool, String> {
+        let uses_install = self
+            .active_model_path
+            .lock()
+            .await
+            .as_deref()
+            .is_some_and(|path| {
+                crate::model_lifecycle::model_path_uses_install(path, install_root)
+            });
+        if !uses_install {
+            return Ok(false);
+        }
+        self.stop_active_engine_locked().await?;
+        Ok(true)
     }
 
     /// Create the engine instance based on compile-time feature flags.
@@ -1053,10 +1135,12 @@ pub async fn direct_runtime_ensure_engine_ready(
 #[tauri::command]
 #[specta::specta]
 pub async fn direct_runtime_start_engine(
+    app: tauri::AppHandle,
     engine_manager: tauri::State<'_, EngineManager>,
     model_path: String,
     context_size: u32,
 ) -> Result<EngineStartResult, crate::thinclaw::bridge::BridgeError> {
+    let _lifecycle_guard = crate::model_lifecycle::MODEL_LIFECYCLE_LOCK.lock().await;
     let _provisioning_guard = engine_manager.provisioning_lock.lock().await;
     let info = direct_runtime_get_active_engine_info();
     if !engine_supported_on_host(&info.id) {
@@ -1069,11 +1153,31 @@ pub async fn direct_runtime_start_engine(
         )
         .into());
     }
-    let mut guard = engine_manager.engine.lock().await;
-    let engine = guard.as_mut().ok_or("No engine configured")?;
+    let (canonical_model_path, resolved_model_path) = if info.id == "ollama" {
+        (None, model_path)
+    } else {
+        let path = crate::model_manager::resolve_compatible_inventory_model_path(
+            &app,
+            &model_path,
+            &info.id,
+            "LLM",
+        )?;
+        let resolved = path
+            .to_str()
+            .ok_or_else(|| "The selected local model path is not valid UTF-8".to_string())?
+            .to_string();
+        (Some(path), resolved)
+    };
 
     let options = EngineStartOptions::default();
-    let (port, _token) = engine.start(&model_path, context_size, options).await?;
+    let (port, _token) = engine_manager
+        .replace_active_engine_locked(
+            &resolved_model_path,
+            canonical_model_path,
+            context_size,
+            options,
+        )
+        .await?;
 
     // Endpoint credentials stay in the backend runtime snapshot. They are not
     // renderer state and must not cross the Tauri IPC boundary.
@@ -1106,11 +1210,8 @@ impl std::fmt::Debug for EngineStartResult {
 pub async fn direct_runtime_stop_engine(
     engine_manager: tauri::State<'_, EngineManager>,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    let mut guard = engine_manager.engine.lock().await;
-    if let Some(engine) = guard.as_mut() {
-        engine.stop().await?;
-    }
-    Ok(())
+    let _lifecycle_guard = crate::model_lifecycle::MODEL_LIFECYCLE_LOCK.lock().await;
+    Ok(engine_manager.stop_active_engine_locked().await?)
 }
 
 /// Check if the active engine is ready (health check).
@@ -1133,6 +1234,178 @@ pub async fn direct_runtime_is_engine_ready(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingEngine {
+        events: Arc<Mutex<Vec<String>>>,
+        fail_start: bool,
+        fail_stop: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl InferenceEngine for RecordingEngine {
+        async fn start(
+            &self,
+            model_path: &str,
+            _context_size: u32,
+            _options: EngineStartOptions,
+        ) -> Result<(u16, String), String> {
+            self.events
+                .lock()
+                .expect("events")
+                .push(format!("start:{model_path}"));
+            if self.fail_start {
+                Err("start failed".to_string())
+            } else {
+                Ok((54_321, "secret".to_string()))
+            }
+        }
+
+        async fn stop(&self) -> Result<(), String> {
+            self.events.lock().expect("events").push("stop".to_string());
+            if self.fail_stop {
+                Err("stop failed".to_string())
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn is_ready(&self) -> bool {
+            false
+        }
+
+        fn base_url(&self) -> Option<String> {
+            None
+        }
+
+        fn display_name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn engine_id(&self) -> &'static str {
+            "recording"
+        }
+
+        fn uses_single_file_model(&self) -> bool {
+            false
+        }
+
+        fn hf_search_tag(&self) -> &'static str {
+            "recording"
+        }
+    }
+
+    async fn recording_manager(
+        events: Arc<Mutex<Vec<String>>>,
+        fail_start: bool,
+        fail_stop: bool,
+    ) -> EngineManager {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manager = EngineManager::new(temp.path().to_path_buf());
+        *manager.engine.lock().await = Some(Box::new(RecordingEngine {
+            events,
+            fail_start,
+            fail_stop,
+        }));
+        manager
+    }
+
+    #[tokio::test]
+    async fn engine_start_replaces_the_existing_process_and_target() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let manager = recording_manager(events.clone(), false, false).await;
+        let old_target = PathBuf::from("/managed/model-a");
+        let new_target = PathBuf::from("/managed/model-b");
+        *manager.active_model_path.lock().await = Some(old_target);
+
+        let endpoint = manager
+            .replace_active_engine_locked(
+                "/managed/model-b",
+                Some(new_target.clone()),
+                8_192,
+                EngineStartOptions::default(),
+            )
+            .await
+            .expect("replace engine");
+
+        assert_eq!(endpoint.0, 54_321);
+        assert_eq!(
+            *events.lock().expect("events"),
+            vec!["stop", "start:/managed/model-b"]
+        );
+        assert_eq!(
+            manager.active_model_path.lock().await.as_ref(),
+            Some(&new_target)
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_engine_replacement_does_not_retain_the_old_target() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let manager = recording_manager(events.clone(), true, false).await;
+        *manager.active_model_path.lock().await = Some(PathBuf::from("/managed/model-a"));
+
+        assert!(manager
+            .replace_active_engine_locked(
+                "/managed/model-b",
+                Some(PathBuf::from("/managed/model-b")),
+                8_192,
+                EngineStartOptions::default(),
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            *events.lock().expect("events"),
+            vec!["stop", "start:/managed/model-b"]
+        );
+        assert!(manager.active_model_path.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_engine_stop_clears_the_target_and_prevents_replacement_start() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let manager = recording_manager(events.clone(), false, true).await;
+        *manager.active_model_path.lock().await = Some(PathBuf::from("/managed/model-a"));
+
+        assert!(manager
+            .replace_active_engine_locked(
+                "/managed/model-b",
+                Some(PathBuf::from("/managed/model-b")),
+                8_192,
+                EngineStartOptions::default(),
+            )
+            .await
+            .is_err());
+        assert_eq!(*events.lock().expect("events"), vec!["stop"]);
+        assert!(manager.active_model_path.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn engine_target_stop_preserves_a_different_active_install() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let install_a = temp.path().join("model-a");
+        let install_b = temp.path().join("model-b");
+        std::fs::create_dir(&install_a).expect("install a");
+        std::fs::create_dir(&install_b).expect("install b");
+        let install_a = install_a.canonicalize().expect("canonical a");
+        let install_b = install_b.canonicalize().expect("canonical b");
+        let manager = EngineManager::new(temp.path().to_path_buf());
+        *manager.active_model_path.lock().await = Some(install_b.clone());
+
+        assert!(!manager
+            .stop_if_using_install_locked(&install_a)
+            .await
+            .expect("unrelated target"));
+        assert_eq!(
+            manager.active_model_path.lock().await.as_ref(),
+            Some(&install_b),
+        );
+        assert!(manager
+            .stop_if_using_install_locked(&install_b)
+            .await
+            .expect("matching target"));
+        assert!(manager.active_model_path.lock().await.is_none());
+    }
 
     #[test]
     fn get_active_engine_returns_valid_info() {
@@ -1142,7 +1415,17 @@ mod tests {
             !info.display_name.is_empty(),
             "display_name must not be empty"
         );
-        assert!(!info.hf_tag.is_empty(), "hf_tag must not be empty");
+        if info.id == "none" {
+            assert!(
+                info.hf_tag.is_empty(),
+                "cloud-only runtime must not advertise a Hugging Face format"
+            );
+        } else {
+            assert!(
+                !info.hf_tag.is_empty(),
+                "local runtime hf_tag must not be empty"
+            );
+        }
 
         // Feature-specific assertions. When multiple features are compiled
         // together, the first one wins (mlx > llamacpp > vllm > ollama).

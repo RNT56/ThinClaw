@@ -1,6 +1,11 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { commands, UserConfig, UserConfigPatch } from '../lib/bindings';
+import { commandClient } from '../lib/command-client';
 import { toast } from 'sonner';
+import {
+    requestLocalChatRuntimeRestart,
+    stopLocalChatRuntime,
+} from '../lib/local-runtime-start';
 
 interface ConfigContextType {
     config: UserConfig | null;
@@ -27,6 +32,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const updateConfig = async (newConfig: UserConfig) => {
+        let attemptedLocalRuntimeStop = false;
         try {
             // Callers historically pass a full config snapshot. Send only the
             // fields they actually changed so a stale React snapshot cannot
@@ -36,14 +42,49 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
                     JSON.stringify(config?.[key as keyof UserConfig]) !== JSON.stringify(value)
                 )
             ) as UserConfigPatch;
+
+            // `selected_chat_provider` is the legacy field and
+            // `chat_backend` is its replacement. Several screens still edit
+            // only one of them, so normalize a provider transition into one
+            // coherent patch instead of letting the two selectors disagree.
+            const selectedProviderChanged =
+                newConfig.selected_chat_provider !== config?.selected_chat_provider;
+            const chatBackendChanged =
+                newConfig.chat_backend !== config?.chat_backend;
+            const requestedProvider = selectedProviderChanged
+                ? newConfig.selected_chat_provider
+                : chatBackendChanged
+                    ? newConfig.chat_backend
+                    : undefined;
+            if (selectedProviderChanged || chatBackendChanged) {
+                patch.selected_chat_provider = requestedProvider ?? null;
+                patch.chat_backend = requestedProvider ?? 'local';
+            }
             if (Object.keys(patch).length === 0) return;
 
+            const currentProvider =
+                config?.chat_backend ?? config?.selected_chat_provider ?? 'local';
+            const nextProvider = requestedProvider ?? 'local';
+            if (currentProvider === 'local' && nextProvider !== 'local') {
+                // Free model RAM before publishing cloud state. Both runtime
+                // owners are attempted by the helper, and a stop failure
+                // leaves the prior provider selected.
+                attemptedLocalRuntimeStop = true;
+                await stopLocalChatRuntime();
+            }
+            await commandClient.updateUserConfig(patch);
             setConfig((current) => current ? { ...current, ...patch } : newConfig);
-            await commands.updateUserConfig(patch);
         } catch (e) {
+            if (attemptedLocalRuntimeStop) {
+                // Persistence may fail after a successful stop (or one of the
+                // two owners may stop before the other reports an error).
+                // Explicitly invalidate auto-start's dedupe state so the still-
+                // selected local provider is restored.
+                requestLocalChatRuntimeRestart();
+            }
             console.error("Failed to save config", e);
             toast.error("Failed to save settings");
-            fetchConfig(); // Revert
+            throw e;
         }
     };
 

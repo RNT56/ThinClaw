@@ -12,14 +12,42 @@ use tauri_plugin_shell::ShellExt;
 use super::core::SidecarManager;
 use super::types::{ChatServerOptions, SidecarChild, SidecarEvent, SidecarProcess};
 
-#[cfg(feature = "mlx")]
-static MLX_EMBEDDING_START_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
-#[cfg(feature = "mlx")]
-static MLX_STT_START_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
-
 impl SidecarManager {
+    fn resolve_inventory_model(
+        app: &AppHandle,
+        model_path: &str,
+        runtime: &str,
+        category: &str,
+    ) -> Result<crate::model_manager::ResolvedInventoryModel> {
+        crate::model_manager::resolve_compatible_inventory_model(app, model_path, runtime, category)
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn inventory_path_string(path: &std::path::Path, purpose: &str) -> Result<String> {
+        path.to_str()
+            .ok_or_else(|| anyhow!("The selected {purpose} model path is not valid UTF-8"))
+            .map(str::to_string)
+    }
+
+    fn select_inventory_projector(
+        declared: Option<&std::path::Path>,
+        requested: Option<&str>,
+    ) -> Result<Option<String>> {
+        let requested = requested
+            .filter(|path| !path.trim().is_empty())
+            .map(|path| Self::validate_projector_path(std::path::Path::new(path), true))
+            .transpose()?
+            .map(std::path::PathBuf::from);
+        if requested.is_some() && requested.as_deref() != declared {
+            return Err(anyhow!(
+                "The selected vision projector is not the companion declared by this model installation"
+            ));
+        }
+        declared
+            .map(|path| Self::inventory_path_string(path, "vision projector"))
+            .transpose()
+    }
+
     pub(crate) fn validate_managed_model_path(
         app: &AppHandle,
         model_path: &str,
@@ -400,9 +428,15 @@ impl SidecarManager {
         on_exit: F,
     ) -> Result<(u16, String)>
     where
-        F: Fn(i32, u16) + Send + Sync + 'static,
+        F: Fn(i32, u16, uuid::Uuid) + Send + Sync + 'static,
     {
-        let (model_path, gguf_meta) = Self::validate_gguf_model_path(options.model_path, "chat")?;
+        let resolved = Self::resolve_inventory_model(&app, &options.model_path, "llamacpp", "LLM")?;
+        let model_path = Self::inventory_path_string(&resolved.path, "chat")?;
+        let mmproj_path_override = Self::select_inventory_projector(
+            resolved.companion_path.as_deref(),
+            options.mmproj.as_deref(),
+        )?;
+        let (model_path, gguf_meta) = Self::validate_gguf_model_path(model_path, "chat")?;
         let context_size = options.context_size;
         if context_size == 0 || context_size > 1_048_576 {
             return Err(anyhow!(
@@ -411,7 +445,6 @@ impl SidecarManager {
         }
         let n_gpu = options.n_gpu;
         let template_name = options.template;
-        let mmproj_path_override = options.mmproj;
         let expose = options.expose;
         if expose {
             return Err(anyhow!(
@@ -574,68 +607,14 @@ impl SidecarManager {
             detected_family
         );
 
-        // Handles MMProj (Vision)
-        // Priority: Explicit Override > .mmproj file > Smart Discovery
-        let mut _found_mmproj = false;
-
+        // Only a manifest-declared projector may be attached. The command
+        // wrapper resolves an omitted selection to that companion and rejects
+        // an explicit path that differs, so adjacent-file discovery cannot
+        // silently cross logical inventory installations.
         if let Some(path) = mmproj_path_override {
-            if !path.trim().is_empty() {
-                println!("[sidecar] Using the explicitly selected vision projector");
-                args.push("--mmproj".to_string());
-                args.push(Self::validate_projector_path(
-                    std::path::Path::new(&path),
-                    true,
-                )?);
-                _found_mmproj = true;
-            }
-        }
-
-        if !_found_mmproj {
-            // Check for mmproj file
-            let mmproj_path = format!("{}.mmproj", model_path);
-            if let Ok(mmproj_path) =
-                Self::validate_projector_path(std::path::Path::new(&mmproj_path), false)
-            {
-                println!("[sidecar] Found the adjacent vision projector");
-                args.push("--mmproj".to_string());
-                args.push(mmproj_path);
-                _found_mmproj = true;
-            } else {
-                // Fallback: Smart Discovery if in a subfolder
-                // If the model is in "models/UseSpecificFolder/", we scan that folder for any "mmproj"
-                let path_obj = std::path::Path::new(&model_path);
-                if let Some(parent) = path_obj.parent() {
-                    let parent_name = parent.file_name().unwrap_or_default().to_string_lossy();
-                    // Ensure we are in a subfolder, not the root models dir
-                    if parent_name != "models" {
-                        if let Ok(entries) = std::fs::read_dir(parent) {
-                            for entry in entries.take(512).flatten() {
-                                let p = entry.path();
-                                if let Ok(projector_path) = Self::validate_projector_path(&p, false)
-                                {
-                                    let fname = p
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .to_ascii_lowercase();
-                                    if fname.contains("mmproj")
-                                        && (fname.ends_with(".gguf") || fname.ends_with(".bin"))
-                                    {
-                                        println!("[sidecar] Auto-detected a vision projector");
-                                        args.push("--mmproj".to_string());
-                                        args.push(projector_path);
-                                        _found_mmproj = true;
-                                        break; // Use the first one found
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if !_found_mmproj {
-                    println!("[sidecar] No vision projector found for the selected model");
-                }
-            }
+            println!("[sidecar] Using the inventory-declared vision projector");
+            args.push("--mmproj".to_string());
+            args.push(path);
         }
 
         let bind_host = "127.0.0.1";
@@ -650,6 +629,7 @@ impl SidecarManager {
             .map_err(|e| anyhow!("Failed to spawn llama-server: {}", e))?;
 
         let pid = child.pid();
+        let instance_id = uuid::Uuid::new_v4();
         tracker.add_pid(pid, "llama-server", "chat");
 
         // Clone for async block
@@ -721,10 +701,10 @@ impl SidecarManager {
 
                         if let Some(code) = payload.code {
                             println!("[sidecar] Chat Server terminated with code {:?}", code);
-                            on_exit(code, port);
+                            on_exit(code, port, instance_id);
                         } else {
                             // Terminated without code (signal?)
-                            on_exit(-1, port);
+                            on_exit(-1, port, instance_id);
                         }
                     }
                     _ => {}
@@ -737,11 +717,13 @@ impl SidecarManager {
         });
 
         *process_guard = Some(SidecarProcess {
+            instance_id,
             child: Some(SidecarChild::Plugin(child)),
             port,
             token: token.clone(),
             context_size,
             model_family: detected_family.clone(),
+            model_path: std::path::PathBuf::from(&model_path),
             model_identity: None,
         });
 
@@ -759,6 +741,8 @@ impl SidecarManager {
         app: AppHandle,
         model_path: String,
     ) -> Result<(u16, String)> {
+        let resolved = Self::resolve_inventory_model(&app, &model_path, "llamacpp", "Embedding")?;
+        let model_path = Self::inventory_path_string(&resolved.path, "embedding")?;
         let (model_path, _) = Self::validate_gguf_model_path(model_path, "embedding")?;
         let model_identity = Self::model_artifact_identity(std::path::Path::new(&model_path))?;
         // Get ProcessTracker
@@ -796,7 +780,7 @@ impl SidecarManager {
             command.env("PATH", path.to_string_lossy())
         };
 
-        let mut args = vec![
+        let args = vec![
             "--model".to_string(),
             model_path.clone(),
             "--embedding".to_string(),
@@ -824,14 +808,6 @@ impl SidecarManager {
             "0".to_string(),
         ];
 
-        // Check for mmproj file
-        let mmproj_path = format!("{}.mmproj", model_path);
-        if std::path::Path::new(&mmproj_path).exists() {
-            println!("[sidecar-embed] Found the adjacent vision projector");
-            args.push("--mmproj".to_string());
-            args.push(mmproj_path);
-        }
-
         println!("[sidecar-embed] Spawning authenticated embedding server on port {port}");
 
         let (mut rx, child) = command
@@ -840,6 +816,7 @@ impl SidecarManager {
             .map_err(|e| anyhow!("Failed to spawn embedding server: {}", e))?;
 
         let pid = child.pid();
+        let instance_id = uuid::Uuid::new_v4();
         tracker.add_pid(pid, "llama-server", "embedding");
 
         let monitor_app = app.clone();
@@ -854,21 +831,21 @@ impl SidecarManager {
                     CommandEvent::Terminated(payload) => {
                         let code = payload.code.unwrap_or(-1);
                         let manager = monitor_app.state::<SidecarManager>();
-                        if let Ok(mut guard) = manager.embedding_process.lock() {
-                            if guard.as_ref().is_some_and(|process| process.port == port) {
-                                *guard = None;
-                                let event = if code == 0 {
-                                    SidecarEvent::Stopped {
-                                        service: "embedding".into(),
-                                    }
-                                } else {
-                                    SidecarEvent::Crashed {
-                                        service: "embedding".into(),
-                                        code,
-                                    }
-                                };
-                                let _ = monitor_app.emit("sidecar_event", event);
-                            }
+                        if SidecarManager::clear_process_instance(
+                            &manager.embedding_process,
+                            instance_id,
+                        ) {
+                            let event = if code == 0 {
+                                SidecarEvent::Stopped {
+                                    service: "embedding".into(),
+                                }
+                            } else {
+                                SidecarEvent::Crashed {
+                                    service: "embedding".into(),
+                                    code,
+                                }
+                            };
+                            let _ = monitor_app.emit("sidecar_event", event);
                         }
                         break;
                     }
@@ -876,17 +853,14 @@ impl SidecarManager {
                 }
             }
             let manager = monitor_app.state::<SidecarManager>();
-            if let Ok(mut guard) = manager.embedding_process.lock() {
-                if guard.as_ref().is_some_and(|process| process.port == port) {
-                    *guard = None;
-                    let _ = monitor_app.emit(
-                        "sidecar_event",
-                        SidecarEvent::Crashed {
-                            service: "embedding".into(),
-                            code: -1,
-                        },
-                    );
-                }
+            if SidecarManager::clear_process_instance(&manager.embedding_process, instance_id) {
+                let _ = monitor_app.emit(
+                    "sidecar_event",
+                    SidecarEvent::Crashed {
+                        service: "embedding".into(),
+                        code: -1,
+                    },
+                );
             }
             // Cleanup
             monitor_app
@@ -895,11 +869,13 @@ impl SidecarManager {
         });
 
         *process_guard = Some(SidecarProcess {
+            instance_id,
             child: Some(SidecarChild::Plugin(child)),
             port,
             token: token.clone(),
             context_size: 4096, // Fixed for embedding
             model_family: "none".into(),
+            model_path: std::path::PathBuf::from(&model_path),
             model_identity: Some(model_identity),
         });
 
@@ -912,7 +888,8 @@ impl SidecarManager {
         app: AppHandle,
         model_path: String,
     ) -> Result<(u16, String)> {
-        let _start_guard = MLX_EMBEDDING_START_LOCK.lock().await;
+        let resolved = Self::resolve_inventory_model(&app, &model_path, "mlx", "Embedding")?;
+        let model_path = Self::inventory_path_string(&resolved.path, "embedding")?;
         let tracker = app.state::<crate::process_tracker::ProcessTracker>();
         {
             let mut process_guard = self
@@ -951,10 +928,16 @@ impl SidecarManager {
         app: AppHandle,
         model_path: String,
     ) -> Result<(u16, String)> {
-        let _start_guard = MLX_STT_START_LOCK.lock().await;
+        let resolved = Self::resolve_inventory_model(&app, &model_path, "mlx", "STT")?;
+        let model_path = Self::inventory_path_string(&resolved.path, "STT")?;
         let tracker = app.state::<crate::process_tracker::ProcessTracker>();
         {
             let mut process_guard = self.stt_process.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(process) = process_guard.as_mut() {
+                if process.model_path == resolved.path && process.is_running() {
+                    return Ok((process.port, process.token.clone()));
+                }
+            }
             if let Some(proc) = process_guard.take() {
                 let _ = proc.kill();
             }
@@ -974,11 +957,16 @@ impl SidecarManager {
         .await?;
         let port = process.port;
         let token = process.token.clone();
+        let canonical_model_path = process
+            .model_path
+            .to_str()
+            .ok_or_else(|| anyhow!("MLX STT model path is not valid UTF-8"))?
+            .to_string();
         *self.stt_process.lock().unwrap_or_else(|e| e.into_inner()) = Some(process);
         *self
             .stt_model_path
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(model_path);
+            .unwrap_or_else(|e| e.into_inner()) = Some(canonical_model_path);
 
         Ok((port, token))
     }
@@ -1120,11 +1108,13 @@ impl SidecarManager {
         app.state::<crate::process_tracker::ProcessTracker>()
             .add_pid(pid, &format!("mlx-{service}-server"), service);
         Ok(SidecarProcess {
+            instance_id: uuid::Uuid::new_v4(),
             child: Some(SidecarChild::Owned(child)),
             port,
             token,
             context_size,
             model_family: model_family.to_string(),
+            model_path: std::path::PathBuf::from(&model_path),
             model_identity: Some(model_identity),
         })
     }
@@ -1136,6 +1126,8 @@ impl SidecarManager {
         context_size: u32,
         n_gpu: i32,
     ) -> Result<(u16, String)> {
+        let resolved = Self::resolve_inventory_model(&app, &model_path, "llamacpp", "LLM")?;
+        let model_path = Self::inventory_path_string(&resolved.path, "summarizer")?;
         let (model_path, _) = Self::validate_gguf_model_path(model_path, "summarizer")?;
         if context_size == 0 || context_size > 1_048_576 {
             return Err(anyhow!(
@@ -1208,6 +1200,7 @@ impl SidecarManager {
             .map_err(|e| anyhow!("Failed to spawn summarizer server: {}", e))?;
 
         let pid = child.pid();
+        let instance_id = uuid::Uuid::new_v4();
         tracker.add_pid(pid, "llama-server", "summarizer");
 
         let monitor_app = app.clone();
@@ -1222,21 +1215,21 @@ impl SidecarManager {
                     CommandEvent::Terminated(payload) => {
                         let code = payload.code.unwrap_or(-1);
                         let manager = monitor_app.state::<SidecarManager>();
-                        if let Ok(mut guard) = manager.summarizer_process.lock() {
-                            if guard.as_ref().is_some_and(|process| process.port == port) {
-                                *guard = None;
-                                let event = if code == 0 {
-                                    SidecarEvent::Stopped {
-                                        service: "summarizer".into(),
-                                    }
-                                } else {
-                                    SidecarEvent::Crashed {
-                                        service: "summarizer".into(),
-                                        code,
-                                    }
-                                };
-                                let _ = monitor_app.emit("sidecar_event", event);
-                            }
+                        if SidecarManager::clear_process_instance(
+                            &manager.summarizer_process,
+                            instance_id,
+                        ) {
+                            let event = if code == 0 {
+                                SidecarEvent::Stopped {
+                                    service: "summarizer".into(),
+                                }
+                            } else {
+                                SidecarEvent::Crashed {
+                                    service: "summarizer".into(),
+                                    code,
+                                }
+                            };
+                            let _ = monitor_app.emit("sidecar_event", event);
                         }
                         break;
                     }
@@ -1244,17 +1237,14 @@ impl SidecarManager {
                 }
             }
             let manager = monitor_app.state::<SidecarManager>();
-            if let Ok(mut guard) = manager.summarizer_process.lock() {
-                if guard.as_ref().is_some_and(|process| process.port == port) {
-                    *guard = None;
-                    let _ = monitor_app.emit(
-                        "sidecar_event",
-                        SidecarEvent::Crashed {
-                            service: "summarizer".into(),
-                            code: -1,
-                        },
-                    );
-                }
+            if SidecarManager::clear_process_instance(&manager.summarizer_process, instance_id) {
+                let _ = monitor_app.emit(
+                    "sidecar_event",
+                    SidecarEvent::Crashed {
+                        service: "summarizer".into(),
+                        code: -1,
+                    },
+                );
             }
             // Cleanup
             monitor_app
@@ -1263,11 +1253,13 @@ impl SidecarManager {
         });
 
         *process_guard = Some(SidecarProcess {
+            instance_id,
             child: Some(SidecarChild::Plugin(child)),
             port,
             token: token.clone(),
             context_size,
             model_family: "none".into(),
+            model_path: std::path::PathBuf::from(&model_path),
             model_identity: None,
         });
 
@@ -1279,13 +1271,15 @@ impl SidecarManager {
         app: AppHandle,
         model_path: String,
     ) -> Result<(u16, String)> {
+        let resolved = Self::resolve_inventory_model(&app, &model_path, "llamacpp", "STT")?;
+        let model_path = Self::inventory_path_string(&resolved.path, "STT")?;
         // whisper.cpp's bundled HTTP server has no authentication and exposes
         // a model-reload endpoint. Keep the selected model as configuration and
         // run the bounded, descendant-owned CLI per transcription instead.
         if model_path.is_empty() || model_path.len() > 4096 {
             return Err(anyhow!("STT model path is empty or too long"));
         }
-        let path = std::path::PathBuf::from(model_path);
+        let path = std::path::PathBuf::from(&model_path);
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| anyhow!("Could not inspect the selected STT model: {error}"))?;
         if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
@@ -1299,6 +1293,16 @@ impl SidecarManager {
             .to_str()
             .ok_or_else(|| anyhow!("The selected STT model path is not valid UTF-8"))?
             .to_string();
+
+        if self
+            .stt_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+            == Some(model_path.as_str())
+        {
+            return Ok((0, String::new()));
+        }
 
         app.state::<crate::process_tracker::ProcessTracker>()
             .cleanup_by_service("stt");
@@ -1321,14 +1325,12 @@ impl SidecarManager {
         app: AppHandle,
         model_path: String,
     ) -> Result<()> {
-        let model_path = Self::validate_managed_model_path(
-            &app,
-            &model_path,
-            "Diffusion",
-            "image",
-            true,
-            &["safetensors", "sft", "gguf", "ckpt"],
-        )?;
+        #[cfg(feature = "mlx")]
+        let runtime = "mlx";
+        #[cfg(not(feature = "mlx"))]
+        let runtime = "llamacpp";
+        let resolved = Self::resolve_inventory_model(&app, &model_path, runtime, "Diffusion")?;
+        let model_path = Self::inventory_path_string(&resolved.path, "image")?;
         let mut model_guard = self
             .image_model_path
             .lock()
@@ -1342,8 +1344,8 @@ impl SidecarManager {
         app: AppHandle,
         model_path: String,
     ) -> Result<()> {
-        let model_path =
-            Self::validate_managed_model_path(&app, &model_path, "TTS", "TTS", false, &["onnx"])?;
+        let resolved = Self::resolve_inventory_model(&app, &model_path, "llamacpp", "TTS")?;
+        let model_path = Self::inventory_path_string(&resolved.path, "TTS")?;
         let config_path = std::path::PathBuf::from(format!("{model_path}.json"));
         let config =
             thinclaw_platform::read_regular_file_bounded_single_link(&config_path, 4 * 1024 * 1024)
@@ -1430,5 +1432,44 @@ impl SidecarManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod inventory_lifecycle_tests {
+    use super::SidecarManager;
+
+    #[test]
+    fn projector_selection_defaults_to_declared_and_rejects_other_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let declared = temp.path().join("mmproj-F16.gguf");
+        let other = temp.path().join("mmproj-other.gguf");
+        std::fs::write(&declared, b"projector").expect("declared projector");
+        std::fs::write(&other, b"projector").expect("other projector");
+        let declared = declared.canonicalize().expect("canonical declared");
+
+        assert_eq!(
+            SidecarManager::select_inventory_projector(Some(&declared), None)
+                .expect("default projector"),
+            Some(declared.to_string_lossy().to_string())
+        );
+        assert_eq!(
+            SidecarManager::select_inventory_projector(
+                Some(&declared),
+                Some(declared.to_string_lossy().as_ref()),
+            )
+            .expect("matching explicit projector"),
+            Some(declared.to_string_lossy().to_string())
+        );
+        assert!(SidecarManager::select_inventory_projector(
+            Some(&declared),
+            Some(other.to_string_lossy().as_ref()),
+        )
+        .is_err());
+        assert!(SidecarManager::select_inventory_projector(
+            None,
+            Some(declared.to_string_lossy().as_ref()),
+        )
+        .is_err());
     }
 }

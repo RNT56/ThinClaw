@@ -37,6 +37,22 @@ impl Default for SidecarManager {
 }
 
 impl SidecarManager {
+    pub(crate) fn clear_process_instance(
+        slot: &Mutex<Option<SidecarProcess>>,
+        instance_id: uuid::Uuid,
+    ) -> bool {
+        let mut process = slot.lock().unwrap_or_else(|error| error.into_inner());
+        if process
+            .as_ref()
+            .is_some_and(|process| process.instance_id == instance_id)
+        {
+            *process = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             chat_process: Arc::new(Mutex::new(None)),
@@ -93,6 +109,26 @@ impl SidecarManager {
                 .model_identity
                 .as_ref()
                 .map(|identity| (process.port, process.token.clone(), identity.clone()))
+        })
+    }
+
+    pub fn get_embedding_target_snapshot(
+        &self,
+    ) -> Option<(u16, String, String, std::path::PathBuf)> {
+        let mut guard = self
+            .embedding_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Self::discard_exited(&mut guard);
+        guard.as_ref().and_then(|process| {
+            process.model_identity.as_ref().map(|identity| {
+                (
+                    process.port,
+                    process.token.clone(),
+                    identity.clone(),
+                    process.model_path.clone(),
+                )
+            })
         })
     }
 

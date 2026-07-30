@@ -16,11 +16,16 @@ pub enum SidecarChild {
 
 /// A handle to a single spawned sidecar process (chat/embedding/summarizer/stt).
 pub struct SidecarProcess {
+    /// Unique identity for this process lifecycle. Ports are intentionally
+    /// reusable, so monitor callbacks must never use a port as ownership.
+    pub instance_id: uuid::Uuid,
     pub child: Option<SidecarChild>,
     pub port: u16,
     pub token: String,
     pub context_size: u32,
     pub model_family: String,
+    /// Canonical filesystem path of the model artifact used by this process.
+    pub model_path: std::path::PathBuf,
     /// Opaque model artifact fingerprint; never contains the source path.
     pub model_identity: Option<String>,
 }

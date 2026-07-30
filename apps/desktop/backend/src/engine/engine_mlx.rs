@@ -9,7 +9,6 @@
 use async_trait::async_trait;
 use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{LazyLock, Mutex};
@@ -28,8 +27,6 @@ const BOOTSTRAP_MARKER: &str = ".thinclaw-mlx-bootstrap";
 const SERVED_MODEL_NAME: &str = "thinclaw-local";
 const MAX_CONTEXT_SIZE: u32 = 1_048_576;
 const MAX_MODEL_CONFIG_BYTES: usize = 1024 * 1024;
-const MAX_WEIGHT_INDEX_BYTES: usize = 16 * 1024 * 1024;
-const MAX_SAFETENSORS_HEADER_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MODEL_DIRECTORY_ENTRIES: usize = 4096;
 const UTILITY_OUTPUT_LIMIT: usize = 1024 * 1024;
 const VENV_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -642,105 +639,6 @@ print("thinclaw-mlx-runtime-ok")
             .map_err(|error| format!("Could not resolve MLX model directory: {error}"))
     }
 
-    fn vision_key(key: &str) -> bool {
-        key.starts_with("vision_tower.")
-            || key.starts_with("vision_model.")
-            || key.starts_with("multi_modal_projector.")
-    }
-
-    fn safetensors_contains_vision_keys(path: &Path) -> bool {
-        let Ok(metadata) = std::fs::symlink_metadata(path) else {
-            return false;
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() < 8 {
-            return false;
-        }
-        let Ok(mut file) = std::fs::File::open(path) else {
-            return false;
-        };
-        let mut length = [0_u8; 8];
-        if file.read_exact(&mut length).is_err() {
-            return false;
-        }
-        let Ok(header_length) = usize::try_from(u64::from_le_bytes(length)) else {
-            return false;
-        };
-        if header_length == 0
-            || header_length > MAX_SAFETENSORS_HEADER_BYTES
-            || 8_u64.saturating_add(header_length as u64) > metadata.len()
-        {
-            return false;
-        }
-        let mut header = vec![0_u8; header_length];
-        if file.read_exact(&mut header).is_err() {
-            return false;
-        }
-        serde_json::from_slice::<serde_json::Value>(&header)
-            .ok()
-            .and_then(|value| value.as_object().cloned())
-            .is_some_and(|object| object.keys().any(|key| Self::vision_key(key)))
-    }
-
-    fn has_vision_weights(model_dir: &Path) -> bool {
-        let index_has_vision = Self::read_bounded_regular_file(
-            &model_dir.join("model.safetensors.index.json"),
-            MAX_WEIGHT_INDEX_BYTES,
-        )
-        .and_then(|index| serde_json::from_slice::<serde_json::Value>(&index).ok())
-        .and_then(|value| {
-            value
-                .get("weight_map")
-                .and_then(|map| map.as_object())
-                .cloned()
-        })
-        .is_some_and(|map| map.keys().any(|key| Self::vision_key(key)));
-        if index_has_vision {
-            return true;
-        }
-
-        let Ok(entries) = std::fs::read_dir(model_dir) else {
-            return false;
-        };
-        entries
-            .take(MAX_MODEL_DIRECTORY_ENTRIES)
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
-            })
-            .any(|path| Self::safetensors_contains_vision_keys(&path))
-    }
-
-    fn is_vision_model(model_path: &str) -> bool {
-        let base = Path::new(model_path);
-        let Some(config) =
-            Self::read_bounded_regular_file(&base.join("config.json"), MAX_MODEL_CONFIG_BYTES)
-        else {
-            return false;
-        };
-        let Some(config) = serde_json::from_slice::<serde_json::Value>(&config).ok() else {
-            return false;
-        };
-        let indicates_vision = config.get("vision_config").is_some()
-            || config.get("vision_feature_layer").is_some()
-            || config.get("image_token_index").is_some()
-            || config
-                .get("architectures")
-                .and_then(|architectures| architectures.as_array())
-                .is_some_and(|architectures| {
-                    architectures
-                        .iter()
-                        .filter_map(|value| value.as_str())
-                        .any(|name| {
-                            name.contains("ConditionalGeneration")
-                                || name.contains("VisionModel")
-                                || name.contains("ForCausalImageTextToText")
-                        })
-                });
-        indicates_vision && Self::has_vision_weights(base)
-    }
-
     fn find_free_port() -> Result<u16, String> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")
             .map_err(|error| format!("Failed to reserve an MLX loopback port: {error}"))?;
@@ -827,10 +725,9 @@ impl InferenceEngine for MlxEngine {
         let effective_context = model_limit
             .map(|limit| context_size.min(limit))
             .unwrap_or(context_size);
-        let model_type = if Self::is_vision_model(&model_path_string) {
-            "multimodal"
-        } else {
-            "lm"
+        let model_type = match crate::model_manager::classify_mlx_vision_directory(&model_path)? {
+            true => "multimodal",
+            false => "lm",
         };
 
         let venv = self
@@ -1125,28 +1022,37 @@ mod tests {
             r#"{"architectures":["LlavaForConditionalGeneration"],"vision_config":{}}"#,
             Some(r#"{"weight_map":{"vision_tower.layer.weight":"model.safetensors"}}"#),
         );
-        assert!(MlxEngine::is_vision_model(vision.path().to_str().unwrap()));
+        assert_eq!(
+            crate::model_manager::classify_mlx_vision_directory(vision.path())
+                .expect("valid vision directory"),
+            true
+        );
 
         let text_only = model_dir(
             r#"{"architectures":["LlamaForCausalLM"],"max_position_embeddings":4096}"#,
             None,
         );
-        assert!(!MlxEngine::is_vision_model(
-            text_only.path().to_str().unwrap()
-        ));
+        assert_eq!(
+            crate::model_manager::classify_mlx_vision_directory(text_only.path())
+                .expect("valid text-only directory"),
+            false
+        );
 
         let misleading = model_dir(
             r#"{"architectures":["MistralForConditionalGeneration"],"vision_config":{}}"#,
             Some(r#"{"weight_map":{"language_model.layer.weight":"model.safetensors"}}"#),
         );
-        assert!(!MlxEngine::is_vision_model(
-            misleading.path().to_str().unwrap()
-        ));
+        assert!(crate::model_manager::classify_mlx_vision_directory(misleading.path()).is_err());
     }
 
     #[test]
     fn single_file_safetensors_header_detects_vision_weights() {
         let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("config.json"),
+            r#"{"vision_config":{}}"#,
+        )
+        .unwrap();
         let header =
             br#"{"vision_model.layer.weight":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}"#;
         let mut file = Vec::new();
@@ -1155,7 +1061,11 @@ mod tests {
         file.extend_from_slice(&[0, 0]);
         let path = directory.path().join("model.safetensors");
         std::fs::write(&path, file).unwrap();
-        assert!(MlxEngine::safetensors_contains_vision_keys(&path));
+        assert_eq!(
+            crate::model_manager::classify_mlx_vision_directory(directory.path())
+                .expect("valid single-file vision directory"),
+            true
+        );
     }
 
     #[test]

@@ -556,9 +556,7 @@ impl FileStore {
 
         match tokio::fs::symlink_metadata(&full_path).await {
             Ok(metadata) => {
-                if metadata.file_type().is_symlink()
-                    || !metadata.is_file()
-                {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
                     return Err(FileStoreError::InvalidPath(format!(
                         "store path is not a regular file: {relative_path}"
                     )));
@@ -703,10 +701,7 @@ impl FileStore {
         };
 
         match tokio::fs::symlink_metadata(&full_path).await {
-            Ok(metadata)
-                if metadata.file_type().is_symlink()
-                    || !metadata.is_file() =>
-            {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                 return Err(FileStoreError::InvalidPath(format!(
                     "store path is not a regular file: {relative_path}"
                 )));

@@ -7,6 +7,8 @@ import { useConfig } from "./use-config";
 import { useChatContext } from "../components/chat/chat-context";
 import { toast } from "sonner";
 import { unwrap } from "../lib/utils";
+import { startLocalChatRuntime } from "../lib/local-runtime-start";
+import { isCompatibleManagedModelForCategory } from "../lib/hf-models";
 
 export type ExtendedMessage = Message & {
     id?: string;
@@ -60,6 +62,8 @@ export function useChat() {
         isRestarting,
         runtimeSnapshot,
         refreshRuntimeSnapshot,
+        engineInfo,
+        localModels,
     } = useModelContext();
     const { activeJobs, activeJobsRef, startGeneration, directRuntimeCancelGeneration: contextCancel } = useChatContext();
 
@@ -200,18 +204,42 @@ export function useChat() {
 
     const startServer = useCallback(async (path: string) => {
         try {
-            unwrap(await directCommands.directRuntimeStartChatServer(path, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false));
+            const selectedModel = localModels.find(model => model.path === path);
+            if (
+                engineInfo?.id !== "ollama"
+                && (
+                    !selectedModel
+                    || !isCompatibleManagedModelForCategory(selectedModel, "LLM")
+                )
+            ) {
+                throw new Error("The selected local chat model is unavailable or incompatible");
+            }
+            await startLocalChatRuntime({
+                engine: engineInfo,
+                modelPath: path,
+                contextSize: maxContext,
+                template: currentModelTemplate,
+                mmproj: selectedModel?.companion_path ?? null,
+                mlock: config?.mlock ?? false,
+                quantizeKv: config?.quantize_kv ?? false,
+            });
             const snapshot = await refreshRuntimeSnapshot();
-            setModelRunning(snapshot?.readiness === "ready" && !!snapshot.endpoint);
+            if (snapshot) {
+                setModelRunning(snapshot.readiness === "ready" && !!snapshot.endpoint);
+            }
         } catch (e) {
             console.error("Server start error:", e);
             throw e;
         }
-    }, [maxContext, currentModelTemplate, config?.mlock, config?.quantize_kv, refreshRuntimeSnapshot]);
+    }, [maxContext, currentModelTemplate, config?.mlock, config?.quantize_kv, refreshRuntimeSnapshot, engineInfo, localModels]);
 
     const stopServer = async () => {
         try {
-            unwrap(await directCommands.directRuntimeStopChatServer(currentModelPath));
+            if (engineInfo?.id === "llamacpp") {
+                unwrap(await directCommands.directRuntimeStopChatServer(currentModelPath));
+            } else {
+                unwrap(await directCommands.directRuntimeStopEngine());
+            }
             await refreshRuntimeSnapshot();
             setModelRunning(false);
         } catch (e) {
@@ -226,7 +254,9 @@ export function useChat() {
             try {
                 const s = await directCommands.directRuntimeGetSidecarStatus();
                 const snapshot = await refreshRuntimeSnapshot();
-                setModelRunning(snapshot?.readiness === "ready" && !!snapshot.endpoint);
+                if (snapshot) {
+                    setModelRunning(snapshot.readiness === "ready" && !!snapshot.endpoint);
+                }
                 setSttRunning(s?.stt_running || false);
                 setImageRunning(s?.image_configured || false);
             } catch (e) {

@@ -76,6 +76,12 @@ pub async fn direct_media_transcribe_audio(
         return Ok(DirectSttResponse { text, asset });
     }
 
+    // Local transcription may either call a persistent managed server or keep
+    // the selected model file open in a one-shot Whisper child. Serialize the
+    // full operation with targeted deactivation/deletion so the install cannot
+    // disappear (or its server be stopped) during an active request.
+    let _lifecycle_guard = crate::model_lifecycle::MODEL_LIFECYCLE_LOCK.lock().await;
+
     // ── Local STT backend (whisper-server / whisper CLI) ──────────────────
     // CHECK FOR RUNNING SERVER FIRST
     let server_config = state.get_stt_server_config();

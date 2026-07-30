@@ -10,6 +10,7 @@ import { useChatLayout } from '../ChatProvider';
 import { findStyle } from '../../../lib/style-library';
 import { useModelContext } from '../../model-context';
 import { AsyncState, Progress } from '../../ui';
+import { isCompatibleManagedModelForCategory } from '../../../lib/hf-models';
 
 export function ChatView() {
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -69,7 +70,7 @@ export function ChatView() {
         maxContext,
         modelPath,
         localModels,
-        currentModelTemplate,
+        startServer,
         getRootProps,
         getInputProps,
         setActiveTab,
@@ -87,10 +88,8 @@ export function ChatView() {
 
     // Only llamacpp builds use the llama-server sidecar; MLX/vLLM manage their
     // own server. We hide the manual "Start Server" button for those engines.
-    const { engineInfo, runtimeSnapshot } = useModelContext();
-    const isLlamaCppEngine = runtimeSnapshot
-        ? runtimeSnapshot.kind === "llama_cpp"
-        : (!engineInfo || engineInfo.single_file_model);
+    const { engineInfo } = useModelContext();
+    const isLlamaCppEngine = engineInfo?.id === "llamacpp";
 
     return (
         <div {...getRootProps()} className="flex-1 flex flex-col h-full overflow-hidden">
@@ -288,8 +287,16 @@ export function ChatView() {
                                 showImageSettings={showImageSettings}
                                 imageRunning={imageRunning}
                                 startServer={isLlamaCppEngine ? async () => {
-                                    const { commands: cmds } = await import('../../../lib/bindings');
-                                    await cmds.directRuntimeStartChatServer(modelPath || localModels[0]?.path, maxContext, currentModelTemplate, null, false, false, false);
+                                    const selectedModel = localModels.find((model: any) =>
+                                        model.path === modelPath
+                                        && isCompatibleManagedModelForCategory(model, 'LLM')
+                                    ) ?? localModels.find((model: any) =>
+                                        isCompatibleManagedModelForCategory(model, 'LLM')
+                                    );
+                                    if (!selectedModel) {
+                                        throw new Error('No compatible local chat model is available');
+                                    }
+                                    await startServer(selectedModel.path);
                                 } : undefined}
                                 slashQuery={slashQuery}
                                 setSlashQuery={setSlashQuery}

@@ -4,7 +4,6 @@ import { ArrowUp, Command, Copy, Pin, PinOff, Check } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useChat } from '../../hooks/use-chat';
 import { commands } from '../../lib/bindings';
-import { directCommands } from '../../lib/generated/direct-commands';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';
@@ -12,6 +11,8 @@ import { toast } from 'sonner';
 import { useModelContext } from '../model-context';
 import { useConfig } from '../../hooks/use-config';
 import { STATUS_TAG_REGEX } from '../../lib/status-tags';
+import { isCompatibleManagedModelForCategory } from '../../lib/hf-models';
+import { startLocalChatRuntime } from '../../lib/local-runtime-start';
 
 // Extract text from React nodes for copy functionality
 function extractText(node: any): string {
@@ -47,7 +48,13 @@ function CodeCopyButton({ content }: { content: string }) {
 export function SpotlightBar() {
     const { messages, isStreaming, sendMessage, clearMessages, modelRunning, currentConversationId, directHistoryDeleteConversation } = useChat();
     const { config: userCfg } = useConfig();
-    const { currentModelPath, maxContext } = useModelContext();
+    const {
+        currentModelPath,
+        currentModelTemplate,
+        engineInfo,
+        localModels,
+        maxContext,
+    } = useModelContext();
     const [input, setInput] = useState("");
     const [isPinned, setIsPinned] = useState(false);
     const [promptHistory, setPromptHistory] = useState<string[]>([]);
@@ -284,13 +291,22 @@ export function SpotlightBar() {
             if (currentModelPath === "auto") {
                 toast.info("Initializing neural link...");
                 try {
-                    const modelsRes = await commands.listModels();
-                    if (modelsRes.status === "ok" && modelsRes.data.length > 0) {
-                        const localModels = modelsRes.data.filter(m => !m.path.startsWith('http'));
-                        const best = localModels.length > 0 ? localModels.sort((a, b) => b.size - a.size)[0] : modelsRes.data[0];
-                        await directCommands.directRuntimeStartChatServer(best.path, maxContext, null, null, false, false, false);
+                    const candidates = localModels
+                        .filter(model => isCompatibleManagedModelForCategory(model, "LLM"))
+                        .sort((left, right) => right.size - left.size);
+                    const best = candidates[0];
+                    if (best) {
+                        await startLocalChatRuntime({
+                            engine: engineInfo,
+                            modelPath: best.path,
+                            contextSize: maxContext,
+                            template: currentModelTemplate,
+                            mmproj: best.companion_path,
+                            mlock: userCfg?.mlock ?? false,
+                            quantizeKv: userCfg?.quantize_kv ?? false,
+                        });
                     } else {
-                        toast.error("No models found. Please download one in settings.");
+                        toast.error("No compatible chat models found. Please download one in settings.");
                         return;
                     }
                 } catch (e) {
@@ -300,7 +316,22 @@ export function SpotlightBar() {
             } else if (currentModelPath) {
                 toast.info("Waking up LLM...");
                 try {
-                    await directCommands.directRuntimeStartChatServer(currentModelPath, maxContext, null, null, false, false, false);
+                    const selected = localModels.find(model =>
+                        model.path === currentModelPath
+                        && isCompatibleManagedModelForCategory(model, "LLM")
+                    );
+                    if (!selected && engineInfo?.id !== "ollama") {
+                        throw new Error("The selected chat model is unavailable");
+                    }
+                    await startLocalChatRuntime({
+                        engine: engineInfo,
+                        modelPath: selected?.path ?? currentModelPath,
+                        contextSize: maxContext,
+                        template: currentModelTemplate,
+                        mmproj: selected?.companion_path ?? null,
+                        mlock: userCfg?.mlock ?? false,
+                        quantizeKv: userCfg?.quantize_kv ?? false,
+                    });
                 } catch (e) {
                     toast.error(`Wake failed: ${String(e)}`);
                     return;

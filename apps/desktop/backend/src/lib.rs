@@ -80,6 +80,7 @@ pub mod image_gen;
 pub mod images;
 pub mod imagine;
 pub mod inference;
+mod model_lifecycle;
 pub mod model_manager;
 pub mod permissions;
 pub mod personas;

@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createServer, type ViteDevServer } from "vite";
+import { createHfBrowserFixtureScript } from "./e2e/support/hf-browser-fixture.js";
 
 let devServer: ViteDevServer | undefined;
 
@@ -130,7 +131,13 @@ const startupCommandResults = {
     totalModels: 0,
     errors: [],
   },
-  direct_runtime_discover_hf_models: [],
+  direct_runtime_get_hf_capabilities: [],
+  direct_runtime_discover_hf_models_v2: {
+    engine_id: "none",
+    task: "chat",
+    models: [],
+    has_more: false,
+  },
   check_missing_standard_assets: [],
   get_permission_status: { accessibility: true, screen_recording: true },
   list_models: [],
@@ -188,6 +195,7 @@ const startupFixtureScript = `
   window.__TAURI_INTERNALS__.metadata ??= {};
   window.__TAURI_INTERNALS__.metadata.currentWindow ??= { label: "main" };
   window.__TAURI_INTERNALS__.metadata.currentWebview ??= { label: "main" };
+  ${createHfBrowserFixtureScript()}
 `;
 
 export const config: WebdriverIO.Config = {
@@ -238,7 +246,15 @@ export const config: WebdriverIO.Config = {
           },
         },
       ],
-      server: { host: "127.0.0.1", port: 1420, strictPort: true },
+      // Browser E2E must exercise one immutable page implementation for the
+      // duration of a journey. Hot updates can otherwise remount React effects
+      // mid-assertion when another local process edits the shared worktree.
+      server: {
+        host: "127.0.0.1",
+        port: 1420,
+        strictPort: true,
+        hmr: false,
+      },
     });
     await devServer.listen();
   },
