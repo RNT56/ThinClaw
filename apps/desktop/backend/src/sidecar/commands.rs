@@ -6,20 +6,13 @@
 //! `setup/commands.rs` keeps resolving unchanged.
 
 use std::sync::atomic::Ordering;
-use std::sync::LazyLock;
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::core::SidecarManager;
 use super::types::{ChatServerConfig, ChatServerOptions, SidecarEvent, SidecarStatus};
 use crate::inference::embedding::{local::LocalEmbeddingBackend, EmbeddingBackend};
-
-static CHAT_START_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(()));
-static EMBEDDING_START_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(()));
-static SUMMARIZER_START_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(()));
+use crate::model_lifecycle::{model_path_uses_install, ModelLifecycleRoles, MODEL_LIFECYCLE_LOCK};
 
 const MANAGED_STT_MARKER: &str = "THINCLAW_MANAGED_WHISPER_ENDPOINT";
 const STT_ENDPOINT_KEY: &str = "WHISPER_HTTP_ENDPOINT";
@@ -81,7 +74,7 @@ pub async fn direct_runtime_start_chat_server(
     mlock: Option<bool>,
     quantize_kv: Option<bool>,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    let _start_guard = CHAT_START_LOCK.lock().await;
+    let _lifecycle_guard = MODEL_LIFECYCLE_LOCK.lock().await;
     if expose_network.unwrap_or(false) {
         return Err(
             crate::thinclaw::bridge::BridgeError::Runtime { message: "Direct model-server network exposure is disabled; use the authenticated ThinClaw gateway for remote access"
@@ -133,30 +126,15 @@ pub async fn direct_runtime_start_chat_server(
                 mlock: mlock.unwrap_or(false),
                 quantize_kv: quantize_kv.unwrap_or(false),
             },
-            move |code, exited_port| {
+            move |code, _exited_port, instance_id| {
                 // This callback runs when the process terminates
                 let manager = app_handle_for_closure.state::<SidecarManager>();
-                let is_current = manager
-                    .chat_process
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .as_ref()
-                    .is_some_and(|process| process.port == exited_port);
-                if !is_current {
+                if !SidecarManager::clear_process_instance(&manager.chat_process, instance_id) {
                     return;
                 }
 
                 if code != 0 {
                     eprintln!("[sidecar] Chat server crashed unexpectedly.");
-
-                    if let Ok(mut guard) = manager.chat_process.lock() {
-                        if guard
-                            .as_ref()
-                            .is_some_and(|process| process.port == exited_port)
-                        {
-                            *guard = None;
-                        }
-                    }
 
                     app_handle_for_closure
                         .emit(
@@ -168,15 +146,6 @@ pub async fn direct_runtime_start_chat_server(
                         )
                         .ok();
                 } else {
-                    // Clean exit (0) logic
-                    if let Ok(mut guard) = manager.chat_process.lock() {
-                        if guard
-                            .as_ref()
-                            .is_some_and(|process| process.port == exited_port)
-                        {
-                            *guard = None;
-                        }
-                    }
                     // Emit stopped event
                     app_handle_for_closure
                         .emit(
@@ -261,7 +230,7 @@ pub async fn start_embedding_server_core(
     vector_manager: &crate::vector_store::VectorStoreManager,
     model_path: String,
 ) -> Result<(), String> {
-    let _start_guard = EMBEDDING_START_LOCK.lock().await;
+    let _lifecycle_guard = MODEL_LIFECYCLE_LOCK.lock().await;
 
     #[cfg(feature = "mlx")]
     let (port, token) = state
@@ -383,7 +352,7 @@ pub async fn direct_runtime_start_summarizer_server(
     model_path: String,
     context_size: u32,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    let _start_guard = SUMMARIZER_START_LOCK.lock().await;
+    let _lifecycle_guard = MODEL_LIFECYCLE_LOCK.lock().await;
     let (port, token) = state
         .direct_runtime_start_summarizer_server(app.clone(), model_path, context_size, -1)
         .map_err(|e| e.to_string())?;
@@ -452,7 +421,22 @@ pub async fn direct_runtime_start_stt_server(
     state: State<'_, SidecarManager>,
     model_path: String,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    clear_managed_stt_endpoint();
+    let _lifecycle_guard = MODEL_LIFECYCLE_LOCK.lock().await;
+    #[cfg(feature = "mlx")]
+    let runtime = "mlx";
+    #[cfg(not(feature = "mlx"))]
+    let runtime = "llamacpp";
+    let resolved = crate::model_manager::resolve_compatible_inventory_model(
+        &app,
+        &model_path,
+        runtime,
+        "STT",
+    )?;
+    let model_path = resolved
+        .path
+        .to_str()
+        .ok_or_else(|| "The selected STT model path is not valid UTF-8".to_string())?
+        .to_string();
     // Route to MLX STT server when compiled with MLX feature
     #[cfg(feature = "mlx")]
     let res = match state.start_mlx_stt_server(app.clone(), model_path).await {
@@ -460,13 +444,16 @@ pub async fn direct_runtime_start_stt_server(
             install_managed_stt_endpoint(port, token);
             Ok(())
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => {
+            clear_managed_stt_endpoint();
+            Err(error.to_string())
+        }
     };
 
     #[cfg(not(feature = "mlx"))]
     let res = state
         .direct_runtime_start_stt_server(app.clone(), model_path)
-        .map(|_| ())
+        .map(|_| clear_managed_stt_endpoint())
         .map_err(|e| e.to_string());
 
     if res.is_ok() {
@@ -489,6 +476,7 @@ pub async fn direct_runtime_start_image_server(
     state: State<'_, SidecarManager>,
     model_path: String,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let _lifecycle_guard = MODEL_LIFECYCLE_LOCK.lock().await;
     Ok(state
         .direct_runtime_start_image_server(app, model_path)
         .map_err(|e| e.to_string())?)
@@ -501,6 +489,7 @@ pub async fn direct_runtime_start_tts_server(
     state: State<'_, SidecarManager>,
     model_path: String,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let _lifecycle_guard = MODEL_LIFECYCLE_LOCK.lock().await;
     Ok(state
         .direct_runtime_start_tts_server(app, model_path)
         .map(|_| ())
@@ -544,6 +533,7 @@ pub async fn direct_runtime_stop_chat_server(
     state: State<'_, SidecarManager>,
     _model_path: String,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let _lifecycle_guard = MODEL_LIFECYCLE_LOCK.lock().await;
     state
         .direct_runtime_stop_chat_server()
         .map_err(|e| e.to_string())?;
@@ -557,6 +547,177 @@ pub async fn direct_runtime_stop_chat_server(
     Ok(())
 }
 
+fn take_process_using_install(
+    slot: &std::sync::Mutex<Option<super::types::SidecarProcess>>,
+    install_root: &std::path::Path,
+) -> Option<super::types::SidecarProcess> {
+    let mut process = slot.lock().unwrap_or_else(|error| error.into_inner());
+    if process
+        .as_ref()
+        .is_some_and(|process| model_path_uses_install(&process.model_path, install_root))
+    {
+        process.take()
+    } else {
+        None
+    }
+}
+
+fn tracked_path_uses_install(
+    slot: &std::sync::Mutex<Option<String>>,
+    install_root: &std::path::Path,
+) -> bool {
+    slot.lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_deref()
+        .is_some_and(|path| model_path_uses_install(std::path::Path::new(path), install_root))
+}
+
+fn clear_tracked_path(
+    slot: &std::sync::Mutex<Option<String>>,
+    install_root: &std::path::Path,
+) -> bool {
+    let mut path = slot.lock().unwrap_or_else(|error| error.into_inner());
+    if path
+        .as_deref()
+        .is_some_and(|path| model_path_uses_install(std::path::Path::new(path), install_root))
+    {
+        *path = None;
+        true
+    } else {
+        false
+    }
+}
+
+/// Stop only services whose backend-owned canonical target is this inventory
+/// install. The caller must hold `MODEL_LIFECYCLE_LOCK`.
+pub(crate) async fn deactivate_model_target_locked(
+    app: &AppHandle,
+    state: &SidecarManager,
+    engine_manager: &crate::engine::EngineManager,
+    install_root: &std::path::Path,
+    roles: ModelLifecycleRoles,
+) -> Result<bool, String> {
+    let tracker = app.state::<crate::process_tracker::ProcessTracker>();
+    let mut stopped_any = false;
+
+    if roles.chat {
+        if let Some(process) = take_process_using_install(&state.chat_process, install_root) {
+            state.set_chat_intentional_stop(true);
+            process
+                .kill()
+                .map_err(|error| format!("Failed to stop target chat service: {error}"))?;
+            tracker.cleanup_by_service("chat");
+            stopped_any = true;
+        }
+    }
+    if roles.embedding {
+        if let Some(process) = take_process_using_install(&state.embedding_process, install_root) {
+            process
+                .kill()
+                .map_err(|error| format!("Failed to stop target embedding service: {error}"))?;
+            tracker.cleanup_by_service("embedding");
+            stopped_any = true;
+        }
+    }
+    if roles.summarizer {
+        if let Some(process) = take_process_using_install(&state.summarizer_process, install_root) {
+            process
+                .kill()
+                .map_err(|error| format!("Failed to stop target summarizer service: {error}"))?;
+            tracker.cleanup_by_service("summarizer");
+            stopped_any = true;
+        }
+    }
+    if roles.stt {
+        let process_target = state
+            .stt_process
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|process| process.model_path.clone());
+        let target_matches = process_target.as_deref().map_or_else(
+            || tracked_path_uses_install(&state.stt_model_path, install_root),
+            |path| model_path_uses_install(path, install_root),
+        );
+        if target_matches {
+            let process = state
+                .stt_process
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let Some(process) = process {
+                process
+                    .kill()
+                    .map_err(|error| format!("Failed to stop target STT service: {error}"))?;
+            }
+            *state
+                .stt_model_path
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
+            clear_managed_stt_endpoint();
+            tracker.cleanup_by_service("stt");
+            stopped_any = true;
+        }
+    }
+    if roles.image && clear_tracked_path(&state.image_model_path, install_root) {
+        tracker.cleanup_by_service("image");
+        stopped_any = true;
+    }
+    if roles.tts && clear_tracked_path(&state.tts_model_path, install_root) {
+        tracker.cleanup_by_service("tts");
+        stopped_any = true;
+    }
+    if roles.engine
+        && engine_manager
+            .stop_if_using_install_locked(install_root)
+            .await?
+    {
+        stopped_any = true;
+    }
+
+    Ok(stopped_any)
+}
+
+/// Stop only the requested local services that actually use the selected
+/// backend inventory installation. A stale renderer selection can therefore
+/// never stop a different active model.
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)]
+pub async fn direct_runtime_deactivate_model_services(
+    app: AppHandle,
+    state: State<'_, SidecarManager>,
+    engine_manager: State<'_, crate::engine::EngineManager>,
+    install_root: String,
+    chat: bool,
+    embedding: bool,
+    summarizer: bool,
+    stt: bool,
+    image: bool,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let _lifecycle_guard = MODEL_LIFECYCLE_LOCK.lock().await;
+    let install_root = crate::model_manager::resolve_inventory_install_root(&app, &install_root)?;
+    let roles =
+        ModelLifecycleRoles::from_deactivation_command(chat, embedding, summarizer, stt, image);
+    deactivate_model_target_locked(
+        &app,
+        state.inner(),
+        engine_manager.inner(),
+        &install_root,
+        roles,
+    )
+    .await?;
+
+    app.emit(
+        "sidecar_event",
+        SidecarEvent::Stopped {
+            service: "model".into(),
+        },
+    )
+    .ok();
+    Ok(())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn direct_runtime_cancel_generation(
@@ -564,4 +725,113 @@ pub async fn direct_runtime_cancel_generation(
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     state.cancellation_token.store(true, Ordering::SeqCst);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sidecar::SidecarProcess;
+
+    fn tracked_process(model_path: std::path::PathBuf) -> SidecarProcess {
+        SidecarProcess {
+            instance_id: uuid::Uuid::new_v4(),
+            child: None,
+            port: 1,
+            token: String::new(),
+            context_size: 1,
+            model_family: "test".to_string(),
+            model_path,
+            model_identity: None,
+        }
+    }
+
+    #[test]
+    fn target_process_take_preserves_an_unrelated_active_model() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let install_a = temp.path().join("model-a");
+        let install_b = temp.path().join("model-b");
+        std::fs::create_dir(&install_a).expect("install a");
+        std::fs::create_dir(&install_b).expect("install b");
+        let install_a = install_a.canonicalize().expect("canonical a");
+        let install_b = install_b.canonicalize().expect("canonical b");
+        let slot = std::sync::Mutex::new(Some(tracked_process(install_b.clone())));
+
+        assert!(take_process_using_install(&slot, &install_a).is_none());
+        assert_eq!(
+            slot.lock()
+                .expect("slot")
+                .as_ref()
+                .map(|process| process.model_path.clone()),
+            Some(install_b),
+        );
+    }
+
+    #[test]
+    fn target_process_take_accepts_a_model_inside_the_install() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let install = temp.path().join("model");
+        let weights = install.join("weights");
+        std::fs::create_dir_all(&weights).expect("weights");
+        let install = install.canonicalize().expect("canonical install");
+        let model = weights.join("model.gguf");
+        std::fs::write(&model, b"GGUF").expect("model");
+        let model = model.canonicalize().expect("canonical model");
+        let slot = std::sync::Mutex::new(Some(tracked_process(model.clone())));
+
+        assert_eq!(
+            take_process_using_install(&slot, &install).map(|process| process.model_path.clone()),
+            Some(model),
+        );
+        assert!(slot.lock().expect("slot").is_none());
+    }
+
+    #[test]
+    fn target_path_clear_requires_the_exact_install_identity() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let install = temp.path().join("model");
+        let sibling = temp.path().join("model-old");
+        std::fs::create_dir(&install).expect("install");
+        std::fs::create_dir(&sibling).expect("sibling");
+        let install = install.canonicalize().expect("canonical install");
+        let sibling = sibling.canonicalize().expect("canonical sibling");
+        let sibling_string = sibling.to_string_lossy().to_string();
+        let slot = std::sync::Mutex::new(Some(sibling_string.clone()));
+
+        assert!(!clear_tracked_path(&slot, &install));
+        assert_eq!(
+            slot.lock().expect("slot").as_deref(),
+            Some(sibling_string.as_str()),
+        );
+        *slot.lock().expect("slot") = Some(install.to_string_lossy().to_string());
+        assert!(clear_tracked_path(&slot, &install));
+        assert!(slot.lock().expect("slot").is_none());
+    }
+
+    #[test]
+    fn delayed_old_exit_cannot_clear_replacement_on_the_same_port() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let old_path = temp.path().join("old.gguf");
+        let new_path = temp.path().join("new.gguf");
+        let old = tracked_process(old_path);
+        let old_instance = old.instance_id;
+        let mut replacement = tracked_process(new_path.clone());
+        replacement.port = old.port;
+        let replacement_instance = replacement.instance_id;
+        let slot = std::sync::Mutex::new(Some(replacement));
+
+        assert!(!SidecarManager::clear_process_instance(&slot, old_instance));
+        assert_eq!(
+            slot.lock().expect("slot").as_ref().map(|process| (
+                process.instance_id,
+                process.port,
+                process.model_path.clone()
+            )),
+            Some((replacement_instance, 1, new_path))
+        );
+        assert!(SidecarManager::clear_process_instance(
+            &slot,
+            replacement_instance
+        ));
+        assert!(slot.lock().expect("slot").is_none());
+    }
 }

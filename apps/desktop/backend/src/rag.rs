@@ -863,8 +863,30 @@ async fn resolve_rag_embedding_backend(
         return Ok(backend);
     }
 
-    let mut snapshot = sidecar.get_embedding_snapshot();
-    if let Some((port, token, _)) = &snapshot {
+    #[cfg(feature = "mlx")]
+    let embedding_runtime = "mlx";
+    #[cfg(not(feature = "mlx"))]
+    let embedding_runtime = "llamacpp";
+    let requested_model = embedding_model_path
+        .as_deref()
+        .map(|path| {
+            crate::model_manager::resolve_compatible_inventory_model(
+                app,
+                path,
+                embedding_runtime,
+                "Embedding",
+            )
+        })
+        .transpose()?;
+    let mut target_snapshot = sidecar.get_embedding_target_snapshot();
+    if requested_model.as_ref().is_some_and(|requested| {
+        target_snapshot
+            .as_ref()
+            .is_some_and(|(_, _, _, active)| active != &requested.path)
+    }) {
+        target_snapshot = None;
+    }
+    if let Some((port, token, _, _)) = &target_snapshot {
         let alive = embedding_http_client(true)?
             .get(format!("http://127.0.0.1:{port}/health"))
             .bearer_auth(token)
@@ -872,20 +894,32 @@ async fn resolve_rag_embedding_backend(
             .await
             .is_ok_and(|response| response.status().is_success());
         if !alive {
-            snapshot = None;
+            target_snapshot = None;
         }
     }
-    if snapshot.is_none() {
-        let model_path = embedding_model_path.ok_or_else(|| {
-            "No embedding backend is active. Select an embedding model in Settings.".to_string()
-        })?;
+    if target_snapshot.is_none() {
+        let model_path = requested_model
+            .as_ref()
+            .map(|model| {
+                model
+                    .path
+                    .to_str()
+                    .ok_or_else(|| {
+                        "The selected embedding model path is not valid UTF-8".to_string()
+                    })
+                    .map(str::to_string)
+            })
+            .transpose()?
+            .ok_or_else(|| {
+                "No embedding backend is active. Select an embedding model in Settings.".to_string()
+            })?;
         crate::sidecar::start_embedding_server_core(app, sidecar, vector_manager, model_path)
             .await
             .map_err(|error| format!("Failed to start embedding backend: {error}"))?;
-        snapshot = sidecar.get_embedding_snapshot();
+        target_snapshot = sidecar.get_embedding_target_snapshot();
     }
-    let (port, token, identity) =
-        snapshot.ok_or_else(|| "Embedding backend did not expose a model identity".to_string())?;
+    let (port, token, identity, _) = target_snapshot
+        .ok_or_else(|| "Embedding backend did not expose a model identity".to_string())?;
     Ok(std::sync::Arc::new(LocalEmbeddingBackend {
         port,
         token,

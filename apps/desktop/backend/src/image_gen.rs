@@ -98,18 +98,31 @@ async fn read_and_normalize_generated_image(path: &std::path::Path) -> Result<Ve
     Ok(normalized)
 }
 
-fn resolve_diffusion_artifact(
+fn resolve_primary_diffusion_model(app: &AppHandle, path: &str) -> Result<String, String> {
+    #[cfg(feature = "mlx")]
+    let runtime = "mlx";
+    #[cfg(not(feature = "mlx"))]
+    let runtime = "llamacpp";
+    let resolved =
+        crate::model_manager::resolve_compatible_inventory_model(app, path, runtime, "Diffusion")?;
+    resolved
+        .path
+        .to_str()
+        .ok_or_else(|| "The selected image model path is not valid UTF-8".to_string())
+        .map(str::to_string)
+}
+
+fn resolve_diffusion_auxiliary_artifact(
     app: &AppHandle,
     path: &str,
     purpose: &str,
-    allow_directory: bool,
 ) -> Result<String, String> {
     SidecarManager::validate_managed_model_path(
         app,
         path,
         "Diffusion",
         purpose,
-        allow_directory,
+        false,
         &["safetensors", "sft", "gguf", "ckpt"],
     )
     .map_err(|error| error.to_string())
@@ -214,57 +227,144 @@ impl DiffusionArchitecture {
     }
 }
 
-/// MLX-native image generation using `mflux` Python package.
-/// Replaces `sd.cpp` sidecar when the MLX engine is active.
-#[cfg(feature = "mlx")]
-async fn run_mflux_inference(
-    app: &AppHandle,
-    model_path: &str,
-    params: &ImageGenParams,
-) -> Result<ImageResponse, String> {
-    use std::io::Write;
+#[cfg(any(feature = "mlx", test))]
+const MAX_MFLUX_CONFIG_BYTES: u64 = 1024 * 1024;
 
-    let output_temp =
-        NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {}", e))?;
-    let output_png = format!("{}.png", output_temp.path().to_string_lossy());
+#[cfg(any(feature = "mlx", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MfluxFluxVariant {
+    Dev,
+    Schnell,
+}
 
+#[cfg(any(feature = "mlx", test))]
+impl MfluxFluxVariant {
+    fn alias(self) -> &'static str {
+        match self {
+            Self::Dev => "dev",
+            Self::Schnell => "schnell",
+        }
+    }
+}
+
+#[cfg(any(feature = "mlx", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MfluxModelOptions {
+    variant: MfluxFluxVariant,
+    quantization: MfluxQuantization,
+}
+
+#[cfg(any(feature = "mlx", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MfluxQuantization {
+    Bits3,
+    Bits4,
+    Bits5,
+    Bits6,
+    Bits8,
+}
+
+#[cfg(any(feature = "mlx", test))]
+impl MfluxQuantization {
+    fn from_u64(bits: u64) -> Option<Self> {
+        match bits {
+            3 => Some(Self::Bits3),
+            4 => Some(Self::Bits4),
+            5 => Some(Self::Bits5),
+            6 => Some(Self::Bits6),
+            8 => Some(Self::Bits8),
+            _ => None,
+        }
+    }
+
+    fn bits(self) -> u8 {
+        match self {
+            Self::Bits3 => 3,
+            Self::Bits4 => 4,
+            Self::Bits5 => 5,
+            Self::Bits6 => 6,
+            Self::Bits8 => 8,
+        }
+    }
+}
+
+#[cfg(any(feature = "mlx", test))]
+fn mflux_model_options_from_config(
+    config: &serde_json::Value,
+) -> Result<MfluxModelOptions, String> {
+    if !crate::model_manager::is_supported_mflux_config(config) {
+        return Err(
+            "MFlux config.json does not describe a supported plain FLUX.1 model".to_string(),
+        );
+    }
+    let original_model = config
+        .get("original_model")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "MFlux config.json is missing original_model".to_string())?;
+    let model_name = original_model
+        .rsplit('/')
+        .next()
+        .unwrap_or(original_model)
+        .to_ascii_lowercase();
+    let variant = if model_name.ends_with("schnell") {
+        MfluxFluxVariant::Schnell
+    } else if model_name.ends_with("dev") {
+        MfluxFluxVariant::Dev
+    } else {
+        return Err(
+            "MFlux original_model must identify a plain dev or schnell variant".to_string(),
+        );
+    };
+    let quantization = config
+        .get("quantization")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|quantization| quantization.get("bits"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(MfluxQuantization::from_u64)
+        .ok_or_else(|| "MFlux quantization bits are missing or unsupported".to_string())?;
+
+    Ok(MfluxModelOptions {
+        variant,
+        quantization,
+    })
+}
+
+#[cfg(any(feature = "mlx", test))]
+fn read_mflux_model_options(model_path: &std::path::Path) -> Result<MfluxModelOptions, String> {
+    let config_path = model_path.join("config.json");
+    let bytes = thinclaw_platform::read_regular_file_bounded_single_link(
+        &config_path,
+        MAX_MFLUX_CONFIG_BYTES,
+    )
+    .map_err(|error| format!("MFlux config.json is unavailable or unsafe: {error}"))?;
+    let config: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("MFlux config.json is invalid: {error}"))?;
+    mflux_model_options_from_config(&config)
+}
+
+#[cfg(any(feature = "mlx", test))]
+fn build_mflux_script(options: MfluxModelOptions, params: &ImageGenParams) -> String {
+    let flux_alias = options.variant.alias();
+    let quantize = options.quantization.bits();
     let width = params.width.unwrap_or(1024);
     let height = params.height.unwrap_or(1024);
     let steps = params.steps.unwrap_or(4);
     let seed = params.seed.unwrap_or(-1);
     let cfg_scale = params.cfg_scale.unwrap_or(1.0);
 
-    // Detect model type from path for mflux CLI command selection
-    let lower_model = model_path.to_lowercase();
-
-    // Detect Flux variant: "dev" uses a different model config than "schnell"
-    let flux_alias = if lower_model.contains("dev") {
-        "dev"
-    } else {
-        "schnell"
-    };
-
-    let quantize_bits = if lower_model.contains("4bit") || lower_model.contains("q4") {
-        4
-    } else if lower_model.contains("8bit") || lower_model.contains("q8") {
-        8
-    } else {
-        0 // No quantization
-    };
-
-    // Create a temporary Python script to run mflux
-    // This is more reliable than CLI because we can pass the model path directly
-    // All strings are passed via the child environment. Interpolating a renderer-
-    // supplied path into Python source would turn a crafted filename into code.
-    let script_content = format!(
+    // mflux's public Python API is pinned by engine-manifest.json. Keep all
+    // renderer-supplied strings in the child environment rather than embedding
+    // them in Python source.
+    format!(
         r#"
 import sys, os
 try:
-    from mflux import Flux1
+    from mflux.models.common.config import ModelConfig
+    from mflux.models.flux.variants.txt2img.flux import Flux1
     model = Flux1(
-        model_config=Flux1.ModelConfig.from_alias("{flux_alias}"),
+        model_config=ModelConfig.from_name(model_name="{flux_alias}", base_model=None),
         quantize={quantize},
-        local_path=os.environ.get("THINCLAW_MFLUX_MODEL_PATH") or None,
+        model_path=os.environ.get("THINCLAW_MFLUX_MODEL_PATH") or None,
     )
     prompt_text = os.environ.get("THINCLAW_MFLUX_PROMPT", "")
     image = model.generate_image(
@@ -281,18 +381,25 @@ except Exception as e:
     print(f"mflux error: {{e}}", file=sys.stderr, flush=True)
     sys.exit(1)
 "#,
-        quantize = if quantize_bits > 0 {
-            quantize_bits.to_string()
-        } else {
-            "None".to_string()
-        },
-        flux_alias = flux_alias,
-        seed = seed,
-        width = width,
-        height = height,
-        steps = steps,
-        cfg_scale = cfg_scale,
-    );
+    )
+}
+
+/// MLX-native image generation using `mflux` Python package.
+/// Replaces `sd.cpp` sidecar when the MLX engine is active.
+#[cfg(feature = "mlx")]
+async fn run_mflux_inference(
+    app: &AppHandle,
+    model_path: &str,
+    params: &ImageGenParams,
+) -> Result<ImageResponse, String> {
+    use std::io::Write;
+
+    let output_temp =
+        NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {}", e))?;
+    let output_png = format!("{}.png", output_temp.path().to_string_lossy());
+
+    let model_options = read_mflux_model_options(std::path::Path::new(model_path))?;
+    let script_content = build_mflux_script(model_options, params);
 
     // Write script to temp file
     let mut script_file =
@@ -994,7 +1101,12 @@ pub async fn direct_media_generate_image(
             "No model selected. Please select a model in Settings or the Chat interface.".into(),
         );
     }
-    let model_path = resolve_diffusion_artifact(&app, &model_path, "image", true)?;
+    // A generated image uses model files for the lifetime of the child
+    // process. Serialize the complete operation with model deactivation and
+    // deletion so an install cannot disappear after validation but before (or
+    // during) inference.
+    let _lifecycle_guard = crate::model_lifecycle::MODEL_LIFECYCLE_LOCK.lock().await;
+    let model_path = resolve_primary_diffusion_model(&app, &model_path)?;
 
     config.reload();
     #[allow(unused_variables)]
@@ -1007,7 +1119,7 @@ pub async fn direct_media_generate_image(
         ("T5/LLM", &mut final_params.t5xxl),
     ] {
         if let Some(value) = path.as_deref() {
-            *path = Some(resolve_diffusion_artifact(&app, value, purpose, false)?);
+            *path = Some(resolve_diffusion_auxiliary_artifact(&app, value, purpose)?);
         }
     }
 
@@ -1079,7 +1191,143 @@ pub async fn direct_media_generate_image(
 
 #[cfg(test)]
 mod tests {
-    use super::progress_fraction;
+    use super::{
+        build_mflux_script, mflux_model_options_from_config, progress_fraction,
+        read_mflux_model_options, ImageGenParams, MfluxFluxVariant, MfluxModelOptions,
+        MfluxQuantization,
+    };
+
+    fn image_params() -> ImageGenParams {
+        ImageGenParams {
+            prompt: "A test image".to_string(),
+            model: None,
+            vae: None,
+            clip_l: None,
+            clip_g: None,
+            t5xxl: None,
+            negative_prompt: None,
+            width: Some(768),
+            height: Some(512),
+            steps: Some(12),
+            cfg_scale: Some(3.5),
+            seed: Some(42),
+            schedule: None,
+            sampling_method: None,
+        }
+    }
+
+    fn mflux_config(original_model: &str, bits: u8) -> serde_json::Value {
+        serde_json::json!({
+            "_class_name": "FluxPipeline",
+            "model_type": "flux-rectified-flow",
+            "original_model": original_model,
+            "quantization": {
+                "method": "mflux",
+                "bits": bits,
+            },
+        })
+    }
+
+    #[test]
+    fn mflux_script_matches_the_pinned_python_api() {
+        let script = build_mflux_script(
+            MfluxModelOptions {
+                variant: MfluxFluxVariant::Dev,
+                quantization: MfluxQuantization::Bits4,
+            },
+            &image_params(),
+        );
+
+        assert!(script.contains("from mflux.models.common.config import ModelConfig"));
+        assert!(script.contains("from mflux.models.flux.variants.txt2img.flux import Flux1"));
+        assert!(script
+            .contains("model_config=ModelConfig.from_name(model_name=\"dev\", base_model=None)"));
+        assert!(script.contains("quantize=4"));
+        assert!(script.contains("model_path=os.environ.get(\"THINCLAW_MFLUX_MODEL_PATH\") or None"));
+        assert!(!script.contains("from mflux import Flux1"));
+        assert!(!script.contains("Flux1.ModelConfig"));
+        assert!(!script.contains("local_path="));
+    }
+
+    #[test]
+    fn mflux_options_come_from_config_for_a_renamed_install() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let custom_install = temp.path().join("renamed-schnell-q8-custom-install");
+        std::fs::create_dir(&custom_install).expect("custom install");
+        let config = mflux_config("black-forest-labs/FLUX.1-dev", 3);
+        std::fs::write(
+            custom_install.join("config.json"),
+            serde_json::to_vec(&config).expect("serialize config"),
+        )
+        .expect("write config");
+
+        let options = read_mflux_model_options(&custom_install).expect("supported config");
+        assert_eq!(
+            options,
+            MfluxModelOptions {
+                variant: MfluxFluxVariant::Dev,
+                quantization: MfluxQuantization::Bits3,
+            }
+        );
+        let mut params = image_params();
+        params.prompt = "'; __import__('os').system('should-not-run')".to_string();
+        let script = build_mflux_script(options, &params);
+
+        assert!(script
+            .contains("model_config=ModelConfig.from_name(model_name=\"dev\", base_model=None)"));
+        assert!(script.contains("quantize=3"));
+        assert!(!script.contains(custom_install.to_string_lossy().as_ref()));
+        assert!(!script.contains(&params.prompt));
+        assert!(script.contains("seed=42"));
+        assert!(script.contains("width=768"));
+        assert!(script.contains("height=512"));
+        assert!(script.contains("num_inference_steps=12"));
+        assert!(script.contains("guidance=3.5"));
+    }
+
+    #[test]
+    fn mflux_config_accepts_only_supported_quantization_bits() {
+        for bits in [3, 4, 5, 6, 8] {
+            let options = mflux_model_options_from_config(&mflux_config(
+                "black-forest-labs/FLUX.1-schnell",
+                bits,
+            ))
+            .expect("supported quantization");
+            assert_eq!(options.variant, MfluxFluxVariant::Schnell);
+            assert_eq!(options.quantization.bits(), bits);
+        }
+        for bits in [0, 2, 7, 9] {
+            assert!(mflux_model_options_from_config(&mflux_config(
+                "black-forest-labs/FLUX.1-schnell",
+                bits,
+            ))
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn mflux_config_rejects_invalid_and_krea_models() {
+        assert!(mflux_model_options_from_config(&serde_json::json!({})).is_err());
+        assert!(mflux_model_options_from_config(&mflux_config(
+            "black-forest-labs/FLUX.1-Krea-dev",
+            4,
+        ))
+        .is_err());
+        assert!(
+            mflux_model_options_from_config(&mflux_config("example/FLUX.1-development", 4,))
+                .is_err()
+        );
+        assert!(mflux_model_options_from_config(&serde_json::json!({
+            "_class_name": "FluxPipeline",
+            "model_type": "flux-rectified-flow",
+            "original_model": "black-forest-labs/FLUX.1-dev",
+            "quantization": {
+                "method": "other",
+                "bits": 4,
+            },
+        }))
+        .is_err());
+    }
 
     #[test]
     fn progress_fraction_zero_total_is_safe() {

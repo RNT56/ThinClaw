@@ -1,23 +1,24 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     RotateCcw,
     CheckCircle2,
     XCircle,
     Zap,
-    ShieldAlert,
-    Box
+    ShieldAlert
 } from 'lucide-react';
-import * as thinclaw from '../../lib/thinclaw';
-import { commands, GGUFMetadata } from '../../lib/bindings';
+import { commands, GGUFMetadata, type UserConfigPatch } from '../../lib/bindings';
+import { commandClient } from '../../lib/command-client';
 import { directCommands } from '../../lib/generated/direct-commands';
+import { unwrapResult } from '../../lib/guards';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import { useModelContext } from '../model-context';
 import * as Switch from '@radix-ui/react-switch';
 import { CustomSelect } from './CustomSelect';
 import { analyzeMemoryConstraints, GB } from './memory-analysis';
-import { bridgeErrorMessage } from '../../lib/command-errors';
+import { startLocalChatRuntime } from '../../lib/local-runtime-start';
+import { isCompatibleManagedModelForCategory } from '../../lib/hf-models';
 
 export function ServerSettings() {
     const {
@@ -34,9 +35,44 @@ export function ServerSettings() {
     const [loading, setLoading] = useState(false);
     const [metadata, setMetadata] = useState<GGUFMetadata | undefined>();
     const [config, setConfig] = useState<any>(null);
+    const settingWriteQueues = useRef<Record<string, Promise<void>>>({});
+
+    const persistSetting = async (
+        key: string,
+        value: unknown,
+        successMessage?: string,
+    ) => {
+        const previous = settingWriteQueues.current[key] ?? Promise.resolve();
+        const write = previous
+            .catch(() => undefined)
+            .then(() =>
+                commandClient.updateUserConfig(
+                    { [key]: value } as UserConfigPatch,
+                )
+            );
+        settingWriteQueues.current[key] = write.then(
+            () => undefined,
+            () => undefined,
+        );
+        try {
+            await write;
+            setConfig((current: any) => current
+                ? { ...current, [key]: value }
+                : current);
+            if (successMessage) {
+                toast.info(successMessage, {
+                    icon: <RotateCcw className="w-4 h-4" />,
+                });
+            }
+        } catch (error) {
+            toast.error("Could not save runtime setting", {
+                description: String(error),
+            });
+        }
+    };
 
     const runtimeKind = runtimeSnapshot?.kind;
-    const isLlamaCpp = runtimeKind ? runtimeKind === 'llama_cpp' : (!engineInfo || engineInfo.id === 'llamacpp');
+    const isLlamaCpp = runtimeKind ? runtimeKind === 'llama_cpp' : engineInfo?.id === 'llamacpp';
     const isCloudOnly = runtimeKind ? runtimeKind === 'none' : engineInfo?.id === 'none';
 
     useEffect(() => {
@@ -77,73 +113,54 @@ export function ServerSettings() {
         setLoading(true);
         const toastId = toast.loading(`Restarting ${engineDisplayName}...`);
         try {
-            if (isLlamaCpp) {
-                // llama.cpp — use the existing sidecar restart command
-                await directCommands.directRuntimeStartChatServer(modelPath, maxContext, currentModelTemplate, null, false, config?.mlock ?? false, config?.quantize_kv ?? false);
-            } else if (!isCloudOnly) {
-                // MLX / vLLM / Ollama — stop then start via EngineManager
-                try { await directCommands.directRuntimeStopEngine(); } catch { /* may already be stopped */ }
-                await new Promise(r => setTimeout(r, 500));
-                const startRes = await directCommands.directRuntimeStartEngine(modelPath, maxContext);
-                if (startRes.status === 'error') throw new Error(bridgeErrorMessage(startRes.error));
+            if (!isCloudOnly) {
+                if (!isLlamaCpp) {
+                    // Directory runtimes are explicitly stopped before a manual
+                    // restart; llama.cpp replaces its own owned sidecar.
+                    unwrapResult(
+                        await directCommands.directRuntimeStopEngine(),
+                        'stop local inference runtime',
+                    );
+                }
+                const selected = localModels.find(model => model.path === modelPath);
+                if (
+                    engineInfo?.id !== 'ollama'
+                    && (
+                        !selected
+                        || !isCompatibleManagedModelForCategory(selected, 'LLM')
+                    )
+                ) {
+                    throw new Error(
+                        'Select an installed chat model compatible with the active runtime',
+                    );
+                }
+                await startLocalChatRuntime({
+                    engine: engineInfo,
+                    modelPath,
+                    contextSize: maxContext,
+                    template: currentModelTemplate,
+                    mmproj: selected?.companion_path ?? null,
+                    mlock: config?.mlock ?? false,
+                    quantizeKv: config?.quantize_kv ?? false,
+                });
             }
-            const snapshot = await refreshRuntimeSnapshot();
+            await refreshRuntimeSnapshot();
 
-            // Attempt dynamic config update for ThinClaw
-            try {
-                const gatewayStatus = await commands.thinclawGetStatus();
-                if (gatewayStatus.status === "ok" && gatewayStatus.data.engine_running) {
-                    toast.loading("Syncing Agent Configuration...", { id: toastId });
+            // This command snapshots the authoritative local endpoint and
+            // rewrites the provider config consumed on the next agent start.
+            toast.loading("Syncing Agent Configuration...", { id: toastId });
+            await commandClient.thinclawSyncLocalLlm();
 
-                    const endpoint = snapshot?.endpoint;
-                    const localBaseUrl = endpoint?.baseUrl?.replace(/\/v1\/?$/, "") ?? "http://127.0.0.1:53755";
-                    const usedContext = endpoint?.contextSize ?? maxContext;
-
-
-                    const configPatch = {
-                        models: {
-                            providers: {
-                                local: {
-                                    baseUrl: localBaseUrl,
-                                    api: "openai-completions",
-                                    models: [
-                                        {
-                                            id: "model",
-                                            name: "Local Model",
-                                            contextWindow: usedContext,
-                                            maxTokens: Math.max(4096, Math.min(8192, Math.floor(usedContext / 4)))
-                                        }
-                                    ]
-                                }
-                            }
-                        }
-                    };
-
-                    await thinclaw.patchThinClawConfig({
-                        raw: JSON.stringify(configPatch)
-                    });
-
-                    toast.success("Server restarted & Agent Synced", { id: toastId });
-                    return;
-                }
-            } catch (err) {
-                console.warn("Dynamic config update failed, falling back to restart:", err);
-
-                // Fallback: Restart ThinClaw Gateway if running
-                try {
-                    const gatewayStatus = await commands.thinclawGetStatus();
-                    if (gatewayStatus.status === "ok" && gatewayStatus.data.engine_running) {
-                        toast.loading("Restarting Agent Engine...", { id: toastId });
-                        await commands.thinclawStopGateway();
-                        await new Promise(r => setTimeout(r, 1000));
-                        await commands.thinclawStartGateway();
-                    }
-                } catch (ignore) {
-                    console.warn("Failed to restart gateway:", ignore);
-                }
+            const gatewayStatus = await commandClient.thinclawGetStatus();
+            if (gatewayStatus.engine_running) {
+                toast.loading("Restarting Agent Engine...", { id: toastId });
+                await commandClient.thinclawStopGateway();
+                await commandClient.thinclawStartGateway();
+                toast.success("Server restarted & Agent Synced", { id: toastId });
+                return;
             }
 
-            toast.success("Server restarted", { id: toastId });
+            toast.success("Server restarted & Agent Configuration Synced", { id: toastId });
         } catch (e) {
             toast.error("Restart failed", { id: toastId, description: String(e) });
         } finally {
@@ -302,11 +319,9 @@ export function ServerSettings() {
                     </div>
                     <Switch.Root
                         checked={config?.enable_memory_reservation ?? true}
-                        onCheckedChange={async (val) => {
+                        onCheckedChange={(val) => {
                             if (!config) return;
-                            const newConfig = { ...config, enable_memory_reservation: val };
-                            setConfig(newConfig);
-                            await commands.updateUserConfig({ enable_memory_reservation: val });
+                            void persistSetting('enable_memory_reservation', val);
                         }}
                         className="w-[42px] h-[25px] bg-muted rounded-full relative shadow-[inner_0_2px_4px_rgba(0,0,0,0.2)] data-[state=checked]:bg-primary transition-colors cursor-pointer outline-hidden"
                     >
@@ -345,12 +360,10 @@ export function ServerSettings() {
                                         })()}
                                         step="1"
                                         value={config?.memory_reservation_gb ?? 4}
-                                        onChange={async (e) => {
+                                        onChange={(e) => {
                                             if (!config) return;
                                             const val = parseInt(e.target.value);
-                                            const newConfig = { ...config, memory_reservation_gb: val };
-                                            setConfig(newConfig);
-                                            await commands.updateUserConfig({ memory_reservation_gb: val });
+                                            void persistSetting('memory_reservation_gb', val);
                                         }}
                                         className="w-[200px] h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
                                     />
@@ -372,12 +385,13 @@ export function ServerSettings() {
                                 </div>
                                 <Switch.Root
                                     checked={config?.mlock ?? false}
-                                    onCheckedChange={async (val) => {
+                                    onCheckedChange={(val) => {
                                         if (!config) return;
-                                        const newConfig = { ...config, mlock: val };
-                                        setConfig(newConfig);
-                                        await commands.updateUserConfig({ mlock: val });
-                                        toast.info("Memory locking strategy updated. Restart server to apply.", { icon: <RotateCcw className="w-4 h-4" /> });
+                                        void persistSetting(
+                                            'mlock',
+                                            val,
+                                            "Memory locking strategy updated. Restart server to apply.",
+                                        );
                                     }}
                                     className="w-[36px] h-[20px] bg-muted rounded-full relative shadow-[inner_0_1px_2px_rgba(0,0,0,0.2)] data-[state=checked]:bg-emerald-500 transition-colors cursor-pointer outline-hidden"
                                 >
@@ -400,12 +414,13 @@ export function ServerSettings() {
                                 </div>
                                 <Switch.Root
                                     checked={config?.quantize_kv ?? false}
-                                    onCheckedChange={async (val) => {
+                                    onCheckedChange={(val) => {
                                         if (!config) return;
-                                        const newConfig = { ...config, quantize_kv: val };
-                                        setConfig(newConfig);
-                                        await commands.updateUserConfig({ quantize_kv: val });
-                                        toast.info("Context optimization updated. Restart server to apply.", { icon: <Box className="w-4 h-4" /> });
+                                        void persistSetting(
+                                            'quantize_kv',
+                                            val,
+                                            "Context optimization updated. Restart server to apply.",
+                                        );
                                     }}
                                     className="w-[36px] h-[20px] bg-muted rounded-full relative shadow-[inner_0_1px_2px_rgba(0,0,0,0.2)] data-[state=checked]:bg-blue-500 transition-colors cursor-pointer outline-hidden"
                                 >

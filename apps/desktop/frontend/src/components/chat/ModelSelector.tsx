@@ -1,69 +1,68 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useModelContext, RECOMMENDED_MODELS } from '../model-context';
-import { ChevronDown, Check, Box, Sparkles, Cloud, Monitor } from 'lucide-react';
+import { ChevronDown, Check, Box, Sparkles, Cloud, Monitor, RefreshCw } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useConfig } from '../../hooks/use-config';
 import { useCloudModels } from '../../hooks/use-cloud-models';
 import { useInferenceBackends } from '../../hooks/use-inference-backends';
+import { isCompatibleManagedModelForCategory } from '../../lib/hf-models';
+import { toast } from 'sonner';
+import { useOllamaModels } from '../../hooks/use-ollama-models';
+import { chooseInstalledOllamaModel } from '../../lib/ollama-models';
 
 export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { onManageClick: () => void, isAutoMode: boolean, toggleAutoMode: (v: boolean) => void }) {
-    const { localModels, currentModelPath: modelPath, setModelPath, downloading, setIsRestarting } = useModelContext();
+    const {
+        localModels,
+        currentModelPath: modelPath,
+        setModelPath,
+        downloading,
+        setIsRestarting,
+        engineInfo,
+    } = useModelContext();
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
     const { config, updateConfig } = useConfig();
     const { available } = useInferenceBackends();
 
-    // Filter out dedicated embedding/STT/diffusion/TTS models from the chat selector.
-    // Uses BOTH path-based category detection (models/{Category}/...) and filename heuristics.
-    const filteredLocal = localModels.filter(m => {
-        // Exclude if currently downloading
-        if (downloading[m.name]) return false;
+    // The backend inventory owns category and runtime compatibility. This
+    // deliberately avoids filename guesses such as treating a chat model with
+    // "embed" in its name as an embedding model.
+    const isOllama = engineInfo?.id === 'ollama';
+    const {
+        models: ollamaModels,
+        status: ollamaModelsStatus,
+        error: ollamaModelsError,
+        refresh: refreshOllamaModels,
+    } = useOllamaModels(isOllama);
+    const filteredLocal = localModels.filter(m =>
+        !isOllama
+        &&
+        isCompatibleManagedModelForCategory(m, 'LLM')
+        && downloading[m.name] === undefined
+        && downloading[m.id] === undefined
+    );
+    const ollamaLocalModels = ollamaModels.map(id => ({
+        id,
+        path: id,
+        name: id,
+        family: 'Ollama',
+        type: 'local' as const,
+    }));
 
-        // --- Path-based category exclusion (most reliable) ---
-        // Models downloaded via HF discovery go into category subdirectories:
-        //   models/Embedding/..., models/STT/..., models/Diffusion/..., models/TTS/...
-        // The `name` field is the relative path from models/ (e.g. "STT/mlx-community_whisper-large-v3-turbo")
-        const namePath = m.name.replace(/\\/g, '/');
-        if (namePath.startsWith('Embedding/') || namePath.startsWith('embedding/')) return false;
-        if (namePath.startsWith('STT/') || namePath.startsWith('stt/')) return false;
-        if (namePath.startsWith('Diffusion/') || namePath.startsWith('diffusion/')) return false;
-        if (namePath.startsWith('TTS/') || namePath.startsWith('tts/')) return false;
-
-        // Also check the absolute path for category folders
-        const pathLower = m.path.replace(/\\/g, '/').toLowerCase();
-        if (pathLower.includes('/models/embedding/')) return false;
-        if (pathLower.includes('/models/stt/')) return false;
-        if (pathLower.includes('/models/diffusion/')) return false;
-        if (pathLower.includes('/models/tts/')) return false;
-
-        const filename = m.name.split(/[\\/]/).pop() || m.name;
-        const known = RECOMMENDED_MODELS.find(k => k.variants?.some(v => v.filename === filename));
-
-        // If known, strictly check tags
-        if (known) {
-            const isExcluded = known.tags?.some(t => ['Embedding', 'STT', 'Image Gen'].includes(t));
-            if (isExcluded) return false;
-            return true;
+    useEffect(() => {
+        if (!isOllama || ollamaModelsStatus !== 'ready') return;
+        const selected = chooseInstalledOllamaModel(ollamaModels, modelPath);
+        if ((selected ?? '') !== modelPath) {
+            setModelPath(selected ?? '');
         }
-
-        // Fallback for non-curated or local models (filename heuristics)
-        const nameLower = filename.toLowerCase();
-
-        // Exclude embeddings
-        if (nameLower.includes('embed') || nameLower.includes('nomic-') || nameLower.includes('bge-')) return false;
-
-        // Exclude Image Gen
-        if (nameLower.includes('diffusion') || nameLower.includes('flux') || nameLower.includes('sd-') || nameLower.includes('sdxl') || nameLower.includes('stable-diffusion') || nameLower.includes('v1-5')) return false;
-
-        // Exclude STT / Whisper / TTS
-        if (nameLower.includes('whisper') || nameLower.includes('ggml') || nameLower.includes('stt') || nameLower.includes('tts')) return false;
-
-        // Exclude specific components
-        if (nameLower.includes('vae') || nameLower.includes('clip') || nameLower.includes('t5xxl') || nameLower.includes('mmproj')) return false;
-
-        return true;
-    });
+    }, [
+        isOllama,
+        modelPath,
+        ollamaModels,
+        ollamaModelsStatus,
+        setModelPath,
+    ]);
     // Unified provider lookup used across cloud model filtering, selection, and badge rendering
     const PROVIDER_LOOKUP: [string, string][] = [
         ["openrouter-", "openrouter"], ["groq-", "groq"],
@@ -132,6 +131,7 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
     }, [cloudModels, discoveredModels]);
 
     const models = [
+        ...ollamaLocalModels,
         ...filteredLocal.map(m => ({ ...m, type: 'local' as const })),
         ...allCloudModels,
     ];
@@ -194,6 +194,8 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                 return;
             } catch (e) {
                 console.error(e);
+                toast.error("Could not switch cloud model");
+                return;
             }
         }
 
@@ -214,6 +216,9 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                 await updateConfig(newConfig);
             } catch (e) {
                 console.error("Failed to update config to local", e);
+                setIsRestarting(false);
+                toast.error("Could not switch to local inference");
+                return;
             }
         }
 
@@ -236,7 +241,11 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                         {isAutoMode ? "Auto Mode" : (
                             selectedChatProvider !== "local"
                                 ? selectedChatModel || (selectedChatProvider.toUpperCase())
-                                : (localModels.find(m => m.path === modelPath)?.name.split(/[\\/]/).pop()) || "Select Model"
+                                : (
+                                    isOllama && ollamaModels.includes(modelPath)
+                                        ? modelPath
+                                        : localModels.find(m => m.path === modelPath)?.name.split(/[\\/]/).pop()
+                                ) || "Select Model"
                         )}
                     </span>
                     {/* Local / Cloud badge */}
@@ -273,6 +282,33 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                                         <span className="truncate flex-1 font-medium text-yellow-600 dark:text-yellow-400">Auto Mode</span>
                                         {isAutoMode && <Check className="w-3.5 h-3.5 shrink-0 text-yellow-500" />}
                                     </button>
+                                    {isOllama && (
+                                        <div className="mx-2 mb-1 rounded-lg border border-border/60 bg-muted/30 px-2.5 py-2 text-[11px] text-muted-foreground">
+                                            <div className="flex items-center justify-between gap-2">
+                                                <span>
+                                                    {ollamaModelsStatus === 'loading'
+                                                        ? 'Reading your Ollama library…'
+                                                        : ollamaModelsError
+                                                            ? ollamaModelsError
+                                                            : ollamaModels.length === 0
+                                                                ? 'No Ollama models installed. Run ollama pull <model>.'
+                                                                : `${ollamaModels.length} model${ollamaModels.length === 1 ? '' : 's'} installed in Ollama`}
+                                                </span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void refreshOllamaModels()}
+                                                    disabled={ollamaModelsStatus === 'loading'}
+                                                    className="shrink-0 rounded p-1 hover:bg-accent disabled:opacity-50"
+                                                    aria-label="Refresh installed Ollama models"
+                                                >
+                                                    <RefreshCw className={cn(
+                                                        "h-3.5 w-3.5",
+                                                        ollamaModelsStatus === 'loading' && "animate-spin",
+                                                    )} />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
                                     {models.map((model: any) => {
                                         const filename = model.type === 'local' ? (model.name.split(/[\\/]/).pop() || model.name) : model.name;
                                         const def = RECOMMENDED_MODELS.find(k => k.variants?.some(v => v.filename === filename) || k.id === model.id);

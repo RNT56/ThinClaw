@@ -116,6 +116,9 @@ thinclaw-tools-core = { path = "../../../crates/thinclaw-tools-core" }
 thinclaw-platform = { path = "../../../crates/thinclaw-platform" }
 thinclaw-secrets = { path = "../../../crates/thinclaw-secrets", default-features = false }
 
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
 #[cfg] secure no-follow file opens for migration inputs
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -34,7 +34,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_learning_evaluate_outcomes` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 | `thinclaw_test_connection` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 
-### Local only (200)
+### Local only (202)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -94,16 +94,19 @@ surface-level table remains the endpoint-oriented operational summary.
 | `direct_rag_retrieve_context` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_rag_upload_document` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_cancel_generation` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `direct_runtime_deactivate_model_services` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_discover_embedding_dimension` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
-| `direct_runtime_discover_hf_models` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
-| `direct_runtime_download_hf_model_files` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `direct_runtime_discover_hf_models_v2` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `direct_runtime_download_hf_selection` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_ensure_engine_ready` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_get_active_engine_info` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_get_chat_server_config` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_get_engine_setup_status` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
-| `direct_runtime_get_model_files` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `direct_runtime_get_hf_capabilities` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `direct_runtime_get_model_files_v2` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_get_sidecar_status` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_is_engine_ready` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `direct_runtime_list_ollama_models` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_setup_engine` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_snapshot` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_start_chat_server` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -115,7 +118,6 @@ surface-level table remains the endpoint-oriented operational summary.
 | `direct_runtime_start_tts_server` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_stop_chat_server` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `direct_runtime_stop_engine` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
-| `download_model` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `download_standard_asset` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `get_hf_token` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `get_model_metadata` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |

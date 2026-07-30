@@ -1,10 +1,15 @@
-import { useEffect, useRef } from "react";
-import { directCommands } from "../lib/generated/direct-commands";
+import { useEffect, useRef, useState } from "react";
 import { commands } from "../lib/bindings";
 import { useModelContext } from "../components/model-context";
 import { useConfig } from "./use-config";
 import { toast } from "sonner";
-import { bridgeErrorMessage } from "../lib/command-errors";
+import {
+    localChatLaunchKind,
+    localChatUsesManagedModelPath,
+    LOCAL_CHAT_RUNTIME_RESTART_EVENT,
+    startLocalChatRuntime,
+} from "../lib/local-runtime-start";
+import { isCompatibleManagedModelForCategory } from "../lib/hf-models";
 
 export function useAutoStart() {
     const { config } = useConfig();
@@ -14,8 +19,7 @@ export function useAutoStart() {
         currentModelTemplate: template,
         maxContext,
         setIsRestarting,
-        models,
-        modelsDir,
+        localModels,
         engineInfo,
         refreshRuntimeSnapshot,
     } = useModelContext();
@@ -28,6 +32,21 @@ export function useAutoStart() {
     const lastStartedTemplate = useRef<string | null>(null);
     const lastStartedContext = useRef<number | null>(null);
     const lastStartedProvider = useRef<string | null>(null);
+    const [forcedRestart, setForcedRestart] = useState(0);
+
+    useEffect(() => {
+        const restart = () => {
+            lastStartedPath.current = null;
+            lastStartedEmbeddingPath.current = null;
+            lastStartedTemplate.current = null;
+            lastStartedContext.current = null;
+            lastStartedProvider.current = null;
+            setForcedRestart(value => value + 1);
+        };
+        window.addEventListener(LOCAL_CHAT_RUNTIME_RESTART_EVENT, restart);
+        return () =>
+            window.removeEventListener(LOCAL_CHAT_RUNTIME_RESTART_EVENT, restart);
+    }, []);
 
     useEffect(() => {
         if (!cleanPath) return;
@@ -40,11 +59,19 @@ export function useAutoStart() {
             return;
         }
 
-        // For non-llamacpp engines (MLX, vLLM, Ollama): start via EngineManager
-        // instead of the llama-server sidecar.  The EngineManager spawns the
-        // engine's own server (e.g. mlx-openai-server) and returns the port/token
-        // that resolve_provider() will use in chat.rs.
-        if (engineInfo && !engineInfo.single_file_model) {
+        // Engine information arrives asynchronously. Starting before it is
+        // known used to route MLX/vLLM/Ollama through the llama.cpp sidecar.
+        if (!engineInfo) return;
+        const launchKind = localChatLaunchKind(engineInfo);
+        if (launchKind === "unavailable") {
+            setIsRestarting(false);
+            return;
+        }
+
+        // MLX, vLLM, and Ollama are owned by EngineManager. Ollama accepts an
+        // external model identifier; bundled engines require an authoritative
+        // compatible inventory path.
+        if (launchKind === "engine-manager") {
             // Deduplicate: only restart if path or context changed
             if (
                 lastStartedPath.current === cleanPath &&
@@ -63,29 +90,28 @@ export function useAutoStart() {
                 try {
                     setIsRestarting(true);
 
-                    // Validate model directory exists
-                    const isValid = await commands.checkModelPath(cleanPath);
-                    if (!isValid) {
-                        toast.error("Model path invalid", {
-                            id: toastId,
-                            description: "Check your model path in Settings."
-                        });
-                        setIsRestarting(false);
-                        return;
+                    if (localChatUsesManagedModelPath(engineInfo)) {
+                        const selected = localModels.find(model =>
+                            model.path === cleanPath
+                            && isCompatibleManagedModelForCategory(model, "LLM")
+                        );
+                        const isValid = Boolean(selected)
+                            && await commands.checkModelPath(cleanPath);
+                        if (!isValid) {
+                            toast.error("Model path invalid", {
+                                id: toastId,
+                                description:
+                                    "Select a compatible chat model from My Models."
+                            });
+                            return;
+                        }
                     }
 
-                    // Provision or repair the locked runtime before attempting
-                    // to launch inference. This is idempotent and backend-owned.
-                    const setup = await directCommands.directRuntimeEnsureEngineReady();
-                    if (setup.status === "error") {
-                        throw new Error(bridgeErrorMessage(setup.error));
-                    }
-
-                    // Start the engine server (mlx-openai-server / vllm serve / etc.)
-                    const result = await directCommands.directRuntimeStartEngine(cleanPath, maxContext);
-                    if (result.status === "error") {
-                        throw new Error(bridgeErrorMessage(result.error));
-                    }
+                    await startLocalChatRuntime({
+                        engine: engineInfo,
+                        modelPath: cleanPath,
+                        contextSize: maxContext,
+                    });
                     await refreshRuntimeSnapshot();
 
                     // Track so we don't restart unnecessarily
@@ -95,7 +121,7 @@ export function useAutoStart() {
 
                     toast.success(`${engineInfo.display_name} ready`, {
                         id: toastId,
-                        description: `Model loaded on port ${result.data.port}`
+                        description: `Model loaded with ${maxContext} context tokens`
                     });
                 } catch (e) {
                     console.error(`[AutoStart] ${engineInfo.id} engine start failed:`, e);
@@ -129,40 +155,36 @@ export function useAutoStart() {
             try {
                 setIsRestarting(true);
 
-                // Validate the path exists
-                const isValid = await commands.checkModelPath(cleanPath);
+                const selectedModel = localModels.find(model =>
+                    model.path === cleanPath
+                    && isCompatibleManagedModelForCategory(model, "LLM")
+                );
+                const isValid = Boolean(selectedModel)
+                    && await commands.checkModelPath(cleanPath);
                 if (!isValid) {
                     setIsRestarting(false);
                     console.warn("[AutoStart] Invalid model path:", cleanPath);
                     toast.error("Model path invalid", {
-                        description: "Check your model path in Settings.",
+                        description: "Select a compatible chat model from My Models.",
                         id: "model-path-error"
                     });
                     return;
                 }
 
-                await directCommands.directRuntimeGetSidecarStatus();
                 const modelName = cleanPath.split(/[/\\]/).pop() ?? cleanPath;
                 const toastId = toast.loading(`Waking up ${modelName}...`, {
                     description: `Context: ${maxContext} tokens`
                 });
 
-                // Resolve mmproj path for vision models
-                let mmprojPath: string | null = null;
-                const modelDef = models.find(m => m.variants.some(v => cleanPath.endsWith(v.filename)));
-                if (modelDef && modelDef.mmproj) {
-                    const slash = cleanPath.lastIndexOf('/');
-                    const backslash = cleanPath.lastIndexOf('\\');
-                    const separatorIndex = Math.max(slash, backslash);
-                    if (separatorIndex !== -1) {
-                        const dir = cleanPath.substring(0, separatorIndex);
-                        mmprojPath = `${dir}/${modelDef.mmproj.filename}`;
-                    } else if (modelsDir) {
-                        mmprojPath = `${modelsDir}/${modelDef.mmproj.filename}`;
-                    }
-                }
-
-                await directCommands.directRuntimeStartChatServer(cleanPath, maxContext, template, mmprojPath, false, false, false);
+                await startLocalChatRuntime({
+                    engine: engineInfo,
+                    modelPath: cleanPath,
+                    contextSize: maxContext,
+                    template,
+                    mmproj: selectedModel?.companion_path ?? null,
+                    mlock: config?.mlock ?? false,
+                    quantizeKv: config?.quantize_kv ?? false,
+                });
                 await refreshRuntimeSnapshot();
 
                 // Track successful start
@@ -187,5 +209,17 @@ export function useAutoStart() {
 
         const timer = setTimeout(init, 500);
         return () => { clearTimeout(timer); };
-    }, [cleanPath, cleanEmbeddingPath, template, maxContext, models, modelsDir, config?.selected_chat_provider, engineInfo, refreshRuntimeSnapshot]);
+    }, [
+        cleanPath,
+        cleanEmbeddingPath,
+        template,
+        maxContext,
+        localModels,
+        config?.selected_chat_provider,
+        config?.mlock,
+        config?.quantize_kv,
+        engineInfo,
+        refreshRuntimeSnapshot,
+        forcedRestart,
+    ]);
 }

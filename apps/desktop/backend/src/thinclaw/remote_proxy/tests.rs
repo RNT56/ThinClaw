@@ -108,11 +108,7 @@ async fn start_fixture_gateway(
 
 async fn start_scripted_gateway(
     responses: Vec<&'static str>,
-) -> (
-    String,
-    Arc<Mutex<Vec<String>>>,
-    tokio::task::JoinHandle<()>,
-) {
+) -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind scripted gateway");
@@ -393,15 +389,12 @@ async fn raw_secret_injection_is_unavailable_in_remote_mode() {
 #[tokio::test]
 async fn health_check_proves_the_bearer_credential_on_an_authenticated_route() {
     let (base_url, recorded, fixture) = start_fixture_gateway(1).await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
-        .expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
 
-    assert!(
-        proxy
-            .health_check()
-            .await
-            .expect("authenticated health check")
-    );
+    assert!(proxy
+        .health_check()
+        .await
+        .expect("authenticated health check"));
     fixture.await.expect("fixture gateway task");
 
     let requests = recorded.lock().await;
@@ -420,8 +413,7 @@ async fn idempotent_get_retries_transient_responses_and_honors_retry_after() {
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
     ])
     .await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
-        .expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
 
     assert_eq!(
         proxy.get_json("/api/transient").await.expect("retried GET")["ok"],
@@ -438,8 +430,7 @@ async fn idempotent_text_reads_retry_truncated_response_bodies() {
         "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
     ])
     .await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
-        .expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
 
     assert_eq!(
         proxy
@@ -459,8 +450,7 @@ async fn health_check_retries_truncated_transient_error_bodies() {
         "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
     ])
     .await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
-        .expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
 
     assert!(proxy.health_check().await.expect("retried health check"));
     server.await.expect("scripted server completes");
@@ -473,8 +463,7 @@ async fn mutation_requests_are_never_retried_implicitly() {
         "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbusy",
     ])
     .await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
-        .expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
 
     let error = proxy
         .post_json("/api/mutation", &serde_json::json!({ "value": 1 }))
@@ -494,8 +483,7 @@ async fn mutation_requests_are_never_retried_implicitly() {
 #[tokio::test]
 async fn fixture_acceptance_remote_chat_and_session_routes() {
     let (base_url, recorded, server) = start_fixture_gateway(11).await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
-        .expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
 
     let sent = proxy
         .send_message("thread-1", "fixture message")
@@ -576,8 +564,7 @@ async fn fixture_acceptance_remote_chat_and_session_routes() {
 #[tokio::test]
 async fn fixture_acceptance_remote_management_routes() {
     let (base_url, recorded, server) = start_fixture_gateway(39).await;
-    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token")
-        .expect("valid fixture proxy");
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").expect("valid fixture proxy");
 
     let providers = proxy.list_provider_status().await.expect("provider status");
     assert_eq!(providers["providers"][0]["slug"], "openai");

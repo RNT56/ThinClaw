@@ -1200,13 +1200,34 @@ pub async fn thinclaw_toggle_local_inference(
         err
     })?;
 
-    // If turning off local inference, we can kill the chat server to free resources
-    if !enabled {
-        let _ = sidecar.stop_chat_server();
-    }
+    // Turning local inference off must stop whichever compile-time runtime owns
+    // the active chat endpoint. Attempt both managers so a failure in one path
+    // cannot leave the other process running.
+    let stop_error = if !enabled {
+        let _lifecycle_guard = crate::model_lifecycle::MODEL_LIFECYCLE_LOCK.lock().await;
+        let sidecar_error = sidecar
+            .stop_chat_server()
+            .err()
+            .map(|error| format!("Could not stop the local chat sidecar: {error}"));
+        let engine_error = engine_manager
+            .stop_active_engine_locked()
+            .await
+            .err()
+            .map(|error| format!("Could not stop the local inference engine: {error}"));
+        match (sidecar_error, engine_error) {
+            (Some(sidecar), Some(engine)) => Some(format!("{sidecar}; {engine}")),
+            (Some(error), None) | (None, Some(error)) => Some(error),
+            (None, None) => None,
+        }
+    } else {
+        None
+    };
 
     *state.config.write().await = Some(cfg);
 
+    if let Some(error) = stop_error {
+        return Err(error.into());
+    }
     Ok(())
 }
 

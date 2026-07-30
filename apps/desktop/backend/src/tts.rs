@@ -126,20 +126,26 @@ pub async fn direct_media_tts_synthesize(
     }
 
     // ── Local TTS backend (Piper sidecar) ────────────────────────────────
+    // Piper reads the selected ONNX/config files for the lifetime of its
+    // child process. Keep deletion/deactivation serialized until synthesis is
+    // complete so the managed installation cannot disappear mid-request.
+    let _lifecycle_guard = crate::model_lifecycle::MODEL_LIFECYCLE_LOCK.lock().await;
     // Resolve which model to use: explicit arg → stored TTS model path → error
     let resolved_model = model_path
         .filter(|p| !p.trim().is_empty())
         .or_else(|| state.inner().get_tts_model())
         .ok_or("No TTS model selected. Please select a Piper ONNX model in Settings, or enable a cloud TTS backend.")?;
-    let resolved_model = crate::sidecar::SidecarManager::validate_managed_model_path(
+    let resolved_model = crate::model_manager::resolve_compatible_inventory_model(
         &app,
         &resolved_model,
+        "llamacpp",
         "TTS",
-        "TTS",
-        false,
-        &["onnx"],
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
+    let resolved_model = resolved_model
+        .path
+        .to_str()
+        .ok_or_else(|| "The selected TTS model path is not valid UTF-8".to_string())?
+        .to_string();
     let config_path = std::path::PathBuf::from(format!("{resolved_model}.json"));
     let config_bytes = thinclaw_platform::read_regular_file_bounded_single_link_async(
         config_path,
