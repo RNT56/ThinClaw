@@ -212,7 +212,21 @@ async fn search(workspace: &Workspace, query: &str, limit: usize) -> anyhow::Res
 
     for (i, result) in results.iter().enumerate() {
         let score_bar = score_indicator(result.score);
-        println!("{}. [{}] (score: {:.3})", i + 1, score_bar, result.score);
+        println!(
+            "{}. [{}] {} (score: {:.3}, document: {}, chunk: {}, fts-rank: {}, vector-rank: {})",
+            i + 1,
+            score_bar,
+            result.path,
+            result.score,
+            result.document_id,
+            result.chunk_id,
+            result
+                .fts_rank
+                .map_or_else(|| "-".to_string(), |rank| rank.to_string()),
+            result
+                .vector_rank
+                .map_or_else(|| "-".to_string(), |rank| rank.to_string()),
+        );
 
         // Show a content preview (first 200 chars)
         let preview = truncate_content(&result.content, 200);

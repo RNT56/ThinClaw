@@ -295,9 +295,13 @@ pub(crate) async fn memory_search_handler(
 
     Ok(Json(memory_search_response_from_hits(
         results.into_iter().map(|result| GatewayMemorySearchHit {
+            document_id: result.document_id,
             path: display_path(&workspace, &result.path),
+            chunk_id: result.chunk_id,
             content: result.content,
             score: result.score as f64,
+            fts_rank: result.fts_rank,
+            vector_rank: result.vector_rank,
         }),
     )))
 }

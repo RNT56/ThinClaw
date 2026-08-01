@@ -271,12 +271,16 @@ pub async fn search_for_identity(
     Ok(memory_search_response_from_hits(results.into_iter().map(
         |result| {
             GatewayMemorySearchHit {
+                document_id: result.document_id,
                 path: scoped
                     .access()
                     .display_path(&result.path)
                     .unwrap_or(result.path),
+                chunk_id: result.chunk_id,
                 content: result.content,
                 score: result.score as f64,
+                fts_rank: result.fts_rank,
+                vector_rank: result.vector_rank,
             }
         },
     )))
@@ -388,9 +392,13 @@ pub async fn search(
     let hits = results
         .iter()
         .map(|r| GatewayMemorySearchHit {
+            document_id: r.document_id,
             path: r.path.clone(),
+            chunk_id: r.chunk_id,
             content: r.content.clone(),
             score: r.score as f64,
+            fts_rank: r.fts_rank,
+            vector_rank: r.vector_rank,
         })
         .collect::<Vec<_>>();
 
