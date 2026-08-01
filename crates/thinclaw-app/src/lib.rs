@@ -34,9 +34,10 @@ pub use runtime::{
     run_async_entrypoint, should_show_quiet_startup_spinner,
 };
 pub use setup::{
-    SetupBootstrapAgentInput, SetupBootstrapChannelInput, SetupBootstrapEnvInput,
+    SetupAskRequest, SetupBootstrapAgentInput, SetupBootstrapChannelInput, SetupBootstrapEnvInput,
     SetupBootstrapEnvPlan, SetupBootstrapEnvVar, SetupBootstrapProviderInput,
-    SetupBootstrapWebUiInput, SetupEmbeddingsDefaultsPlan, SetupGuideTopic, SetupOnboardingProfile,
+    SetupBootstrapWebUiInput, SetupContinuation, SetupEmbeddingsDefaultsPlan, SetupGuideTopic,
+    SetupInvocation, SetupInvocationKind, SetupMode, SetupOnboardingProfile,
     SetupProviderSlotDefaultsInput, SetupProviderSlotDefaultsPlan, SetupReadinessSummary,
     SetupRuntimeCommandInput, SetupRuntimeProfile, SetupStepDescriptor, SetupStepStatus,
     SetupValidationItem, SetupValidationLevel, SetupWizardPhase, SetupWizardPhaseId,

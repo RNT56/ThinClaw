@@ -116,8 +116,8 @@ available for service-specific writable paths.
 Opens the guided Advanced Setup lane directly from CLI or TUI without showing
 the Quick/Advanced selector first.
 
-- `thinclaw onboard --guide` opens the guided topic menu
-- `thinclaw onboard --guide ai` jumps directly to AI & Models
+- `thinclaw setup edit` opens the guided topic menu
+- `thinclaw setup edit ai` jumps directly to AI & Models
 - Valid topics: `menu`, `ai`, `channels`, `agent`, `tools`, `automation`, `runtime`
 
 ### `--profile <profile>`
@@ -126,7 +126,7 @@ Preselects the onboarding profile and skips the Profile prompt. Valid values:
 `balanced`, `local-private`, `builder-coding`, `channel-first`, `remote`,
 `pi-os-lite-64`, and `custom`.
 
-Use `thinclaw onboard --profile remote` for Raspberry Pi, Mac Mini, VPS, or
+Use `thinclaw setup --profile remote --mode advanced` for Raspberry Pi, Mac Mini, VPS, or
 SSH-managed hosts. This profile configures a service-safe runtime:
 
 - `CLI_ENABLED=false`
@@ -137,7 +137,7 @@ SSH-managed hosts. This profile configures a service-safe runtime:
 - local libSQL database unless the operator chooses another backend
 - env-backed secrets fallback writes `THINCLAW_ALLOW_ENV_MASTER_KEY=1` when selected
 
-Use `thinclaw onboard --profile pi-os-lite-64` on Raspberry Pi OS Lite 64-bit.
+Use `thinclaw setup --profile pi-os-lite-64 --mode advanced` on Raspberry Pi OS Lite 64-bit.
 It applies the same service-safe runtime defaults and additionally writes
 `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` plus `THINCLAW_HEADLESS=true` so
 desktop autonomy tools are not registered at runtime.
@@ -280,8 +280,8 @@ Profile behavior is intentionally asymmetric:
 - The CLI wizard and onboarding TUI shell must use the same step plan and validation logic.
 - The CLI wizard and onboarding TUI shell must keep the same readiness framing and follow-up semantics.
 - Onboarding must clearly point to both local runtime entrypoints: `thinclaw` and `thinclaw tui`.
-- Remote onboarding must point to `thinclaw run --no-onboard`, service commands,
-  and `thinclaw gateway access` instead of implying an interactive REPL handoff.
+- Remote setup must point to `thinclaw run --skip-setup-check`, service commands,
+  and `thinclaw runtime web access` instead of implying an interactive REPL handoff.
 - Setup docs must not claim a different step or phase shape than the code.
 
 ## High-Value Setup Areas

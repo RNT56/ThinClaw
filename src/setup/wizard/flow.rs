@@ -36,6 +36,7 @@ impl SetupWizard {
         thinclaw_app::SetupWizardPlanInput {
             channels_only: self.config.channels_only,
             guide_topic: self.config.guide_topic.map(GuideTopic::app_topic),
+            mode: self.config.mode,
         }
     }
 
@@ -55,29 +56,32 @@ impl SetupWizard {
     }
 
     pub fn should_continue_to_runtime(&self) -> bool {
-        !self.config.pause_after_completion
+        self.config.invocation.continuation.continues_to_runtime()
+    }
+
+    pub fn continuation(&self) -> &thinclaw_app::SetupContinuation {
+        &self.config.invocation.continuation
     }
 
     fn runtime_command_input(&self) -> thinclaw_app::SetupRuntimeCommandInput {
         thinclaw_app::SetupRuntimeCommandInput {
             profile: self.selected_profile.app_profile(),
             ui_mode: self.runtime_ui_mode().app_mode(),
-            continue_to_runtime: self.should_continue_to_runtime(),
-            pause_after_completion: self.config.pause_after_completion,
+            continuation: self.config.invocation.continuation.clone(),
         }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn primary_runtime_command(&self) -> &'static str {
-        thinclaw_app::setup_primary_runtime_command(self.runtime_command_input())
+        thinclaw_app::setup_primary_runtime_command(&self.runtime_command_input())
     }
 
     pub(super) fn runtime_handoff_summary(&self) -> String {
-        thinclaw_app::setup_runtime_handoff_summary(self.runtime_command_input())
+        thinclaw_app::setup_runtime_handoff_summary(&self.runtime_command_input())
     }
 
     pub(super) fn what_next_commands(&self) -> Vec<String> {
-        thinclaw_app::setup_what_next_commands(self.runtime_command_input())
+        thinclaw_app::setup_what_next_commands(&self.runtime_command_input())
     }
 
     pub(super) fn build_plan(&self) -> WizardPlan {

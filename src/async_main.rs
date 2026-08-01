@@ -111,12 +111,21 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
                     guide_topic,
                     ui_mode: setup.ui,
                     profile: setup.profile,
-                    pause_after_completion: !setup.run,
+                    mode: setup.mode.into(),
+                    invocation: thinclaw_app::SetupInvocation {
+                        kind: thinclaw_app::SetupInvocationKind::Explicit,
+                        continuation: if setup.run {
+                            thinclaw_app::SetupContinuation::Run
+                        } else {
+                            thinclaw_app::SetupContinuation::Exit
+                        },
+                    },
                 };
                 let mut wizard = SetupWizard::with_config(config);
                 wizard.run().await?;
                 if wizard.should_continue_to_runtime() {
-                    runtime_entry_mode = runtime_entry_mode_from_ui_mode(wizard.runtime_ui_mode());
+                    runtime_entry_mode =
+                        runtime_entry_mode_from_setup_continuation(wizard.continuation());
                 } else {
                     return Ok(());
                 }
@@ -146,7 +155,8 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
                 let mut wizard = SetupWizard::with_config(config);
                 wizard.run().await?;
                 if wizard.should_continue_to_runtime() {
-                    runtime_entry_mode = runtime_entry_mode_from_ui_mode(wizard.runtime_ui_mode());
+                    runtime_entry_mode =
+                        runtime_entry_mode_from_setup_continuation(wizard.continuation());
                 } else {
                     return Ok(());
                 }
@@ -183,10 +193,12 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     {
         println!("Onboarding needed: {}", reason);
         println!();
-        let mut wizard =
-            SetupWizard::with_config(setup_config_for_startup_onboarding(runtime_entry_mode));
+        let mut wizard = SetupWizard::with_config(setup_config_for_startup_onboarding(
+            runtime_entry_mode,
+            runtime_args.one_shot_message.clone(),
+        ));
         wizard.run().await?;
-        runtime_entry_mode = runtime_entry_mode_from_ui_mode(wizard.runtime_ui_mode());
+        runtime_entry_mode = runtime_entry_mode_from_setup_continuation(wizard.continuation());
     }
 
     // Load initial config from env + disk + optional TOML (before DB is available)

@@ -85,7 +85,7 @@ impl SetupWizard {
                 category: OnboardingFollowupCategory::Verification,
                 status: OnboardingFollowupStatus::Optional,
                 instructions: "ThinClaw can still run locally, but no external messaging path is configured yet.".to_string(),
-                action_hint: Some("Rerun `thinclaw onboard --channels-only` when you are ready to add a channel.".to_string()),
+                action_hint: Some("Run `thinclaw setup edit channels` when you are ready to add a channel.".to_string()),
             });
             print_warning(
                 "No external messaging channel is configured yet. ThinClaw will still work locally.",
@@ -396,7 +396,7 @@ impl SetupWizard {
                 category: OnboardingFollowupCategory::Verification,
                 status: OnboardingFollowupStatus::NeedsAttention,
                 instructions: "At least one enabled channel is still missing required configuration details or verification signals.".to_string(),
-                action_hint: Some("Use `thinclaw onboard --channels-only` to revisit the channel flow.".to_string()),
+                action_hint: Some("Use `thinclaw setup edit channels` to revisit the channel flow.".to_string()),
             });
             print_warning(&format!(
                 "Channel verification found {} configuration gap(s). The completion screen will keep a follow-up for you.",

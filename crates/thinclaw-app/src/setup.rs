@@ -3,6 +3,54 @@
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SetupMode {
+    #[default]
+    Quick,
+    Advanced,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupAskRequest {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupContinuation {
+    Exit,
+    Run,
+    Tui,
+    Ask(SetupAskRequest),
+}
+
+impl SetupContinuation {
+    pub const fn continues_to_runtime(&self) -> bool {
+        !matches!(self, Self::Exit)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupInvocationKind {
+    Explicit,
+    AutomaticFirstRun,
+    LegacyOnboard,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupInvocation {
+    pub kind: SetupInvocationKind,
+    pub continuation: SetupContinuation,
+}
+
+impl Default for SetupInvocation {
+    fn default() -> Self {
+        Self {
+            kind: SetupInvocationKind::AutomaticFirstRun,
+            continuation: SetupContinuation::Run,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SetupWizardUiMode {
     #[default]
     Auto,
@@ -285,6 +333,7 @@ pub struct SetupReadinessSummary {
 pub struct SetupWizardPlanInput {
     pub channels_only: bool,
     pub guide_topic: Option<SetupGuideTopic>,
+    pub mode: SetupMode,
 }
 
 impl SetupWizardPlanInput {
@@ -293,40 +342,40 @@ impl SetupWizardPlanInput {
     }
 
     pub const fn is_quick_setup(self) -> bool {
-        !self.channels_only && !self.is_guide_mode()
+        matches!(self.mode, SetupMode::Quick) && !self.channels_only && !self.is_guide_mode()
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupRuntimeCommandInput {
     pub profile: SetupOnboardingProfile,
     pub ui_mode: SetupWizardUiMode,
-    pub continue_to_runtime: bool,
-    pub pause_after_completion: bool,
+    pub continuation: SetupContinuation,
 }
 
-pub fn setup_primary_runtime_command(input: SetupRuntimeCommandInput) -> &'static str {
+pub fn setup_primary_runtime_command(input: &SetupRuntimeCommandInput) -> &'static str {
     if input.profile.is_headless_remote() {
-        return "thinclaw run --no-onboard";
+        return "thinclaw run --skip-setup-check";
     }
-    match input.ui_mode {
-        SetupWizardUiMode::Tui => "thinclaw tui",
-        SetupWizardUiMode::Cli | SetupWizardUiMode::Auto => "thinclaw",
+    match input.continuation {
+        SetupContinuation::Tui => "thinclaw tui",
+        SetupContinuation::Ask(_) => "thinclaw ask",
+        SetupContinuation::Exit | SetupContinuation::Run => "thinclaw",
     }
 }
 
-pub fn setup_runtime_handoff_summary(input: SetupRuntimeCommandInput) -> String {
+pub fn setup_runtime_handoff_summary(input: &SetupRuntimeCommandInput) -> String {
     if input.profile.is_headless_remote() {
-        return if input.continue_to_runtime {
+        return if input.continuation.continues_to_runtime() {
             format!(
-                "ThinClaw will now continue into `thinclaw run --no-onboard` with the service-safe {} runtime settings from this run.",
+                "ThinClaw will now continue into `thinclaw run --skip-setup-check` with the service-safe {} runtime settings from this run.",
                 input.profile.title()
             )
         } else {
-            "Settings are saved. Start the headless runtime with `thinclaw run --no-onboard` or install/start the OS service.".to_string()
+            "Settings are saved. Start the headless runtime with `thinclaw run --skip-setup-check` or install/start the OS service.".to_string()
         };
     }
-    if input.continue_to_runtime {
+    if input.continuation.continues_to_runtime() {
         format!(
             "ThinClaw will now continue into `{}` using the settings from this run.",
             setup_primary_runtime_command(input)
@@ -337,23 +386,29 @@ pub fn setup_runtime_handoff_summary(input: SetupRuntimeCommandInput) -> String 
     }
 }
 
-pub fn setup_what_next_commands(input: SetupRuntimeCommandInput) -> Vec<String> {
+pub fn setup_what_next_commands(input: &SetupRuntimeCommandInput) -> Vec<String> {
     if input.profile.is_headless_remote() {
         let mut commands = vec![
-            "Service-safe runtime: thinclaw run --no-onboard".to_string(),
+            "Service-safe runtime: thinclaw run --skip-setup-check".to_string(),
             "Install OS service: thinclaw service install".to_string(),
             "Start OS service: thinclaw service start".to_string(),
-            "Show WebUI access: thinclaw gateway access".to_string(),
-            "Show full token URL: thinclaw gateway access --show-token".to_string(),
+            "Show WebUI access: thinclaw runtime web access".to_string(),
+            "Reveal WebUI credential: thinclaw runtime web access --reveal-token".to_string(),
         ];
         if input.profile == SetupOnboardingProfile::PiOsLite64 {
-            commands.push("Pi diagnostics: thinclaw doctor --profile pi-os-lite-64".to_string());
-            commands
-                .push("Reopen Pi onboarding: thinclaw onboard --profile pi-os-lite-64".to_string());
+            commands.push(
+                "Pi diagnostics: thinclaw doctor --readiness-profile pi-os-lite-64".to_string(),
+            );
+            commands.push(
+                "Reopen Pi setup: thinclaw setup --profile pi-os-lite-64 --mode advanced"
+                    .to_string(),
+            );
         } else {
-            commands.push("Remote diagnostics: thinclaw doctor --profile remote".to_string());
             commands
-                .push("Reopen remote onboarding: thinclaw onboard --profile remote".to_string());
+                .push("Remote diagnostics: thinclaw doctor --readiness-profile remote".to_string());
+            commands.push(
+                "Reopen remote setup: thinclaw setup --profile remote --mode advanced".to_string(),
+            );
         }
         return commands;
     }
@@ -361,12 +416,12 @@ pub fn setup_what_next_commands(input: SetupRuntimeCommandInput) -> Vec<String> 
         format!("Primary runtime: {}", setup_primary_runtime_command(input)),
         "Standard CLI runtime: thinclaw".to_string(),
         "Full-screen TUI runtime: thinclaw tui".to_string(),
-        "Reopen onboarding: thinclaw onboard".to_string(),
-        "Revisit channels only: thinclaw onboard --channels-only".to_string(),
+        "Reopen setup: thinclaw setup".to_string(),
+        "Revisit channels: thinclaw setup edit channels".to_string(),
     ];
 
-    if input.pause_after_completion {
-        commands.push("Topic guide: thinclaw onboard --guide".to_string());
+    if !input.continuation.continues_to_runtime() {
+        commands.push("Topic guide: thinclaw setup edit".to_string());
     }
 
     commands
@@ -569,6 +624,60 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
         phases.push(SetupWizardPhase {
             id: phase_id,
             step_ids,
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::Finish,
+            step_ids: vec![Step::Summary],
+        });
+    } else if input.mode == SetupMode::Advanced {
+        phases.push(SetupWizardPhase {
+            id: Phase::WelcomeProfile,
+            step_ids: vec![Step::CliSkin, Step::Profile],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::CoreRuntime,
+            step_ids: vec![Step::Database, Step::Security],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::AiStack,
+            step_ids: vec![
+                Step::InferenceProvider,
+                Step::ModelSelection,
+                Step::SmartRouting,
+                Step::FallbackProviders,
+                Step::Embeddings,
+            ],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::IdentityPresence,
+            step_ids: vec![Step::AgentIdentity, Step::Timezone],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::ChannelsContinuity,
+            step_ids: vec![
+                Step::Channels,
+                Step::ChannelContinuity,
+                Step::ChannelVerification,
+                Step::Notifications,
+            ],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::CapabilitiesAutomation,
+            step_ids: vec![
+                Step::Extensions,
+                Step::DockerSandbox,
+                Step::CodingWorkers,
+                Step::ClaudeCode,
+                Step::CodexCode,
+                Step::ToolApproval,
+                Step::Routines,
+                Step::Skills,
+                Step::Heartbeat,
+            ],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::ExperienceOperations,
+            step_ids: vec![Step::WebUi, Step::Observability],
         });
         phases.push(SetupWizardPhase {
             id: Phase::Finish,
@@ -1449,6 +1558,7 @@ mod tests {
         let ai_plan = setup_wizard_plan(SetupWizardPlanInput {
             channels_only: false,
             guide_topic: Some(SetupGuideTopic::Ai),
+            mode: SetupMode::Advanced,
         });
         let ai_step_ids: Vec<_> = ai_plan.steps.iter().map(|step| step.id).collect();
         assert_eq!(
@@ -1466,6 +1576,7 @@ mod tests {
         let channels_plan = setup_wizard_plan(SetupWizardPlanInput {
             channels_only: true,
             guide_topic: Some(SetupGuideTopic::Ai),
+            mode: SetupMode::Advanced,
         });
         let channel_step_ids: Vec<_> = channels_plan.steps.iter().map(|step| step.id).collect();
         assert_eq!(
@@ -1476,6 +1587,23 @@ mod tests {
                 SetupWizardStepId::Summary,
             ]
         );
+    }
+
+    #[test]
+    fn advanced_plan_traverses_every_legacy_page_once() {
+        let plan = setup_wizard_plan(SetupWizardPlanInput {
+            mode: SetupMode::Advanced,
+            ..SetupWizardPlanInput::default()
+        });
+        let ids = plan
+            .phases
+            .iter()
+            .flat_map(|phase| phase.step_ids.iter().copied())
+            .collect::<Vec<_>>();
+        let unique = ids.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), 27);
+        assert_eq!(unique.len(), 27);
+        assert_eq!(plan.steps.len(), 27);
     }
 
     #[test]
@@ -1576,16 +1704,15 @@ mod tests {
         let desktop = SetupRuntimeCommandInput {
             profile: SetupOnboardingProfile::Balanced,
             ui_mode: SetupWizardUiMode::Tui,
-            continue_to_runtime: true,
-            pause_after_completion: true,
+            continuation: SetupContinuation::Tui,
         };
-        assert_eq!(setup_primary_runtime_command(desktop), "thinclaw tui");
+        assert_eq!(setup_primary_runtime_command(&desktop), "thinclaw tui");
         assert!(
-            setup_runtime_handoff_summary(desktop).contains("`thinclaw tui`"),
+            setup_runtime_handoff_summary(&desktop).contains("`thinclaw tui`"),
             "desktop handoff should name the selected UI command"
         );
         assert!(
-            setup_what_next_commands(desktop)
+            !setup_what_next_commands(&desktop)
                 .iter()
                 .any(|command| command == "Topic guide: thinclaw onboard --guide")
         );
@@ -1593,21 +1720,21 @@ mod tests {
         let headless = SetupRuntimeCommandInput {
             profile: SetupOnboardingProfile::PiOsLite64,
             ui_mode: SetupWizardUiMode::Tui,
-            continue_to_runtime: false,
-            pause_after_completion: false,
+            continuation: SetupContinuation::Exit,
         };
         assert_eq!(
-            setup_primary_runtime_command(headless),
-            "thinclaw run --no-onboard"
+            setup_primary_runtime_command(&headless),
+            "thinclaw run --skip-setup-check"
         );
         assert!(
-            setup_runtime_handoff_summary(headless).contains("install/start the OS service"),
+            setup_runtime_handoff_summary(&headless).contains("install/start the OS service"),
             "paused headless handoff should point at service startup"
         );
         assert!(
-            setup_what_next_commands(headless)
+            setup_what_next_commands(&headless)
                 .iter()
-                .any(|command| command == "Pi diagnostics: thinclaw doctor --profile pi-os-lite-64")
+                .any(|command| command
+                    == "Pi diagnostics: thinclaw doctor --readiness-profile pi-os-lite-64")
         );
     }
 }

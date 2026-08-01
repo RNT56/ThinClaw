@@ -826,6 +826,23 @@ mod tests {
     }
 
     #[test]
+    fn setup_mode_and_run_continuation_parse_explicitly() {
+        let cli = Cli::try_parse_from([
+            "thinclaw", "setup", "--mode", "advanced", "--run", "--ui", "tui",
+        ])
+        .expect("parse explicit advanced setup");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Setup(SetupCommand {
+                mode: setup::SetupModeArg::Advanced,
+                run: true,
+                ui: UiMode::Tui,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn ask_and_legacy_message_resolve_to_one_shot_runtime() {
         let ask = Cli::try_parse_from(["thinclaw", "ask", "hello"]).expect("parse ask");
         assert_eq!(

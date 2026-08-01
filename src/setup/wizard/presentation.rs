@@ -157,7 +157,7 @@ impl SetupWizard {
             "Gateway credentials are not printed. Use the guarded runtime access command when explicit reveal is required.",
         );
         print_info(
-            "Service handoff: run `thinclaw run --no-onboard`, or install/start the OS service after onboarding.",
+            "Service handoff: run `thinclaw run --skip-setup-check`, or install/start the OS service after setup.",
         );
 
         Ok(())

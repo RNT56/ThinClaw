@@ -1,6 +1,6 @@
 //! Canonical setup command parsing.
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
 use crate::setup::{GuideTopic, OnboardingProfile, UiMode};
 
@@ -15,6 +15,10 @@ pub struct SetupCommand {
     #[arg(long)]
     pub run: bool,
 
+    /// Setup depth: quick recommended defaults or the complete advanced flow
+    #[arg(long, value_enum, default_value_t = SetupModeArg::Quick)]
+    pub mode: SetupModeArg,
+
     /// Skip provider authentication during this setup pass
     #[arg(long)]
     pub skip_provider_auth: bool,
@@ -28,6 +32,21 @@ pub struct SetupCommand {
 
     #[arg(long, value_enum)]
     pub profile: Option<OnboardingProfile>,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupModeArg {
+    Quick,
+    Advanced,
+}
+
+impl From<SetupModeArg> for thinclaw_app::SetupMode {
+    fn from(value: SetupModeArg) -> Self {
+        match value {
+            SetupModeArg::Quick => Self::Quick,
+            SetupModeArg::Advanced => Self::Advanced,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]

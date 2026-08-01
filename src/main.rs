@@ -70,10 +70,15 @@ fn execute_env_bootstrap_plan(plan: RuntimeEnvBootstrapPlan) {
 }
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-fn runtime_entry_mode_from_ui_mode(ui_mode: UiMode) -> RuntimeEntryMode {
-    match ui_mode {
-        UiMode::Tui => RuntimeEntryMode::Tui,
-        UiMode::Cli | UiMode::Auto => RuntimeEntryMode::Cli,
+fn runtime_entry_mode_from_setup_continuation(
+    continuation: &thinclaw_app::SetupContinuation,
+) -> RuntimeEntryMode {
+    match continuation {
+        thinclaw_app::SetupContinuation::Tui => RuntimeEntryMode::Tui,
+        thinclaw_app::SetupContinuation::Run | thinclaw_app::SetupContinuation::Ask(_) => {
+            RuntimeEntryMode::Cli
+        }
+        thinclaw_app::SetupContinuation::Exit => RuntimeEntryMode::Default,
     }
 }
 
@@ -91,20 +96,43 @@ fn setup_config_for_onboard_command(
         guide_topic,
         ui_mode,
         profile,
-        pause_after_completion: false,
+        mode: if guide_topic.is_some() {
+            thinclaw_app::SetupMode::Advanced
+        } else {
+            thinclaw_app::SetupMode::Quick
+        },
+        invocation: thinclaw_app::SetupInvocation {
+            kind: thinclaw_app::SetupInvocationKind::LegacyOnboard,
+            continuation: thinclaw_app::SetupContinuation::Run,
+        },
     }
 }
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-fn setup_config_for_startup_onboarding(runtime_entry_mode: RuntimeEntryMode) -> SetupConfig {
+fn setup_config_for_startup_onboarding(
+    runtime_entry_mode: RuntimeEntryMode,
+    one_shot_message: Option<String>,
+) -> SetupConfig {
     let ui_mode = match runtime_entry_mode {
         RuntimeEntryMode::Tui => UiMode::Tui,
         RuntimeEntryMode::Cli => UiMode::Cli,
         RuntimeEntryMode::Default => UiMode::Auto,
     };
 
+    let continuation = if let Some(text) = one_shot_message {
+        thinclaw_app::SetupContinuation::Ask(thinclaw_app::SetupAskRequest { text })
+    } else if runtime_entry_mode == RuntimeEntryMode::Tui {
+        thinclaw_app::SetupContinuation::Tui
+    } else {
+        thinclaw_app::SetupContinuation::Run
+    };
+
     SetupConfig {
         ui_mode,
+        invocation: thinclaw_app::SetupInvocation {
+            kind: thinclaw_app::SetupInvocationKind::AutomaticFirstRun,
+            continuation,
+        },
         ..SetupConfig::default()
     }
 }

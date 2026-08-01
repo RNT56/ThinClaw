@@ -67,8 +67,10 @@ pub struct SetupConfig {
     pub guide_topic: Option<GuideTopic>,
     /// Optional profile supplied by the CLI.
     pub profile: Option<OnboardingProfile>,
-    /// When true, save settings and return without continuing into runtime.
-    pub pause_after_completion: bool,
+    /// Quick recommended defaults or the complete advanced flow.
+    pub mode: thinclaw_app::SetupMode,
+    /// Invocation source and the exact post-setup continuation.
+    pub invocation: thinclaw_app::SetupInvocation,
 }
 
 impl Default for SetupConfig {
@@ -79,7 +81,8 @@ impl Default for SetupConfig {
             ui_mode: UiMode::Auto,
             guide_topic: None,
             profile: None,
-            pause_after_completion: false,
+            mode: thinclaw_app::SetupMode::Quick,
+            invocation: thinclaw_app::SetupInvocation::default(),
         }
     }
 }
@@ -289,7 +292,8 @@ mod tests {
             ui_mode: UiMode::Cli,
             guide_topic: None,
             profile: None,
-            pause_after_completion: false,
+            mode: thinclaw_app::SetupMode::Quick,
+            invocation: thinclaw_app::SetupInvocation::default(),
         };
         let wizard = SetupWizard::with_config(config);
         assert!(wizard.config.skip_auth);

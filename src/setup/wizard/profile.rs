@@ -221,7 +221,7 @@ impl SetupWizard {
             category: OnboardingFollowupCategory::Authentication,
             status: OnboardingFollowupStatus::Pending,
             instructions: "Skip-auth mode kept provider review non-secret. Add the relevant provider API key before relying on remote routing or failover.".to_string(),
-            action_hint: Some("Set the provider env var or rerun `thinclaw onboard --ui cli` without --skip-auth.".to_string()),
+            action_hint: Some("Configure a credential source or rerun `thinclaw setup --ui cli` without --skip-provider-auth.".to_string()),
         });
     }
 }
