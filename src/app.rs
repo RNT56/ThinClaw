@@ -894,9 +894,27 @@ impl AppBuilder {
                                 let server_name = server.name.clone();
 
                                 let client = if server.is_stdio() {
-                                    match McpClient::new_stdio_with_store(
+                                    let secret_env = match crate::tools::mcp::config::resolve_mcp_secret_environment(
+                                        &server,
+                                        &secrets,
+                                        "default",
+                                    )
+                                    .await
+                                    {
+                                        Ok(secret_env) => secret_env,
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                "Failed to resolve stdio MCP credentials for '{}': {}",
+                                                server_name,
+                                                error
+                                            );
+                                            return;
+                                        }
+                                    };
+                                    match McpClient::new_stdio_with_store_and_secret_env(
                                         &server,
                                         Some(config_store.clone()),
+                                        &secret_env,
                                     ) {
                                         Ok(c) => c,
                                         Err(e) => {

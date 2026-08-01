@@ -10,7 +10,7 @@ use tokio::time::MissedTickBehavior;
 use crate::extensions::{ActivateResult, AuthResult, ExtensionError, ExtensionKind};
 use crate::secrets::CreateSecretParams;
 use crate::tools::mcp::auth::{is_authenticated, prepare_mcp_authorization};
-use crate::tools::mcp::config::{McpConfigStore, McpServerConfig};
+use crate::tools::mcp::config::{McpConfigStore, McpServerConfig, resolve_mcp_secret_environment};
 use crate::tools::mcp::{McpClient, McpPendingInteraction};
 
 use super::ExtensionManager;
@@ -364,7 +364,10 @@ impl ExtensionManager {
     ) -> Result<Arc<McpClient>, ExtensionError> {
         let config_store = Some(self.mcp_config_store().into_inner());
         let client = if server.is_stdio() {
-            McpClient::new_stdio_with_store(server, config_store)
+            let secret_env = resolve_mcp_secret_environment(server, &self.secrets, &self.user_id)
+                .await
+                .map_err(|error| ExtensionError::ActivationFailed(error.to_string()))?;
+            McpClient::new_stdio_with_store_and_secret_env(server, config_store, &secret_env)
                 .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?
         } else {
             let has_tokens = is_authenticated(server, &self.secrets, &self.user_id).await;
