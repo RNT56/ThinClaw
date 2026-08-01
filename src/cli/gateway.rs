@@ -516,6 +516,7 @@ async fn start_gateway(
             };
             command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | DETACHED_PROCESS);
         }
+        thinclaw_platform::apply_child_environment_policy(&mut command)?;
         let mut child = command.spawn()?;
 
         let pid = child.id();

@@ -906,6 +906,7 @@ mod windows_impl {
             cmd.env("THINCLAW_HOME", home);
         }
 
+        thinclaw_platform::apply_child_environment_policy(&mut cmd)?;
         cmd.spawn()
     }
 
