@@ -3,6 +3,7 @@
 mod main_helpers;
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use thinclaw::{
@@ -26,14 +27,27 @@ use thinclaw::setup::{SetupConfig, UiMode};
 
 use main_helpers::*;
 
-fn main() -> anyhow::Result<()> {
-    run_async_entrypoint(async_main)
+fn main() -> ExitCode {
+    match run_async_entrypoint(async_main) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            if let Some(cli_error) = error.downcast_ref::<thinclaw::cli::CliError>() {
+                if !cli_error.was_reported() {
+                    eprintln!("error: {cli_error}");
+                }
+                cli_error.exit_class().exit_code()
+            } else {
+                eprintln!("error: {error:#}");
+                thinclaw::cli::ExitClass::Operational.exit_code()
+            }
+        }
+    }
 }
 
 fn runtime_command_intent(command: Option<&Command>) -> RuntimeCommandIntent {
     match command {
-        None | Some(Command::Run) => RuntimeCommandIntent::AgentRuntime,
-        Some(Command::Tui) => RuntimeCommandIntent::TuiRuntime,
+        None | Some(Command::Run(_) | Command::Ask { .. }) => RuntimeCommandIntent::AgentRuntime,
+        Some(Command::Tui(_)) => RuntimeCommandIntent::TuiRuntime,
         Some(Command::Onboard { .. }) => RuntimeCommandIntent::Onboarding,
         #[cfg(feature = "docker-sandbox")]
         Some(Command::Worker { .. })
@@ -108,13 +122,14 @@ fn native_lifecycle_channel_descriptors(config: &Config) -> Vec<ChannelDescripto
 
 async fn register_native_lifecycle_channels(
     config: &Config,
+    selection: &thinclaw::cli::ChannelSelectionArg,
     channels: Arc<ChannelManager>,
     channel_names: &mut Vec<String>,
 ) -> Vec<axum::Router> {
     let http: Arc<dyn NativeHttpClient> = Arc::new(ReqwestNativeHttpClient::new());
     let mut webhook_config = NativeLifecycleWebhookConfig::default();
 
-    if config.channels.matrix_enabled {
+    if config.channels.matrix_enabled && selection.allows("matrix") {
         match matrix_native_config_from_env() {
             Ok(Some(matrix_config)) => {
                 let client = Arc::new(MatrixNativeClient::new(matrix_config, Arc::clone(&http)));
@@ -136,7 +151,7 @@ async fn register_native_lifecycle_channels(
         }
     }
 
-    if config.channels.voice_call_enabled {
+    if config.channels.voice_call_enabled && selection.allows("voice-call") {
         if !config.channels.voice_call_available {
             tracing::warn!(
                 "Voice-call native lifecycle is enabled but the binary was built without the voice feature"
@@ -165,7 +180,7 @@ async fn register_native_lifecycle_channels(
         }
     }
 
-    if config.channels.apns_enabled {
+    if config.channels.apns_enabled && selection.allows("apns") {
         match apns_native_config_from_env() {
             Ok(Some(apns_config)) => {
                 if let Some(registration_secret) = env_value("APNS_REGISTRATION_SECRET") {
@@ -207,7 +222,7 @@ async fn register_native_lifecycle_channels(
         }
     }
 
-    if config.channels.browser_push_enabled {
+    if config.channels.browser_push_enabled && selection.allows("browser-push") {
         if !config.channels.browser_push_available {
             tracing::warn!(
                 "Browser-push native lifecycle is enabled but the binary was built without the browser feature"

@@ -333,14 +333,13 @@ impl SignalChannel {
             Ok(result) => {
                 tracing::info!(
                     sender = %sender,
-                    code = %result.code,
+                    request_id = %result.request_id,
                     "Signal: pairing request upserted"
                 );
                 if result.created {
                     let message = format!(
-                        "To pair with this bot, run: `thinclaw pairing approve signal {}`. \
-                         For a new family member, you can add `--name \"Alex\"` to create and link an actor.",
-                        result.code
+                        "Your pairing request ID is `{}`. Ask the ThinClaw operator to approve it.",
+                        result.request_id
                     );
                     let http_url = self.config.http_url.clone();
                     let account = self.config.account.clone();

@@ -30,6 +30,7 @@ pub enum RuntimeLeaseError {
 /// Held for the complete lifetime of a mutable agent runtime.
 pub struct RuntimeLease {
     file: File,
+    operation_file: File,
     state_dir: PathBuf,
     scope_id: String,
 }
@@ -40,7 +41,16 @@ impl RuntimeLease {
     }
 
     pub fn acquire(state_dir: impl AsRef<Path>) -> Result<Self, RuntimeLeaseError> {
-        let state_dir = state_dir.as_ref().to_path_buf();
+        let state_dir =
+            absolute_path(state_dir.as_ref()).map_err(|source| RuntimeLeaseError::Prepare {
+                path: state_dir.as_ref().to_path_buf(),
+                source,
+            })?;
+        let operation_file = open_operation_lock(&state_dir)?;
+        FileExt::lock_shared(&operation_file).map_err(|source| RuntimeLeaseError::Lock {
+            path: state_dir.clone(),
+            source,
+        })?;
         std::fs::create_dir_all(&state_dir).map_err(|source| RuntimeLeaseError::Prepare {
             path: state_dir.clone(),
             source,
@@ -133,6 +143,7 @@ impl RuntimeLease {
         Ok(Self {
             scope_id,
             file,
+            operation_file,
             state_dir: canonical,
         })
     }
@@ -149,7 +160,92 @@ impl RuntimeLease {
 impl Drop for RuntimeLease {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.file);
+        let _ = FileExt::unlock(&self.operation_file);
     }
+}
+
+/// Exclusive guard for destructive or migration operations over runtime state.
+pub struct RuntimeOperationLease {
+    file: File,
+    state_dir: PathBuf,
+}
+
+impl RuntimeOperationLease {
+    pub fn acquire_default() -> Result<Self, RuntimeLeaseError> {
+        Self::acquire(crate::platform::resolve_data_dir(""))
+    }
+
+    pub fn acquire(state_dir: impl AsRef<Path>) -> Result<Self, RuntimeLeaseError> {
+        let state_dir =
+            absolute_path(state_dir.as_ref()).map_err(|source| RuntimeLeaseError::Prepare {
+                path: state_dir.as_ref().to_path_buf(),
+                source,
+            })?;
+        if let Ok(metadata) = std::fs::symlink_metadata(&state_dir)
+            && (metadata.file_type().is_symlink() || !metadata.is_dir())
+        {
+            return Err(RuntimeLeaseError::Prepare {
+                path: state_dir,
+                source: std::io::Error::other("runtime state path is not a real directory"),
+            });
+        }
+        let file = open_operation_lock(&state_dir)?;
+        match FileExt::try_lock(&file) {
+            Ok(()) => Ok(Self { file, state_dir }),
+            Err(TryLockError::WouldBlock) => {
+                Err(RuntimeLeaseError::AlreadyRunning { path: state_dir })
+            }
+            Err(TryLockError::Error(source)) => Err(RuntimeLeaseError::Lock {
+                path: state_dir,
+                source,
+            }),
+        }
+    }
+
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+}
+
+impl Drop for RuntimeOperationLease {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn open_operation_lock(state_dir: &Path) -> Result<File, RuntimeLeaseError> {
+    let parent = state_dir
+        .parent()
+        .ok_or_else(|| RuntimeLeaseError::Prepare {
+            path: state_dir.to_path_buf(),
+            source: std::io::Error::other("runtime state path has no parent"),
+        })?;
+    let digest = blake3::hash(state_dir.to_string_lossy().as_bytes());
+    let key = digest
+        .to_hex()
+        .to_string()
+        .chars()
+        .take(24)
+        .collect::<String>();
+    let path = parent.join(format!(".thinclaw-operation-{key}.lock"));
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    options
+        .open(&path)
+        .map_err(|source| RuntimeLeaseError::Prepare { path, source })
 }
 
 pub fn runtime_scope_id_for_path(path: &Path) -> String {
@@ -229,6 +325,26 @@ mod tests {
         let first = RuntimeLease::acquire(first_dir.path()).unwrap();
         let second = RuntimeLease::acquire(second_dir.path()).unwrap();
         assert_ne!(first.scope_id(), second.scope_id());
+    }
+
+    #[test]
+    fn exclusive_operation_lease_blocks_and_is_blocked_by_runtime() {
+        let parent = tempfile::tempdir().unwrap();
+        let state = parent.path().join("state");
+        let runtime = RuntimeLease::acquire(&state).unwrap();
+        assert!(matches!(
+            RuntimeOperationLease::acquire(&state),
+            Err(RuntimeLeaseError::AlreadyRunning { .. })
+        ));
+        drop(runtime);
+
+        let operation = RuntimeOperationLease::acquire(&state).unwrap();
+        assert!(matches!(
+            RuntimeLease::acquire(&state),
+            Err(RuntimeLeaseError::AlreadyRunning { .. })
+        ));
+        drop(operation);
+        RuntimeLease::acquire(&state).expect("runtime should acquire after operation completes");
     }
 
     #[test]

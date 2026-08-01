@@ -20,11 +20,13 @@ mod channels;
 mod comfy;
 mod completion;
 mod config;
+mod context;
 mod cron;
 mod devices;
 mod doctor;
 mod experiments;
 mod gateway;
+mod gateway_client;
 mod identity;
 mod logs;
 mod mcp;
@@ -32,6 +34,8 @@ pub mod memory;
 mod message;
 mod models;
 pub mod oauth_defaults;
+mod outcome;
+mod output;
 mod pairing;
 mod registry;
 mod repo_projects;
@@ -52,11 +56,15 @@ pub use channels::{ChannelCommand, run_channels_command};
 pub use comfy::{ComfyCommand, run_comfy_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
+pub use context::{CliContext, CliContextOptions};
 pub use cron::{CronCommand, run_cron_command};
 pub use devices::{DeviceCommand, run_devices_command};
 pub use doctor::run_doctor_command;
 pub use experiments::{ExperimentsCommand, run_experiments_command};
 pub use gateway::{GatewayCommand, run_gateway_command};
+pub use gateway_client::{
+    GatewayAuthToken, GatewayClient, GatewayClientError, GatewayRequestBudget,
+};
 pub use identity::{IdentityCommand, run_identity_command};
 pub use logs::{LogCommand, run_log_command};
 pub use mcp::{McpCommand, run_mcp_command};
@@ -66,6 +74,8 @@ pub use memory::run_memory_command;
 pub use memory::run_memory_command_with_db;
 pub use message::{MessageCommand, run_message_command};
 pub use models::{ModelCommand, run_model_command};
+pub use outcome::{CliDispatch, CliError, CliOutcome, ExitClass};
+pub use output::{ColorChoice, OutputFormat, OutputPolicy};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use repo_projects::{RepoProjectCommand, run_repo_projects_command};
@@ -79,7 +89,7 @@ pub use tool::{ToolCommand, run_tool_command};
 pub use trajectory::{TrajectoryCommand, run_trajectory_command};
 pub use update::{UpdateCommand, run_update_command};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::setup::{GuideTopic, OnboardingProfile, UiMode};
 
@@ -95,25 +105,119 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub debug: bool,
 
-    /// Run in interactive CLI mode only (disable other channels)
-    #[arg(long, global = true)]
-    pub cli_only: bool,
+    /// Output presentation format for command data
+    #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Human)]
+    pub output_format: OutputFormat,
 
-    /// Skip database connection (for testing)
-    #[arg(long, global = true)]
-    pub no_db: bool,
+    /// Terminal color policy
+    #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
+    pub color: ColorChoice,
 
-    /// Single message mode - send one message and exit
-    #[arg(short, long, global = true)]
-    pub message: Option<String>,
+    /// Suppress nonessential human diagnostics and progress
+    #[arg(long, global = true, conflicts_with = "verbose")]
+    pub quiet: bool,
+
+    /// Include additional human diagnostics
+    #[arg(long, global = true, conflicts_with = "quiet")]
+    pub verbose: bool,
+
+    /// Deprecated alias for `run --channels none`
+    #[arg(long = "cli-only", global = true, hide = true)]
+    pub legacy_cli_only: bool,
+
+    /// Deprecated alias for `ask TEXT`
+    #[arg(
+        short = 'm',
+        long = "message",
+        global = true,
+        hide = true,
+        conflicts_with = "command"
+    )]
+    pub legacy_message: Option<String>,
 
     /// Configuration file path (optional, uses env vars by default)
     #[arg(short, long, global = true)]
     pub config: Option<std::path::PathBuf>,
+}
 
-    /// Skip first-run onboarding check
-    #[arg(long, global = true)]
-    pub no_onboard: bool,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelSelectionArg {
+    None,
+    Configured,
+    Selected(Vec<String>),
+}
+
+impl ChannelSelectionArg {
+    pub fn allows(&self, channel: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::Configured => true,
+            Self::Selected(channels) => channels.iter().any(|selected| selected == channel),
+        }
+    }
+
+    pub const fn disables_external_ingress(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+impl std::str::FromStr for ChannelSelectionArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        match value {
+            "none" => Ok(Self::None),
+            "configured" => Ok(Self::Configured),
+            "" => Err("channel selection cannot be empty".to_string()),
+            _ => {
+                let mut channels = Vec::new();
+                for channel in value.split(',') {
+                    let channel = channel.trim();
+                    if channel.is_empty()
+                        || channel.len() > 128
+                        || !channel.chars().all(|character| {
+                            character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+                        })
+                    {
+                        return Err(format!("invalid channel name '{channel}'"));
+                    }
+                    let channel = channel.to_ascii_lowercase().replace('_', "-");
+                    if !channels.contains(&channel) {
+                        channels.push(channel);
+                    }
+                }
+                Ok(Self::Selected(channels))
+            }
+        }
+    }
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct RuntimeArgs {
+    /// Skip database connection (testing and diagnostics only)
+    #[arg(long, hide = true)]
+    pub no_db: bool,
+
+    /// Skip the first-run setup check
+    #[arg(long)]
+    pub skip_setup_check: bool,
+
+    /// Deprecated alias for `--skip-setup-check`
+    #[arg(long = "no-onboard", hide = true)]
+    pub legacy_no_onboard: bool,
+
+    /// Select nonlocal ingress: none, configured, or comma-separated channel names
+    #[arg(long, value_name = "SELECTION")]
+    pub channels: Option<ChannelSelectionArg>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRuntimeArgs {
+    pub no_db: bool,
+    pub skip_setup_check: bool,
+    pub channels: ChannelSelectionArg,
+    pub one_shot_message: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -143,10 +247,33 @@ impl From<LinuxReadinessCliProfile> for crate::platform::LinuxReadinessProfile {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Run the agent (default if no subcommand given)
-    Run,
+    Run(RuntimeArgs),
 
     /// Run the agent with the full-screen terminal UI
-    Tui,
+    Tui(RuntimeArgs),
+
+    /// Run one local agent turn, then exit
+    Ask {
+        /// Message text for the local agent turn
+        text: String,
+
+        #[command(flatten)]
+        runtime: RuntimeArgs,
+    },
+
+    /// Inject a message through the running web runtime
+    Send {
+        /// Message text to inject
+        text: String,
+
+        /// Principal/user identity for the injected message
+        #[arg(long, default_value = "cli")]
+        user_id: String,
+
+        /// Explicit running-runtime URL
+        #[arg(long)]
+        gateway_url: Option<String>,
+    },
 
     /// Interactive onboarding wizard
     Onboard {
@@ -304,6 +431,7 @@ pub enum Command {
     /// Run as a sandboxed worker inside a Docker container (internal use).
     /// This is invoked automatically by the orchestrator, not by users directly.
     #[cfg(feature = "docker-sandbox")]
+    #[command(hide = true)]
     Worker {
         /// Job ID to execute.
         #[arg(long)]
@@ -321,6 +449,7 @@ pub enum Command {
     /// Run as a Claude Code bridge inside a Docker container (internal use).
     /// Spawns the `claude` CLI and streams output back to the orchestrator.
     #[cfg(feature = "docker-sandbox")]
+    #[command(hide = true)]
     ClaudeBridge {
         /// Job ID to execute.
         #[arg(long)]
@@ -342,6 +471,7 @@ pub enum Command {
     /// Run as a Codex bridge inside a Docker container (internal use).
     /// Spawns the `codex` CLI and streams output back to the orchestrator.
     #[cfg(feature = "docker-sandbox")]
+    #[command(hide = true)]
     CodexBridge {
         /// Job ID to execute.
         #[arg(long)]
@@ -366,15 +496,24 @@ pub enum Command {
     },
 
     /// Run as a lease-scoped remote experiment runner (internal/automation use).
+    #[command(hide = true)]
     ExperimentRunner {
-        #[arg(long)]
-        lease_id: uuid::Uuid,
-
         #[arg(long)]
         gateway_url: String,
 
-        #[arg(long)]
-        token: String,
+        #[arg(
+            long,
+            required_unless_present = "auth_file",
+            conflicts_with = "auth_file"
+        )]
+        auth_stdin: bool,
+
+        #[arg(
+            long,
+            required_unless_present = "auth_stdin",
+            conflicts_with = "auth_stdin"
+        )]
+        auth_file: Option<std::path::PathBuf>,
 
         #[arg(long)]
         workspace_root: Option<std::path::PathBuf>,
@@ -391,7 +530,43 @@ pub enum Command {
 impl Cli {
     /// Check if we should run the agent (default behavior or explicit `run` command).
     pub fn should_run_agent(&self) -> bool {
-        matches!(self.command, None | Some(Command::Run) | Some(Command::Tui))
+        matches!(
+            self.command,
+            None | Some(Command::Run(_)) | Some(Command::Tui(_)) | Some(Command::Ask { .. })
+        ) || self.legacy_message.is_some()
+    }
+
+    pub fn resolve_runtime_args(&self) -> Result<Option<ResolvedRuntimeArgs>, CliError> {
+        let (args, one_shot_message) = match &self.command {
+            None => (RuntimeArgs::default(), self.legacy_message.clone()),
+            Some(Command::Run(args) | Command::Tui(args)) => (args.clone(), None),
+            Some(Command::Ask { text, runtime }) => (runtime.clone(), Some(text.clone())),
+            Some(_) => {
+                if self.legacy_cli_only || self.legacy_message.is_some() {
+                    return Err(CliError::usage(
+                        "--cli-only and --message are valid only for the local runtime",
+                    ));
+                }
+                return Ok(None);
+            }
+        };
+
+        if self.legacy_cli_only && args.channels.is_some() {
+            return Err(CliError::usage(
+                "--cli-only conflicts with the canonical --channels option",
+            ));
+        }
+
+        Ok(Some(ResolvedRuntimeArgs {
+            no_db: args.no_db,
+            skip_setup_check: args.skip_setup_check || args.legacy_no_onboard,
+            channels: if self.legacy_cli_only {
+                ChannelSelectionArg::None
+            } else {
+                args.channels.unwrap_or(ChannelSelectionArg::Configured)
+            },
+            one_shot_message,
+        }))
     }
 }
 
@@ -519,6 +694,86 @@ mod tests {
     fn test_tui_command_runs_agent() {
         let cli = Cli::try_parse_from(["thinclaw", "tui"]).expect("parse tui command");
         assert!(cli.should_run_agent());
-        assert!(matches!(cli.command, Some(Command::Tui)));
+        assert!(matches!(cli.command, Some(Command::Tui(_))));
+    }
+
+    #[test]
+    fn runtime_only_flags_are_rejected_on_status() {
+        assert!(Cli::try_parse_from(["thinclaw", "status", "--no-db"]).is_err());
+        assert!(Cli::try_parse_from(["thinclaw", "--no-db", "status"]).is_err());
+    }
+
+    #[test]
+    fn ask_and_legacy_message_resolve_to_one_shot_runtime() {
+        let ask = Cli::try_parse_from(["thinclaw", "ask", "hello"]).expect("parse ask");
+        assert_eq!(
+            ask.resolve_runtime_args()
+                .expect("resolve ask")
+                .expect("runtime")
+                .one_shot_message
+                .as_deref(),
+            Some("hello")
+        );
+
+        let legacy = Cli::try_parse_from(["thinclaw", "-m", "hello"]).expect("parse legacy");
+        assert_eq!(
+            legacy
+                .resolve_runtime_args()
+                .expect("resolve legacy")
+                .expect("runtime")
+                .one_shot_message
+                .as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn channel_selection_normalizes_and_deduplicates() {
+        let cli = Cli::try_parse_from(["thinclaw", "run", "--channels", "discord,matrix,discord"])
+            .expect("parse selected channels");
+        let runtime = cli
+            .resolve_runtime_args()
+            .expect("resolve")
+            .expect("runtime");
+        assert_eq!(
+            runtime.channels,
+            ChannelSelectionArg::Selected(vec!["discord".into(), "matrix".into()])
+        );
+    }
+
+    #[test]
+    fn experiment_runner_requires_one_private_auth_source_and_has_no_secret_argv() {
+        assert!(
+            Cli::try_parse_from([
+                "thinclaw",
+                "experiment-runner",
+                "--gateway-url",
+                "https://gateway.example"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "thinclaw",
+                "experiment-runner",
+                "--gateway-url",
+                "https://gateway.example",
+                "--auth-stdin",
+                "--auth-file",
+                "/tmp/auth.json"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "thinclaw",
+                "experiment-runner",
+                "--gateway-url",
+                "https://gateway.example",
+                "--token",
+                "secret"
+            ])
+            .is_err()
+        );
     }
 }

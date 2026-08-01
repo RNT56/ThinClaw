@@ -123,12 +123,12 @@ pub(crate) fn handle_message(message: TelegramMessage) {
                             channel_host::log(
                                 channel_host::LogLevel::Info,
                                 &format!(
-                                    "Pairing request for user {} (chat {}): code {}",
-                                    from.id, message.chat.id, result.code
+                                    "Pairing request {} created for user {} (chat {})",
+                                    result.request_id, from.id, message.chat.id
                                 ),
                             );
                             if result.created {
-                                let _ = send_pairing_reply(message.chat.id, &result.code);
+                                let _ = send_pairing_reply(message.chat.id, &result.request_id);
                             }
                         }
                         Err(e) => {

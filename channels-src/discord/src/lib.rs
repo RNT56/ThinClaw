@@ -590,11 +590,11 @@ fn check_sender_permission(
             Ok(result) => {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!("Pairing request for user {}: code {}", user_id, result.code),
+                    &format!("Pairing request {} created for user {}", result.request_id, user_id),
                 );
                 if result.created {
                     if let Some(ctx) = reply_ctx {
-                        let _ = send_pairing_reply(ctx, &result.code);
+                        let _ = send_pairing_reply(ctx, &result.request_id);
                     }
                 }
             }
@@ -609,8 +609,8 @@ fn check_sender_permission(
     false
 }
 
-/// Send a pairing code as an ephemeral Discord followup message.
-fn send_pairing_reply(ctx: &PairingReplyCtx, code: &str) -> Result<(), String> {
+/// Send a pairing request notice as an ephemeral Discord followup message.
+fn send_pairing_reply(ctx: &PairingReplyCtx, request_id: &str) -> Result<(), String> {
     let url = format!(
         "https://discord.com/api/v10/webhooks/{}/{}",
         ctx.application_id, ctx.token
@@ -618,8 +618,8 @@ fn send_pairing_reply(ctx: &PairingReplyCtx, code: &str) -> Result<(), String> {
 
     let payload = serde_json::json!({
         "content": format!(
-            "To pair with this bot, run: `thinclaw pairing approve discord {}`",
-            code
+            "Your pairing request ID is `{}`. Ask the ThinClaw operator to approve it.",
+            request_id
         ),
         "flags": 64 // Ephemeral — only visible to the sender
     });

@@ -234,6 +234,9 @@ impl Agent {
                     .send_status(
                         &message.channel,
                         StatusUpdate::ToolStarted {
+                            invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                &pending.tool_call_id,
+                            ),
                             name: pending.tool_name.clone(),
                             parameters: Some(pending.parameters.clone()),
                         },
@@ -280,6 +283,9 @@ impl Agent {
                     .send_status(
                         &message.channel,
                         StatusUpdate::ToolCompleted {
+                            invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                &pending.tool_call_id,
+                            ),
                             name: pending.tool_name.clone(),
                             success: tool_result.is_ok(),
                             result_preview: tool_result.as_ref().ok().map(|output| {
@@ -288,6 +294,7 @@ impl Agent {
                                     500,
                                 )
                             }),
+                            duration_ms: None,
                         },
                         &message.metadata,
                     )
@@ -305,6 +312,9 @@ impl Agent {
                         .send_status(
                             &message.channel,
                             StatusUpdate::ToolResult {
+                                invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                    &pending.tool_call_id,
+                                ),
                                 name: pending.tool_name.clone(),
                                 preview: output.sanitized_content.clone(),
                                 artifacts: output.artifacts.clone(),
@@ -521,6 +531,9 @@ impl Agent {
                             .send_status(
                                 &message.channel,
                                 StatusUpdate::ToolStarted {
+                                    invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                        &tc.id,
+                                    ),
                                     name: tc.name.clone(),
                                     parameters: Some(tc.arguments.clone()),
                                 },
@@ -541,6 +554,9 @@ impl Agent {
                             .send_status(
                                 &message.channel,
                                 StatusUpdate::ToolCompleted {
+                                    invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                        &tc.id,
+                                    ),
                                     name: tc.name.clone(),
                                     success: result.is_ok(),
                                     result_preview: result.as_ref().ok().map(|output| {
@@ -549,6 +565,7 @@ impl Agent {
                                             500,
                                         )
                                     }),
+                                    duration_ms: None,
                                 },
                                 &message.metadata,
                             )
@@ -576,6 +593,8 @@ impl Agent {
                                 .send_status(
                                     &channel,
                                     StatusUpdate::ToolStarted {
+                                        invocation_id:
+                                            thinclaw_types::ToolInvocationId::from_provider(&tc.id),
                                         name: tc.name.clone(),
                                         parameters: Some(tc.arguments.clone()),
                                     },
@@ -590,6 +609,8 @@ impl Agent {
                                 .send_status(
                                     &channel,
                                     StatusUpdate::ToolCompleted {
+                                        invocation_id:
+                                            thinclaw_types::ToolInvocationId::from_provider(&tc.id),
                                         name: tc.name.clone(),
                                         success: result.is_ok(),
                                         result_preview: result.as_ref().ok().map(|output| {
@@ -598,6 +619,7 @@ impl Agent {
                                                 500,
                                             )
                                         }),
+                                        duration_ms: None,
                                     },
                                     &metadata,
                                 )
@@ -681,6 +703,9 @@ impl Agent {
                             .send_status(
                                 &message.channel,
                                 StatusUpdate::ToolResult {
+                                    invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                        &tc.id,
+                                    ),
                                     name: tc.name.clone(),
                                     preview: output.sanitized_content.clone(),
                                     artifacts: output.artifacts.clone(),

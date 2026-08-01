@@ -27,7 +27,8 @@ use thinclaw::{
         web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_channels_command, run_gateway_command, run_identity_command,
+        ChannelSelectionArg, Cli, CliContext, CliContextOptions, CliDispatch, CliOutcome, Command,
+        ResolvedRuntimeArgs, run_channels_command, run_gateway_command, run_identity_command,
         run_mcp_command, run_pairing_command, run_reset_command, run_secrets_command,
         run_status_command, run_tool_command, run_trajectory_command,
     },
@@ -60,10 +61,38 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     let env_bootstrap_plan = RuntimeEnvBootstrapPlan::for_command(command_intent);
     let mut runtime_entry_mode = command_intent.initial_entry_mode();
 
+    // Parser information exits inside Clap before this point. Every executable
+    // invocation applies its intent-specific bootstrap exactly once before
+    // context construction, configuration loading, or dispatch.
+    execute_env_bootstrap_plan(env_bootstrap_plan);
+    let cli_context = CliContext::resolve(CliContextOptions {
+        output_format: cli.output_format,
+        color: cli.color,
+        quiet: cli.quiet,
+        verbose: cli.verbose,
+        debug: cli.debug,
+        config_path: cli.config.clone(),
+    })?;
+    let resolved_runtime_args = cli.resolve_runtime_args()?;
+
     // Terminal CLI commands do not need the full agent runtime bootstrap.
-    if let Some(result) = command_dispatch::run_terminal_command(&cli, env_bootstrap_plan).await {
-        return result;
+    match command_dispatch::run_terminal_command(&cli, &cli_context).await? {
+        CliDispatch::Handled(CliOutcome::Success) => return Ok(()),
+        CliDispatch::Handled(CliOutcome::Unhealthy) => {
+            return Err(thinclaw::cli::CliError::unhealthy_reported().into());
+        }
+        CliDispatch::Handled(CliOutcome::Interrupted) => {
+            return Err(thinclaw::cli::CliError::interrupted().into());
+        }
+        CliDispatch::Runtime => {}
     }
+
+    let runtime_args = resolved_runtime_args.unwrap_or(ResolvedRuntimeArgs {
+        no_db: false,
+        skip_setup_check: false,
+        channels: ChannelSelectionArg::Configured,
+        one_shot_message: None,
+    });
 
     match &cli.command {
         Some(Command::Onboard {
@@ -73,8 +102,6 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             ui,
             profile,
         }) => {
-            execute_env_bootstrap_plan(env_bootstrap_plan);
-
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
                 let config = setup_config_for_onboard_command(
@@ -101,7 +128,6 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::AutonomyShadowCanary { manifest }) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             let report = thinclaw::desktop_autonomy::run_shadow_canary_entrypoint(manifest)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -112,20 +138,16 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             );
             return Ok(());
         }
-        None | Some(Command::Run) | Some(Command::Tui) => {}
+        None | Some(Command::Run(_) | Command::Tui(_) | Command::Ask { .. }) => {}
         _ => unreachable!("terminal command should have been dispatched"),
     }
 
     // ── Agent startup ──────────────────────────────────────────────────
 
-    // Load .env files early so DATABASE_URL (and any other vars) are
-    // available to all subsequent env-based config resolution.
-    execute_env_bootstrap_plan(env_bootstrap_plan);
-
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
-    if !cli.no_onboard
-        && let Some(reason) = check_onboard_needed(cli.config.as_deref(), cli.no_db)
+    if !runtime_args.skip_setup_check
+        && let Some(reason) = check_onboard_needed(cli.config.as_deref(), runtime_args.no_db)
     {
         println!("Onboarding needed: {}", reason);
         println!();
@@ -137,7 +159,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     // Load initial config from env + disk + optional TOML (before DB is available)
     let toml_path = cli.config.as_deref();
-    let config = match Config::from_env_with_toml_options(toml_path, !cli.no_db).await {
+    let config = match Config::from_env_with_toml_options(toml_path, !runtime_args.no_db).await {
         Ok(c) => c,
         Err(thinclaw::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
@@ -159,7 +181,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     let entrypoint_plan = RuntimeEntrypointPlan::new(
         runtime_entry_mode,
         config.channels.cli.enabled,
-        cli.message.is_some(),
+        runtime_args.one_shot_message.is_some(),
     );
     let local_runtime_requested = matches!(
         entrypoint_plan.local_channel,
@@ -170,7 +192,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     let mut quiet_startup_spinner = if should_show_quiet_startup_spinner(
         cli.should_run_agent(),
         cli.debug,
-        cli.message.is_some(),
+        runtime_args.one_shot_message.is_some(),
         local_runtime_requested,
         std::env::var_os("RUST_LOG").is_some(),
         std::io::stdin().is_terminal(),
@@ -209,7 +231,9 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     // ── Phase 1-5: Build all core components via AppBuilder ────────────
 
-    let flags = AppBuilderFlags { no_db: cli.no_db };
+    let flags = AppBuilderFlags {
+        no_db: runtime_args.no_db,
+    };
     let mut components = AppBuilder::new(
         config,
         flags,
@@ -467,23 +491,25 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         channels.add_descriptor(descriptor).await;
     }
     let channel_plan = NativeChannelActivationPlan::from_input(NativeChannelActivationInput {
-        cli_only: cli.cli_only,
-        signal_configured: config.channels.signal.is_some(),
+        cli_only: runtime_args.channels.disables_external_ingress(),
+        signal_configured: config.channels.signal.is_some()
+            && runtime_args.channels.allows("signal"),
         nostr_configured: {
             #[cfg(feature = "nostr")]
             {
-                config.channels.nostr.is_some()
+                config.channels.nostr.is_some() && runtime_args.channels.allows("nostr")
             }
             #[cfg(not(feature = "nostr"))]
             {
                 false
             }
         },
-        discord_configured: config.channels.discord.is_some(),
+        discord_configured: config.channels.discord.is_some()
+            && runtime_args.channels.allows("discord"),
         imessage_configured: {
             #[cfg(target_os = "macos")]
             {
-                config.channels.imessage.is_some()
+                config.channels.imessage.is_some() && runtime_args.channels.allows("imessage")
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -493,17 +519,19 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         apple_mail_configured: {
             #[cfg(target_os = "macos")]
             {
-                config.channels.apple_mail.is_some()
+                config.channels.apple_mail.is_some() && runtime_args.channels.allows("apple-mail")
             }
             #[cfg(not(target_os = "macos"))]
             {
                 false
             }
         },
-        bluebubbles_configured: config.channels.bluebubbles.is_some(),
-        gmail_configured: config.channels.gmail.is_some(),
-        http_configured: config.channels.http.is_some(),
-        gateway_configured: config.channels.gateway.is_some(),
+        bluebubbles_configured: config.channels.bluebubbles.is_some()
+            && runtime_args.channels.allows("bluebubbles"),
+        gmail_configured: config.channels.gmail.is_some() && runtime_args.channels.allows("gmail"),
+        http_configured: config.channels.http.is_some() && runtime_args.channels.allows("http"),
+        gateway_configured: config.channels.gateway.is_some()
+            && runtime_args.channels.allows("gateway"),
         wasm_channels_enabled: config.channels.wasm_channels_enabled,
         wasm_channels_dir_exists: config.channels.wasm_channels_dir.exists(),
     });
@@ -543,7 +571,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     match entrypoint_plan.local_channel {
         Some(LocalRuntimeChannel::SingleMessage) => {
-            if let Some(ref msg) = cli.message {
+            if let Some(ref msg) = runtime_args.one_shot_message {
                 channels
                     .add(Box::new(ReplChannel::with_message(msg.clone())))
                     .await;
@@ -567,10 +595,15 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     // Collect webhook route fragments; a single WebhookServer hosts them all.
     let mut webhook_routes: Vec<axum::Router> = Vec::new();
-    if !cli.cli_only {
+    if !runtime_args.channels.disables_external_ingress() {
         webhook_routes.extend(
-            register_native_lifecycle_channels(&config, Arc::clone(&channels), &mut channel_names)
-                .await,
+            register_native_lifecycle_channels(
+                &config,
+                &runtime_args.channels,
+                Arc::clone(&channels),
+                &mut channel_names,
+            )
+            .await,
         );
     }
 
@@ -1204,17 +1237,12 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             }
         }
 
-        let gateway_token_url = format!(
-            "http://{}:{}/?token={}",
-            gw_config.host,
-            gw_config.port,
-            gw.auth_token()
-        );
-        thinclaw::tui::set_runtime_gateway_url_override(Some(gateway_token_url.clone()));
+        let gateway_origin = format!("http://{}:{}/", gw_config.host, gw_config.port);
+        thinclaw::tui::set_runtime_gateway_url_override(Some(gateway_origin.clone()));
 
         #[cfg(feature = "repl")]
         {
-            gateway_url = Some(gateway_token_url);
+            gateway_url = Some(gateway_origin);
         }
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
@@ -1271,12 +1299,12 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             llm_backend: config.llm.backend.to_string(),
             llm_model: boot_llm_model,
             cheap_model: boot_cheap_model,
-            db_backend: if cli.no_db {
+            db_backend: if runtime_args.no_db {
                 "none".to_string()
             } else {
                 config.database.backend.to_string()
             },
-            db_connected: !cli.no_db,
+            db_connected: !runtime_args.no_db,
             tool_count: boot_tool_count,
             gateway_url,
             embeddings_enabled: config.embeddings.enabled,

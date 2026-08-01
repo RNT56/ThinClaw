@@ -77,13 +77,13 @@ fn test_pairing_flow_cli_approve() {
     let (store, _) = test_store();
     store.upsert_request("telegram", "user_999", None).unwrap();
     let pending = store.list_pending("telegram").unwrap();
-    let code = pending[0].code.clone();
+    let request_id = pending[0].request_id.clone();
 
     let result = run_pairing_command_with_store(
         &store,
         PairingCommand::Approve {
             channel: "telegram".to_string(),
-            code,
+            request_id,
             actor: None,
             name: None,
         },
@@ -97,18 +97,18 @@ fn test_pairing_flow_cli_approve() {
 }
 
 #[test]
-fn test_pairing_reject_invalid_code() {
+fn test_pairing_reject_invalid_request_id() {
     let (store, _) = test_store();
     store.upsert_request("telegram", "user_1", None).unwrap();
 
-    let result = store.approve("telegram", "INVALID1");
+    let result = store.approve_request("telegram", "invalid-request");
     assert!(result.unwrap().is_none());
 
     let result = run_pairing_command_with_store(
         &store,
         PairingCommand::Approve {
             channel: "telegram".to_string(),
-            code: "BADCODE1".to_string(),
+            request_id: "bad-request".to_string(),
             actor: None,
             name: None,
         },

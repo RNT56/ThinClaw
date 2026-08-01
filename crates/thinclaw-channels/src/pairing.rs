@@ -50,6 +50,7 @@ pub enum PairingStoreError {
 /// Result of upserting a pairing request.
 #[derive(Debug)]
 pub struct UpsertResult {
+    pub request_id: String,
     pub code: String,
     pub created: bool,
 }
@@ -57,7 +58,12 @@ pub struct UpsertResult {
 /// A pending pairing request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairingRequest {
+    /// Stable operator-facing identifier. This is not an authentication secret.
+    #[serde(default)]
+    pub request_id: String,
     pub id: String,
+    /// Legacy sender-facing secret retained only to read and rewrite old stores.
+    #[serde(default, skip_serializing)]
     pub code: String,
     pub created_at: String,
     pub last_seen_at: String,
@@ -330,7 +336,7 @@ impl PairingStore {
                 requests: Vec::new(),
             });
         };
-        let file: PairingStoreFile = if bytes.iter().all(u8::is_ascii_whitespace) {
+        let mut file: PairingStoreFile = if bytes.iter().all(u8::is_ascii_whitespace) {
             PairingStoreFile {
                 version: 1,
                 requests: Vec::new(),
@@ -343,14 +349,18 @@ impl PairingStore {
                 "pairing request file has an unsupported version or too many entries".to_string(),
             ));
         }
-        for request in &file.requests {
+        for request in &mut file.requests {
+            if request.request_id.is_empty() {
+                request.request_id = request.id.clone();
+            }
             validate_identity(&request.id)?;
-            if request.code.is_empty()
-                || request.code.len() > 16
-                || !request
-                    .code
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric())
+            validate_identity(&request.request_id)?;
+            if (!request.code.is_empty()
+                && (request.code.len() > 16
+                    || !request
+                        .code
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric())))
                 || request.created_at.len() > 64
                 || request.last_seen_at.len() > 64
                 || parse_timestamp(&request.created_at).is_none()
@@ -546,8 +556,10 @@ impl PairingStore {
             if let Some(m) = meta {
                 req.meta = Some(m);
             }
+            let request_id = req.request_id.clone();
             self.write_pairing_requests(channel, &store.requests)?;
             return Ok(UpsertResult {
+                request_id,
                 code,
                 created: false,
             });
@@ -555,13 +567,16 @@ impl PairingStore {
 
         if store.requests.len() >= PAIRING_PENDING_MAX {
             return Ok(UpsertResult {
+                request_id: String::new(),
                 code: String::new(),
                 created: false,
             });
         }
 
         let code = generate_unique_code(&existing_codes);
+        let request_id = uuid::Uuid::new_v4().to_string();
         store.requests.push(PairingRequest {
+            request_id: request_id.clone(),
             id: id.clone(),
             code: code.clone(),
             created_at: now.clone(),
@@ -572,6 +587,7 @@ impl PairingStore {
         self.write_pairing_requests(channel, &store.requests)?;
 
         Ok(UpsertResult {
+            request_id,
             code,
             created: true,
         })
@@ -656,6 +672,62 @@ impl PairingStore {
         self.write_pairing_requests(channel, &store.requests)?;
 
         Ok(Some(entry))
+    }
+
+    /// Approve a pending request by its stable, non-secret request ID.
+    pub fn approve_request(
+        &self,
+        channel: &str,
+        request_id: &str,
+    ) -> Result<Option<PairingRequest>, PairingStoreError> {
+        let request_id = validate_identity(request_id)?;
+        let _lock = self.lock_channel(channel)?;
+
+        if self.is_approve_rate_limited(channel)? {
+            return Err(PairingStoreError::ApproveRateLimited);
+        }
+
+        let path = pairing_path(&self.base_dir, channel)?;
+        if read_bounded_file(&path)?.is_none() {
+            return Err(PairingStoreError::InvalidChannel(
+                "no pairing file".to_string(),
+            ));
+        }
+        let mut store = self.read_pairing_file(channel)?;
+        let before_expiry = store.requests.len();
+        store
+            .requests
+            .retain(|request| !is_expired(request, now_secs()));
+
+        let Some(index) = store
+            .requests
+            .iter()
+            .position(|request| request.request_id == request_id)
+        else {
+            if store.requests.len() != before_expiry {
+                self.write_pairing_requests(channel, &store.requests)?;
+            }
+            self.record_failed_approve(channel)?;
+            return Ok(None);
+        };
+
+        let entry = store.requests.remove(index);
+        self.add_allow_from_unlocked(channel, &entry.id)?;
+        self.write_pairing_requests(channel, &store.requests)?;
+        Ok(Some(entry))
+    }
+
+    /// Find a pending pairing request by stable request ID without mutating state.
+    pub fn find_pending_by_id(
+        &self,
+        channel: &str,
+        request_id: &str,
+    ) -> Result<Option<PairingRequest>, PairingStoreError> {
+        let request_id = validate_identity(request_id)?;
+        Ok(self
+            .list_pending(channel)?
+            .into_iter()
+            .find(|request| request.request_id == request_id))
     }
 
     /// Find a pending pairing request by approval code without mutating state.

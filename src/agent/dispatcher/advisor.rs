@@ -332,11 +332,14 @@ impl Agent {
             }
         }
 
+        let invocation_id = thinclaw_types::ToolInvocationId::from_provider(&tool_call.id);
+        let tool_started_at = std::time::Instant::now();
         let _ = self
             .channels
             .send_status(
                 &message.channel,
                 StatusUpdate::ToolStarted {
+                    invocation_id: invocation_id.clone(),
                     name: tool_call.name.clone(),
                     parameters: Some(tool_call.arguments.clone()),
                 },
@@ -368,12 +371,20 @@ impl Agent {
             .send_status(
                 &message.channel,
                 StatusUpdate::ToolCompleted {
+                    invocation_id: invocation_id.clone(),
                     name: tool_call.name.clone(),
                     success: matches!(
                         envelope.status,
                         crate::tools::builtin::advisor::AdvisorEnvelopeStatus::Ok
                     ),
                     result_preview: Some(truncate_preview(&serialized, 500)),
+                    duration_ms: Some(
+                        tool_started_at
+                            .elapsed()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX),
+                    ),
                 },
                 &message.metadata,
             )
@@ -383,6 +394,7 @@ impl Agent {
             .send_status(
                 &message.channel,
                 StatusUpdate::ToolResult {
+                    invocation_id,
                     name: tool_call.name.clone(),
                     preview: serialized.clone(),
                     artifacts: Vec::new(),

@@ -439,7 +439,6 @@ async fn start_gateway(
             .env("GATEWAY_HOST", &gw_host)
             .env("GATEWAY_PORT", gw_port.to_string())
             .env("CLI_ENABLED", "false")
-            .env("THINCLAW_GATEWAY_INSTANCE_TOKEN", &instance_token)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit());
@@ -484,7 +483,6 @@ async fn start_gateway(
             .env("GATEWAY_HOST", &gw_host)
             .env("GATEWAY_PORT", gw_port.to_string())
             .env("CLI_ENABLED", "false")
-            .env("THINCLAW_GATEWAY_INSTANCE_TOKEN", &instance_token)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());

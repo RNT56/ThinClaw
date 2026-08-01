@@ -487,6 +487,7 @@ async fn test_typing_task_persists_on_tool_started() {
     let _ = channel
         .send_status(
             thinclaw_channels_core::StatusUpdate::ToolStarted {
+                invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-http"),
                 name: "http_request".into(),
                 parameters: None,
             },
@@ -937,6 +938,7 @@ fn test_status_to_wit_tool_started() {
     let metadata = serde_json::json!({"chat_id": 7});
     let wit = status_to_wit(
         &thinclaw_channels_core::StatusUpdate::ToolStarted {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-http"),
             name: "http_request".to_string(),
             parameters: None,
         },
@@ -957,9 +959,11 @@ fn test_status_to_wit_tool_completed_success() {
     let metadata = serde_json::json!(null);
     let wit = status_to_wit(
         &thinclaw_channels_core::StatusUpdate::ToolCompleted {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-http"),
             name: "http_request".to_string(),
             success: true,
             result_preview: None,
+            duration_ms: Some(1),
         },
         &metadata,
     );
@@ -978,9 +982,11 @@ fn test_status_to_wit_tool_completed_failure() {
     let metadata = serde_json::json!(null);
     let wit = status_to_wit(
         &thinclaw_channels_core::StatusUpdate::ToolCompleted {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-http"),
             name: "http_request".to_string(),
             success: false,
             result_preview: None,
+            duration_ms: Some(1),
         },
         &metadata,
     );
@@ -999,6 +1005,7 @@ fn test_status_to_wit_tool_result() {
     let metadata = serde_json::json!(null);
     let wit = status_to_wit(
         &thinclaw_channels_core::StatusUpdate::ToolResult {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-http"),
             name: "http_request".to_string(),
             preview: "{".to_string() + "\"temperature\": 22}",
             artifacts: Vec::new(),
@@ -1021,6 +1028,7 @@ fn test_status_to_wit_tool_result_truncates_preview() {
     let long_preview = "x".repeat(400);
     let wit = status_to_wit(
         &thinclaw_channels_core::StatusUpdate::ToolResult {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-big"),
             name: "big_tool".to_string(),
             preview: long_preview,
             artifacts: Vec::new(),

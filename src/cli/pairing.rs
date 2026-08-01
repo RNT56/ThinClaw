@@ -116,22 +116,22 @@ pub enum PairingCommand {
         json: bool,
     },
 
-    /// Approve a pairing request by code
+    /// Approve a pairing request by stable request ID
     Approve {
         /// Channel name (e.g., telegram, slack)
         #[arg(required = true)]
         channel: String,
 
-        /// Pairing code (e.g., ABC12345)
+        /// Stable pending-request ID shown by `list`
         #[arg(required = true)]
-        code: String,
+        request_id: String,
 
         /// Existing actor ID to link this endpoint to
-        #[arg(long)]
+        #[arg(long, conflicts_with = "name")]
         actor: Option<String>,
 
         /// Create a new actor with this display name and link the endpoint
-        #[arg(long)]
+        #[arg(long, conflicts_with = "actor")]
         name: Option<String>,
     },
 
@@ -193,7 +193,7 @@ pub fn run_pairing_command_with_store(
         PairingCommand::List { channel, json } => run_list(store, &channel, json),
         PairingCommand::Approve {
             channel,
-            code,
+            request_id,
             actor,
             name,
         } => {
@@ -203,7 +203,7 @@ pub fn run_pairing_command_with_store(
                         .to_string(),
                 );
             }
-            run_approve(store, &channel, &code)
+            run_approve(store, &channel, &request_id)
         }
         PairingCommand::Block { channel, sender } => run_block(store, &channel, &sender),
         PairingCommand::Unblock { channel, sender } => run_unblock(store, &channel, &sender),
@@ -220,10 +220,13 @@ async fn run_pairing_command_with_store_and_db(
         PairingCommand::List { channel, json } => run_list(store, &channel, json),
         PairingCommand::Approve {
             channel,
-            code,
+            request_id,
             actor,
             name,
-        } => run_approve_with_identity(store, db.as_deref(), &channel, &code, actor, name).await,
+        } => {
+            run_approve_with_identity(store, db.as_deref(), &channel, &request_id, actor, name)
+                .await
+        }
         PairingCommand::Block { channel, sender } => run_block(store, &channel, &sender),
         PairingCommand::Unblock { channel, sender } => run_unblock(store, &channel, &sender),
         PairingCommand::Blocked { channel, json } => run_blocked(store, &channel, json),
@@ -234,9 +237,21 @@ fn run_list(store: &PairingStore, channel: &str, json: bool) -> Result<(), Strin
     let requests = store.list_pending(channel).map_err(|e| e.to_string())?;
 
     if json {
+        let views = requests
+            .iter()
+            .map(|request| {
+                serde_json::json!({
+                    "request_id": request.request_id,
+                    "sender_id": request.id,
+                    "meta": request.meta,
+                    "created_at": request.created_at,
+                    "last_seen_at": request.last_seen_at,
+                })
+            })
+            .collect::<Vec<_>>();
         println!(
             "{}",
-            serde_json::to_string_pretty(&requests).map_err(|e| e.to_string())?
+            serde_json::to_string_pretty(&views).map_err(|e| e.to_string())?
         );
         return Ok(());
     }
@@ -259,21 +274,21 @@ fn run_list(store: &PairingStore, channel: &str, json: bool) -> Result<(), Strin
                     .join(", ")
             })
             .unwrap_or_default();
-        println!("  {}  {}  {}  {}", r.code, r.id, meta, r.created_at);
+        println!("  {}  {}  {}  {}", r.request_id, r.id, meta, r.created_at);
     }
 
     Ok(())
 }
 
-fn run_approve(store: &PairingStore, channel: &str, code: &str) -> Result<(), String> {
-    match store.approve(channel, code) {
+fn run_approve(store: &PairingStore, channel: &str, request_id: &str) -> Result<(), String> {
+    match store.approve_request(channel, request_id) {
         Ok(Some(entry)) => {
             println!("Approved {} sender {}.", channel, entry.id);
             Ok(())
         }
         Ok(None) => Err(format!(
-            "No pending pairing request found for code: {}",
-            code
+            "No pending pairing request found for ID: {}",
+            request_id
         )),
         Err(crate::pairing::PairingStoreError::ApproveRateLimited) => Err(
             "Too many failed approve attempts. Wait a few minutes before trying again.".to_string(),
@@ -286,7 +301,7 @@ async fn run_approve_with_identity<T>(
     store: &PairingStore,
     db: Option<&T>,
     channel: &str,
-    code: &str,
+    request_id: &str,
     actor_id: Option<String>,
     display_name: Option<String>,
 ) -> Result<(), String>
@@ -294,16 +309,16 @@ where
     T: PairingIdentityDb + ?Sized,
 {
     if actor_id.is_none() && display_name.is_none() {
-        return run_approve(store, channel, code);
+        return run_approve(store, channel, request_id);
     }
 
     let db =
         db.ok_or_else(|| "Identity linking requires a configured database backend.".to_string())?;
 
     let pending_entry = store
-        .find_pending_by_code(channel, code)
+        .find_pending_by_id(channel, request_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("No pending pairing request found for code: {}", code))?;
+        .ok_or_else(|| format!("No pending pairing request found for ID: {}", request_id))?;
 
     let endpoint_id = pending_entry
         .meta
@@ -352,12 +367,12 @@ where
         )
     };
 
-    let approved_entry = match store.approve(channel, code) {
+    let approved_entry = match store.approve_request(channel, request_id) {
         Ok(Some(entry)) => entry,
         Ok(None) => {
             return Err(format!(
-                "No pending pairing request found for code: {}",
-                code
+                "No pending pairing request found for ID: {}",
+                request_id
             ));
         }
         Err(crate::pairing::PairingStoreError::ApproveRateLimited) => {
@@ -720,16 +735,16 @@ mod tests {
     }
 
     #[test]
-    fn test_approve_invalid_code_returns_err() {
+    fn test_approve_invalid_request_id_returns_err() {
         let (store, _) = test_store();
-        // Create a pending request so the pairing file exists, then approve with wrong code
+        // Create a pending request so the pairing file exists, then approve a wrong ID.
         store.upsert_request("telegram", "user1", None).unwrap();
 
         let result = run_pairing_command_with_store(
             &store,
             PairingCommand::Approve {
                 channel: "telegram".to_string(),
-                code: "BADCODE1".to_string(),
+                request_id: uuid::Uuid::new_v4().to_string(),
                 actor: None,
                 name: None,
             },
@@ -739,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn test_approve_valid_code_returns_ok() {
+    fn test_approve_valid_request_id_returns_ok() {
         let (store, _) = test_store();
         let r = store.upsert_request("telegram", "user1", None).unwrap();
         assert!(r.created);
@@ -748,7 +763,7 @@ mod tests {
             &store,
             PairingCommand::Approve {
                 channel: "telegram".to_string(),
-                code: r.code,
+                request_id: r.request_id,
                 actor: None,
                 name: None,
             },
@@ -789,7 +804,7 @@ mod tests {
             &store,
             Some(&db),
             "telegram",
-            &request.code,
+            &request.request_id,
             None,
             Some("Alex".to_string()),
         )
@@ -805,7 +820,7 @@ mod tests {
         let pending = store.list_pending("telegram").unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, "sender-42");
-        assert_eq!(pending[0].code, request.code);
+        assert_eq!(pending[0].request_id, request.request_id);
 
         let allow = store.read_allow_from("telegram").unwrap();
         assert!(

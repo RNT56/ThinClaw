@@ -197,11 +197,21 @@ impl TuiApp {
     }
 
     fn render_input(&mut self, frame: &mut Frame, area: Rect) {
-        let (border_style, title) = if self.pending_approval {
+        let (border_style, title) = if let Some(prompt) = self.pending_approvals.front() {
+            let age = prompt.received_at.elapsed().as_secs();
+            let detail = format!(
+                "{} — {} • args {}B • {}s • {}",
+                prompt.tool_name,
+                prompt.description,
+                prompt.redacted_parameters.len(),
+                age,
+                prompt.request_id
+            );
+            let detail = detail.chars().take(72).collect::<String>();
             (
                 self.skin.warn_style(),
                 format!(
-                    " Approval pending — yes/no/always ({}) ",
+                    " Approval: {detail} — yes/no/always ({}) ",
                     self.skin.prompt_symbol()
                 ),
             )
@@ -224,7 +234,7 @@ impl TuiApp {
     fn render_status(&self, frame: &mut Frame, area: Rect) {
         let indicator_spans = if self.active_stream.is_some() {
             self.spinner.to_spans(&self.skin)
-        } else if self.pending_approval {
+        } else if !self.pending_approvals.is_empty() {
             vec![Span::styled("⚠ ", self.skin.warn_style().bold())]
         } else {
             vec![Span::styled("○ ", self.skin.border_soft_style())]
@@ -351,10 +361,14 @@ impl TuiApp {
                     ]));
                 }
                 ChatMessage::ToolCall {
+                    invocation_id,
                     name,
                     args,
                     result,
                     is_error,
+                    completed,
+                    duration_ms,
+                    artifact_count,
                 } => {
                     let tool_label = self.skin.tool_label(name);
                     let header_style = if *is_error {
@@ -365,6 +379,10 @@ impl TuiApp {
                     lines.push(Line::from(vec![
                         Span::styled("╭ ", header_style),
                         Span::styled(format!("tool {tool_label}"), header_style),
+                        Span::styled(
+                            format!(" · {}", invocation_id.as_str()),
+                            self.skin.muted_style(),
+                        ),
                     ]));
                     if !args.is_empty() {
                         lines.push(Line::from(vec![
@@ -397,7 +415,21 @@ impl TuiApp {
                     }
                     lines.push(Line::from(vec![
                         Span::styled("╰", self.skin.border_soft_style()),
-                        Span::styled(" tool complete ", self.skin.muted_style()),
+                        Span::styled(
+                            format!(
+                                " {}{}{} ",
+                                if *completed { "complete" } else { "running" },
+                                duration_ms
+                                    .map(|duration| format!(" · {duration}ms"))
+                                    .unwrap_or_default(),
+                                if *artifact_count > 0 {
+                                    format!(" · {artifact_count} artifact(s)")
+                                } else {
+                                    String::new()
+                                }
+                            ),
+                            self.skin.muted_style(),
+                        ),
                     ]));
                 }
                 ChatMessage::System { text } => {

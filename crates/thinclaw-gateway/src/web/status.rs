@@ -391,17 +391,36 @@ pub fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String
             message: msg,
             thread_id,
         },
-        StatusUpdate::ToolStarted { name, .. } => SseEvent::ToolStarted { name, thread_id },
-        StatusUpdate::ToolCompleted { name, success, .. } => SseEvent::ToolCompleted {
+        StatusUpdate::ToolStarted {
+            invocation_id,
+            name,
+            ..
+        } => SseEvent::ToolStarted {
+            invocation_id,
+            name,
+            thread_id,
+        },
+        StatusUpdate::ToolCompleted {
+            invocation_id,
             name,
             success,
+            result_preview,
+            duration_ms,
+        } => SseEvent::ToolCompleted {
+            invocation_id,
+            name,
+            success,
+            result_preview,
+            duration_ms,
             thread_id,
         },
         StatusUpdate::ToolResult {
+            invocation_id,
             name,
             preview,
             artifacts,
         } => SseEvent::ToolResult {
+            invocation_id,
             name,
             preview,
             artifacts,

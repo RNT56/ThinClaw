@@ -8,12 +8,12 @@
 //! - Input history (up/down arrows)
 //! - Scroll (PageUp/PageDown)
 //! - Ctrl+C: abort active run / double-tap to exit
-//! - Local shell via `!` prefix
 
 mod rendering;
 pub mod skin;
 pub mod spinner;
 
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
@@ -27,25 +27,34 @@ use ratatui::prelude::*;
 use ratatui_textarea::{Input, Key, TextArea};
 use tokio::sync::mpsc;
 
-use crate::platform::shell_launcher;
 use crate::settings::Settings;
 use crate::tui::skin::CliSkin;
 use crate::tui::spinner::KawaiiSpinner;
-pub use thinclaw_channels::tui::{TuiEvent, TuiUpdate};
+pub use thinclaw_channels::tui::{TuiApprovalDecision, TuiEvent, TuiUpdate};
 
 static RUNTIME_GATEWAY_URL_OVERRIDE: RwLock<Option<String>> = RwLock::new(None);
 
 /// Set or clear a runtime-resolved Web UI URL override for the TUI startup card.
 ///
-/// This is used by the host runtime to inject the live gateway URL that includes
-/// the effective auth token (which may be generated at startup and therefore not
-/// available in settings/env at render time).
+/// Only a credential-free origin is retained. Userinfo, query parameters, and
+/// fragments are discarded before the value can reach terminal-visible output.
 pub fn set_runtime_gateway_url_override(url: Option<String>) {
     if let Ok(mut guard) = RUNTIME_GATEWAY_URL_OVERRIDE.write() {
-        *guard = url
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
+        *guard = url.and_then(|value| credential_free_gateway_url(&value));
     }
+}
+
+fn credential_free_gateway_url(value: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(value.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return None;
+    }
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.set_path("/");
+    Some(parsed.to_string())
 }
 
 fn runtime_gateway_url_override() -> Option<String> {
@@ -82,10 +91,14 @@ pub enum ChatMessage {
         text: String,
     },
     ToolCall {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
         args: String,
         result: Option<String>,
         is_error: bool,
+        completed: bool,
+        duration_ms: Option<u64>,
+        artifact_count: usize,
     },
     /// Structured note from the agent (warning, question, interim_result).
     AgentNote {
@@ -111,6 +124,15 @@ enum KeyAction {
 struct StreamState {
     content_text: String,
     thinking_text: String,
+}
+
+#[derive(Debug)]
+struct ApprovalPrompt {
+    request_id: String,
+    tool_name: String,
+    description: String,
+    redacted_parameters: String,
+    received_at: Instant,
 }
 
 impl StreamState {
@@ -157,8 +179,10 @@ pub struct TuiApp {
     last_ctrl_c: Option<Instant>,
     /// Exit requested by a slash command.
     pending_exit: bool,
-    /// Whether an approval prompt is awaiting a yes/no/always response.
-    pending_approval: bool,
+    /// Ordered pending approvals, preserving the runtime request identity.
+    pending_approvals: VecDeque<ApprovalPrompt>,
+    /// Message index for each tool invocation so interleaved events update correctly.
+    tool_activity: HashMap<thinclaw_types::ToolInvocationId, usize>,
     /// Channel for sending user messages out.
     outgoing_tx: mpsc::Sender<TuiEvent>,
     /// Channel for receiving status updates.
@@ -205,7 +229,8 @@ impl TuiApp {
             show_thinking: true,
             last_ctrl_c: None,
             pending_exit: false,
-            pending_approval: false,
+            pending_approvals: VecDeque::new(),
+            tool_activity: HashMap::new(),
             outgoing_tx,
             incoming_rx,
             total_chat_lines: 0,
@@ -279,6 +304,7 @@ impl TuiApp {
                         if let Event::Key(key) = event::read()? {
                             match self.handle_key(key) {
                                 KeyAction::Exit => {
+                                    self.deny_pending_approvals().await;
                                     let _ = self.outgoing_tx.send(TuiEvent::Exit).await;
                                     return Ok(());
                                 }
@@ -470,37 +496,46 @@ impl TuiApp {
         if text.starts_with('/') {
             self.handle_slash_command(text).await;
             if self.pending_exit {
+                self.deny_pending_approvals().await;
                 let _ = self.outgoing_tx.send(TuiEvent::Exit).await;
             }
             return;
         }
 
-        // Local shell
+        // Raw shell escape was intentionally removed. Do not reinterpret it as chat.
         if text.starts_with('!') {
             self.handle_bang_line(text).await;
             return;
         }
 
         // Check for approval response when approval is pending
-        if self.pending_approval {
+        if let Some(prompt) = self.pending_approvals.front() {
             let lower = text.trim().to_ascii_lowercase();
             if matches!(lower.as_str(), "yes" | "y" | "no" | "n" | "always" | "a") {
-                self.pending_approval = false;
-                let label = match lower.as_str() {
-                    "yes" | "y" => "Approved",
-                    "no" | "n" => "Denied",
-                    "always" | "a" => "Approved for session",
-                    _ => "Responded",
+                let decision = match lower.as_str() {
+                    "yes" | "y" => TuiApprovalDecision::ApproveOnce,
+                    "always" | "a" => TuiApprovalDecision::ApproveForSession,
+                    _ => TuiApprovalDecision::Deny,
                 };
-                self.push_info(label);
-                let _ = self
+                let request_id = prompt.request_id.clone();
+                if self
                     .outgoing_tx
-                    .send(TuiEvent::UserMessage(text.to_string()))
-                    .await;
+                    .send(TuiEvent::ApprovalResponse {
+                        request_id,
+                        decision,
+                    })
+                    .await
+                    .is_ok()
+                {
+                    self.pending_approvals.pop_front();
+                    self.push_info(match decision {
+                        TuiApprovalDecision::ApproveOnce => "Approved once",
+                        TuiApprovalDecision::ApproveForSession => "Approved for this tool/session",
+                        TuiApprovalDecision::Deny => "Denied",
+                    });
+                }
                 return;
             }
-            // Non-approval text clears the approval state
-            self.pending_approval = false;
         }
 
         // Regular message → send to agent
@@ -544,31 +579,92 @@ impl TuiApp {
                     stream.thinking_text = text;
                 }
             }
-            TuiUpdate::ToolStarted { name } => {
+            TuiUpdate::ToolStarted {
+                invocation_id,
+                name,
+                parameters,
+            } => {
+                if self.tool_activity.contains_key(&invocation_id) {
+                    self.push_warning(format!("Duplicate tool start ignored: {invocation_id}"));
+                    return;
+                }
+                let args = parameters
+                    .as_ref()
+                    .map(redact_and_bound_parameters)
+                    .unwrap_or_default();
+                let index = self.messages.len();
                 self.messages.push(ChatMessage::ToolCall {
+                    invocation_id: invocation_id.clone(),
                     name: name.clone(),
-                    args: String::new(),
+                    args,
                     result: None,
                     is_error: false,
+                    completed: false,
+                    duration_ms: None,
+                    artifact_count: 0,
                 });
+                self.tool_activity.insert(invocation_id, index);
                 self.status_text = format!("Inspecting tool: {}", self.skin.tool_label(&name));
             }
-            TuiUpdate::ToolResult {
+            TuiUpdate::ToolOutput {
+                invocation_id,
                 name,
-                result,
-                is_error,
+                preview,
+                artifacts,
             } => {
-                // Update the last tool call message
+                let Some(index) = self.tool_activity.get(&invocation_id).copied() else {
+                    self.push_warning(format!(
+                        "Tool output arrived for unknown invocation {invocation_id} ({name})"
+                    ));
+                    return;
+                };
                 if let Some(ChatMessage::ToolCall {
-                    result: r,
-                    is_error: e,
+                    result,
+                    artifact_count,
                     ..
-                }) = self.messages.last_mut()
+                }) = self.messages.get_mut(index)
                 {
-                    *r = Some(result);
-                    *e = is_error;
+                    *result = Some(bound_preview(&preview));
+                    *artifact_count = artifacts.len();
                 }
-                self.status_text = format!("Tool {} finished", self.skin.tool_label(&name));
+                self.status_text = format!("Tool {} produced output", self.skin.tool_label(&name));
+            }
+            TuiUpdate::ToolCompleted {
+                invocation_id,
+                name,
+                success,
+                result_preview,
+                duration_ms,
+            } => {
+                let Some(index) = self.tool_activity.get(&invocation_id).copied() else {
+                    self.push_warning(format!(
+                        "Tool completion arrived for unknown invocation {invocation_id} ({name})"
+                    ));
+                    return;
+                };
+                if let Some(ChatMessage::ToolCall {
+                    result,
+                    is_error,
+                    completed,
+                    duration_ms: stored_duration,
+                    ..
+                }) = self.messages.get_mut(index)
+                {
+                    if *completed {
+                        return;
+                    }
+                    if result.is_none() {
+                        *result = result_preview.as_deref().map(bound_preview);
+                    }
+                    *is_error = !success;
+                    *completed = true;
+                    *stored_duration = duration_ms;
+                }
+                self.status_text = format!(
+                    "Tool {} {}",
+                    self.skin.tool_label(&name),
+                    if success { "succeeded" } else { "failed" }
+                );
             }
             TuiUpdate::Response(text) => {
                 // Finalize the stream
@@ -598,13 +694,31 @@ impl TuiApp {
                 self.model = model;
             }
             TuiUpdate::ApprovalNeeded {
+                request_id,
                 tool_name,
                 description,
+                parameters,
             } => {
-                self.pending_approval = true;
+                if self
+                    .pending_approvals
+                    .iter()
+                    .any(|prompt| prompt.request_id == request_id)
+                {
+                    self.push_warning(format!("Duplicate approval request ignored: {request_id}"));
+                    return;
+                }
+                let redacted_parameters = redact_and_bound_parameters(&parameters);
+                self.pending_approvals.push_back(ApprovalPrompt {
+                    request_id: request_id.clone(),
+                    tool_name: tool_name.clone(),
+                    description: description.clone(),
+                    redacted_parameters: redacted_parameters.clone(),
+                    received_at: Instant::now(),
+                });
                 self.messages.push(ChatMessage::Warning {
                     text: format!(
-                        "Approval needed: {tool_name} — {description}\n\
+                        "Approval needed [{request_id}]: {tool_name} — {description}\n\
+                         Arguments: {redacted_parameters}\n\
                          Type yes (y) / no (n) / always (a) to respond.",
                     ),
                 });
@@ -763,6 +877,7 @@ impl TuiApp {
                 ));
             }
             "/interrupt" => {
+                self.deny_pending_approvals().await;
                 let _ = self.outgoing_tx.send(TuiEvent::Abort).await;
                 self.active_stream = None;
                 self.status_text = "Interrupted".to_string();
@@ -793,48 +908,21 @@ impl TuiApp {
         }
     }
 
-    async fn handle_bang_line(&mut self, line: &str) {
-        let cmd = &line[1..];
-        if cmd.is_empty() {
-            return;
-        }
+    async fn handle_bang_line(&mut self, _line: &str) {
+        self.push_warning(
+            "Raw shell escape was removed. Use an approved ThinClaw tool or a separate terminal.",
+        );
+    }
 
-        self.messages.push(ChatMessage::System {
-            text: format!("$ {cmd}"),
-        });
-        self.scroll_offset = u16::MAX;
-
-        let mut command = shell_launcher().tokio_command(cmd);
-        match thinclaw_platform::bounded_command_output(
-            &mut command,
-            std::time::Duration::from_secs(10 * 60),
-            4 * 1024 * 1024,
-            4 * 1024 * 1024,
-        )
-        .await
-        {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let combined = format!("{stdout}{stderr}");
-                let truncated: String = combined.lines().take(50).collect::<Vec<_>>().join("\n");
-
-                if !truncated.is_empty() {
-                    self.messages.push(ChatMessage::System { text: truncated });
-                    self.scroll_offset = u16::MAX;
-                }
-
-                self.messages.push(ChatMessage::System {
-                    text: format!("exit {}", output.status.code().unwrap_or(-1)),
-                });
-                self.scroll_offset = u16::MAX;
-            }
-            Err(e) => {
-                self.messages.push(ChatMessage::Error {
-                    text: format!("Shell error: {e}"),
-                });
-                self.scroll_offset = u16::MAX;
-            }
+    async fn deny_pending_approvals(&mut self) {
+        while let Some(prompt) = self.pending_approvals.pop_front() {
+            let _ = self
+                .outgoing_tx
+                .send(TuiEvent::ApprovalResponse {
+                    request_id: prompt.request_id,
+                    decision: TuiApprovalDecision::Deny,
+                })
+                .await;
         }
     }
 
@@ -935,6 +1023,56 @@ impl TuiApp {
     // Rendering methods are in tui/rendering.rs
 }
 
+fn redact_and_bound_parameters(parameters: &serde_json::Value) -> String {
+    fn redact(value: &serde_json::Value, key: Option<&str>) -> serde_json::Value {
+        let sensitive_key = key.is_some_and(|key| {
+            let key = key.to_ascii_lowercase();
+            ["token", "secret", "password", "api_key", "authorization"]
+                .iter()
+                .any(|needle| key.contains(needle))
+        });
+        if sensitive_key {
+            return serde_json::Value::String("[REDACTED]".to_string());
+        }
+        match value {
+            serde_json::Value::Object(map) => serde_json::Value::Object(
+                map.iter()
+                    .map(|(key, value)| (key.clone(), redact(value, Some(key))))
+                    .collect(),
+            ),
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.iter().map(|value| redact(value, None)).collect())
+            }
+            _ => value.clone(),
+        }
+    }
+
+    const MAX_PARAMETER_PREVIEW_BYTES: usize = 8 * 1024;
+    let rendered = serde_json::to_string(&redact(parameters, None))
+        .unwrap_or_else(|_| "[unavailable]".to_string());
+    if rendered.len() <= MAX_PARAMETER_PREVIEW_BYTES {
+        rendered
+    } else {
+        let mut boundary = MAX_PARAMETER_PREVIEW_BYTES;
+        while !rendered.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        format!("{}… [truncated]", &rendered[..boundary])
+    }
+}
+
+fn bound_preview(preview: &str) -> String {
+    const MAX_PREVIEW_BYTES: usize = 8 * 1024;
+    if preview.len() <= MAX_PREVIEW_BYTES {
+        return preview.to_string();
+    }
+    let mut boundary = MAX_PREVIEW_BYTES;
+    while !preview.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    format!("{}… [truncated]", &preview[..boundary])
+}
+
 fn build_startup_message(settings: &Settings) -> String {
     let mut lines = vec![
         "ThinClaw cockpit online. Type /help for controls, or send a message to begin.".to_string(),
@@ -964,16 +1102,7 @@ fn runtime_access_lines(settings: &Settings) -> Vec<String> {
         if let Some(url) = runtime_gateway_url_override() {
             lines.push(format!("Web UI: {url}"));
         } else {
-            let gateway_token = std::env::var("GATEWAY_AUTH_TOKEN")
-                .ok()
-                .or_else(|| settings.channels.gateway_auth_token.clone())
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-            if let Some(token) = gateway_token {
-                lines.push(format!("Web UI: {base_url}?token={token}"));
-            } else {
-                lines.push(format!("Web UI: {base_url}"));
-            }
+            lines.push(format!("Web UI: {base_url}"));
         }
     }
 
@@ -1081,6 +1210,117 @@ mod tests {
         assert_eq!(app.status_text, "Closed last detail card");
     }
 
+    #[tokio::test]
+    async fn bang_input_is_rejected_without_forwarding() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (_update_tx, update_rx) = mpsc::channel(4);
+        let mut app = TuiApp::new(tx, update_rx);
+
+        app.handle_submit("!whoami").await;
+
+        assert!(matches!(
+            app.messages.last(),
+            Some(ChatMessage::Warning { text })
+                if text.contains("Raw shell escape was removed")
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn approval_is_id_bound_and_unrelated_text_does_not_dismiss_it() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (_update_tx, update_rx) = mpsc::channel(4);
+        let mut app = TuiApp::new(tx, update_rx);
+        app.handle_update(TuiUpdate::ApprovalNeeded {
+            request_id: "request-123".to_string(),
+            tool_name: "shell".to_string(),
+            description: "run a command".to_string(),
+            parameters: serde_json::json!({
+                "command": "pwd",
+                "api_token": "top-secret"
+            }),
+        });
+
+        assert_eq!(app.pending_approvals.len(), 1);
+        assert!(
+            app.pending_approvals[0]
+                .redacted_parameters
+                .contains("[REDACTED]")
+        );
+        assert!(
+            !app.pending_approvals[0]
+                .redacted_parameters
+                .contains("top-secret")
+        );
+
+        app.handle_submit("please wait").await;
+        assert_eq!(app.pending_approvals.len(), 1);
+        assert!(matches!(
+            rx.recv().await,
+            Some(TuiEvent::UserMessage(text)) if text == "please wait"
+        ));
+
+        app.handle_submit("always").await;
+        assert!(app.pending_approvals.is_empty());
+        assert!(matches!(
+            rx.recv().await,
+            Some(TuiEvent::ApprovalResponse {
+                request_id,
+                decision: TuiApprovalDecision::ApproveForSession,
+            }) if request_id == "request-123"
+        ));
+    }
+
+    #[test]
+    fn interleaved_tool_events_update_their_matching_cards() {
+        let (tx, _rx) = mpsc::channel(8);
+        let (_update_tx, update_rx) = mpsc::channel(4);
+        let mut app = TuiApp::new(tx, update_rx);
+        let first = thinclaw_types::ToolInvocationId::from_provider("first");
+        let second = thinclaw_types::ToolInvocationId::from_provider("second");
+
+        for (id, name) in [(first.clone(), "one"), (second.clone(), "two")] {
+            app.handle_update(TuiUpdate::ToolStarted {
+                invocation_id: id,
+                name: name.to_string(),
+                parameters: Some(serde_json::json!({"value": name})),
+            });
+        }
+        app.handle_update(TuiUpdate::ToolOutput {
+            invocation_id: first.clone(),
+            name: "one".to_string(),
+            preview: "first output".to_string(),
+            artifacts: Vec::new(),
+        });
+        app.handle_update(TuiUpdate::ToolCompleted {
+            invocation_id: second.clone(),
+            name: "two".to_string(),
+            success: false,
+            result_preview: Some("second failed".to_string()),
+            duration_ms: Some(20),
+        });
+        app.handle_update(TuiUpdate::ToolCompleted {
+            invocation_id: first.clone(),
+            name: "one".to_string(),
+            success: true,
+            result_preview: None,
+            duration_ms: Some(10),
+        });
+
+        let first_index = app.tool_activity[&first];
+        let second_index = app.tool_activity[&second];
+        assert!(matches!(
+            &app.messages[first_index],
+            ChatMessage::ToolCall { result: Some(result), is_error: false, completed: true, .. }
+                if result == "first output"
+        ));
+        assert!(matches!(
+            &app.messages[second_index],
+            ChatMessage::ToolCall { result: Some(result), is_error: true, completed: true, .. }
+                if result == "second failed"
+        ));
+    }
+
     #[test]
     fn test_runtime_access_lines_include_webui_and_tunnel() {
         let _guard = lock_env();
@@ -1097,8 +1337,9 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "Web UI: http://127.0.0.1:3100/?token=abc123")
+                .any(|line| line == "Web UI: http://127.0.0.1:3100/")
         );
+        assert!(!lines.iter().any(|line| line.contains("abc123")));
         assert!(
             lines
                 .iter()
@@ -1154,8 +1395,9 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "Web UI: http://127.0.0.1:3100/?token=runtime-token")
+                .any(|line| line == "Web UI: http://127.0.0.1:3100/")
         );
+        assert!(!lines.iter().any(|line| line.contains("runtime-token")));
         assert!(!lines.iter().any(|line| line.contains("env-token")));
         unsafe {
             std::env::remove_var("GATEWAY_ENABLED");

@@ -6,9 +6,7 @@
 
 use clap::Subcommand;
 
-use crate::terminal_branding::TerminalBranding;
-
-const MAX_GATEWAY_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+use crate::cli::{CliContext, GatewayClient};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum MessageCommand {
@@ -29,13 +27,13 @@ pub enum MessageCommand {
 }
 
 /// Run a message command.
-pub async fn run_message_command(cmd: MessageCommand) -> anyhow::Result<()> {
+pub async fn run_message_command(cmd: MessageCommand, context: &CliContext) -> anyhow::Result<()> {
     match cmd {
         MessageCommand::Send {
             text,
             user_id,
             gateway_url,
-        } => send_message(text, user_id, gateway_url).await,
+        } => send_message(text, user_id, gateway_url, context).await,
     }
 }
 
@@ -44,76 +42,42 @@ async fn send_message(
     text: String,
     user_id: String,
     gateway_url: Option<String>,
+    context: &CliContext,
 ) -> anyhow::Result<()> {
-    let branding = TerminalBranding::current();
-    let base_url = gateway_url.unwrap_or_else(|| {
-        // Check env for gateway port
-        let port = std::env::var("GATEWAY_PORT").unwrap_or_else(|_| "3000".to_string());
-        let host = std::env::var("GATEWAY_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-        format!("http://{}:{}", host, port)
-    });
-
-    let url = format!("{}/api/chat/send", base_url);
-
-    // Check for auth token
-    let auth_token = std::env::var("GATEWAY_AUTH_TOKEN").ok();
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .build()?;
-
-    let body = serde_json::json!({
-        "content": text,
-        "user_id": user_id,
-    });
-
-    let mut request = client.post(&url).json(&body);
-
-    if let Some(ref token) = auth_token {
-        request = request.bearer_auth(token);
+    #[derive(serde::Serialize)]
+    struct SendRequest {
+        content: String,
+        user_id: String,
+        client_message_id: uuid::Uuid,
+    }
+    #[derive(Debug, serde::Deserialize, serde::Serialize)]
+    struct SendResult {
+        message_id: uuid::Uuid,
+        status: String,
     }
 
-    branding.print_banner("Message", Some("Inject a prompt through the gateway"));
-    println!("{}", branding.accent(format!("Sending to {}...", url)));
-
-    let response = request.send().await.map_err(|e| {
-        if e.is_connect() {
-            anyhow::anyhow!(
-                "Could not connect to gateway at {}. Is the agent running?\n\
-                 Start with: thinclaw run\n\
-                 Or specify --gateway-url",
-                base_url
-            )
-        } else {
-            anyhow::anyhow!("Request failed: {}", e.without_url())
-        }
+    let settings = crate::settings::Settings::load();
+    let client = GatewayClient::resolve(gateway_url.as_deref(), None, Some(&settings))?;
+    context.output().progress(format!(
+        "Sending through {}...",
+        client.credential_free_origin()
+    ))?;
+    let result: SendResult = client
+        .post_json(
+            "/api/chat/send",
+            &SendRequest {
+                content: text,
+                user_id,
+                client_message_id: uuid::Uuid::new_v4(),
+            },
+        )
+        .await?;
+    context.output().write_record("send", &result, |result| {
+        format!(
+            "Message accepted: {} ({})",
+            result.message_id, result.status
+        )
     })?;
-
-    let status = response.status();
-    let body_text = crate::http_response::bounded_text(response, MAX_GATEWAY_RESPONSE_BYTES)
-        .await
-        .map_err(|error| anyhow::anyhow!("Could not read the gateway response: {error}"))?;
-
-    if status.is_success() {
-        // Try to parse as JSON for pretty output
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body_text) {
-            if let Some(reply) = json.get("response").and_then(|v| v.as_str()) {
-                println!("{}", branding.good("Response received:"));
-                println!("{}", reply);
-            } else {
-                println!("{}", branding.good("Sent successfully. Response:"));
-                println!("{}", serde_json::to_string_pretty(&json)?);
-            }
-        } else {
-            println!("{}", branding.good("Sent successfully. Raw response:"));
-            println!("{}", body_text);
-        }
-    } else {
-        anyhow::bail!("Gateway returned HTTP {}: {}", status.as_u16(), body_text);
-    }
-
     Ok(())
 }
 

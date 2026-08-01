@@ -409,14 +409,12 @@ pub fn validate_gateway_url(gateway_url: &str) -> Result<String, String> {
 
 pub fn build_bootstrap_command(
     gateway_url: &str,
-    auth: &ExperimentLeaseAuthentication,
+    _auth: &ExperimentLeaseAuthentication,
 ) -> Result<String, String> {
     let gateway_url = validate_gateway_url(gateway_url)?;
     Ok(format!(
-        "thinclaw experiment-runner --lease-id {} --gateway-url {} --token {}",
-        auth.lease_id,
-        sh_single_quote(&gateway_url),
-        sh_single_quote(&auth.token)
+        "thinclaw experiment-runner --gateway-url {} --auth-stdin",
+        sh_single_quote(&gateway_url)
     ))
 }
 

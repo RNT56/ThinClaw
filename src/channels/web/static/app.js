@@ -5020,10 +5020,10 @@ function loadPairingRequests(channel, container) {
         const row = document.createElement('div');
         row.className = 'pairing-row';
 
-        const code = document.createElement('span');
-        code.className = 'pairing-code';
-        code.textContent = req.code;
-        row.appendChild(code);
+        const requestId = document.createElement('span');
+        requestId.className = 'pairing-code';
+        requestId.textContent = req.request_id;
+        row.appendChild(requestId);
 
         const sender = document.createElement('span');
         sender.className = 'pairing-sender';
@@ -5033,7 +5033,7 @@ function loadPairingRequests(channel, container) {
         const btn = document.createElement('button');
         btn.className = 'btn-ext activate';
         btn.textContent = 'Approve';
-        btn.addEventListener('click', () => approvePairing(channel, req.code, container));
+        btn.addEventListener('click', () => approvePairing(channel, req.request_id, container));
         row.appendChild(btn);
 
         container.appendChild(row);
@@ -5042,10 +5042,10 @@ function loadPairingRequests(channel, container) {
     .catch(() => {});
 }
 
-function approvePairing(channel, code, container) {
+function approvePairing(channel, requestId, container) {
   apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
     method: 'POST',
-    body: { code },
+    body: { request_id: requestId },
   }).then(res => {
     if (res.success) {
       showToast('Pairing approved', 'success');

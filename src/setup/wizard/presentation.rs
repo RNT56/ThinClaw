@@ -153,9 +153,9 @@ impl SetupWizard {
         if access.is_loopback() {
             print_info(&format!("SSH tunnel: {}", access.ssh_tunnel_command()));
         }
-        if let Some(url) = access.token_url(true) {
-            print_info(&format!("Token URL: {}", url));
-        }
+        print_info(
+            "Gateway credentials are not printed. Use the guarded runtime access command when explicit reveal is required.",
+        );
         print_info(
             "Service handoff: run `thinclaw run --no-onboard`, or install/start the OS service after onboarding.",
         );

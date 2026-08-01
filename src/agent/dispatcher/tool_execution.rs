@@ -299,6 +299,7 @@ impl Agent {
                     .send_status(
                         &message.channel,
                         StatusUpdate::ToolStarted {
+                            invocation_id: thinclaw_types::ToolInvocationId::from_provider(&tc.id),
                             name: tc.name.clone(),
                             parameters: Some(tc.arguments.clone()),
                         },
@@ -341,12 +342,20 @@ impl Agent {
                     .send_status(
                         &message.channel,
                         StatusUpdate::ToolCompleted {
+                            invocation_id: thinclaw_types::ToolInvocationId::from_provider(&tc.id),
                             name: tc.name.clone(),
                             success: result.is_ok(),
                             result_preview: result
                                 .as_ref()
                                 .ok()
                                 .map(|output| truncate_preview(&output.content, 500)),
+                            duration_ms: Some(
+                                tool_started_at
+                                    .elapsed()
+                                    .as_millis()
+                                    .try_into()
+                                    .unwrap_or(u64::MAX),
+                            ),
                         },
                         &message.metadata,
                     )
@@ -360,11 +369,15 @@ impl Agent {
 
             for (pf_idx, tc) in &runnable {
                 if tc.name == crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
+                    let tool_started_at = std::time::Instant::now();
                     let _ = self
                         .channels
                         .send_status(
                             &message.channel,
                             StatusUpdate::ToolStarted {
+                                invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                    &tc.id,
+                                ),
                                 name: tc.name.clone(),
                                 parameters: Some(tc.arguments.clone()),
                             },
@@ -393,12 +406,22 @@ impl Agent {
                         .send_status(
                             &message.channel,
                             StatusUpdate::ToolCompleted {
+                                invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                    &tc.id,
+                                ),
                                 name: tc.name.clone(),
                                 success: result.is_ok(),
                                 result_preview: result
                                     .as_ref()
                                     .ok()
                                     .map(|output| truncate_preview(&output.content, 500)),
+                                duration_ms: Some(
+                                    tool_started_at
+                                        .elapsed()
+                                        .as_millis()
+                                        .try_into()
+                                        .unwrap_or(u64::MAX),
+                                ),
                             },
                             &message.metadata,
                         )
@@ -419,10 +442,14 @@ impl Agent {
                 let main_tool_profile = self.config.main_tool_profile;
 
                 join_set.spawn(async move {
+                    let tool_started_at = std::time::Instant::now();
                     let _ = channels
                         .send_status(
                             &channel,
                             StatusUpdate::ToolStarted {
+                                invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                    &tc.id,
+                                ),
                                 name: tc.name.clone(),
                                 parameters: Some(tc.arguments.clone()),
                             },
@@ -445,12 +472,22 @@ impl Agent {
                         .send_status(
                             &channel,
                             StatusUpdate::ToolCompleted {
+                                invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                    &tc.id,
+                                ),
                                 name: tc.name.clone(),
                                 success: result.is_ok(),
                                 result_preview: result
                                     .as_ref()
                                     .ok()
                                     .map(|output| truncate_preview(&output.content, 500)),
+                                duration_ms: Some(
+                                    tool_started_at
+                                        .elapsed()
+                                        .as_millis()
+                                        .try_into()
+                                        .unwrap_or(u64::MAX),
+                                ),
                             },
                             &metadata,
                         )
@@ -571,18 +608,20 @@ impl Agent {
                     if let Ok(ref output) = tool_result
                         && !output.content.is_empty()
                     {
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::ToolResult {
-                                    name: tc.name.clone(),
-                                    preview: output.content.clone(),
-                                    artifacts: output.artifacts.clone(),
-                                },
-                                &message.metadata,
-                            )
-                            .await;
+                        let _ =
+                            self.channels
+                                .send_status(
+                                    &message.channel,
+                                    StatusUpdate::ToolResult {
+                                        invocation_id:
+                                            thinclaw_types::ToolInvocationId::from_provider(&tc.id),
+                                        name: tc.name.clone(),
+                                        preview: output.content.clone(),
+                                        artifacts: output.artifacts.clone(),
+                                    },
+                                    &message.metadata,
+                                )
+                                .await;
                     }
                     if let Ok(ref output) = tool_result
                         && should_merge_tool_output_attachments(

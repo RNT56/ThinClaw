@@ -14,8 +14,19 @@ use thinclaw_types::error::ChannelError;
 #[derive(Debug)]
 pub enum TuiEvent {
     UserMessage(String),
+    ApprovalResponse {
+        request_id: String,
+        decision: TuiApprovalDecision,
+    },
     Abort,
     Exit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiApprovalDecision {
+    ApproveOnce,
+    ApproveForSession,
+    Deny,
 }
 
 #[derive(Debug, Clone)]
@@ -23,19 +34,31 @@ pub enum TuiUpdate {
     Thinking(String),
     StreamChunk(String),
     ToolStarted {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
+        parameters: Option<serde_json::Value>,
     },
-    ToolResult {
+    ToolOutput {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
-        result: String,
-        is_error: bool,
+        preview: String,
+        artifacts: Vec<thinclaw_tools_core::ToolArtifact>,
+    },
+    ToolCompleted {
+        invocation_id: thinclaw_types::ToolInvocationId,
+        name: String,
+        success: bool,
+        result_preview: Option<String>,
+        duration_ms: Option<u64>,
     },
     Response(String),
     Status(String),
     ModelChanged(String),
     ApprovalNeeded {
+        request_id: String,
         tool_name: String,
         description: String,
+        parameters: serde_json::Value,
     },
     Error(String),
     AgentMessage {
@@ -76,22 +99,39 @@ impl From<StatusUpdate> for TuiUpdate {
         match status {
             StatusUpdate::StreamChunk(chunk) => TuiUpdate::StreamChunk(chunk),
             StatusUpdate::Thinking(text) => TuiUpdate::Thinking(text),
-            StatusUpdate::ToolStarted { name, .. } => TuiUpdate::ToolStarted { name },
-            StatusUpdate::ToolResult { name, preview, .. } => TuiUpdate::ToolResult {
+            StatusUpdate::ToolStarted {
+                invocation_id,
                 name,
-                result: preview,
-                is_error: false,
+                parameters,
+            } => TuiUpdate::ToolStarted {
+                invocation_id,
+                name,
+                parameters,
+            },
+            StatusUpdate::ToolResult {
+                invocation_id,
+                name,
+                preview,
+                artifacts,
+            } => TuiUpdate::ToolOutput {
+                invocation_id,
+                name,
+                preview,
+                artifacts,
             },
             StatusUpdate::ToolCompleted {
+                invocation_id,
                 name,
-                success: false,
-                ..
-            } => TuiUpdate::ToolResult {
+                success,
+                result_preview,
+                duration_ms,
+            } => TuiUpdate::ToolCompleted {
+                invocation_id,
                 name,
-                result: "Failed".to_string(),
-                is_error: true,
+                success,
+                result_preview,
+                duration_ms,
             },
-            StatusUpdate::ToolCompleted { .. } => TuiUpdate::Status("Ready".to_string()),
             StatusUpdate::Status(text) => TuiUpdate::Status(text),
             StatusUpdate::ContextPressure {
                 level,
@@ -129,12 +169,15 @@ impl From<StatusUpdate> for TuiUpdate {
             )),
             StatusUpdate::Error { message, .. } => TuiUpdate::Error(message),
             StatusUpdate::ApprovalNeeded {
+                request_id,
                 tool_name,
                 description,
-                ..
+                parameters,
             } => TuiUpdate::ApprovalNeeded {
+                request_id,
                 tool_name,
                 description,
+                parameters,
             },
             StatusUpdate::AgentMessage {
                 content,
@@ -321,6 +364,24 @@ impl Channel for TuiChannel {
                 };
                 let content = match event {
                     TuiEvent::UserMessage(text) => text,
+                    TuiEvent::ApprovalResponse {
+                        request_id,
+                        decision,
+                    } => {
+                        let (approved, always) = match decision {
+                            TuiApprovalDecision::ApproveOnce => (true, false),
+                            TuiApprovalDecision::ApproveForSession => (true, true),
+                            TuiApprovalDecision::Deny => (false, false),
+                        };
+                        serde_json::json!({
+                            "ExecApproval": {
+                                "request_id": request_id,
+                                "approved": approved,
+                                "always": always,
+                            }
+                        })
+                        .to_string()
+                    }
                     TuiEvent::Abort => "/interrupt".to_string(),
                     TuiEvent::Exit => {
                         sent_shutdown = true;

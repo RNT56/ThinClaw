@@ -97,7 +97,9 @@ async fn agent_env_runner_rejects_malformed_benchmark_config() {
 fn lease_auth() -> ExperimentLeaseAuthentication {
     ExperimentLeaseAuthentication {
         lease_id: Uuid::new_v4(),
-        token: "exp_0123456789ab_0123456789abcdef0123456789abcdef".to_string(),
+        token: "exp_0123456789ab_0123456789abcdef0123456789abcdef"
+            .to_string()
+            .into(),
     }
 }
 
@@ -122,14 +124,17 @@ fn gateway_urls_fail_closed_before_building_bootstrap_commands() {
 }
 
 #[test]
-fn bootstrap_command_shell_quotes_every_variable_argument() {
+fn bootstrap_command_contains_only_origin_and_private_auth_selector() {
     let auth = ExperimentLeaseAuthentication {
         lease_id: Uuid::new_v4(),
-        token: "safe'quoted".to_string(),
+        token: "safe'quoted".to_string().into(),
     };
     let command = build_bootstrap_command("https://gateway.example/base", &auth).unwrap();
     assert!(command.contains("--gateway-url 'https://gateway.example/base'"));
-    assert!(command.contains("--token 'safe'\"'\"'quoted'"));
+    assert!(command.contains("--auth-stdin"));
+    assert!(!command.contains("safe'quoted"));
+    assert!(!command.contains("--token"));
+    assert!(!command.contains("--lease-id"));
 }
 
 #[test]
@@ -196,7 +201,8 @@ fn kubernetes_manifest_quotes_configured_yaml_scalars() {
 
 #[test]
 fn launch_outcome_debug_never_renders_bootstrap_material() {
-    let token = lease_auth().token;
+    let auth = lease_auth();
+    let token = secrecy::ExposeSecret::expose_secret(&auth.token).to_string();
     let outcome = RunnerLaunchOutcome {
         message: "manual".to_string(),
         bootstrap_command: Some(format!("run --token {token}")),

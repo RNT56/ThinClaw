@@ -624,6 +624,7 @@ async fn tool_call_ids_are_unique_and_correlated() {
         &state,
         "sess_test",
         StatusUpdate::ToolStarted {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-first"),
             name: "shell".to_string(),
             parameters: None,
         },
@@ -633,6 +634,7 @@ async fn tool_call_ids_are_unique_and_correlated() {
         &state,
         "sess_test",
         StatusUpdate::ToolStarted {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-second"),
             name: "shell".to_string(),
             parameters: None,
         },
@@ -652,9 +654,11 @@ async fn tool_call_ids_are_unique_and_correlated() {
         &state,
         "sess_test",
         StatusUpdate::ToolCompleted {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-first"),
             name: "shell".to_string(),
             success: true,
             result_preview: Some("ok".to_string()),
+            duration_ms: Some(5),
         },
     )
     .await;
@@ -1015,6 +1019,7 @@ async fn status_updates_round_trip_through_typed_session_update_variants() {
         ),
         (
             StatusUpdate::ToolStarted {
+                invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-shell"),
                 name: "shell".to_string(),
                 parameters: Some(json!({ "command": "true" })),
             },
@@ -1022,6 +1027,7 @@ async fn status_updates_round_trip_through_typed_session_update_variants() {
         ),
         (
             StatusUpdate::ToolResult {
+                invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-shell"),
                 name: "shell".to_string(),
                 preview: "stdout".to_string(),
                 artifacts: Vec::new(),
@@ -1030,9 +1036,11 @@ async fn status_updates_round_trip_through_typed_session_update_variants() {
         ),
         (
             StatusUpdate::ToolCompleted {
+                invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-shell"),
                 name: "shell".to_string(),
                 success: true,
                 result_preview: Some("done".to_string()),
+                duration_ms: Some(1),
             },
             "tool_call_update",
         ),

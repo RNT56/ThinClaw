@@ -695,10 +695,9 @@ impl std::fmt::Debug for ExperimentLease {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
 pub struct ExperimentLeaseAuthentication {
     pub lease_id: Uuid,
-    pub token: String,
+    pub token: secrecy::SecretString,
 }
 
 impl std::fmt::Debug for ExperimentLeaseAuthentication {

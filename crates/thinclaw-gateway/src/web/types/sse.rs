@@ -32,19 +32,26 @@ pub enum SseEvent {
     },
     #[serde(rename = "tool_started")]
     ToolStarted {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_completed")]
     ToolCompleted {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
         success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result_preview: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
         preview: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

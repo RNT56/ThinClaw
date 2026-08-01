@@ -1072,10 +1072,10 @@ pub(crate) fn check_sender_permission(
             Ok(result) => {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!("Pairing request for {}: code {}", sender_phone, result.code),
+                    &format!("Pairing request {} created for {}", result.request_id, sender_phone),
                 );
                 if result.created {
-                    let _ = send_pairing_reply(sender_phone, phone_number_id, &result.code);
+                    let _ = send_pairing_reply(sender_phone, phone_number_id, &result.request_id);
                 }
             }
             Err(e) => {
@@ -1089,11 +1089,11 @@ pub(crate) fn check_sender_permission(
     false
 }
 
-/// Send a pairing code message via WhatsApp Cloud API.
+/// Send a pairing request notice via WhatsApp Cloud API.
 pub(crate) fn send_pairing_reply(
     recipient_phone: &str,
     phone_number_id: &str,
-    code: &str,
+    request_id: &str,
 ) -> Result<(), String> {
     let api_version = current_api_version();
 
@@ -1110,8 +1110,8 @@ pub(crate) fn send_pairing_reply(
         "text": {
             "preview_url": false,
             "body": format!(
-                "To pair with this bot, run: thinclaw pairing approve whatsapp {}",
-                code
+                "Your pairing request ID is {}. Ask the ThinClaw operator to approve it.",
+                request_id
             )
         }
     });

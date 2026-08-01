@@ -185,8 +185,10 @@ impl NativeChannelActivationPlan {
             bluebubbles: native_enabled && input.bluebubbles_configured,
             gmail: native_enabled && input.gmail_configured,
             http: native_enabled && input.http_configured,
-            gateway: input.gateway_configured,
-            wasm_channels: input.wasm_channels_enabled && input.wasm_channels_dir_exists,
+            gateway: native_enabled && input.gateway_configured,
+            wasm_channels: native_enabled
+                && input.wasm_channels_enabled
+                && input.wasm_channels_dir_exists,
         }
     }
 }

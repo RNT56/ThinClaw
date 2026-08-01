@@ -258,9 +258,6 @@ fn print_service_install_summary() {
     println!("  Env file: {}", env_path.display());
     println!("  Runtime command: thinclaw run --no-onboard");
     println!("  WebUI URL: {}", access.local_url());
-    if let Some(url) = access.token_url(false) {
-        println!("  Token URL: {}", url);
-    }
     println!("  SSH tunnel: {}", access.ssh_tunnel_command());
 }
 

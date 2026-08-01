@@ -28,4 +28,4 @@ pub use subagent::{
     SubagentMemoryMode, SubagentProvidedContext, SubagentSkillMode, SubagentTaskPacket,
     SubagentToolMode,
 };
-pub use tool::ToolProfile;
+pub use tool::{ToolInvocationId, ToolProfile};

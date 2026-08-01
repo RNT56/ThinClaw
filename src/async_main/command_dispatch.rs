@@ -4,18 +4,21 @@ use super::*;
 
 pub(super) async fn run_terminal_command(
     cli: &Cli,
-    env_bootstrap_plan: RuntimeEnvBootstrapPlan,
-) -> Option<anyhow::Result<()>> {
+    context: &thinclaw::cli::CliContext,
+) -> Result<thinclaw::cli::CliDispatch, thinclaw::cli::CliError> {
     match cli.command.as_ref() {
         None
         | Some(
-            Command::Run
-            | Command::Tui
+            Command::Run(_)
+            | Command::Tui(_)
+            | Command::Ask { .. }
             | Command::Onboard { .. }
             | Command::AutonomyShadowCanary { .. },
-        ) => return None,
+        ) => return Ok(thinclaw::cli::CliDispatch::Runtime),
         _ => {}
     }
+
+    debug_assert_eq!(context.debug(), cli.debug);
 
     let result = match &cli.command {
         Some(Command::Tool(tool_cmd)) => {
@@ -67,47 +70,38 @@ pub(super) async fn run_terminal_command(
         }
         Some(Command::Doctor { profile }) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             thinclaw::cli::run_doctor_command((*profile).into()).await
         }
         Some(Command::Status { profile }) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             run_status_command((*profile).into()).await
         }
         Some(Command::Reset(reset_cmd)) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             run_reset_command(reset_cmd.clone()).await
         }
         Some(Command::Secrets(secrets_cmd)) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             run_secrets_command(secrets_cmd.clone()).await
         }
         Some(Command::Cron(cron_cmd)) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             thinclaw::cli::run_cron_command(cron_cmd.clone()).await
         }
         Some(Command::Experiments(experiments_cmd)) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             thinclaw::cli::run_experiments_command(experiments_cmd.clone()).await
         }
         Some(Command::Gateway(gw_cmd)) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             run_gateway_command(gw_cmd.clone()).await
         }
         Some(Command::Identity(identity_cmd)) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             run_identity_command(identity_cmd.clone()).await
         }
         Some(Command::Channels(ch_cmd)) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             run_channels_command(ch_cmd.clone()).await
         }
         Some(Command::Comfy(comfy_cmd)) => {
@@ -116,12 +110,26 @@ pub(super) async fn run_terminal_command(
         }
         Some(Command::Message(msg_cmd)) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
-            thinclaw::cli::run_message_command(msg_cmd.clone()).await
+            thinclaw::cli::run_message_command(msg_cmd.clone(), context).await
+        }
+        Some(Command::Send {
+            text,
+            user_id,
+            gateway_url,
+        }) => {
+            init_cli_tracing(cli.debug);
+            thinclaw::cli::run_message_command(
+                thinclaw::cli::MessageCommand::Send {
+                    text: text.clone(),
+                    user_id: user_id.clone(),
+                    gateway_url: gateway_url.clone(),
+                },
+                context,
+            )
+            .await
         }
         Some(Command::Models(model_cmd)) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             thinclaw::cli::run_model_command(model_cmd.clone()).await
         }
         Some(Command::Completion(completion)) => {
@@ -163,7 +171,6 @@ pub(super) async fn run_terminal_command(
         }
         Some(Command::Agents(agent_cmd)) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             // In standalone CLI mode, create a fresh router.
             // Runtime agent routing state is in-memory only.
             let router = thinclaw::agent::AgentRouter::new();
@@ -172,7 +179,6 @@ pub(super) async fn run_terminal_command(
         }
         Some(Command::Sessions(session_cmd)) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             // In standalone CLI mode, create a fresh session manager.
             // Runtime session state is in-memory only.
             let mgr = std::sync::Arc::new(thinclaw::agent::SessionManager::new());
@@ -181,7 +187,6 @@ pub(super) async fn run_terminal_command(
         }
         Some(Command::Logs(log_cmd)) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             thinclaw::cli::run_log_command(log_cmd.clone()).await
         }
         Some(Command::Browser(browser_cmd)) => {
@@ -193,17 +198,23 @@ pub(super) async fn run_terminal_command(
             run_trajectory_command(trajectory_cmd.clone()).await
         }
         Some(Command::ExperimentRunner {
-            lease_id,
             gateway_url,
-            token,
+            auth_stdin,
+            auth_file,
             workspace_root,
         }) => {
             init_cli_tracing(cli.debug);
+            let auth = thinclaw::experiments::runner_auth::read_runner_auth(
+                *auth_stdin,
+                auth_file.as_deref(),
+            )?;
+            let workspace_root =
+                thinclaw::experiments::runner_auth::resolve_workspace_root(workspace_root.clone())?;
             thinclaw::experiments::runner::run_remote_runner(
                 gateway_url,
-                *lease_id,
-                token,
-                workspace_root.clone(),
+                auth.lease_id,
+                secrecy::ExposeSecret::expose_secret(&auth.token),
+                workspace_root,
             )
             .await
         }
@@ -214,5 +225,8 @@ pub(super) async fn run_terminal_command(
         _ => unreachable!("runtime command must be handled by the caller"),
     };
 
-    Some(result)
+    result.map_err(thinclaw::cli::CliError::from)?;
+    Ok(thinclaw::cli::CliDispatch::Handled(
+        thinclaw::cli::CliOutcome::Success,
+    ))
 }

@@ -602,6 +602,7 @@ mod tests {
 
     fn tool_started(thread_id: &str, name: &str) -> SseEvent {
         SseEvent::ToolStarted {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("push-policy"),
             name: name.to_string(),
             thread_id: Some(thread_id.to_string()),
         }

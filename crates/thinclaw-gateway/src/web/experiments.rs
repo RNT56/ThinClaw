@@ -4,11 +4,11 @@ use axum::http::{HeaderMap, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use thinclaw_experiments::{
     ExperimentArtifactRef, ExperimentAutonomyMode, ExperimentCampaign, ExperimentComparisonPolicy,
-    ExperimentLeaseAuthentication, ExperimentMetricDefinition, ExperimentModelUsageRecord,
-    ExperimentOpportunity, ExperimentPreset, ExperimentProject, ExperimentProjectStatus,
-    ExperimentRunnerBackend, ExperimentRunnerJob, ExperimentRunnerProfile,
-    ExperimentRunnerReadinessClass, ExperimentRunnerStatus, ExperimentStopPolicy, ExperimentTarget,
-    ExperimentTargetKind, ExperimentTrial, experiment_target_not_found_message,
+    ExperimentMetricDefinition, ExperimentModelUsageRecord, ExperimentOpportunity,
+    ExperimentPreset, ExperimentProject, ExperimentProjectStatus, ExperimentRunnerBackend,
+    ExperimentRunnerJob, ExperimentRunnerProfile, ExperimentRunnerReadinessClass,
+    ExperimentRunnerStatus, ExperimentStopPolicy, ExperimentTarget, ExperimentTargetKind,
+    ExperimentTrial, experiment_target_not_found_message,
 };
 use uuid::Uuid;
 
@@ -472,12 +472,17 @@ pub struct ExperimentRunnerValidationResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ExperimentLeaseReference {
+    pub lease_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ExperimentCampaignActionResponse {
     pub campaign: ExperimentCampaign,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trial: Option<ExperimentTrial>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lease: Option<ExperimentLeaseAuthentication>,
+    pub lease: Option<ExperimentLeaseReference>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch: Option<ExperimentLaunchDetails>,
     pub message: String,
