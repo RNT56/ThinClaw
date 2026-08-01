@@ -47,19 +47,13 @@ pub async fn thinclaw_reveal_workspace(
 
     // Open in Finder (macOS) / Explorer (Windows) using OS built-ins
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open")
-        .arg(&path_str)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(std::process::Command::new("open").arg(&path_str))
         .map_err(|e| format!("Failed to open Finder: {}", e))?;
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer")
-        .arg(&path_str)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(std::process::Command::new("explorer").arg(&path_str))
         .map_err(|e| format!("Failed to open Explorer: {}", e))?;
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open")
-        .arg(&path_str)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(std::process::Command::new("xdg-open").arg(&path_str))
         .map_err(|e| format!("Failed to open folder: {}", e))?;
 
     info!("[thinclaw-runtime] Revealed workspace: {}", path_str);
@@ -244,23 +238,25 @@ pub async fn thinclaw_reveal_file(
     }
 
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open")
-        .arg("-R") // -R = reveal (select in Finder)
-        .arg(&p)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(
+        std::process::Command::new("open")
+            .arg("-R") // -R = reveal (select in Finder)
+            .arg(&p),
+    )
         .map_err(|e| format!("Failed to reveal file in Finder: {}", e))?;
 
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer")
-        .arg("/select,")
-        .arg(&p)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(
+        std::process::Command::new("explorer")
+            .arg("/select,")
+            .arg(&p),
+    )
         .map_err(|e| format!("Failed to reveal file in Explorer: {}", e))?;
 
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open")
-        .arg(p.parent().unwrap_or(&p))
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(
+        std::process::Command::new("xdg-open").arg(p.parent().unwrap_or(&p)),
+    )
         .map_err(|e| format!("Failed to open folder: {}", e))?;
 
     Ok(())

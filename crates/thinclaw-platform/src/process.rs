@@ -95,6 +95,22 @@ impl OwnedStdChild {
     }
 }
 
+/// Spawn a short-lived host integration command and reap it asynchronously.
+///
+/// This is reserved for fixed OS opener-style utilities whose successful
+/// launch should not block the caller. The process still receives the owned
+/// child environment/tree policy, and a dedicated reaper prevents zombies.
+pub fn spawn_reaped_std(command: &mut std::process::Command) -> std::io::Result<u32> {
+    let mut child = OwnedStdChild::spawn(command)?;
+    let id = child.id();
+    std::thread::Builder::new()
+        .name(format!("thinclaw-child-reaper-{id}"))
+        .spawn(move || {
+            let _ = child.wait();
+        })?;
+    Ok(id)
+}
+
 impl std::fmt::Debug for OwnedChild {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

@@ -127,7 +127,7 @@ mod macos {
         };
 
         tracing::info!("[permissions] Opening System Settings: {}", url);
-        let _ = Command::new("open").arg(url).spawn();
+        let _ = thinclaw_platform::spawn_reaped_std(Command::new("open").arg(url));
     }
 }
 

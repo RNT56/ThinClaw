@@ -29,7 +29,7 @@ pub use paths::{
 pub use process::{
     BoundedLine, BoundedProcessError, BoundedProcessOutput, OwnedChild, OwnedStdChild,
     apply_child_environment_policy, bounded_command_output, bounded_command_output_with_input,
-    bounded_std_command_output, read_bounded_line,
+    bounded_std_command_output, read_bounded_line, spawn_reaped_std,
 };
 pub use shell::{ShellFlavor, ShellLauncher, shell_launcher};
 

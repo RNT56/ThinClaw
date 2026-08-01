@@ -841,13 +841,21 @@ pub fn open_config_file(app: AppHandle) -> Result<(), crate::thinclaw::bridge::B
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg(&config_path)
-            .spawn()
+        thinclaw_platform::spawn_reaped_std(
+            std::process::Command::new("open").arg(&config_path),
+        )
             .map_err(|error| format!("Failed to open config file: {error}"))?;
     }
-    #[cfg(not(target_os = "macos"))]
-    open::that(&config_path).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    thinclaw_platform::spawn_reaped_std(
+        std::process::Command::new("xdg-open").arg(&config_path),
+    )
+    .map_err(|error| format!("Failed to open config file: {error}"))?;
+    #[cfg(target_os = "windows")]
+    thinclaw_platform::spawn_reaped_std(
+        std::process::Command::new("explorer").arg(&config_path),
+    )
+    .map_err(|error| format!("Failed to open config file: {error}"))?;
 
     Ok(())
 }

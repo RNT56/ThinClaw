@@ -97,21 +97,15 @@ pub async fn open_models_folder(
     }
 
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open")
-        .arg(&models_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(std::process::Command::new("open").arg(&models_dir))
         .map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open")
-        .arg(&models_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(std::process::Command::new("xdg-open").arg(&models_dir))
         .map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer")
-        .arg(&models_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(std::process::Command::new("explorer").arg(&models_dir))
         .map_err(|e| e.to_string())?;
 
     Ok(())
@@ -133,21 +127,15 @@ pub async fn open_standard_models_folder(
     }
 
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open")
-        .arg(&standard_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(std::process::Command::new("open").arg(&standard_dir))
         .map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open")
-        .arg(&standard_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(std::process::Command::new("xdg-open").arg(&standard_dir))
         .map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer")
-        .arg(&standard_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(std::process::Command::new("explorer").arg(&standard_dir))
         .map_err(|e| e.to_string())?;
 
     Ok(())
