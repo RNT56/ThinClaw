@@ -21,7 +21,7 @@ import { useAutoStart } from '../../hooks/use-auto-start';
 import { useAudioRecorder } from '../../hooks/use-audio-recorder';
 import { useProjects } from '../../hooks/use-projects';
 import { useConfig } from '../../hooks/use-config';
-import { ThinClawPage } from '../thinclaw/ThinClawSidebar';
+import type { ThinClawPage } from '../thinclaw/agent-routes';
 import * as thinclawApi from '../../lib/thinclaw';
 import { AppMode } from '../navigation/ModeNavigator';
 import { ImagineTab } from '../imagine';
@@ -312,7 +312,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     // ThinClaw
     const [selectedThinClawSession, setSelectedThinClawSession] = useState<string | null>(null);
     const [thinclawGatewayRunning, setThinClawGatewayRunning] = useState(false);
-    const [activeThinClawPage, setActiveThinClawPage] = useState<ThinClawPage>('dashboard');
+    const [activeThinClawPage, setActiveThinClawPage] = useState<ThinClawPage>('home');
 
     // File attachments
     const [attachedImages, setAttachedImages] = useState<{ id: string; path: string }[]>([]);

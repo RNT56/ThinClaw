@@ -2,7 +2,7 @@ import { useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { useChatLayout } from '../ChatProvider';
 import { ThinClawSidebar } from '../../thinclaw/ThinClawSidebar';
-import type { ThinClawPage } from '../../thinclaw/ThinClawSidebar';
+import type { ThinClawPage } from '../../thinclaw/agent-routes';
 
 export function ThinClawSidebarSlice() {
     const {

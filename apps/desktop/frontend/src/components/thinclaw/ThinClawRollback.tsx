@@ -4,6 +4,7 @@ import { GitBranch, RefreshCw, RotateCcw, Clock, History, AlertTriangle } from '
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
+import { ConfirmDialog } from '../ui';
 
 export function ThinClawRollback() {
     const [projectDir, setProjectDir] = useState('');
@@ -12,7 +13,8 @@ export function ThinClawRollback() {
     const [diff, setDiff] = useState('');
     const [isLoading, setIsLoading] = useState(true);
     const [notice, setNotice] = useState<string | null>(null);
-    const [pendingRestore, setPendingRestore] = useState<string | null>(null);
+    const [restoreTarget, setRestoreTarget] = useState<thinclaw.CheckpointEntry | null>(null);
+    const [isRestoring, setIsRestoring] = useState(false);
 
     const load = useCallback(async (dir?: string) => {
         setIsLoading(true);
@@ -59,19 +61,17 @@ export function ThinClawRollback() {
     };
 
     const restore = async (hash: string) => {
-        if (pendingRestore !== hash) {
-            setPendingRestore(hash);
-            setTimeout(() => setPendingRestore((p) => (p === hash ? null : p)), 4000);
-            return;
-        }
-        setPendingRestore(null);
+        setIsRestoring(true);
         const tId = toast.loading('Restoring checkpoint…');
         try {
             await thinclaw.restoreCheckpoint(projectDir, hash);
             toast.success('Project restored to checkpoint', { id: tId });
+            setRestoreTarget(null);
             load();
         } catch (e: any) {
             toast.error(`Restore failed: ${String(e?.message ?? e)}`, { id: tId });
+        } finally {
+            setIsRestoring(false);
         }
     };
 
@@ -133,16 +133,14 @@ export function ThinClawRollback() {
                                             <Clock className="w-2.5 h-2.5" />{new Date(e.timestamp).toLocaleString()}
                                         </span>
                                         <button
-                                            onClick={(ev) => { ev.stopPropagation(); restore(e.commit_hash); }}
+                                            onClick={(ev) => { ev.stopPropagation(); setRestoreTarget(e); }}
                                             className={cn(
                                                 'inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium border transition-all',
-                                                pendingRestore === e.commit_hash
-                                                    ? 'bg-red-500/15 text-red-300 border-red-500/30'
-                                                    : 'bg-white/3 text-muted-foreground hover:text-foreground border-white/5',
+                                                'bg-white/3 text-muted-foreground hover:text-foreground border-white/5',
                                             )}
                                         >
                                             <RotateCcw className="w-2.5 h-2.5" />
-                                            {pendingRestore === e.commit_hash ? 'Confirm restore' : 'Restore'}
+                                            Restore
                                         </button>
                                     </div>
                                 </div>
@@ -164,6 +162,17 @@ export function ThinClawRollback() {
                     </div>
                 </div>
             )}
+            <ConfirmDialog
+                open={restoreTarget !== null}
+                onOpenChange={(open) => { if (!open) setRestoreTarget(null); }}
+                title="Restore this checkpoint?"
+                description={restoreTarget
+                    ? <>The workspace at <span className="font-mono">{projectDir || 'the selected project'}</span> will be restored to checkpoint <span className="font-mono">{restoreTarget.commit_hash.slice(0, 8)}</span>. Current file changes may be replaced.</>
+                    : ''}
+                confirmLabel="Restore checkpoint"
+                onConfirm={() => restoreTarget ? restore(restoreTarget.commit_hash) : undefined}
+                isConfirming={isRestoring}
+            />
         </motion.div>
     );
 }

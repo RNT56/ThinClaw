@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { motion } from 'framer-motion';
-import { SlidersHorizontal, RefreshCw, Save, AlertTriangle } from 'lucide-react';
+import { RefreshCw, Save } from 'lucide-react';
 import { toast } from 'sonner';
-import { cn } from '../../lib/utils';
 import { thinclawCommands } from '../../lib/generated/thinclaw-commands';
+import { AsyncState, Button, Notice, Surface } from '../ui';
+import { normalizeAgentActionOutcome } from './action-outcome';
 
 interface ConfigOption {
     value: string;
@@ -26,6 +26,24 @@ interface ConfigSchema {
 }
 
 type FieldValue = string | boolean | number | null;
+type ChannelValues = Record<string, Record<string, FieldValue>>;
+
+interface ChannelConfigSchemasResponse {
+    available?: boolean;
+    reason?: string;
+    schemas?: ConfigSchema[];
+    values?: ChannelValues;
+    secret_binding_available?: boolean;
+    secret_binding_reason?: string;
+}
+
+interface ChannelConfigSubmitResponse {
+    ok?: boolean;
+    persisted?: boolean;
+    forwarded?: boolean;
+    restart_required?: boolean;
+    note?: string;
+}
 
 export function ThinClawChannelConfig() {
     const [schemas, setSchemas] = useState<ConfigSchema[]>([]);
@@ -33,6 +51,8 @@ export function ThinClawChannelConfig() {
     const [isLoading, setIsLoading] = useState(true);
     const [saving, setSaving] = useState<string | null>(null);
     const [notice, setNotice] = useState<string | null>(null);
+    const [secretBindingAvailable, setSecretBindingAvailable] = useState(false);
+    const [secretBindingReason, setSecretBindingReason] = useState<string | null>(null);
 
     const load = useCallback(async () => {
         setIsLoading(true);
@@ -40,24 +60,31 @@ export function ThinClawChannelConfig() {
         try {
             const r = await thinclawCommands.thinclawChannelConfigSchemas();
             if (r.status === 'ok') {
-                const data = r.data as { available?: boolean; reason?: string; schemas?: ConfigSchema[] };
+                const data = r.data as ChannelConfigSchemasResponse;
                 if (data?.available === false) {
                     setNotice(data.reason ?? 'Channel configuration is unavailable in this mode.');
                     setSchemas([]);
+                    setValues({});
                 } else {
                     setSchemas(Array.isArray(data?.schemas) ? data.schemas : []);
-                    setValues({});
+                    setValues(data?.values ?? {});
+                    setSecretBindingAvailable(data?.secret_binding_available === true);
+                    setSecretBindingReason(data?.secret_binding_reason ?? null);
                 }
             } else {
                 setNotice(String(r.error));
             }
+        } catch (caught) {
+            setSchemas([]);
+            setValues({});
+            setNotice(caught instanceof Error ? caught.message : String(caught));
         } finally {
             setIsLoading(false);
         }
     }, []);
 
     useEffect(() => {
-        load();
+        void load();
     }, [load]);
 
     const setField = (channel: string, field: string, val: FieldValue) =>
@@ -74,8 +101,10 @@ export function ThinClawChannelConfig() {
     };
 
     const submit = async (schema: ConfigSchema) => {
+        const editableFields = schema.fields.filter((field) => field.field_type !== 'password');
+        if (editableFields.length === 0) return;
         setSaving(schema.channel_id);
-        const payload = schema.fields.reduce<Record<string, FieldValue>>((acc, f) => {
+        const payload = editableFields.reduce<Record<string, FieldValue>>((acc, f) => {
             acc[f.id] = fieldValue(schema, f);
             return acc;
         }, {});
@@ -83,147 +112,113 @@ export function ThinClawChannelConfig() {
         try {
             const r = await thinclawCommands.thinclawChannelConfigSubmit(schema.channel_id, payload);
             if (r.status === 'ok') {
-                const data = r.data as { note?: string };
-                toast.success(data?.note ?? 'Configuration saved', { id: tId });
+                const data = r.data as ChannelConfigSubmitResponse;
+                const outcome = normalizeAgentActionOutcome(data, 'Configuration saved');
+                const detail = outcome.message;
+                if (outcome.state === 'rejected') {
+                    setNotice(detail);
+                    toast.error(detail, { id: tId });
+                } else if (outcome.state === 'persisted' || outcome.state === 'prepared') {
+                    setNotice(detail);
+                    toast.info(detail, { id: tId });
+                } else if (outcome.state === 'restart-required') {
+                    setNotice(detail);
+                    toast.info(detail, { id: tId });
+                } else if (outcome.state === 'unknown') {
+                    setNotice(`The request completed, but its apply state is not known. ${detail}`);
+                    toast.info(`The request completed, but its apply state is not known. ${detail}`, { id: tId });
+                } else {
+                    toast.success(detail, { id: tId });
+                }
             } else {
                 const e = r.error as { reason?: string; message?: string };
-                toast.error(e?.reason ?? e?.message ?? String(r.error), { id: tId });
+                const message = e?.reason ?? e?.message ?? String(r.error);
+                setNotice(message);
+                toast.error(message, { id: tId });
             }
+        } catch (caught) {
+            const message = caught instanceof Error ? caught.message : String(caught);
+            setNotice(message);
+            toast.error(message, { id: tId });
         } finally {
             setSaving(null);
         }
     };
 
     if (isLoading) {
-        return (
-            <div className="flex-1 flex items-center justify-center">
-                <RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" />
-            </div>
-        );
+        return <AsyncState kind="loading" title="Loading channel setup" className="flex-1" />;
     }
 
     return (
-        <motion.div className="flex-1 overflow-y-auto p-8 space-y-6" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-            {/* Header */}
-            <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                    <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/20">
-                        <SlidersHorizontal className="w-5 h-5 text-primary" />
-                    </div>
-                    <div>
-                        <h1 className="text-xl font-bold">Channel Configuration</h1>
-                        <p className="text-xs text-muted-foreground">
-                            Runtime settings for channels that expose a config schema
-                        </p>
-                    </div>
+        <section aria-label="Channel setup" className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                    <h2 className="text-sm font-semibold">Published channel setup</h2>
+                    <p className="mt-1 text-xs text-content-muted">Only fields returned by the selected runtime can be edited here. Stored secret values are never sent back to Desktop.</p>
                 </div>
-                <button
-                    type="button"
-                    onClick={load}
-                    aria-label="Refresh channel configuration"
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
-                >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                </button>
+                <Button size="sm" variant="secondary" onClick={() => void load()} aria-label="Refresh channel configuration">
+                    <RefreshCw className="size-3.5" aria-hidden="true" /> Refresh
+                </Button>
             </div>
 
-            {notice && (
-                <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
-                    <p className="text-xs text-amber-200/90">{notice}</p>
-                </div>
-            )}
+            {notice && <Notice tone="warning" title="Channel setup needs attention">{notice}</Notice>}
 
-            {!notice && schemas.length === 0 && (
-                <p className="text-xs text-muted-foreground">No channels expose a configuration schema yet.</p>
-            )}
-
-            {schemas.map((schema) => (
-                <div key={schema.channel_id} className="rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md p-6 space-y-4">
+            {schemas.length === 0 ? (
+                <AsyncState kind="empty" title="No channels expose a configuration schema" description="A channel appears here only when the selected runtime publishes a supported setup schema." />
+            ) : schemas.map((schema) => (
+                <Surface key={schema.channel_id} className="space-y-4 p-5">
                     <div>
-                        <h2 className="text-sm font-bold">{schema.channel_name}</h2>
-                        {schema.help && <p className="text-[11px] text-muted-foreground mt-0.5">{schema.help}</p>}
+                        <h2 className="text-sm font-semibold">{schema.channel_name}</h2>
+                        {schema.help && <p className="mt-1 text-xs leading-relaxed text-content-muted">{schema.help}</p>}
                     </div>
 
-                    {schema.fields.length > 0 && <div className="space-y-3">
+                    {schema.fields.length > 0 && <div className="space-y-4">
                         {schema.fields.map((field) => {
                             const val = fieldValue(schema, field);
                             const inputId = `channel-config-${schema.channel_id}-${field.id}`;
+                            if (field.field_type === 'password') {
+                                return (
+                                    <Notice key={field.id} tone="warning" title={`${field.label} is kept outside the renderer`}>
+                                        {secretBindingAvailable
+                                            ? 'This secret is configured by the supported secure setup flow; Desktop will not display or submit its stored value here.'
+                                            : secretBindingReason ?? 'Secret configuration is not available in Desktop yet.'}
+                                    </Notice>
+                                );
+                            }
                             return (
-                                <div key={field.id} className="space-y-1">
-                                    <label htmlFor={inputId} className="text-xs font-medium text-foreground/90 flex items-center gap-1">
+                                <div key={field.id} className="space-y-1.5">
+                                    <label htmlFor={inputId} className="flex items-center gap-1 text-xs font-medium text-content-primary">
                                         {field.label}
-                                        {field.required && <span className="text-red-400">*</span>}
+                                        {field.required && <span aria-label="required" className="text-destructive">*</span>}
                                     </label>
                                     {field.field_type === 'checkbox' ? (
-                                        <label className="flex items-center gap-2 cursor-pointer">
-                                            <input
-                                                id={inputId}
-                                                type="checkbox"
-                                                checked={val === true}
-                                                onChange={(e) => setField(schema.channel_id, field.id, e.target.checked)}
-                                                className="accent-primary"
-                                            />
-                                            <span className="text-[11px] text-muted-foreground">{field.help_text}</span>
+                                        <label className="flex cursor-pointer items-center gap-2 text-xs text-content-muted">
+                                            <input id={inputId} type="checkbox" checked={val === true} onChange={(event) => setField(schema.channel_id, field.id, event.target.checked)} className="accent-primary" />
+                                            {field.help_text}
                                         </label>
                                     ) : field.field_type === 'textarea' ? (
-                                        <textarea
-                                            id={inputId}
-                                            value={String(val)}
-                                            onChange={(e) => setField(schema.channel_id, field.id, e.target.value)}
-                                            rows={3}
-                                            placeholder={field.help_text ?? ''}
-                                            className="w-full rounded-lg border border-border/40 bg-black/20 px-3 py-2 text-xs outline-hidden focus:border-primary/40"
-                                        />
+                                        <textarea id={inputId} value={String(val)} onChange={(event) => setField(schema.channel_id, field.id, event.target.value)} rows={3} placeholder={field.help_text ?? ''} className="w-full rounded-[var(--radius-control)] border border-surface-outline bg-surface-subtle px-3 py-2 text-xs text-content-primary outline-none focus-visible:ring-2 focus-visible:ring-primary/20" />
                                     ) : field.field_type === 'select' ? (
-                                        <select
-                                            id={inputId}
-                                            value={String(val)}
-                                            onChange={(e) => setField(schema.channel_id, field.id, e.target.value)}
-                                            className="w-full rounded-lg border border-border/40 bg-black/20 px-3 py-2 text-xs outline-hidden focus:border-primary/40"
-                                        >
-                                            {(field.options ?? []).map((o) => (
-                                                <option key={o.value} value={o.value}>{o.label}</option>
-                                            ))}
+                                        <select id={inputId} value={String(val)} onChange={(event) => setField(schema.channel_id, field.id, event.target.value)} className="h-[var(--control-height)] w-full rounded-[var(--radius-control)] border border-surface-outline bg-surface-subtle px-3 text-xs text-content-primary outline-none focus-visible:ring-2 focus-visible:ring-primary/20">
+                                            {(field.options ?? []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                                         </select>
                                     ) : (
-                                        <input
-                                            id={inputId}
-                                            type={field.field_type === 'password' ? 'password' : field.field_type === 'number' ? 'number' : 'text'}
-                                            value={val === null ? '' : String(val)}
-                                            onChange={(e) => setField(
-                                                schema.channel_id,
-                                                field.id,
-                                                field.field_type === 'number'
-                                                    ? e.target.value === '' ? null : e.target.valueAsNumber
-                                                    : e.target.value,
-                                            )}
-                                            placeholder={field.help_text ?? ''}
-                                            className="w-full rounded-lg border border-border/40 bg-black/20 px-3 py-2 text-xs outline-hidden focus:border-primary/40"
-                                        />
+                                        <input id={inputId} type={field.field_type === 'number' ? 'number' : 'text'} value={val === null ? '' : String(val)} onChange={(event) => setField(schema.channel_id, field.id, field.field_type === 'number' ? event.target.value === '' ? null : event.target.valueAsNumber : event.target.value)} placeholder={field.help_text ?? ''} className="h-[var(--control-height)] w-full rounded-[var(--radius-control)] border border-surface-outline bg-surface-subtle px-3 text-xs text-content-primary outline-none focus-visible:ring-2 focus-visible:ring-primary/20" />
                                     )}
-                                    {field.field_type !== 'checkbox' && field.help_text && (
-                                        <p className="text-[10px] text-muted-foreground">{field.help_text}</p>
-                                    )}
+                                    {field.field_type !== 'checkbox' && field.help_text && <p className="text-[10px] text-content-muted">{field.help_text}</p>}
                                 </div>
                             );
                         })}
                     </div>}
 
-                    {schema.fields.length > 0 && <button
-                        type="button"
-                        onClick={() => submit(schema)}
-                        disabled={saving === schema.channel_id}
-                        className={cn(
-                            'inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-medium border transition-all',
-                            'bg-primary/15 text-primary border-primary/20 hover:bg-primary/20 disabled:opacity-50',
-                        )}
-                    >
-                        {saving === schema.channel_id ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                        Save
-                    </button>}
-                </div>
+                    {schema.fields.some((field) => field.field_type !== 'password') && (
+                        <Button size="sm" variant="primary" onClick={() => void submit(schema)} disabled={saving === schema.channel_id}>
+                            {saving === schema.channel_id ? <RefreshCw className="size-3.5 animate-spin" aria-hidden="true" /> : <Save className="size-3.5" aria-hidden="true" />}
+                            Save
+                        </Button>
+                    )}
+                </Surface>
             ))}
-        </motion.div>
+        </section>
     );
 }

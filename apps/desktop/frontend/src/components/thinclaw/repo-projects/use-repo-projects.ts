@@ -3,19 +3,18 @@ import { toast } from 'sonner';
 
 import * as thinclaw from '../../../lib/thinclaw';
 import { useThinClawEvents } from '../../../hooks/use-thinclaw-stream';
-import { SHELL_EVENTS, SHELL_PROJECTS } from './fixtures';
 import {
     commandNotice, derivedReadinessItems, payloadLooksRepoProject, payloadProjectId,
     readinessIsReady,
 } from './utils';
 
 export function useRepoProjects() {
-    const [projects, setProjects] = useState<thinclaw.ThinClawRepoProject[]>(SHELL_PROJECTS);
-    const [selectedProjectId, setSelectedProjectId] = useState<string | null>(SHELL_PROJECTS[0]?.id ?? null);
-    const [detail, setDetail] = useState<thinclaw.ThinClawRepoProject | null>(SHELL_PROJECTS[0] ?? null);
-    const [events, setEvents] = useState<thinclaw.ThinClawJobEvent[]>(SHELL_EVENTS);
-    const [mergeGates, setMergeGates] = useState<thinclaw.ThinClawRepoMergeGate[]>(SHELL_PROJECTS[0]?.merge_gates ?? []);
-    const [isShellMode, setIsShellMode] = useState(true);
+    const [projects, setProjects] = useState<thinclaw.ThinClawRepoProject[]>([]);
+    const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+    const [detail, setDetail] = useState<thinclaw.ThinClawRepoProject | null>(null);
+    const [events, setEvents] = useState<thinclaw.ThinClawJobEvent[]>([]);
+    const [mergeGates, setMergeGates] = useState<thinclaw.ThinClawRepoMergeGate[]>([]);
+    const [isSetupRequired, setIsSetupRequired] = useState(false);
     const [unavailableReason, setUnavailableReason] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [mutatingAction, setMutatingAction] = useState<string | null>(null);
@@ -42,15 +41,23 @@ export function useRepoProjects() {
         setIsLoading(true);
         try {
             const response = await thinclaw.listRepoProjects();
-            const nextProjects = response.projects.length > 0 ? response.projects : SHELL_PROJECTS;
+            const nextProjects = response.projects ?? [];
             setProjects(nextProjects);
-            setIsShellMode(response.projects.length === 0);
+            setIsSetupRequired(nextProjects.length === 0);
             setUnavailableReason(response.unavailable?.reason ?? null);
             setSelectedProjectId((current) => (
                 current && nextProjects.some((project) => project.id === current)
                     ? current
                     : nextProjects[0]?.id ?? null
             ));
+        } catch (error) {
+            setProjects([]);
+            setDetail(null);
+            setEvents([]);
+            setMergeGates([]);
+            setIsSetupRequired(false);
+            setUnavailableReason(error instanceof Error ? error.message : 'Live project data could not be loaded.');
+            setSelectedProjectId(null);
         } finally {
             setIsLoading(false);
         }
@@ -65,7 +72,7 @@ export function useRepoProjects() {
         ]);
         const nextProject = projectResponse.project ?? fallbackProject;
         setDetail(nextProject);
-        setEvents(eventResponse.events.length > 0 ? eventResponse.events : (isShellMode ? SHELL_EVENTS : []));
+        setEvents(eventResponse.events ?? []);
         setMergeGates(gateResponse.gates.length > 0 ? gateResponse.gates : (nextProject?.merge_gates ?? []));
         setUnavailableReason(
             projectResponse.unavailable?.reason
@@ -73,7 +80,7 @@ export function useRepoProjects() {
             ?? gateResponse.unavailable?.reason
             ?? null,
         );
-    }, [isShellMode, projects]);
+    }, [projects]);
 
     useEffect(() => {
         loadProjects();
@@ -111,8 +118,8 @@ export function useRepoProjects() {
     const pendingGate = mergeGates.find((gate) => gate.state === 'pending' || gate.state === 'blocked') ?? null;
     const cancellableRun = selectedProject?.worker_runs?.find((run) => ['queued', 'running', 'paused'].includes(run.state)) ?? selectedProject?.worker_runs?.[0] ?? null;
     const readinessItems = useMemo(
-        () => derivedReadinessItems(selectedProject, isShellMode, unavailableReason),
-        [isShellMode, selectedProject, unavailableReason],
+        () => derivedReadinessItems(selectedProject, isSetupRequired, unavailableReason),
+        [isSetupRequired, selectedProject, unavailableReason],
     );
     const readinessScore = readinessItems.length === 0
         ? 0
@@ -178,9 +185,12 @@ export function useRepoProjects() {
     };
 
     const approveGate = () => {
-        if (!selectedProject) return;
+        if (!selectedProject || !pendingGate) {
+            toast.error('No live merge gate is awaiting approval');
+            return;
+        }
         runCommand('Approve gate', () => thinclaw.approveRepoProject(selectedProject.id, {
-            approval_id: pendingGate?.id ?? 'repo-project-shell-approval',
+            approval_id: pendingGate.id,
             decision: 'approve',
             note: 'Approved from ThinClaw Desktop',
         }));
@@ -196,7 +206,7 @@ export function useRepoProjects() {
     const canEnqueueWork = Boolean(selectedProject) && enqueueInput.title.trim().length > 0 && !mutatingAction;
 
     return {
-        projects, selectedProjectId, setSelectedProjectId, events, mergeGates, isShellMode,
+        projects, selectedProjectId, setSelectedProjectId, events, mergeGates, isSetupRequired,
         unavailableReason, isLoading, mutatingAction, lastLiveRefreshAt, createInput,
         setCreateInput, enqueueInput, setEnqueueInput, selectedProject, loadProjects, stats,
         pendingGate, cancellableRun, readinessItems, readinessScore, runCommand, createProject,

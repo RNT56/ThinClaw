@@ -1,35 +1,33 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    MessageCircle, Radio, ChevronLeft, RefreshCw, Settings,
-    Layout, Smartphone, Timer, Package, Cpu, Shield, Brain, History,
-    ChevronDown, Server, Laptop, Trash2, Anchor, Plug, Settings2, Activity,
-    Stethoscope, Wrench, KeyRound, DollarSign, Database, Zap, FileText, Star, GitBranch,
-    Play, ShieldCheck, FlaskConical, BrainCircuit, Search, SlidersHorizontal, Network
+    ChevronDown,
+    ChevronLeft,
+    CircleAlert,
+    Laptop,
+    MessageCircle,
+    Plus,
+    Radio,
+    RefreshCw,
+    Search,
+    Server,
+    Settings,
+    Trash2,
 } from 'lucide-react';
+import { motion } from 'framer-motion';
 import { toast } from 'sonner';
+
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
-import { ThinClawSession } from '../../lib/thinclaw';
+import { ConfirmDialog, Notice, StatusBadge } from '../ui';
+import { useAgentCockpit } from './AgentCockpitProvider';
+import {
+    AGENT_ROUTE_REGISTRY,
+    AGENT_ROUTE_SECTIONS,
+    type ThinClawPage,
+    resolveAgentRoute,
+} from './agent-routes';
 
-import { motion } from 'framer-motion';
-
-export type ThinClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'channel-status' | 'presence' | 'automations' | 'jobs' | 'repo-projects' | 'autonomy' | 'routine-audit' | 'skills' | 'hooks' | 'plugins' | 'system-control' | 'brain' | 'memory' | 'config' | 'event-inspector' | 'doctor' | 'tool-policies' | 'pairing' | 'cost-dashboard' | 'cache-stats' | 'routing' | 'experiments' | 'learning' | 'trajectory' | 'rollback' | 'session-search' | 'channel-config' | 'remote-access';
-
-const containerVariants = {
-    hidden: { opacity: 0 },
-    visible: {
-        opacity: 1,
-        transition: {
-            staggerChildren: 0.05,
-        }
-    }
-};
-
-const itemVariants = {
-    hidden: { opacity: 0 },
-    visible: { opacity: 1 },
-    exit: { opacity: 0 }
-};
+export type { ThinClawPage } from './agent-routes';
 
 interface ThinClawSidebarProps {
     sidebarOpen: boolean;
@@ -43,6 +41,19 @@ interface ThinClawSidebarProps {
     onSelectPage: (page: ThinClawPage) => void;
 }
 
+function profileName(status: thinclaw.ThinClawStatus | null) {
+    if (!status) return 'Checking profile';
+    if (status.gateway_mode === 'local') return 'Local Core';
+    return status.profiles.find((profile) => profile.url === status.remote_url)?.name ?? 'Remote profile';
+}
+
+function profileConnection(status: thinclaw.ThinClawStatus | null) {
+    if (!status) return 'Checking';
+    if (status.engine_running && status.engine_connected) return 'Connected';
+    if (status.gateway_mode === 'remote') return 'Disconnected';
+    return 'Stopped';
+}
+
 export function ThinClawSidebar({
     sidebarOpen,
     onBack,
@@ -52,483 +63,261 @@ export function ThinClawSidebar({
     gatewayRunning,
     onNavigateToSettings,
     activePage,
-    onSelectPage
+    onSelectPage,
 }: ThinClawSidebarProps) {
-    const [sessions, setSessions] = useState<ThinClawSession[]>([]);
-    const [isLoading, setIsLoading] = useState(false);
+    const { status, checkedAt, error, isRefreshing, refresh, capability } = useAgentCockpit();
+    const [sessions, setSessions] = useState<thinclaw.ThinClawSession[]>([]);
+    const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+    const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+    const [switchError, setSwitchError] = useState<string | null>(null);
+    const [isSwitching, setIsSwitching] = useState(false);
+    const [deleteTarget, setDeleteTarget] = useState<thinclaw.ThinClawSession | null>(null);
+    const [isDeletingSession, setIsDeletingSession] = useState(false);
+    const navRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
-    const [status, setStatus] = useState<thinclaw.ThinClawStatus | null>(null);
-    const [isAgentListOpen, setIsAgentListOpen] = useState(false);
+    const selectedDestination = resolveAgentRoute(activePage).destination;
+    const runtimeCapability = capability('runtime');
+    const profileCapability = capability('always');
+    const activeProfileName = profileName(status);
+    const connection = profileConnection(status);
+    const profileIcon = status?.gateway_mode === 'remote' ? Server : Laptop;
+    const ProfileIcon = profileIcon;
+    const freshness = checkedAt ? new Date(checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null;
 
-    const fetchData = useCallback(async () => {
-        // Always fetch status to know if gateway is running
-        try {
-            const s = await thinclaw.getThinClawStatus();
-            setStatus(s);
-
-            if (s.engine_running && activePage === 'chat') {
-                const res = await thinclaw.getThinClawSessions();
-                setSessions(res.sessions);
-            } else if (!s.engine_running) {
-                // Clear stale sessions when gateway is down (e.g. after factory reset)
-                setSessions([]);
-            }
-        } catch (e) {
-            console.error('Failed to fetch data:', e);
-            // If we can't reach the gateway, clear sessions
-            setSessions([]);
-        } finally {
-            setIsLoading(false);
-        }
-    }, [activePage]);
-
-    useEffect(() => {
-        fetchData();
-        const interval = setInterval(fetchData, 5000); // Polling status every 5s
-        return () => clearInterval(interval);
-    }, [fetchData]);
-
-    // Track which session is pending delete confirmation
-    const [pendingDeleteKey, setPendingDeleteKey] = useState<string | null>(null);
-    const deleteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-    const handleDeleteSession = async (e: React.MouseEvent, sessionKey: string) => {
-        e.stopPropagation();
-        e.preventDefault();
-
-        // Two-click confirmation: first click shows "confirm?", second click deletes
-        if (pendingDeleteKey !== sessionKey) {
-            setPendingDeleteKey(sessionKey);
-            // Auto-dismiss after 3 seconds
-            if (deleteTimeoutRef.current) clearTimeout(deleteTimeoutRef.current);
-            deleteTimeoutRef.current = setTimeout(() => setPendingDeleteKey(null), 3000);
+    const loadSessions = useCallback(async () => {
+        if (!status?.engine_running || selectedDestination !== 'chat') {
+            if (!status?.engine_running) setSessions([]);
             return;
         }
-
-        // Second click — confirmed, proceed with delete
-        setPendingDeleteKey(null);
-        if (deleteTimeoutRef.current) clearTimeout(deleteTimeoutRef.current);
-
-        const tId = toast.loading("Deleting session...");
-
-        // Attempt to abort first, just in case
+        setIsLoadingSessions(true);
         try {
-            await thinclaw.abortThinClawChat(sessionKey);
-        } catch (ignored) {
-            // Ignore abort failure, proceed to delete
+            const response = await thinclaw.getThinClawSessions();
+            setSessions(response.sessions ?? []);
+        } catch (caught) {
+            setSessions([]);
+            toast.error(`Unable to load agent sessions: ${caught instanceof Error ? caught.message : String(caught)}`);
+        } finally {
+            setIsLoadingSessions(false);
         }
+    }, [selectedDestination, status?.engine_running]);
 
+    useEffect(() => {
+        void loadSessions();
+    }, [loadSessions]);
+
+    useEffect(() => {
+        if (selectedDestination !== 'chat' || !status?.engine_running) return;
+        const poll = window.setInterval(() => void loadSessions(), 15_000);
+        return () => window.clearInterval(poll);
+    }, [loadSessions, selectedDestination, status?.engine_running]);
+
+    const switchProfile = async (profile: thinclaw.AgentProfile | 'local') => {
+        setIsSwitching(true);
+        setSwitchError(null);
         try {
-            await thinclaw.deleteThinClawSession(sessionKey);
-            toast.success("Session deleted", { id: tId });
-            // Immediately remove from local state for instant UI feedback
-            setSessions(prev => prev.filter(s => s.session_key !== sessionKey));
-            fetchData(); // Also refresh from server
-            if (selectedSessionKey === sessionKey) {
-                onSelectSession('agent:main'); // fallback
-            }
-        } catch (err: any) {
-            console.error("Delete session failed", err);
-            const msg = err?.message || String(err);
-
-            // If it fails because it's active, try force delete automatically
-            if (msg.includes("still active") || msg.includes("timeout")) {
-                try {
-                    toast.loading("Session active, force deleting...", { id: tId });
-                    await thinclaw.resetThinClawSession(sessionKey);
-                    // After reset, try delete again to remove empty session
-                    await thinclaw.deleteThinClawSession(sessionKey);
-                    toast.success("Session force deleted", { id: tId });
-                    setSessions(prev => prev.filter(s => s.session_key !== sessionKey));
-                    fetchData();
-                    if (selectedSessionKey === sessionKey) {
-                        onSelectSession('agent:main');
-                    }
-                } catch (e2) {
-                    toast.error("Force delete failed: " + String(e2), { id: tId });
-                }
-            } else {
-                toast.error(`Failed to delete session: ${msg}`, { id: tId });
-            }
+            if (profile === 'local') await thinclaw.saveGatewaySettings('local', '', '');
+            else await thinclaw.switchToProfile(profile.id);
+            setAgentMenuOpen(false);
+            await refresh();
+        } catch (caught) {
+            setSwitchError(caught instanceof Error ? caught.message : String(caught));
+        } finally {
+            setIsSwitching(false);
         }
     };
 
-    const handleSwitchAgent = async (profile: thinclaw.AgentProfile | 'local') => {
-        setIsLoading(true);
+    const deleteSession = async () => {
+        if (!deleteTarget) return;
+        setIsDeletingSession(true);
         try {
-            if (profile === 'local') {
-                await thinclaw.saveGatewaySettings('local', '', '');
-            } else {
-                await thinclaw.switchToProfile(profile.id);
-            }
-            setIsAgentListOpen(false);
-            // Wait a bit for restart
-            setTimeout(fetchData, 1000);
-        } catch (e) {
-            console.error('Failed to switch agent:', e);
+            await thinclaw.deleteThinClawSession(deleteTarget.session_key);
+            setSessions((current) => current.filter((session) => session.session_key !== deleteTarget.session_key));
+            if (selectedSessionKey === deleteTarget.session_key) onSelectSession('agent:main');
+            setDeleteTarget(null);
+            toast.success('Session deleted');
+        } catch (caught) {
+            toast.error(`Session could not be deleted. Stop its active run first if needed: ${caught instanceof Error ? caught.message : String(caught)}`);
+        } finally {
+            setIsDeletingSession(false);
         }
     };
 
-    const handleSetDefault = async (e: React.MouseEvent, agentId: string) => {
-        e.stopPropagation();
-        try {
-            await thinclaw.setDefaultAgent(agentId);
-            toast.success('Default agent updated');
-            fetchData();
-        } catch (err) {
-            toast.error(`Failed to set default: ${err}`);
-        }
+    const routesBySection = useMemo(() => AGENT_ROUTE_SECTIONS.map((section) => ({
+        ...section,
+        routes: AGENT_ROUTE_REGISTRY.filter((route) => route.section === section.id),
+    })), []);
+
+    const navigableRoutes = AGENT_ROUTE_REGISTRY.filter((route) => {
+        const state = capability(route.capability).state;
+        return route.capability === 'always' || route.capability === 'advanced' || state === 'available' || state === 'stale';
+    });
+    const rovingRouteId = navigableRoutes.some((route) => route.id === selectedDestination)
+        ? selectedDestination
+        : navigableRoutes[0]?.id;
+
+    const moveNavFocus = (routeId: string, destination: 'first' | 'last' | number) => {
+        if (navigableRoutes.length === 0) return;
+        const index = Math.max(0, navigableRoutes.findIndex((route) => route.id === routeId));
+        const next = destination === 'first'
+            ? navigableRoutes[0]
+            : destination === 'last'
+                ? navigableRoutes[navigableRoutes.length - 1]
+                : navigableRoutes[(index + destination + navigableRoutes.length) % navigableRoutes.length];
+        if (!next) return;
+        onSelectPage(next.id);
+        requestAnimationFrame(() => navRefs.current[next.id]?.focus());
     };
-
-    // Identify active agent
-    const activeAgentName = status?.gateway_mode === 'local'
-        ? 'Local Core'
-        : (status?.profiles.find(p => p.url === status.remote_url)?.name || 'Remote Agent');
-
-    const ActiveAgentIcon = status?.gateway_mode === 'local' ? Laptop : Server;
 
     return (
-        <motion.div
-            className="flex flex-col flex-1 h-full min-h-0"
-            variants={containerVariants}
-            initial="hidden"
-            animate="visible"
+        <motion.nav
+            aria-label="Agent Cockpit navigation"
+            className="flex h-full min-h-0 flex-1 flex-col"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
         >
-            {/* Header — fixed */}
-            <div className="flex items-center gap-3 px-1 mb-4 shrink-0">
-                <button
-                    onClick={onBack}
-                    className="w-8 h-8 rounded-lg bg-muted/50 hover:bg-muted flex items-center justify-center shrink-0 transition-colors"
-                >
-                    <ChevronLeft className="w-4 h-4" />
+            <div className="mb-4 flex shrink-0 items-center gap-3 px-1">
+                <button type="button" onClick={onBack} aria-label="Back to Direct Workbench" className="grid size-8 place-items-center rounded-[var(--radius-control)] bg-surface-subtle text-content-muted transition-colors hover:bg-surface-panel hover:text-content-primary">
+                    <ChevronLeft className="size-4" aria-hidden="true" />
                 </button>
-                <div className={cn("flex items-center gap-2", !sidebarOpen && "hidden")}>
-                    <Radio className="w-4 h-4 text-primary" />
-                    <span className="font-bold text-base">ThinClaw</span>
-                </div>
+                {sidebarOpen && <div className="flex items-center gap-2"><Radio className="size-4 text-primary" aria-hidden="true" /><span className="text-base font-semibold">ThinClaw</span></div>}
             </div>
 
-            {/* Agent Switcher — fixed */}
-            <div className={cn("mb-3 px-3 relative shrink-0", !sidebarOpen && "px-1")}>
+            <div className={cn('relative mb-3 shrink-0', sidebarOpen ? 'px-2' : 'px-0')}>
                 <button
-                    onClick={() => sidebarOpen && setIsAgentListOpen(!isAgentListOpen)}
+                    type="button"
+                    onClick={() => sidebarOpen && setAgentMenuOpen((open) => !open)}
+                    aria-expanded={agentMenuOpen}
                     className={cn(
-                        "w-full flex items-center gap-3 p-2 rounded-xl transition-all border",
-                        isAgentListOpen ? "bg-accent border-primary/20" : "bg-card/50 border-border/50 hover:bg-accent/50",
-                        !sidebarOpen && "justify-center px-0 border-none bg-transparent"
+                        'flex w-full items-center gap-3 rounded-[var(--radius-panel)] border border-surface-outline bg-surface-panel p-2 text-left transition-colors hover:bg-surface-subtle',
+                        !sidebarOpen && 'justify-center border-transparent bg-transparent px-0',
                     )}
                 >
-                    <div className={cn(
-                        "w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors",
-                        status?.engine_running ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"
-                    )}>
-                        <ActiveAgentIcon className="w-4 h-4" />
-                    </div>
-
-                    {sidebarOpen && (
-                        <>
-                            <div className="flex-1 text-left min-w-0">
-                                <p className="text-xs font-bold text-foreground truncate">{activeAgentName}</p>
-                                <p className="text-[10px] text-muted-foreground flex items-center gap-1.5">
-                                    <span className={cn("w-1.5 h-1.5 rounded-full", status?.engine_running ? "bg-emerald-500 animate-pulse" : "bg-red-500")} />
-                                    {status?.engine_running ? "Online" : "Offline"}
-                                </p>
-                            </div>
-                            <ChevronDown className={cn("w-3 h-3 text-muted-foreground transition-transform", isAgentListOpen && "rotate-180")} />
-                        </>
-                    )}
+                    <span className="grid size-8 shrink-0 place-items-center rounded-[var(--radius-control)] bg-primary/10 text-primary"><ProfileIcon className="size-4" aria-hidden="true" /></span>
+                    {sidebarOpen && <span className="min-w-0 flex-1"><span className="block truncate text-xs font-semibold text-content-primary">{activeProfileName}</span><span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-content-muted"><StatusBadge status={connection} className="px-1.5 py-0 text-[9px]" />{freshness ? `Checked ${freshness}` : 'Checking status'}</span></span>}
+                    {sidebarOpen && <ChevronDown className={cn('size-3 shrink-0 text-content-muted transition-transform', agentMenuOpen && 'rotate-180')} aria-hidden="true" />}
                 </button>
 
-                {/* Dropdown Menu */}
-                {isAgentListOpen && sidebarOpen && (
-                    <div className="absolute top-full left-3 right-3 mt-2 p-1.5 bg-popover border border-border rounded-xl shadow-2xl z-50 animate-in fade-in zoom-in-95 duration-200">
-                        <div className="space-y-0.5">
-                            <button
-                                onClick={() => handleSwitchAgent('local')}
-                                className={cn(
-                                    "w-full flex items-center gap-3 p-2 rounded-lg text-left transition-colors",
-                                    status?.gateway_mode === 'local' ? "bg-primary/10 text-primary" : "hover:bg-accent text-muted-foreground hover:text-foreground"
-                                )}
-                            >
-                                <Laptop className="w-4 h-4" />
-                                <div className="flex-1">
-                                    <p className="text-xs font-bold">Local Core</p>
-                                    <p className="text-[9px] opacity-70">Running on this device</p>
-                                </div>
-                                {status?.gateway_mode === 'local' && <div className="w-1.5 h-1.5 rounded-full bg-primary" />}
+                {agentMenuOpen && sidebarOpen && (
+                    <div className="absolute inset-x-2 top-full z-50 mt-2 rounded-[var(--radius-panel)] border border-surface-outline bg-surface-elevated p-2 shadow-lg">
+                        <button type="button" onClick={() => void switchProfile('local')} disabled={isSwitching} className={cn('flex w-full items-center gap-3 rounded-[var(--radius-control)] p-2 text-left text-xs transition-colors hover:bg-surface-subtle', status?.gateway_mode === 'local' && 'bg-primary/10 text-primary')}>
+                            <Laptop className="size-4" aria-hidden="true" /><span className="min-w-0 flex-1"><span className="block font-semibold">Local Core</span><span className="block text-[10px] text-content-muted">Runs on this Desktop</span></span>
+                        </button>
+                        {(status?.profiles ?? []).map((profile) => (
+                            <button key={profile.id} type="button" onClick={() => void switchProfile(profile)} disabled={isSwitching} className={cn('mt-1 flex w-full items-center gap-3 rounded-[var(--radius-control)] p-2 text-left text-xs transition-colors hover:bg-surface-subtle', status?.gateway_mode === 'remote' && status.remote_url === profile.url && 'bg-primary/10 text-primary')}>
+                                <Server className="size-4 shrink-0" aria-hidden="true" /><span className="min-w-0 flex-1"><span className="block truncate font-semibold">{profile.name}</span><span className="block truncate text-[10px] text-content-muted">{profile.url}</span></span>
                             </button>
-
-                            {(status?.profiles || []).map(profile => (
-                                <button
-                                    key={profile.id}
-                                    onClick={() => handleSwitchAgent(profile)}
-                                    className={cn(
-                                        "w-full flex items-center gap-3 p-2 rounded-lg text-left transition-colors",
-                                        status?.gateway_mode === 'remote' && status.remote_url === profile.url
-                                            ? "bg-primary/10 text-primary"
-                                            : "hover:bg-accent text-muted-foreground hover:text-foreground"
-                                    )}
-                                >
-                                    <Server className="w-4 h-4" />
-                                    <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-1.5">
-                                            <p className="text-xs font-bold truncate">{profile.name}</p>
-                                            {profile.is_default && <Star className="w-3 h-3 text-amber-400 fill-amber-400" />}
-                                            {profile.status && (
-                                                <span className={cn("w-1.5 h-1.5 rounded-full",
-                                                    profile.status === 'running' ? 'bg-emerald-500' :
-                                                        profile.status === 'paused' ? 'bg-amber-500' :
-                                                            profile.status === 'error' ? 'bg-red-500' : 'bg-zinc-500'
-                                                )} />
-                                            )}
-                                        </div>
-                                        <p className="text-[9px] opacity-70 truncate">
-                                            {profile.url}
-                                            {profile.session_count != null && ` · ${profile.session_count} sessions`}
-                                        </p>
-                                    </div>
-                                    <div className="flex items-center gap-1">
-                                        {!profile.is_default && (
-                                            <button
-                                                onClick={(e) => handleSetDefault(e, profile.id)}
-                                                className="p-1 rounded hover:bg-accent transition-colors"
-                                                title="Set as default"
-                                            >
-                                                <Star className="w-3 h-3 text-muted-foreground/40 hover:text-amber-400" />
-                                            </button>
-                                        )}
-                                        {status?.gateway_mode === 'remote' && status.remote_url === profile.url && <div className="w-1.5 h-1.5 rounded-full bg-primary" />}
-                                    </div>
-                                </button>
-                            ))}
-                        </div>
-
-                        <div className="mt-2 pt-2 border-t border-border">
-                            <button
-                                onClick={() => {
-                                    setIsAgentListOpen(false);
-                                    onNavigateToSettings('thinclaw-gateway');
-                                }}
-                                className="w-full flex items-center gap-2 p-2 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-                            >
-                                <Settings className="w-3 h-3" />
-                                Manage Agents
-                            </button>
-                        </div>
+                        ))}
+                        <button type="button" onClick={() => { setAgentMenuOpen(false); onNavigateToSettings('thinclaw-gateway'); }} className="mt-2 flex w-full items-center gap-2 border-t border-surface-outline px-2 pt-3 text-xs text-content-muted hover:text-content-primary">
+                            <Settings className="size-3.5" aria-hidden="true" /> Manage agents
+                        </button>
                     </div>
                 )}
             </div>
 
-            {/* ── Scrollable area: nav + sessions ── */}
-            <div className="flex-1 min-h-0 overflow-y-auto scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+            {switchError && sidebarOpen && <Notice tone="error" title="Profile switch failed" className="mx-2 mb-3">{switchError}</Notice>}
+            {error && sidebarOpen && <Notice tone="warning" title="Profile status needs attention" className="mx-2 mb-3">{error}</Notice>}
 
-                {/* Navigation — grouped into sections */}
-                <div className="space-y-3 pb-2">
-                    {([
-                        {
-                            label: 'Core',
-                            items: [
-                                { id: 'dashboard', label: 'Dashboard', icon: Layout },
-                                { id: 'chat', label: 'Live Chat', icon: MessageCircle },
-                                // Fleet Command only shown when remote agent profiles exist
-                                ...((status?.profiles?.length ?? 0) > 0
-                                    ? [{ id: 'fleet', label: 'Fleet Command', icon: Server }]
-                                    : []),
-                            ]
-                        },
-                        {
-                            label: 'Knowledge',
-                            items: [
-                                { id: 'brain', label: 'The Brain', icon: Brain },
-                                { id: 'memory', label: 'Temporal Memory', icon: History },
-                                { id: 'learning', label: 'Learning Review', icon: BrainCircuit },
-                                { id: 'trajectory', label: 'Trajectory', icon: Activity },
-                                { id: 'rollback', label: 'Rollback', icon: History },
-                                { id: 'session-search', label: 'Session Search', icon: Search },
-                                { id: 'cost-dashboard', label: 'Cost Dashboard', icon: DollarSign },
-                                { id: 'cache-stats', label: 'Cache Stats', icon: Database },
-                            ]
-                        },
-                        {
-                            label: 'Channels',
-                            items: [
-                                { id: 'channels', label: 'Channels', icon: Smartphone },
-                                { id: 'channel-status', label: 'Channel Status', icon: Zap },
-                                { id: 'channel-config', label: 'Channel Config', icon: SlidersHorizontal },
-                                { id: 'presence', label: 'Presence', icon: Cpu },
-                                { id: 'pairing', label: 'DM Pairing', icon: KeyRound },
-                                { id: 'routing', label: 'Routing', icon: GitBranch },
-                            ]
-                        },
-                        {
-                            label: 'Automation',
-                            items: [
-                                { id: 'automations', label: 'Automations', icon: Timer },
-                                { id: 'jobs', label: 'Jobs', icon: Play },
-                                { id: 'repo-projects', label: 'Repo Projects', icon: GitBranch },
-                                { id: 'autonomy', label: 'Autonomy', icon: ShieldCheck },
-                                { id: 'experiments', label: 'Experiments', icon: FlaskConical },
-                                { id: 'routine-audit', label: 'Routine Audit', icon: FileText },
-                                { id: 'hooks', label: 'Hooks', icon: Anchor },
-                            ]
-                        },
-                        {
-                            label: 'Tooling',
-                            items: [
-                                { id: 'skills', label: 'Skills', icon: Package },
-                                { id: 'plugins', label: 'Plugins', icon: Plug },
-                                { id: 'tool-policies', label: 'Tool Policies', icon: Wrench },
-                                { id: 'config', label: 'Config Editor', icon: Settings2 },
-                            ]
-                        },
-                        {
-                            label: 'System',
-                            items: [
-                                { id: 'remote-access', label: 'Remote Access', icon: Network },
-                                { id: 'event-inspector', label: 'Event Inspector', icon: Activity },
-                                { id: 'doctor', label: 'Doctor', icon: Stethoscope },
-                                { id: 'system-control', label: 'System', icon: Shield },
-                            ]
-                        },
-                    ] as const).map((group) => (
-                        <div key={group.label}>
-                            {sidebarOpen && (
-                                <p className="px-3 mb-1 text-[9px] font-bold uppercase tracking-widest text-muted-foreground/40 select-none">
-                                    {group.label}
-                                </p>
-                            )}
+            <div className="min-h-0 flex-1 overflow-y-auto">
+                <div className="space-y-3 pb-3">
+                    {routesBySection.map((section) => (
+                        <section key={section.id} aria-label={section.label}>
+                            {sidebarOpen && <p className="mb-1 px-3 text-[10px] font-bold uppercase tracking-widest text-content-muted">{section.label}</p>}
                             <div className="space-y-0.5">
-                                {(group.items as readonly { id: string; label: string; icon: React.ElementType }[]).map((item) => {
-                                    const isDisabled = item.id === 'skills' && !gatewayRunning;
+                                {section.routes.map((route) => {
+                                    const state = capability(route.capability);
+                                    const canRemediate = route.capability === 'always' || route.capability === 'advanced';
+                                    const disabled = !canRemediate && (state.state === 'unavailable' || state.state === 'loading');
+                                    const selected = selectedDestination === route.id;
+                                    const Icon = route.icon;
                                     return (
-                                        <motion.button
-                                            key={item.id}
-                                            variants={itemVariants}
-                                            onClick={() => !isDisabled && onSelectPage(item.id as ThinClawPage)}
-                                            disabled={isDisabled}
+                                        <button
+                                            key={route.id}
+                                            ref={(node) => { navRefs.current[route.id] = node; }}
+                                            type="button"
+                                            aria-current={selected ? 'page' : undefined}
+                                            tabIndex={disabled ? -1 : route.id === rovingRouteId ? 0 : -1}
+                                            disabled={disabled}
+                                            title={disabled ? [state.reason, state.remediation].filter(Boolean).join(' ') : (!sidebarOpen ? route.label : undefined)}
+                                            onClick={() => onSelectPage(route.id)}
+                                            onKeyDown={(event) => {
+                                                if (event.key === 'ArrowDown') { event.preventDefault(); moveNavFocus(route.id, 1); }
+                                                if (event.key === 'ArrowUp') { event.preventDefault(); moveNavFocus(route.id, -1); }
+                                                if (event.key === 'Home') { event.preventDefault(); moveNavFocus(route.id, 'first'); }
+                                                if (event.key === 'End') { event.preventDefault(); moveNavFocus(route.id, 'last'); }
+                                            }}
                                             className={cn(
-                                                "flex items-center gap-2 rounded-lg transition-all duration-200",
-                                                sidebarOpen ? "w-full px-3 py-1.5" : "w-10 h-9 justify-center mx-auto",
-                                                activePage === item.id
-                                                    ? "bg-accent text-foreground font-semibold shadow-xs ring-1 ring-primary/20"
-                                                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                                                isDisabled && "opacity-40 cursor-not-allowed grayscale-[0.5] hover:bg-transparent"
+                                                'flex items-center gap-2 rounded-[var(--radius-control)] text-left text-xs transition-colors',
+                                                sidebarOpen ? 'w-full px-3 py-2' : 'mx-auto size-9 justify-center',
+                                                selected ? 'bg-primary/10 font-semibold text-content-primary ring-1 ring-primary/20' : 'text-content-muted hover:bg-surface-subtle hover:text-content-primary',
+                                                disabled && 'cursor-not-allowed opacity-45 hover:bg-transparent',
                                             )}
-                                            title={isDisabled ? `${item.label} (Requires active Gateway)` : (!sidebarOpen ? item.label : undefined)}
                                         >
-                                            <item.icon className={cn("w-3.5 h-3.5 shrink-0 transition-colors duration-200", activePage === item.id && !isDisabled ? "text-primary" : "")} />
-                                            <span className={cn("text-xs transition-all duration-200", sidebarOpen ? "opacity-100" : "opacity-0 hidden")}>
-                                                {item.label}
-                                            </span>
-                                        </motion.button>
+                                            <Icon className={cn('size-3.5 shrink-0', selected && 'text-primary')} aria-hidden="true" />
+                                            {sidebarOpen && <span className="truncate">{route.label}</span>}
+                                        </button>
                                     );
                                 })}
                             </div>
-                        </div>
+                        </section>
                     ))}
                 </div>
 
-                {/* Sessions list — only on chat page */}
-                {activePage === 'chat' && (
-                    <div className="border-t border-border/40 pt-3 pb-2 space-y-0.5">
-                        {sidebarOpen && (
-                            <p className="px-3 mb-1 text-[9px] font-bold uppercase tracking-widest text-muted-foreground/40 select-none">
-                                Sessions
-                            </p>
-                        )}
-
-                        {gatewayRunning && (
-                            <button
-                                onClick={onNewSession}
-                                className={cn(
-                                    "flex items-center gap-2 rounded-lg bg-primary/10 text-primary text-xs font-bold uppercase tracking-wider transition-all mb-2 border border-primary/10 hover:bg-primary/20",
-                                    sidebarOpen ? "w-full px-3 py-1.5 justify-start" : "w-10 h-9 justify-center mx-auto"
-                                )}
-                            >
-                                <MessageCircle className="w-3.5 h-3.5" />
-                                <span className={cn(sidebarOpen ? "block" : "hidden")}>New Session</span>
+                {selectedDestination === 'chat' && (
+                    <section className="border-t border-surface-outline pt-3" aria-label="Chat sessions">
+                        {sidebarOpen && <p className="mb-1 px-3 text-[10px] font-bold uppercase tracking-widest text-content-muted">Sessions</p>}
+                        <div className="space-y-0.5">
+                            {runtimeCapability.state === 'available' && (
+                                <button type="button" onClick={onNewSession} className={cn('flex items-center gap-2 rounded-[var(--radius-control)] bg-primary/10 text-xs font-semibold text-primary transition-colors hover:bg-primary/15', sidebarOpen ? 'w-full px-3 py-2' : 'mx-auto size-9 justify-center')} title={!sidebarOpen ? 'New session' : undefined}>
+                                    <Plus className="size-3.5" aria-hidden="true" />{sidebarOpen && 'New session'}
+                                </button>
+                            )}
+                            <button type="button" onClick={() => onSelectPage('session-search')} className={cn('flex items-center gap-2 rounded-[var(--radius-control)] text-xs text-content-muted transition-colors hover:bg-surface-subtle hover:text-content-primary', sidebarOpen ? 'w-full px-3 py-2' : 'mx-auto size-9 justify-center')} title={!sidebarOpen ? 'Search sessions' : undefined}>
+                                <Search className="size-3.5" aria-hidden="true" />{sidebarOpen && 'Search sessions'}
                             </button>
-                        )}
-
-                        {!gatewayRunning ? (
-                            <div className={cn("text-center py-6 text-muted-foreground text-xs", !sidebarOpen && "hidden")}>
-                                <p>Gateway not running</p>
-                            </div>
-                        ) : sessions.length === 0 ? (
-                            <div className={cn("text-center py-6 text-muted-foreground text-xs", !sidebarOpen && "hidden")}>
-                                <p>No sessions found</p>
-                            </div>
-                        ) : (
-                            sessions.map((session) => (
-                                <div key={session.session_key} className="relative group">
-                                    <button
-                                        onClick={() => onSelectSession(session.session_key)}
-                                        className={cn(
-                                            "w-full text-left rounded-lg transition-all",
-                                            sidebarOpen ? "px-3 py-1.5 hover:bg-accent pr-8" : "w-10 h-9 flex items-center justify-center hover:bg-accent mx-auto",
-                                            selectedSessionKey === session.session_key && "bg-accent border border-white/5"
-                                        )}
-                                    >
-                                        {sidebarOpen ? (
-                                            <div className="flex items-start gap-2">
-                                                <MessageCircle className={cn("w-3.5 h-3.5 mt-0.5 shrink-0", session.session_key === 'agent:main' ? "text-blue-400" : "text-muted-foreground")} />
-                                                <div className="flex-1 min-w-0">
-                                                    <p className={cn("text-xs truncate", session.session_key === 'agent:main' ? "font-bold text-blue-100" : "font-medium")}>
-                                                        {session.session_key === 'agent:main' ? 'ThinClaw Core' : (session.title || session.session_key.split(':').pop()?.slice(0, 8))}
-                                                    </p>
-                                                    <p className="text-[10px] text-muted-foreground truncate">{session.source || 'system'}</p>
-                                                </div>
-                                            </div>
-                                        ) : (
-                                            <MessageCircle className={cn("w-3.5 h-3.5", session.session_key === 'agent:main' ? "text-blue-400" : "text-muted-foreground")} />
-                                        )}
+                            {runtimeCapability.state !== 'available' ? (
+                                sidebarOpen && <p className="px-3 py-3 text-xs text-content-muted">{runtimeCapability.reason}</p>
+                            ) : sessions.length === 0 ? (
+                                sidebarOpen && <p className="px-3 py-3 text-xs text-content-muted">{isLoadingSessions ? 'Loading sessions…' : 'No sessions found.'}</p>
+                            ) : sessions.map((session) => (
+                                <div key={session.session_key} className="group relative">
+                                    <button type="button" onClick={() => onSelectSession(session.session_key)} className={cn('flex w-full items-center gap-2 rounded-[var(--radius-control)] text-left transition-colors hover:bg-surface-subtle', sidebarOpen ? 'px-3 py-2 pr-8' : 'mx-auto size-9 justify-center', selectedSessionKey === session.session_key && 'bg-surface-subtle text-content-primary')} title={!sidebarOpen ? (session.title ?? session.session_key) : undefined}>
+                                        <MessageCircle className="size-3.5 shrink-0 text-content-muted" aria-hidden="true" />
+                                        {sidebarOpen && <span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{session.session_key === 'agent:main' ? 'ThinClaw Core' : session.title ?? session.session_key}</span><span className="block truncate text-[10px] text-content-muted">{session.source ?? 'agent'}</span></span>}
                                     </button>
                                     {sidebarOpen && session.session_key !== 'agent:main' && (
-                                        <button
-                                            onClick={(e) => handleDeleteSession(e, session.session_key)}
-                                            className={cn(
-                                                "absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md transition-all z-10",
-                                                pendingDeleteKey === session.session_key
-                                                    ? "opacity-100 bg-red-500/20 text-red-500 animate-pulse"
-                                                    : "opacity-0 group-hover:opacity-100 hover:bg-red-500/10 text-muted-foreground hover:text-red-500"
-                                            )}
-                                            title={pendingDeleteKey === session.session_key ? "Click again to confirm delete" : "Delete Session"}
-                                        >
-                                            <Trash2 className="w-3 h-3" />
+                                        <button type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setDeleteTarget(session); }} className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-content-muted opacity-0 transition-colors hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100" aria-label={`Delete ${session.title ?? session.session_key}`} title="Delete session">
+                                            <Trash2 className="size-3" aria-hidden="true" />
                                         </button>
                                     )}
                                 </div>
-                            ))
-                        )}
-                    </div>
+                            ))}
+                        </div>
+                    </section>
                 )}
             </div>
 
-            {/* Bottom Actions — sticky pinned */}
-            <div className="shrink-0 pt-2 border-t border-border/50 space-y-0.5">
-                <button
-                    onClick={() => onNavigateToSettings('thinclaw-gateway')}
-                    className={cn(
-                        "flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-all duration-200 rounded-lg hover:bg-accent",
-                        sidebarOpen ? "w-full px-3 py-2" : "w-10 h-9 justify-center mx-auto"
-                    )}
-                >
-                    <Settings className="w-4 h-4" />
-                    {sidebarOpen && "Gateway Settings"}
+            <div className="shrink-0 border-t border-surface-outline pt-2">
+                <button type="button" onClick={() => onNavigateToSettings('thinclaw-gateway')} className={cn('flex items-center gap-2 rounded-[var(--radius-control)] text-xs text-content-muted transition-colors hover:bg-surface-subtle hover:text-content-primary', sidebarOpen ? 'w-full px-3 py-2' : 'mx-auto size-9 justify-center')} title={!sidebarOpen ? 'Gateway settings' : undefined}>
+                    <Settings className="size-4" aria-hidden="true" />{sidebarOpen && 'Gateway settings'}
                 </button>
-                {activePage === 'chat' && status?.engine_running && (
-                    <button
-                        onClick={fetchData}
-                        className={cn(
-                            "flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-all duration-200 rounded-lg hover:bg-accent",
-                            sidebarOpen ? "w-full px-3 py-2" : "w-10 h-9 justify-center mx-auto"
-                        )}
-                    >
-                        <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
-                        {sidebarOpen && "Refresh Sessions"}
+                {(error || !checkedAt || profileCapability.state === 'stale') && (
+                    <button type="button" onClick={() => void refresh()} disabled={isRefreshing} className={cn('mt-0.5 flex items-center gap-2 rounded-[var(--radius-control)] text-xs text-content-muted transition-colors hover:bg-surface-subtle hover:text-content-primary', sidebarOpen ? 'w-full px-3 py-2' : 'mx-auto size-9 justify-center')} title={!sidebarOpen ? 'Refresh profile' : undefined}>
+                        <RefreshCw className={cn('size-4', isRefreshing && 'animate-spin')} aria-hidden="true" />{sidebarOpen && 'Refresh profile'}
                     </button>
                 )}
+                {!gatewayRunning && sidebarOpen && <div className="mt-2 flex items-center gap-2 px-3 text-[10px] text-content-muted"><CircleAlert className="size-3.5" aria-hidden="true" /> Gateway stopped</div>}
             </div>
-        </motion.div>
+            <ConfirmDialog
+                open={deleteTarget !== null}
+                onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+                title="Delete this agent session?"
+                description={deleteTarget
+                    ? <>Session <span className="font-mono">{deleteTarget.title ?? deleteTarget.session_key}</span> will be permanently removed. Stop any active run first.</>
+                    : ''}
+                confirmLabel="Delete session"
+                onConfirm={deleteSession}
+                isConfirming={isDeletingSession}
+            />
+        </motion.nav>
     );
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import {
     DollarSign, TrendingUp, AlertTriangle, RefreshCw,
     Download, BarChart3, Cpu, Bot, Trash2, Zap, Hash
@@ -7,6 +7,7 @@ import {
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
+import { ConfirmDialog } from '../ui';
 
 // ── Bar chart (inline SVG — no library dependency) ──────────────────
 function MiniBar({ value, max, label, color }: { value: number; max: number; label: string; color: string }) {
@@ -39,6 +40,7 @@ export function ThinClawCostDashboard() {
     const [summary, setSummary] = useState<thinclaw.CostSummary | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [showResetConfirm, setShowResetConfirm] = useState(false);
+    const [isResetting, setIsResetting] = useState(false);
     const [activeTab, setActiveTab] = useState<'overview' | 'by-model' | 'by-agent'>('overview');
 
     const fetchData = useCallback(async () => {
@@ -69,6 +71,7 @@ export function ThinClawCostDashboard() {
     };
 
     const handleReset = async () => {
+        setIsResetting(true);
         try {
             await thinclaw.resetCostData();
             toast.success('Cost data reset successfully');
@@ -76,6 +79,8 @@ export function ThinClawCostDashboard() {
             await fetchData();
         } catch (e) {
             toast.error(`Reset failed: ${e}`);
+        } finally {
+            setIsResetting(false);
         }
     };
 
@@ -144,41 +149,15 @@ export function ThinClawCostDashboard() {
                 </div>
             </div>
 
-            {/* Reset confirmation modal */}
-            <AnimatePresence>
-                {showResetConfirm && (
-                    <motion.div
-                        initial={{ opacity: 0, y: -10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -10 }}
-                        className="flex items-center justify-between gap-4 p-4 rounded-2xl bg-red-500/10 border border-red-500/20"
-                    >
-                        <div className="flex items-center gap-3">
-                            <Trash2 className="w-5 h-5 text-red-400 shrink-0" />
-                            <div>
-                                <p className="text-sm font-semibold text-red-300">Reset all cost data?</p>
-                                <p className="text-xs text-muted-foreground/70">
-                                    This will permanently delete {totalRequests} entries totaling ${totalCost.toFixed(4)}. This cannot be undone.
-                                </p>
-                            </div>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                            <button
-                                onClick={() => setShowResetConfirm(false)}
-                                className="px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                onClick={handleReset}
-                                className="px-3 py-1.5 rounded-lg text-xs font-medium text-red-300 bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 transition-all"
-                            >
-                                Confirm Reset
-                            </button>
-                        </div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
+            <ConfirmDialog
+                open={showResetConfirm}
+                onOpenChange={setShowResetConfirm}
+                title="Reset all recorded cost data?"
+                description={`This permanently deletes ${totalRequests} recorded request${totalRequests === 1 ? '' : 's'} totaling $${totalCost.toFixed(4)}. This cannot be undone.`}
+                confirmLabel="Reset cost data"
+                onConfirm={handleReset}
+                isConfirming={isResetting}
+            />
 
             {/* Alert banner */}
             {summary?.alert_triggered && (

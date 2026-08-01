@@ -66,7 +66,9 @@ fn offline_agent(
         latency_ms: None,
         version: None,
         stats: Some(serde_json::json!({ "error": reason })),
-        current_task: Some(reason),
+        // A connection failure is not an active task. Keep it in stats/error
+        // and avoid presenting a synthesized task to the desktop UI.
+        current_task: None,
         progress: None,
         logs: None,
         parent_id: Some("main".to_string()),
@@ -85,10 +87,6 @@ fn remote_agent_from_status(
     latency_ms: u32,
     status: serde_json::Value,
 ) -> AgentStatusSummary {
-    let connection_count = status
-        .get("total_connections")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_default();
     let runtime_error = status
         .get("runtime_reload_error")
         .and_then(serde_json::Value::as_str)
@@ -125,11 +123,9 @@ fn remote_agent_from_status(
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
         stats: Some(status.clone()),
-        current_task: Some(if connection_count == 0 {
-            "Ready".to_string()
-        } else {
-            format!("{connection_count} live control connection(s)")
-        }),
+        // Gateway status does not contain task identity. Do not turn control
+        // connection counts into an apparent agent task.
+        current_task: None,
         progress: None,
         logs: None,
         parent_id: Some("main".to_string()),
@@ -264,7 +260,8 @@ pub async fn thinclaw_get_fleet_status(
                 "runtime": "embedded",
                 "configured_remote_agents": results.len(),
             })),
-            current_task: Some("Ready".to_string()),
+            // Runtime initialization proves availability, not an active task.
+            current_task: None,
             progress: None,
             logs: None,
             parent_id: None,
@@ -436,10 +433,7 @@ mod tests {
         assert!(summary.active);
         assert_eq!(summary.latency_ms, Some(42));
         assert_eq!(summary.model.as_deref(), Some("openai/gpt-5"));
-        assert_eq!(
-            summary.current_task.as_deref(),
-            Some("3 live control connection(s)")
-        );
+        assert_eq!(summary.current_task, None);
         assert!(summary
             .capabilities
             .unwrap()

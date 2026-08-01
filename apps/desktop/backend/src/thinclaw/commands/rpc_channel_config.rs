@@ -38,7 +38,34 @@ pub async fn thinclaw_channel_config_schemas(
     }
     let agent = ironclaw.agent().await?;
     let schemas = agent.channels().config_schemas().await;
-    Ok(json!({ "available": true, "schemas": schemas }))
+    let mut values = serde_json::Map::new();
+    if let Some(store) = agent.store() {
+        for schema in &schemas {
+            let mut channel_values = serde_json::Map::new();
+            for field in &schema.fields {
+                // Password fields are intentionally omitted. Desktop does not yet
+                // have the encrypted channel-secret binding required to read or
+                // replace them safely.
+                if field.field_type == "password" {
+                    continue;
+                }
+                let key = format!("channels.{}_{}", schema.channel_id, field.id);
+                if let Ok(Some(value)) = store.get_setting("local_user", &key).await {
+                    channel_values.insert(field.id.clone(), value);
+                }
+            }
+            if !channel_values.is_empty() {
+                values.insert(schema.channel_id.clone(), Value::Object(channel_values));
+            }
+        }
+    }
+    Ok(json!({
+        "available": true,
+        "schemas": schemas,
+        "values": values,
+        "secret_binding_available": false,
+        "secret_binding_reason": "Channel secrets must be configured through the gateway or host until encrypted desktop secret bindings are available."
+    }))
 }
 
 /// Apply configuration changes to a channel.

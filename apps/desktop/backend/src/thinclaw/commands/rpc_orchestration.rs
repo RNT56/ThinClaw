@@ -7,6 +7,7 @@ use tracing::info;
 
 use super::types::*;
 use super::ThinClawManager;
+use crate::thinclaw::bridge::{gated, RouteMode};
 use crate::thinclaw::config::AgentProfile;
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
@@ -116,10 +117,20 @@ pub(crate) mod sub_agent_registry {
     }
 }
 
+fn desktop_managed_subagents_remote_gate() -> crate::thinclaw::bridge::BridgeError {
+    gated(
+        "Desktop-managed sub-agents",
+        "the selected remote profile does not expose a profile-targeted sub-agent dispatch contract",
+        "switch to Local Core to spawn or manage Desktop-managed sub-agents",
+        RouteMode::LocalOnly,
+    )
+}
+
 #[cfg(test)]
 mod sub_agent_registry_tests {
     use super::super::types::ChildSessionInfo;
-    use super::sub_agent_registry;
+    use super::{desktop_managed_subagents_remote_gate, sub_agent_registry};
+    use crate::thinclaw::bridge::{BridgeError, RouteMode};
     use std::sync::OnceLock;
     use tokio::sync::Mutex;
 
@@ -166,6 +177,19 @@ mod sub_agent_registry_tests {
         assert!(sub_agent_registry::list_children(parent).await.is_empty());
         assert_eq!(sub_agent_registry::all_children().await, 0);
     }
+
+    #[test]
+    fn remote_subagent_gate_is_typed_and_local_only() {
+        assert!(matches!(
+            desktop_managed_subagents_remote_gate(),
+            BridgeError::Unavailable {
+                capability,
+                satisfied_by: RouteMode::LocalOnly,
+                remediation: Some(_),
+                ..
+            } if capability == "Desktop-managed sub-agents"
+        ));
+    }
 }
 
 /// Spawn a new sub-agent session with optional parent tracking.
@@ -182,6 +206,15 @@ pub async fn thinclaw_spawn_session(
     task: String,
     parent_session: Option<String>,
 ) -> Result<SpawnSessionResponse, crate::thinclaw::bridge::BridgeError> {
+    // Desktop-managed child sessions are backed by the embedded runtime's
+    // in-process session manager. A remote profile can have its own chat
+    // workflow, but it does not currently expose a profile-targeted
+    // sub-agent-dispatch contract. Do not silently create a local child while
+    // the UI says a remote profile is active.
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(desktop_managed_subagents_remote_gate());
+    }
+
     let child_key = format!("agent:{}:task-{}", agent_id, uuid::Uuid::new_v4());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -327,6 +360,10 @@ pub async fn thinclaw_list_child_sessions(
     ironclaw: State<'_, ThinClawRuntimeState>,
     parent_session: String,
 ) -> Result<Vec<ChildSessionInfo>, crate::thinclaw::bridge::BridgeError> {
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(desktop_managed_subagents_remote_gate());
+    }
+
     let mut children = sub_agent_registry::list_children(&parent_session).await;
 
     // ── Post-restart recovery: scan live sessions if registry is empty ──
@@ -377,6 +414,10 @@ pub async fn thinclaw_update_sub_agent_status(
     status: String,
     result_summary: Option<String>,
 ) -> Result<ThinClawRpcResponse, crate::thinclaw::bridge::BridgeError> {
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(desktop_managed_subagents_remote_gate());
+    }
+
     // Find the parent before updating
     let parent = sub_agent_registry::find_parent(&child_session).await;
 

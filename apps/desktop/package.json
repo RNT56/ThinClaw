@@ -54,6 +54,7 @@
     "lint:fmt": "cd ../.. && cargo fmt --all -- --check",
     "lint:fmt:fix": "cd ../.. && cargo fmt --all",
     "lint:ts": "cd frontend && tsc --noEmit && cd .. && tsc --noEmit -p tsconfig.e2e.json",
+    "lint:agent-styles": "node scripts/check_agent_semantic_styles.mjs",
     "lint:all": "npm run lint:fmt && npm run lint:thinclaw && npm run lint:ts",
     "test:thinclaw": "cd ../.. && cargo test --workspace",
     "ci": "npm run lint:all && npm run test:thinclaw",

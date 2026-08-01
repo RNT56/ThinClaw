@@ -5,12 +5,15 @@ const commands = vi.hoisted(() => ({
     thinclawChannelConfigSchemas: vi.fn(),
     thinclawChannelConfigSubmit: vi.fn(),
 }));
+const sonner = vi.hoisted(() => ({
+    toast: { loading: vi.fn(() => 'toast-id'), success: vi.fn(), info: vi.fn(), error: vi.fn() },
+}));
 
 vi.mock('../../lib/generated/thinclaw-commands', () => ({
     thinclawCommands: commands,
 }));
 vi.mock('sonner', () => ({
-    toast: { loading: vi.fn(() => 'toast-id'), success: vi.fn(), error: vi.fn() },
+    toast: sonner.toast,
 }));
 
 import { ThinClawChannelConfig } from '../../components/thinclaw/ThinClawChannelConfig';
@@ -86,7 +89,7 @@ describe('ThinClawChannelConfig', () => {
         expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
     });
 
-    it('keeps manifest credentials opaque and submits replacements explicitly', async () => {
+    it('keeps manifest credentials opaque until encrypted secret binding is available', async () => {
         commands.thinclawChannelConfigSchemas.mockResolvedValue({
             status: 'ok',
             data: {
@@ -106,16 +109,30 @@ describe('ThinClawChannelConfig', () => {
         });
 
         render(<ThinClawChannelConfig />);
-        const credential = await screen.findByLabelText(/Channel secret/);
-        expect(credential).toHaveAttribute('type', 'password');
-        expect(credential).toHaveValue('');
-        fireEvent.change(credential, { target: { value: 'replacement' } });
-        fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+        expect(await screen.findByText(/Secret configuration is not available in Desktop yet/)).toBeInTheDocument();
+        expect(screen.queryByLabelText(/Channel secret/)).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+    });
+
+    it('does not report persisted-but-not-forwarded settings as a full success', async () => {
+        commands.thinclawChannelConfigSubmit.mockResolvedValue({
+            status: 'ok',
+            data: {
+                ok: false,
+                persisted: true,
+                forwarded: false,
+                note: 'Settings were saved and will apply when the channel starts.',
+            },
+        });
+
+        render(<ThinClawChannelConfig />);
+        fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
 
         await waitFor(() => {
-            expect(commands.thinclawChannelConfigSubmit).toHaveBeenCalledWith('line', {
-                line_channel_secret: 'replacement',
-            });
+            expect(sonner.toast.info).toHaveBeenCalledWith(
+                'Settings were saved and will apply when the channel starts.',
+                { id: 'toast-id' },
+            );
         });
     });
 });

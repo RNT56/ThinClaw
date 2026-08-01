@@ -5,9 +5,35 @@ import { Sidebar } from './Sidebar';
 import { CanvasWindow } from '../thinclaw/canvas/CanvasWindow';
 import { CanvasProviderWrapper } from '../thinclaw/canvas/CanvasProvider';
 import { CanvasToolbar } from '../thinclaw/canvas/CanvasToolbar';
-import { CommandPalette } from '../navigation/CommandPalette';
 import { useI18n } from '../i18n-provider';
 import { AsyncState } from '../ui';
+import { AgentCockpitProvider, useAgentCockpit } from '../thinclaw/AgentCockpitProvider';
+import { AGENT_ROUTE_REGISTRY, type AgentPrimaryPage } from '../thinclaw/agent-routes';
+import type { SettingsPage } from '../settings/SettingsSidebar';
+import type { ProductMode } from '../navigation/ModeNavigator';
+
+const CommandPalette = lazy(() => import('../navigation/CommandPalette').then((module) => ({ default: module.CommandPalette })));
+
+function AgentAwareCommandPalette({
+    open,
+    onOpenChange,
+    onModeChange,
+    onSettingsChange,
+    onAgentPageChange,
+}: {
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
+    onModeChange: (mode: ProductMode) => void;
+    onSettingsChange: (page: SettingsPage) => void;
+    onAgentPageChange: (page: AgentPrimaryPage) => void;
+}) {
+    const { capability } = useAgentCockpit();
+    const routes = AGENT_ROUTE_REGISTRY.filter((route) => {
+        const state = capability(route.capability).state;
+        return route.capability === 'always' || route.capability === 'advanced' || state === 'available';
+    });
+    return <Suspense fallback={null}><CommandPalette open={open} onOpenChange={onOpenChange} onModeChange={onModeChange} onSettingsChange={onSettingsChange} onAgentPageChange={onAgentPageChange} agentRoutes={routes} /></Suspense>;
+}
 
 const ChatView = lazy(() => import('./views/ChatView').then((module) => ({ default: module.ChatView })));
 const ThinClawView = lazy(() => import('./views/ThinClawView').then((module) => ({ default: module.ThinClawView })));
@@ -32,6 +58,7 @@ function ChatLayoutShell() {
         commandPaletteOpen,
         setCommandPaletteOpen,
         setActiveTab,
+        setActiveThinClawPage,
     } = useChatLayout();
     const [mountedModes, setMountedModes] = useState(() => ({
         thinclaw: isThinClawMode,
@@ -48,6 +75,7 @@ function ChatLayoutShell() {
     }, [isImagineMode, isThinClawMode]);
 
     return (
+        <AgentCockpitProvider enabled={isThinClawMode}>
         <div className="flex h-screen bg-background text-foreground overflow-hidden font-sans">
             {/* Hidden dropzone input — must be at root so drag events propagate */}
             <input {...(getInputProps as any)()} />
@@ -99,13 +127,15 @@ function ChatLayoutShell() {
             {/* Global floating canvas panels + toolbar */}
             <CanvasWindow />
             <CanvasToolbar showAvailability={isThinClawMode} />
-            <CommandPalette
+            <AgentAwareCommandPalette
                 open={commandPaletteOpen}
                 onOpenChange={setCommandPaletteOpen}
                 onModeChange={setActiveTab}
                 onSettingsChange={setActiveTab}
+                onAgentPageChange={setActiveThinClawPage}
             />
         </div>
+        </AgentCockpitProvider>
     );
 }
 

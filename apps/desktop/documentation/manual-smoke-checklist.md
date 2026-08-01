@@ -1,6 +1,6 @@
 # ThinClaw Desktop Manual Smoke Checklist
 
-Last updated: 2026-05-15
+Last updated: 2026-08-01
 
 This checklist is the repeatable P3-W2 manual acceptance run for ThinClaw
 Desktop. It covers local and remote mode with the same product surfaces and
@@ -143,13 +143,14 @@ script, then record the exact command and Cargo feature set in the report.
   list, and file read.
 - Expected events: subagent and job lifecycle events on `thinclaw-event`.
 
-### Fleet Command
+### Advanced → Fleet
 
 - Add two credentialed remote agent profiles and open Fleet Command.
 - Verify each remote node reports authenticated gateway latency, active model,
-  connection count, and any runtime error without exposing its bearer token.
-- Assign a task to one remote node and verify the resulting thread is created on
-  that gateway, not in the local runtime.
+  capabilities, source/freshness, and any runtime error without exposing its
+  bearer token.
+- Verify that targeted task assignment and abort are not offered. They remain
+  unavailable until a selected-profile dispatch contract exists.
 - Broadcast a harmless instruction and verify the receipt attempts each local or
   remote node exactly once, including a named failure when one node is offline.
 
@@ -161,6 +162,10 @@ script, then record the exact command and Cargo feature set in the report.
   Telegram setup. In DM Pairing, check Telegram, Slack, Discord, WhatsApp, and
   Signal; verify each tab lists the real credential path and a generated code
   can be approved for a configured adapter.
+- Open Channel Setup and verify it loads current non-secret values only. Confirm
+  that password/secret values are never rendered or copied, and that secret
+  editing is explicitly marked unavailable until encrypted channel-secret
+  binding is implemented.
 - Expected events: routine lifecycle events forward to `thinclaw-event`.
 
 ### Extensions, Skills, And MCP
@@ -227,6 +232,9 @@ Additional remote-specific checks:
   snapshots, and any unsupported job/autonomy mutation.
 - Provider vault surfaces expose save/delete/status only; raw secret reads are
   denied.
+- Desktop-managed sub-agents remain visibly unavailable with a Local Core
+  remediation. Confirm that remote mode does not load embedded-runtime child
+  sessions or enable manual spawn.
 - Autonomy host-executing mutation remains gated unless the remote host policy
   explicitly allows it.
 

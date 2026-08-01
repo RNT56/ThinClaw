@@ -1,32 +1,16 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { patchConfig } = vi.hoisted(() => ({
-    patchConfig: vi.fn().mockResolvedValue(undefined),
+const { startGateway, stopGateway } = vi.hoisted(() => ({
+    startGateway: vi.fn().mockResolvedValue(undefined),
+    stopGateway: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../../lib/thinclaw', () => ({
-    getThinClawStatus: vi.fn().mockResolvedValue({ engine_running: false }),
-    getThinClawConfig: vi.fn().mockResolvedValue({
-        version: 1,
-        workbench: { max_search_results: 5, mcp_sandbox_enabled: false },
-        agent: { 'llm.backend': 'anthropic' },
-        settings: [],
-    }),
-    getThinClawConfigSchema: vi.fn().mockResolvedValue({
-        views: {
-            workbench: {
-                description: 'Direct settings',
-                schema: { properties: { max_search_results: { type: 'number' } } },
-            },
-            agent: { description: 'Agent settings', schema: { properties: {} } },
-        },
-    }),
-    patchThinClawConfig: patchConfig,
+    getThinClawStatus: vi.fn().mockResolvedValue({ engine_running: true }),
     getThinClawLogsTail: vi.fn().mockResolvedValue({ logs: [] }),
-    runThinClawUpdate: vi.fn().mockResolvedValue(undefined),
-    startThinClawGateway: vi.fn().mockResolvedValue(undefined),
-    stopThinClawGateway: vi.fn().mockResolvedValue(undefined),
+    startThinClawGateway: startGateway,
+    stopThinClawGateway: stopGateway,
 }));
 
 vi.mock('../../hooks/use-thinclaw-stream', () => ({
@@ -34,35 +18,37 @@ vi.mock('../../hooks/use-thinclaw-stream', () => ({
 }));
 
 vi.mock('sonner', () => ({
-    toast: {
-        success: vi.fn(),
-        error: vi.fn(),
-        promise: vi.fn(),
-    },
+    toast: { success: vi.fn(), info: vi.fn(), error: vi.fn() },
 }));
 
 import { ThinClawSystemControl } from '../../components/thinclaw/ThinClawSystemControl';
 
-describe('ThinClawSystemControl unified settings views', () => {
+describe('ThinClawSystemControl gateway operations', () => {
     beforeEach(() => {
-        patchConfig.mockClear();
+        startGateway.mockClear();
+        stopGateway.mockClear();
     });
 
-    it('switches between Workbench and Agent views and saves the typed envelope', async () => {
+    it('requires an explicit confirmation before stopping a running gateway', async () => {
         render(<ThinClawSystemControl />);
 
-        expect(await screen.findByDisplayValue('5')).toBeInTheDocument();
-        fireEvent.click(screen.getByRole('button', { name: 'Agent Cockpit' }));
-        expect(await screen.findByDisplayValue('anthropic')).toBeInTheDocument();
+        const stop = await screen.findByRole('button', { name: 'Stop gateway' });
+        fireEvent.click(stop);
+        expect(stopGateway).not.toHaveBeenCalled();
+        const dialog = await screen.findByRole('dialog', { name: 'Stop the local gateway?' });
+        expect(dialog).toBeInTheDocument();
 
-        fireEvent.click(screen.getByRole('button', { name: 'Deploy Configuration' }));
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Stop gateway' }));
         await waitFor(() => {
-            expect(patchConfig).toHaveBeenCalledWith({
-                workbench: { max_search_results: 5, mcp_sandbox_enabled: false },
-                agent: { 'llm.backend': 'anthropic' },
-            });
+            expect(stopGateway).toHaveBeenCalledTimes(1);
         });
-        expect(patchConfig.mock.calls[0]?.[0]).not.toHaveProperty('raw');
-        expect(patchConfig.mock.calls[0]?.[0]).not.toHaveProperty('baseHash');
+    });
+
+    it('does not expose incompatible configuration or embedded update controls', async () => {
+        render(<ThinClawSystemControl />);
+
+        expect(await screen.findByText('Gateway and logs')).toBeInTheDocument();
+        expect(screen.queryByText('Deploy Configuration')).not.toBeInTheDocument();
+        expect(screen.queryByText('Run Update & Rebuild')).not.toBeInTheDocument();
     });
 });

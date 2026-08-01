@@ -191,6 +191,7 @@ function formatUptime(secs: number): string {
 export function ThinClawChannelStatus() {
     const [entries, setEntries] = useState<thinclaw.ChannelStatusEntry[]>([]);
     const [isLoading, setIsLoading] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
     const [expandedChannel, setExpandedChannel] = useState<string | null>(null);
     const [sortBy, setSortBy] = useState<'name' | 'state'>('name');
     const { status: runtimeStatus } = useThinClawStatusSnapshot(15000);
@@ -199,23 +200,11 @@ export function ThinClawChannelStatus() {
         try {
             const data = await thinclaw.getChannelStatusList();
             setEntries(data);
+            setLoadError(null);
         } catch (e) {
             console.error('Failed to fetch channel statuses:', e);
-            // Fallback to old API
-            try {
-                const resp = await thinclaw.getThinClawChannelsList();
-                setEntries((resp.channels || []).map(ch => ({
-                    ...ch,
-                    state: ch.enabled ? 'Running' : 'Disconnected' as any,
-                    type: ch.type as any,
-                    uptime_secs: null,
-                    messages_sent: 0,
-                    messages_received: 0,
-                    last_error: null,
-                })));
-            } catch (_) {
-                setEntries([]);
-            }
+            setEntries([]);
+            setLoadError(e instanceof Error ? e.message : String(e));
         } finally {
             setIsLoading(false);
         }
@@ -309,8 +298,14 @@ export function ThinClawChannelStatus() {
                 </div>
             </div>
 
+            {loadError && (
+                <div role="alert" className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs text-amber-800 dark:text-amber-200">
+                    Channel health is unavailable: {loadError}. No status is inferred from configuration data.
+                </div>
+            )}
+
             {/* Empty state */}
-            {sorted.length === 0 && (
+            {!loadError && sorted.length === 0 && (
                 <div className="text-center py-16">
                     <Radio className="w-8 h-8 text-muted-foreground/30 mx-auto mb-3" />
                     <p className="text-sm text-muted-foreground">No channels configured.</p>

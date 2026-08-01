@@ -1,75 +1,51 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { motion } from 'framer-motion';
 import {
-    AlertTriangle,
-    CheckCircle2,
-    Circle,
     FileText,
     Folder,
     MessageSquarePlus,
-    Play,
     RefreshCw,
     RotateCcw,
     Square,
-    XCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { cn } from '../../lib/utils';
-import * as thinclaw from '../../lib/thinclaw';
 
-function stateTone(state?: string) {
-    switch (state) {
-        case 'running':
-        case 'in_progress':
-        case 'creating':
-        case 'pending':
-            return 'text-blue-400 bg-blue-500/10 border-blue-500/20';
-        case 'completed':
-        case 'accepted':
-        case 'submitted':
-            return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20';
-        case 'failed':
-        case 'stuck':
-        case 'interrupted':
-            return 'text-red-400 bg-red-500/10 border-red-500/20';
-        case 'cancelled':
-        case 'abandoned':
-            return 'text-amber-400 bg-amber-500/10 border-amber-500/20';
-        default:
-            return 'text-muted-foreground bg-white/3 border-white/5';
-    }
-}
+import * as thinclaw from '../../lib/thinclaw';
+import {
+    AgentPageShell,
+    AsyncState,
+    Button,
+    ConfirmDialog,
+    MetricCard,
+    Notice,
+    StatusBadge,
+    Surface,
+} from '../ui';
+import { normalizeAgentActionOutcome } from './action-outcome';
+import { useOptionalAgentCockpit } from './AgentCockpitProvider';
 
 function formatDate(value?: string | null) {
-    if (!value) return 'Never';
+    if (!value) return 'Unknown';
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
-function reasonFromError(err: unknown): string {
-    // Typed bridge gate (BridgeError): render the reason (+ remediation) instead of
-    // "[object Object]". Covers the RemoteOnly job commands (files list/read/restart/
-    // prompt) which return BridgeError::Unavailable when running in embedded mode.
-    if (err && typeof err === 'object' && 'kind' in err) {
-        const be = err as {
-            kind?: string;
-            message?: string;
-            capability?: string;
-            reason?: string;
-            remediation?: string | null;
-        };
-        if (be.kind === 'unavailable') {
-            const head = [be.capability, be.reason].filter(Boolean).join(': ');
-            return be.remediation ? `${head} — ${be.remediation}` : head || 'Unavailable';
+function reasonFromError(error: unknown): string {
+    if (error && typeof error === 'object' && 'kind' in error) {
+        const bridge = error as { kind?: string; message?: string; capability?: string; reason?: string; remediation?: string | null };
+        if (bridge.kind === 'unavailable') {
+            const head = [bridge.capability, bridge.reason].filter(Boolean).join(': ');
+            return bridge.remediation ? `${head} — ${bridge.remediation}` : head || 'Unavailable';
         }
-        if (be.kind === 'runtime' && be.message) {
-            return be.message;
-        }
+        if (bridge.kind === 'runtime' && bridge.message) return bridge.message;
     }
-    return err instanceof Error ? err.message : String(err);
+    return error instanceof Error ? error.message : String(error);
 }
 
+const CANCELLABLE_STATES = new Set(['queued', 'pending', 'running', 'in_progress', 'paused']);
+
+/** Capability-aware Job center. Unsupported remote-only actions are not rendered. */
 export function ThinClawJobs() {
+    const cockpit = useOptionalAgentCockpit();
     const [jobs, setJobs] = useState<thinclaw.ThinClawJob[]>([]);
     const [summary, setSummary] = useState<thinclaw.ThinClawJobSummary | null>(null);
     const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -79,14 +55,14 @@ export function ThinClawJobs() {
     const [filePath, setFilePath] = useState('');
     const [fileContent, setFileContent] = useState('');
     const [prompt, setPrompt] = useState('');
+    const [capabilities, setCapabilities] = useState<Record<string, boolean>>({});
     const [unavailable, setUnavailable] = useState<Record<string, string>>({});
     const [error, setError] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(true);
+    const [activeAction, setActiveAction] = useState<string | null>(null);
+    const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
 
-    const selectedJob = useMemo(
-        () => jobs.find((job) => job.id === selectedId) ?? null,
-        [jobs, selectedId],
-    );
+    const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedId) ?? null, [jobs, selectedId]);
 
     const loadList = useCallback(async () => {
         setIsLoading(true);
@@ -96,13 +72,16 @@ export function ThinClawJobs() {
                 thinclaw.listJobs(),
                 thinclaw.getJobsSummary().catch(() => null),
             ]);
-            setJobs(list.jobs ?? []);
+            const nextJobs = list.jobs ?? [];
+            setJobs(nextJobs);
+            setCapabilities(list.capabilities ?? {});
             setUnavailable(list.unavailable ?? {});
             setSummary(nextSummary);
-            setSelectedId((current) => current ?? list.jobs?.[0]?.id ?? null);
-        } catch (err) {
-            setError(reasonFromError(err));
+            setSelectedId((current) => current && nextJobs.some((job) => job.id === current) ? current : nextJobs[0]?.id ?? null);
+        } catch (caught) {
+            setError(reasonFromError(caught));
             setJobs([]);
+            setSelectedId(null);
         } finally {
             setIsLoading(false);
         }
@@ -112,18 +91,14 @@ export function ThinClawJobs() {
         try {
             const [nextDetail, eventResponse] = await Promise.all([
                 thinclaw.getJobDetail(jobId),
-                thinclaw.getJobEvents(jobId).catch((err) => ({
-                    job_id: jobId,
-                    events: [],
-                    unavailable_reason: reasonFromError(err),
-                })),
+                thinclaw.getJobEvents(jobId).catch((caught) => ({ job_id: jobId, events: [], unavailable_reason: reasonFromError(caught) })),
             ]);
             setDetail(nextDetail);
             setEvents(eventResponse.events ?? []);
-        } catch (err) {
+        } catch (caught) {
             setDetail(null);
             setEvents([]);
-            toast.error(reasonFromError(err));
+            toast.error(reasonFromError(caught));
         }
     }, []);
 
@@ -133,16 +108,18 @@ export function ThinClawJobs() {
             setFiles(response.entries ?? []);
             setFilePath(path);
             setFileContent('');
-        } catch (err) {
+        } catch (caught) {
             setFiles([]);
-            toast.error(reasonFromError(err));
+            toast.error(reasonFromError(caught));
         }
     }, []);
 
     useEffect(() => {
-        loadList();
-        const interval = setInterval(loadList, 10000);
-        return () => clearInterval(interval);
+        void loadList();
+        const poll = window.setInterval(() => {
+            if (document.visibilityState === 'visible') void loadList();
+        }, 15_000);
+        return () => window.clearInterval(poll);
     }, [loadList]);
 
     useEffect(() => {
@@ -150,23 +127,44 @@ export function ThinClawJobs() {
             setDetail(null);
             setEvents([]);
             setFiles([]);
+            setFilePath('');
+            setFileContent('');
             return;
         }
-        loadDetail(selectedId);
+        void loadDetail(selectedId);
     }, [selectedId, loadDetail]);
+
+    const can = (name: string) => capabilities[name] === true;
+    const canCancel = Boolean(detail && can('cancel') && CANCELLABLE_STATES.has(detail.state));
+    const canRestart = Boolean(detail && can('restart'));
+    const canPrompt = Boolean(detail && can('prompt'));
+    const canBrowseFiles = Boolean(detail && can('files'));
 
     const handleAction = async (action: 'cancel' | 'restart' | 'prompt' | 'done') => {
         if (!selectedId) return;
+        const capability = action === 'done' ? 'prompt' : action;
+        if (!can(capability)) {
+            toast.error(unavailable[capability] ?? `${capability} is unavailable for this job`);
+            return;
+        }
+        setActiveAction(action);
         try {
-            if (action === 'cancel') await thinclaw.cancelJob(selectedId);
-            if (action === 'restart') await thinclaw.restartJob(selectedId);
-            if (action === 'prompt') await thinclaw.promptJob(selectedId, prompt, false);
-            if (action === 'done') await thinclaw.promptJob(selectedId, null, true);
+            let result: unknown;
+            if (action === 'cancel') result = await thinclaw.cancelJob(selectedId);
+            if (action === 'restart') result = await thinclaw.restartJob(selectedId);
+            if (action === 'prompt') result = await thinclaw.promptJob(selectedId, prompt, false);
+            if (action === 'done') result = await thinclaw.promptJob(selectedId, null, true);
             if (action === 'prompt') setPrompt('');
-            toast.success('Job command submitted');
+            const outcome = normalizeAgentActionOutcome(result, 'The job command returned without an outcome payload.');
+            if (outcome.state === 'rejected') toast.error(outcome.message);
+            else if (outcome.state === 'applied') toast.success(outcome.message);
+            else toast.info(outcome.message);
+            setCancelDialogOpen(false);
             await Promise.all([loadList(), loadDetail(selectedId)]);
-        } catch (err) {
-            toast.error(reasonFromError(err));
+        } catch (caught) {
+            toast.error(reasonFromError(caught));
+        } finally {
+            setActiveAction(null);
         }
     };
 
@@ -176,8 +174,8 @@ export function ThinClawJobs() {
             const response = await thinclaw.readJobFile(selectedId, path);
             setFileContent(response.content);
             setFilePath(response.path);
-        } catch (err) {
-            toast.error(reasonFromError(err));
+        } catch (caught) {
+            toast.error(reasonFromError(caught));
         }
     };
 
@@ -191,231 +189,90 @@ export function ThinClawJobs() {
         interrupted: 0,
         stuck: 0,
     };
+    const sourceLabel = cockpit?.source === 'remote' ? 'Remote profile' : cockpit?.source === 'local' ? 'Local Core' : 'Profile';
+
+    if (isLoading && jobs.length === 0) {
+        return <AsyncState kind="loading" title="Loading jobs" className="flex-1" />;
+    }
 
     return (
-        <motion.div className="flex-1 overflow-y-auto p-8 space-y-6" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-            <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-3">
-                    <div className="p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/20">
-                        <Play className="w-5 h-5 text-primary" />
-                    </div>
-                    <div>
-                        <h1 className="text-xl font-bold">Jobs</h1>
-                        <p className="text-xs text-muted-foreground">Background execution, events, files, and interactive prompts</p>
-                    </div>
-                </div>
-                <button
-                    onClick={loadList}
-                    className="p-2 rounded-lg text-muted-foreground hover:text-foreground bg-white/3 hover:bg-white/5 border border-white/5 transition-all"
-                >
-                    <RefreshCw className={cn('w-4 h-4', isLoading && 'animate-spin')} />
-                </button>
-            </div>
+        <AgentPageShell
+            eyebrow="Agent execution"
+            title="Jobs"
+            description="Inspect active and historical work. Controls only appear when the selected profile reports support."
+            badge={<StatusBadge status={cockpit?.status?.engine_running ? 'Running' : cockpit?.error ? 'Unavailable' : 'Stopped'} label={sourceLabel} />}
+            actions={<Button size="sm" variant="secondary" onClick={() => void loadList()} disabled={isLoading}><RefreshCw className={`size-3.5 ${isLoading ? 'animate-spin' : ''}`} aria-hidden="true" /> Refresh</Button>}
+        >
+            <div className="mx-auto flex w-full max-w-7xl flex-col gap-5">
+                {error && <Notice tone="error" title="Jobs could not be loaded">{error}</Notice>}
+                {Object.values(unavailable).some(Boolean) && (
+                    <Notice tone="info" title="Capability-aware controls">
+                        This profile does not expose every job control. Reasons are shown next to the relevant work area instead of failing after a click.
+                    </Notice>
+                )}
 
-            {error && (
-                <div className="flex items-start gap-3 rounded-lg border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-200">
-                    <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-                    <span>{error}</span>
-                </div>
-            )}
-
-            <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
-                {[
-                    ['Total', stats.total],
-                    ['Running', stats.in_progress],
-                    ['Pending', stats.pending],
-                    ['Done', stats.completed],
-                    ['Failed', stats.failed + stats.stuck + stats.interrupted],
-                    ['Cancelled', stats.cancelled],
-                ].map(([label, value]) => (
-                    <div key={label} className="rounded-lg border border-border/40 bg-card/30 p-4">
-                        <p className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{label}</p>
-                        <p className="text-2xl font-bold tabular-nums mt-1">{value}</p>
-                    </div>
-                ))}
-            </div>
-
-            <div className="grid grid-cols-1 xl:grid-cols-[360px_1fr] gap-6 min-h-[520px]">
-                <div className="rounded-lg border border-border/40 bg-card/30 overflow-hidden">
-                    <div className="px-4 py-3 border-b border-border/40 text-xs font-bold uppercase tracking-widest text-muted-foreground">
-                        Queue
-                    </div>
-                    <div className="max-h-[640px] overflow-y-auto">
-                        {jobs.length === 0 ? (
-                            <div className="p-8 text-center text-sm text-muted-foreground">
-                                {isLoading ? 'Loading jobs...' : 'No jobs found'}
-                            </div>
-                        ) : jobs.map((job) => (
-                            <button
-                                key={job.id}
-                                onClick={() => setSelectedId(job.id)}
-                                className={cn(
-                                    'w-full text-left px-4 py-3 border-b border-border/30 hover:bg-white/3 transition-colors',
-                                    selectedId === job.id && 'bg-primary/10',
-                                )}
-                            >
-                                <div className="flex items-start justify-between gap-3">
-                                    <div className="min-w-0">
-                                        <p className="text-sm font-semibold truncate">{job.title || job.id}</p>
-                                        <p className="text-[10px] text-muted-foreground truncate font-mono mt-1">{job.id}</p>
-                                    </div>
-                                    <span className={cn('text-[10px] px-2 py-1 rounded-md border shrink-0', stateTone(job.state))}>
-                                        {job.state}
-                                    </span>
-                                </div>
-                                <p className="text-[10px] text-muted-foreground mt-2">{formatDate(job.created_at)}</p>
-                            </button>
-                        ))}
-                    </div>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+                    <MetricCard label="Total" value={stats.total} />
+                    <MetricCard label="Running" value={stats.in_progress} />
+                    <MetricCard label="Pending" value={stats.pending} />
+                    <MetricCard label="Completed" value={stats.completed} />
+                    <MetricCard label="Failed" value={stats.failed + stats.stuck + stats.interrupted} />
+                    <MetricCard label="Cancelled" value={stats.cancelled} />
                 </div>
 
-                <div className="space-y-6">
-                    <div className="rounded-lg border border-border/40 bg-card/30 p-5">
-                        <div className="flex flex-wrap items-start justify-between gap-4">
-                            <div className="min-w-0">
-                                <p className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">Selected Job</p>
-                                <h2 className="text-lg font-bold mt-1 truncate">{detail?.title ?? selectedJob?.title ?? 'No job selected'}</h2>
-                                <p className="text-xs text-muted-foreground mt-1 font-mono truncate">{selectedId ?? 'Select a job from the queue'}</p>
-                            </div>
-                            {detail && (
-                                <span className={cn('text-xs px-2.5 py-1 rounded-md border', stateTone(detail.state))}>{detail.state}</span>
-                            )}
-                        </div>
-
-                        {detail && (
-                            <>
-                                <p className="text-sm text-muted-foreground mt-4 whitespace-pre-wrap">{detail.description || 'No description'}</p>
-                                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
-                                    <div>
-                                        <p className="text-[10px] uppercase font-bold text-muted-foreground">Backend</p>
-                                        <p className="text-xs mt-1">{detail.execution_backend ?? 'unknown'}</p>
+                <div className="grid min-h-[32rem] gap-5 xl:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)]">
+                    <Surface className="min-h-0 overflow-hidden">
+                        <div className="border-b border-surface-outline px-4 py-3 text-[10px] font-bold uppercase tracking-widest text-content-muted">Job queue</div>
+                        <div className="max-h-[42rem] overflow-y-auto p-2">
+                            {jobs.length === 0 ? (
+                                <AsyncState compact kind="empty" title="No jobs reported" description="Jobs appear when the selected profile exposes execution history." />
+                            ) : jobs.map((job) => (
+                                <button
+                                    key={job.id}
+                                    type="button"
+                                    onClick={() => setSelectedId(job.id)}
+                                    className={`mb-1 w-full rounded-[var(--radius-control)] p-3 text-left transition-colors ${selectedId === job.id ? 'bg-primary/10 ring-1 ring-primary/20' : 'hover:bg-surface-subtle'}`}
+                                >
+                                    <div className="flex items-start justify-between gap-2">
+                                        <div className="min-w-0"><p className="truncate text-sm font-medium text-content-primary">{job.title || job.id}</p><p className="mt-1 truncate font-mono text-[10px] text-content-muted">{job.id}</p></div>
+                                        <StatusBadge status={job.state} />
                                     </div>
-                                    <div>
-                                        <p className="text-[10px] uppercase font-bold text-muted-foreground">Runtime</p>
-                                        <p className="text-xs mt-1">{detail.runtime_mode ?? detail.runtime_family ?? 'unknown'}</p>
-                                    </div>
-                                    <div>
-                                        <p className="text-[10px] uppercase font-bold text-muted-foreground">Started</p>
-                                        <p className="text-xs mt-1">{formatDate(detail.started_at)}</p>
-                                    </div>
-                                    <div>
-                                        <p className="text-[10px] uppercase font-bold text-muted-foreground">Elapsed</p>
-                                        <p className="text-xs mt-1">{detail.elapsed_secs == null ? 'n/a' : `${detail.elapsed_secs}s`}</p>
-                                    </div>
-                                </div>
-                                <div className="flex flex-wrap gap-2 mt-5">
-                                    <button onClick={() => handleAction('cancel')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-red-500/10 text-red-300 border border-red-500/20 hover:bg-red-500/20">
-                                        <Square className="w-3.5 h-3.5" />
-                                        Cancel
-                                    </button>
-                                    <button onClick={() => handleAction('restart')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/3 border border-white/5 hover:bg-white/5" title={unavailable.restart}>
-                                        <RotateCcw className="w-3.5 h-3.5" />
-                                        Restart
-                                    </button>
-                                    <button onClick={() => loadFiles(detail.id)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/3 border border-white/5 hover:bg-white/5" title={unavailable.files}>
-                                        <Folder className="w-3.5 h-3.5" />
-                                        Files
-                                    </button>
-                                </div>
-                            </>
-                        )}
-                    </div>
-
-                    <div className="grid grid-cols-1 2xl:grid-cols-2 gap-6">
-                        <div className="rounded-lg border border-border/40 bg-card/30 p-5">
-                            <div className="flex items-center justify-between mb-4">
-                                <h3 className="text-sm font-bold">Events</h3>
-                                <button disabled={!selectedId} onClick={() => selectedId && loadDetail(selectedId)} className="p-1.5 rounded-md hover:bg-white/5 disabled:opacity-40">
-                                    <RefreshCw className="w-3.5 h-3.5" />
+                                    <p className="mt-2 text-[10px] text-content-muted">{formatDate(job.created_at)}</p>
                                 </button>
-                            </div>
-                            <div className="space-y-2 max-h-72 overflow-y-auto">
-                                {events.length === 0 ? (
-                                    <p className="text-xs text-muted-foreground">No events recorded.</p>
-                                ) : events.map((event, index) => (
-                                    <div key={event.id ?? index} className="rounded-md border border-white/5 bg-black/20 p-3">
-                                        <div className="flex items-center justify-between gap-2">
-                                            <p className="text-xs font-semibold">{event.event_type}</p>
-                                            <p className="text-[10px] text-muted-foreground">{formatDate(event.created_at)}</p>
-                                        </div>
-                                        {event.data != null && (
-                                            <pre className="text-[10px] text-muted-foreground mt-2 overflow-x-auto">{JSON.stringify(event.data, null, 2)}</pre>
-                                        )}
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-
-                        <div className="rounded-lg border border-border/40 bg-card/30 p-5">
-                            <h3 className="text-sm font-bold mb-4">Prompt</h3>
-                            <textarea
-                                value={prompt}
-                                onChange={(event) => setPrompt(event.target.value)}
-                                className="w-full min-h-24 rounded-lg bg-black/20 border border-white/5 px-3 py-2 text-sm outline-hidden focus:border-primary/40 resize-y"
-                                placeholder={unavailable.prompt ?? 'Send a follow-up prompt to an interactive job'}
-                            />
-                            <div className="flex gap-2 mt-3">
-                                <button disabled={!prompt.trim()} onClick={() => handleAction('prompt')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-40">
-                                    <MessageSquarePlus className="w-3.5 h-3.5" />
-                                    Send
-                                </button>
-                                <button onClick={() => handleAction('done')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-white/3 border border-white/5 hover:bg-white/5">
-                                    <CheckCircle2 className="w-3.5 h-3.5" />
-                                    Done
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div className="rounded-lg border border-border/40 bg-card/30 p-5">
-                        <div className="flex items-center justify-between mb-4">
-                            <h3 className="text-sm font-bold">Files</h3>
-                            <p className="text-[10px] text-muted-foreground font-mono">{filePath || '/'}</p>
-                        </div>
-                        <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-4">
-                            <div className="space-y-1 max-h-80 overflow-y-auto">
-                                {filePath && (
-                                    <button onClick={() => loadFiles(selectedId!, filePath.split('/').slice(0, -1).join('/'))} className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-white/5">
-                                        <Folder className="w-3.5 h-3.5" />
-                                        ..
-                                    </button>
-                                )}
-                                {files.length === 0 ? (
-                                    <p className="text-xs text-muted-foreground">{unavailable.files ?? 'No files loaded.'}</p>
-                                ) : files.map((entry) => (
-                                    <button
-                                        key={entry.path}
-                                        onClick={() => entry.is_dir ? loadFiles(selectedId!, entry.path) : handleReadFile(entry.path)}
-                                        className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-white/5 text-left"
-                                    >
-                                        {entry.is_dir ? <Folder className="w-3.5 h-3.5 text-blue-400" /> : <FileText className="w-3.5 h-3.5 text-muted-foreground" />}
-                                        <span className="truncate">{entry.name}</span>
-                                    </button>
-                                ))}
-                            </div>
-                            <pre className="min-h-40 max-h-80 overflow-auto rounded-lg bg-black/20 border border-white/5 p-3 text-[11px] text-muted-foreground whitespace-pre-wrap">
-                                {fileContent || 'Select a file to inspect its content.'}
-                            </pre>
-                        </div>
-                    </div>
-
-                    <div className="rounded-lg border border-border/40 bg-card/30 p-5">
-                        <h3 className="text-sm font-bold mb-4">Transitions</h3>
-                        <div className="space-y-2">
-                            {(detail?.transitions ?? []).length === 0 ? (
-                                <p className="text-xs text-muted-foreground">No transitions recorded.</p>
-                            ) : detail!.transitions!.map((transition, index) => (
-                                <div key={`${transition.timestamp}-${index}`} className="flex items-center gap-3 text-xs">
-                                    {transition.to === 'failed' ? <XCircle className="w-3.5 h-3.5 text-red-400" /> : <Circle className="w-3.5 h-3.5 text-muted-foreground" />}
-                                    <span className="font-mono text-muted-foreground">{formatDate(transition.timestamp)}</span>
-                                    <span>{transition.from} -&gt; {transition.to}</span>
-                                    {transition.reason && <span className="text-muted-foreground truncate">{transition.reason}</span>}
-                                </div>
                             ))}
                         </div>
+                    </Surface>
+
+                    <div className="min-w-0 space-y-5">
+                        <Surface className="p-5">
+                            <div className="flex flex-wrap items-start justify-between gap-4">
+                                <div className="min-w-0"><p className="text-[10px] font-bold uppercase tracking-widest text-content-muted">Selected job</p><h2 className="mt-1 truncate text-lg font-semibold">{detail?.title ?? selectedJob?.title ?? 'No job selected'}</h2><p className="mt-1 truncate font-mono text-xs text-content-muted">{selectedId ?? 'Select a job from the queue'}</p></div>
+                                {detail && <StatusBadge status={detail.state} />}
+                            </div>
+                            {detail ? <>
+                                <p className="mt-4 whitespace-pre-wrap text-sm text-content-muted">{detail.description || 'No description provided.'}</p>
+                                <dl className="mt-4 grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4"><div><dt className="text-content-muted">Backend</dt><dd className="mt-1 text-content-primary">{detail.execution_backend ?? 'Unknown'}</dd></div><div><dt className="text-content-muted">Runtime</dt><dd className="mt-1 text-content-primary">{detail.runtime_mode ?? detail.runtime_family ?? 'Unknown'}</dd></div><div><dt className="text-content-muted">Started</dt><dd className="mt-1 text-content-primary">{formatDate(detail.started_at)}</dd></div><div><dt className="text-content-muted">Elapsed</dt><dd className="mt-1 text-content-primary">{detail.elapsed_secs == null ? 'Unknown' : `${detail.elapsed_secs}s`}</dd></div></dl>
+                                <div className="mt-5 flex flex-wrap gap-2">
+                                    {canCancel && <Button size="sm" variant="danger" onClick={() => setCancelDialogOpen(true)} disabled={activeAction !== null}><Square className="size-3.5" aria-hidden="true" /> Cancel</Button>}
+                                    {canRestart && <Button size="sm" variant="secondary" onClick={() => void handleAction('restart')} disabled={activeAction !== null}><RotateCcw className="size-3.5" aria-hidden="true" /> Restart</Button>}
+                                    {canBrowseFiles && <Button size="sm" variant="secondary" onClick={() => void loadFiles(detail.id)}><Folder className="size-3.5" aria-hidden="true" /> Files</Button>}
+                                    {!canCancel && !canRestart && !canBrowseFiles && <p className="text-xs text-content-muted">{unavailable.cancel ?? 'No additional actions are available for this job.'}</p>}
+                                </div>
+                            </> : <p className="mt-5 text-sm text-content-muted">Select a job to inspect its supported actions and recorded state.</p>}
+                        </Surface>
+
+                        <div className="grid gap-5 2xl:grid-cols-2">
+                            <Surface className="p-5"><div className="flex items-center justify-between gap-2"><h2 className="text-sm font-semibold">Events</h2><Button size="icon" variant="ghost" aria-label="Refresh job events" onClick={() => selectedId && void loadDetail(selectedId)} disabled={!selectedId}><RefreshCw className="size-3.5" aria-hidden="true" /></Button></div><div className="mt-4 max-h-72 space-y-2 overflow-y-auto">{events.length === 0 ? <p className="text-xs text-content-muted">No events recorded.</p> : events.map((event, index) => <div key={event.id ?? index} className="rounded-[var(--radius-control)] border border-surface-outline bg-surface-subtle p-3"><div className="flex justify-between gap-2"><p className="text-xs font-medium">{event.event_type}</p><p className="text-[10px] text-content-muted">{formatDate(event.created_at)}</p></div>{event.data != null && <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] text-content-muted">{JSON.stringify(event.data, null, 2)}</pre>}</div>)}</div></Surface>
+                            <Surface className="p-5"><div className="flex items-center gap-2"><MessageSquarePlus className="size-4 text-primary" aria-hidden="true" /><h2 className="text-sm font-semibold">Prompt</h2></div>{canPrompt ? <><textarea aria-label="Follow-up prompt" value={prompt} onChange={(event) => setPrompt(event.currentTarget.value)} placeholder="Send a follow-up prompt" className="mt-4 min-h-24 w-full rounded-[var(--radius-control)] border border-surface-outline bg-surface-subtle p-3 text-sm text-content-primary outline-none focus-visible:ring-2 focus-visible:ring-primary/20" /><div className="mt-3 flex gap-2"><Button size="sm" variant="primary" onClick={() => void handleAction('prompt')} disabled={!prompt.trim() || activeAction !== null}>Send prompt</Button><Button size="sm" variant="secondary" onClick={() => void handleAction('done')} disabled={activeAction !== null}>Mark prompt complete</Button></div></> : <p className="mt-3 text-xs leading-relaxed text-content-muted">{unavailable.prompt ?? 'Interactive prompts are not supported for this job.'}</p>}</Surface>
+                        </div>
+
+                        <Surface className="p-5"><div className="flex items-center justify-between gap-2"><div className="flex items-center gap-2"><FileText className="size-4 text-primary" aria-hidden="true" /><h2 className="text-sm font-semibold">Files</h2></div><p className="max-w-56 truncate font-mono text-[10px] text-content-muted" title={filePath}>{filePath || '/'}</p></div>{canBrowseFiles ? <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(14rem,20rem)_minmax(0,1fr)]"><div className="max-h-80 space-y-1 overflow-y-auto">{files.length === 0 ? <p className="text-xs text-content-muted">Select Files to list the supported job workspace.</p> : files.map((file) => <button key={file.path} type="button" onClick={() => file.is_dir ? void loadFiles(selectedId!, file.path) : void handleReadFile(file.path)} className="flex w-full items-center gap-2 rounded-[var(--radius-control)] px-2 py-1.5 text-left text-xs text-content-muted hover:bg-surface-subtle hover:text-content-primary"><Folder className="size-3 shrink-0" aria-hidden="true" /> <span className="truncate">{file.name}</span></button>)}</div><pre className="min-h-40 max-h-80 overflow-auto rounded-[var(--radius-control)] bg-surface-subtle p-3 whitespace-pre-wrap break-words font-mono text-[11px] text-content-muted">{fileContent || 'Select a file to inspect its content.'}</pre></div> : <p className="mt-3 text-xs text-content-muted">{unavailable.files ?? 'File browsing is not supported for this job.'}</p>}</Surface>
+
+                        <Surface className="p-5"><h2 className="text-sm font-semibold">Transitions</h2><div className="mt-3 space-y-2">{detail?.transitions?.length ? detail.transitions.map((transition, index) => <div key={`${transition.timestamp}-${index}`} className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-control)] bg-surface-subtle p-3 text-xs"><span className="font-medium text-content-primary">{transition.from} → {transition.to}</span><span className="text-content-muted">{transition.reason ?? formatDate(transition.timestamp)}</span></div>) : <p className="text-xs text-content-muted">No transitions recorded.</p>}</div></Surface>
                     </div>
                 </div>
             </div>
-        </motion.div>
+            <ConfirmDialog open={cancelDialogOpen} onOpenChange={setCancelDialogOpen} title="Cancel this job?" description={detail ? <>Job <span className="font-mono">{detail.title || detail.id}</span> will be asked to stop. The selected profile may still need time to report the resulting state.</> : 'The selected job will be asked to stop.'} confirmLabel="Cancel job" onConfirm={() => handleAction('cancel')} isConfirming={activeAction === 'cancel'} />
+        </AgentPageShell>
     );
 }
