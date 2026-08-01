@@ -38,7 +38,7 @@ fn docker_compose_setup_and_docs_share_gateway_port() {
     assert!(compose.contains("localhost:$${GATEWAY_PORT:-3000}/api/health"));
     assert!(setup.contains("THINCLAW_PORT=\"${GATEWAY_PORT:-3000}\""));
     assert!(setup.contains("--mode <auto|native|docker>"));
-    assert!(setup.contains("ExecStart=/usr/local/bin/thinclaw run --no-onboard"));
+    assert!(setup.contains("ExecStart=/usr/local/bin/thinclaw run --skip-setup-check"));
     assert!(setup.contains("THINCLAW_HOME=/var/lib/thinclaw/.thinclaw"));
     assert!(setup.contains("LIBSQL_PATH=/var/lib/thinclaw/.thinclaw/thinclaw.db"));
     assert!(setup.contains("http://localhost:$THINCLAW_PORT/api/health"));
@@ -114,7 +114,7 @@ fn pi_os_lite_support_is_documented_and_guarded() {
         pi_deployment_docs.contains("deploy-setup.sh --secrets-stdin --mode native --profile edge"),
         "Pi OS Lite guide should document the supported native edge install"
     );
-    assert!(deployment_docs.contains("thinclaw doctor --profile pi-os-lite-64"));
+    assert!(deployment_docs.contains("thinclaw doctor --readiness-profile pi-os-lite-64"));
     assert!(deployment_docs.contains("aarch64-unknown-linux-gnu"));
     assert!(deployment_docs.contains("docker compose pull thinclaw"));
     assert!(deployment_docs.contains("cargo build --release --features full"));
@@ -129,7 +129,7 @@ fn pi_os_lite_support_is_documented_and_guarded() {
     assert!(ci.contains("workflow_dispatch"));
     assert!(ci.contains("Verify ARM64 runner"));
     assert!(ci.contains("cargo build --locked --release --features full --bin thinclaw"));
-    assert!(ci.contains("./target/release/thinclaw doctor --profile pi-os-lite-64"));
+    assert!(ci.contains("./target/release/thinclaw doctor --readiness-profile pi-os-lite-64"));
     assert!(ci.contains("THINCLAW_LINUX_READINESS_OS_RELEASE"));
     assert!(ci.contains("http://127.0.0.1:$port/api/health"));
     assert!(ci.contains("linux-desktop-autonomy-smoke"));

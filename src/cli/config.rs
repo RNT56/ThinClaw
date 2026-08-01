@@ -21,7 +21,7 @@ pub enum ConfigCommand {
     /// Generate a default config.toml file
     Init {
         /// Output path (default: ~/.thinclaw/config.toml)
-        #[arg(short, long)]
+        #[arg(short, long = "out", alias = "output")]
         output: Option<std::path::PathBuf>,
 
         /// Overwrite existing file

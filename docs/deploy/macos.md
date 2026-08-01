@@ -7,10 +7,10 @@ polished host for local use, service mode, and desktop autonomy.
 
 | Goal | Recommended Path |
 |---|---|
-| Fast local install | Release installer, then `thinclaw onboard` |
-| Fresh Mac Mini setup | Release installer, then `thinclaw onboard --profile remote` |
+| Fast local install | Release installer, then `thinclaw setup` |
+| Fresh Mac Mini setup | Release installer, then `thinclaw setup --profile remote --mode advanced` |
 | Source patch workflow | Manual Cargo build |
-| Always-on background runtime | `thinclaw onboard --profile remote`, then launchd service |
+| Always-on background runtime | `thinclaw setup --profile remote --mode advanced`, then launchd service |
 | Host-level desktop automation | Enable the reckless desktop autonomy profile after local setup |
 | Remote ThinClaw Desktop access | Bind the gateway to a private address or Tailscale |
 
@@ -51,7 +51,7 @@ thinclaw doctor
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh
 
-thinclaw onboard
+thinclaw setup
 thinclaw
 ```
 
@@ -72,7 +72,7 @@ Common post-install checks:
 ```bash
 thinclaw status
 thinclaw doctor
-thinclaw logs tail
+thinclaw runtime logs tail
 ```
 
 Verbose startup diagnostics:
@@ -124,7 +124,7 @@ rustup target add wasm32-wasip2
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
 cargo build --release --features full --bin thinclaw
-./target/release/thinclaw onboard
+./target/release/thinclaw setup
 ```
 
 Use `cargo build --release --bin thinclaw` only when you intentionally want the
@@ -135,43 +135,43 @@ smaller default `light` profile. See [../BUILD_PROFILES.md](../BUILD_PROFILES.md
 For a Mac Mini reached over SSH, prefer the remote profile first:
 
 ```bash
-thinclaw onboard --profile remote
-thinclaw gateway access
+thinclaw setup --profile remote --mode advanced
+thinclaw runtime web access
 ```
 
 After onboarding:
 
 ```bash
-thinclaw service install
-thinclaw service start
-thinclaw service status
+thinclaw runtime service install
+thinclaw runtime service start
+thinclaw runtime service status
 ```
 
 Service management:
 
 ```bash
-thinclaw service stop
-thinclaw service uninstall
+thinclaw runtime service stop
+thinclaw runtime service uninstall
 ```
 
 The service uses launchd and runs:
 
 ```bash
-thinclaw run --no-onboard
+thinclaw run --skip-setup-check
 ```
 
 If the service fails to start, inspect launchd status first, then run the same
 command in the foreground:
 
 ```bash
-thinclaw --debug run --no-onboard
+thinclaw --debug run --skip-setup-check
 ```
 
 Useful service log commands:
 
 ```bash
-thinclaw logs tail
-thinclaw logs tail -l error
+thinclaw runtime logs tail
+thinclaw runtime logs tail -l error
 ```
 
 ## Remote Gateway Access
@@ -207,8 +207,8 @@ Use [../DESKTOP_AUTONOMY.md](../DESKTOP_AUTONOMY.md) as the canonical guide.
 If the gateway is not available:
 
 ```bash
-thinclaw logs tail
-thinclaw logs tail -l error
+thinclaw runtime logs tail
+thinclaw runtime logs tail -l error
 ```
 
 If Tailscale crashes with a `BundleIdentifiers.swift` fatal error, you launched

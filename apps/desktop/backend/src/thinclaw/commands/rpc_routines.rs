@@ -403,7 +403,7 @@ pub async fn thinclaw_routine_create(
 // ============================================================================
 
 /// Validates a cron expression and returns next fire times.
-/// This is a frontend-facing version of `thinclaw cron lint`.
+/// This is a frontend-facing version of `thinclaw automation routines lint`.
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_cron_lint(

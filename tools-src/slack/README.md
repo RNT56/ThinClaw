@@ -60,7 +60,7 @@ cp slack.capabilities.json ~/.thinclaw/tools/
 Use the agent CLI or API to store the tool:
 
 ```bash
-thinclaw tool install \
+thinclaw extensions tools install \
   --name slack \
   --wasm target/wasm32-wasip2/release/slack_tool.wasm \
   --capabilities slack.capabilities.json

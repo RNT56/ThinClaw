@@ -55,7 +55,7 @@ SIGNAL_IGNORE_STORIES=true
 |--------|----------|
 | `open` | Accept DMs from everyone |
 | `allowlist` | Only accept from `SIGNAL_ALLOW_FROM` list |
-| `pairing` | Allowlist + send pairing code to unknown senders. Approve via `thinclaw pairing approve signal <code>` |
+| `pairing` | Allowlist + record a pending request for unknown senders. List it and approve via `thinclaw access senders approve signal <request-id>` |
 
 ## Group Policies
 
@@ -72,7 +72,7 @@ SIGNAL_IGNORE_STORIES=true
 - Generated media replies are written to temporary files and sent through
   signal-cli JSON-RPC `attachments`, then cleaned up after dispatch
 - Pairing system for unknown senders
-- Blocklist support (`thinclaw pairing block signal <sender>`)
+- Blocklist support (`thinclaw access senders block signal <sender>`)
 - Typing indicators (via JSON-RPC)
 - Debug mode toggle (`/debug`)
 - Deterministic thread IDs for conversation persistence

@@ -1,4 +1,4 @@
-//! CLI subcommand definitions for `thinclaw service`.
+//! CLI subcommand definitions for `thinclaw runtime service`.
 
 use clap::Subcommand;
 

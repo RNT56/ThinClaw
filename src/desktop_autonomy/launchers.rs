@@ -47,7 +47,7 @@ impl DesktopAutonomyManager {
             let home = self.session_launcher_home()?;
             let wrapper_path = self.session_wrapper_path(&home);
             let wrapper = format!(
-                "#!/bin/sh\nset -eu\ncandidate={candidate}\nfallback={fallback}\nif [ -f \"$candidate\" ] && [ -x \"$candidate\" ]; then\n  exec \"$candidate\" run --no-onboard\nfi\nexec \"$fallback\" run --no-onboard\n",
+                "#!/bin/sh\nset -eu\ncandidate={candidate}\nfallback={fallback}\nif [ -f \"$candidate\" ] && [ -x \"$candidate\" ]; then\n  exec \"$candidate\" run --skip-setup-check\nfi\nexec \"$fallback\" run --skip-setup-check\n",
                 candidate = shell_single_quote(
                     self.promoted_session_binary_path()
                         .to_string_lossy()
@@ -227,7 +227,7 @@ impl DesktopAutonomyManager {
                 lines.push(format!("set DESKTOP_AUTONOMY_TARGET_USERNAME={username}"));
             }
             lines.push(format!(
-                "if exist \"{}\" (\r\n  \"{}\" run --no-onboard\r\n) else (\r\n  \"{}\" run --no-onboard\r\n)",
+                "if exist \"{}\" (\r\n  \"{}\" run --skip-setup-check\r\n) else (\r\n  \"{}\" run --skip-setup-check\r\n)",
                 promoted_exe.display(),
                 promoted_exe.display(),
                 exe.display(),
@@ -358,7 +358,7 @@ impl DesktopAutonomyManager {
                 ));
             }
             let wrapper = format!(
-                "#!/bin/sh\nset -eu\nexport HOME={home}\n{env}\ncandidate={candidate}\nfallback={fallback}\nif [ -f \"$candidate\" ] && [ -x \"$candidate\" ]; then\n  exec \"$candidate\" run --no-onboard\nfi\nexec \"$fallback\" run --no-onboard\n",
+                "#!/bin/sh\nset -eu\nexport HOME={home}\n{env}\ncandidate={candidate}\nfallback={fallback}\nif [ -f \"$candidate\" ] && [ -x \"$candidate\" ]; then\n  exec \"$candidate\" run --skip-setup-check\nfi\nexec \"$fallback\" run --skip-setup-check\n",
                 home = shell_single_quote(home.to_string_lossy().as_ref()),
                 env = env_lines.join("\n"),
                 candidate = shell_single_quote(

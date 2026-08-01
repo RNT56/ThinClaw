@@ -1,4 +1,4 @@
-//! `thinclaw repo-projects` — manage the GitHub repository project supervisor
+//! `thinclaw automation projects` — manage the GitHub repository project supervisor
 //! from the terminal. Commands talk directly to the database + secrets store via
 //! the framework-free `crate::api::repo_projects` layer (the same one the
 //! desktop commands and gateway handlers use).

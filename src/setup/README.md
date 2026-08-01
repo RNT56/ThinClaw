@@ -20,13 +20,14 @@ This document does not own deployment or broader trust architecture. Use `docs/D
 Explicit onboarding:
 
 ```bash
-thinclaw onboard [--skip-auth] [--channels-only] [--guide[=<topic>]] [--ui auto|cli|tui] [--profile <profile>]
+thinclaw setup [--mode quick|advanced] [--skip-provider-auth] [--run] [--ui auto|cli|tui] [--profile <profile>]
+thinclaw setup edit [<topic>]
 ```
 
 Full reset:
 
 ```bash
-thinclaw reset [--yes]
+thinclaw setup reset [--yes]
 ```
 
 Implicit onboarding:
@@ -46,7 +47,7 @@ High-level behavior:
 - `.env` files are loaded first
 - ThinClaw checks for an existing database configuration
 - `ONBOARD_COMPLETED=true` suppresses repeat onboarding
-- `--no-onboard` bypasses the auto-launch path
+- `run`, `tui`, and `ask` accept `--skip-setup-check` to bypass the auto-launch path
 
 The exact entry logic lives in `main.rs` and the bootstrap helpers.
 

@@ -1,8 +1,8 @@
-//! Device identity operator CLI (`thinclaw devices ...`).
+//! Device identity operator CLI (`thinclaw access devices ...`).
 //!
 //! Talks to the local gateway's `/api/devices/*` HTTP surface — never a
 //! direct store/registry dependency — the same way `thinclaw message` and
-//! `thinclaw gateway access` do. Design authority:
+//! `thinclaw runtime web access` do. Design authority:
 //! `docs/MOBILE_SECURITY.md` (decisions D-P*/D-T*/D-X*/D-K*, §8 gateway
 //! hardening) and `docs/MOBILE_APP.md` (device identity section).
 //!
@@ -113,7 +113,7 @@ pub enum DeviceCommand {
     },
 }
 
-/// Run a `thinclaw devices` command.
+/// Run a `thinclaw access devices` command.
 pub async fn run_devices_command(cmd: DeviceCommand) -> anyhow::Result<()> {
     let settings = Settings::load();
     let access = GatewayAccessInfo::from_env_and_settings(Some(&settings));
@@ -145,7 +145,7 @@ fn auth_error() -> anyhow::Error {
 fn connect_error(base: &str, source: reqwest::Error) -> anyhow::Error {
     if source.is_connect() {
         anyhow::anyhow!(
-            "Could not connect to the gateway at {}. Is it running? Start with `thinclaw gateway start`.",
+            "Could not connect to the gateway at {}. Is it running? Start with `thinclaw runtime web start`.",
             base
         )
     } else if source.is_timeout() {

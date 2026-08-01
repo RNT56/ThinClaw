@@ -210,7 +210,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             eprintln!("  {}", hint);
             eprintln!();
             eprintln!(
-                "Run 'thinclaw onboard' to configure, or set the required environment variables."
+                "Run 'thinclaw setup' to configure, or set the required environment variables."
             );
             std::process::exit(1);
         }

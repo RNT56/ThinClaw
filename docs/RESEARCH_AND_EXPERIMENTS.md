@@ -46,7 +46,7 @@ The `src/agent/env/` framework packages ThinClaw's normal multi-turn agent loop 
 - `EnvRunner::serve_openai_compatible` exposes `/v1/chat/completions` for external eval harnesses
 - `TerminalBenchEnv` and `SkillBenchEnv` can now run through Research campaigns by creating an `agent_env` runner with `backend_config.benchmark` set to `terminal_bench` or `skill_bench`
 - trajectory steps carry token/logprob capture metadata when a provider can supply exact token IDs and logprobs; unsupported providers mark the capability flags false rather than pretending synthetic data is exact
-- `thinclaw trajectory export` now produces validated `sft` and `dpo` datasets with optional manifests covering record counts, skipped-record reasons, score thresholds, max-record limits, and output hashes
+- `thinclaw data trajectories export` now produces validated `sft` and `dpo` datasets with optional manifests covering record counts, skipped-record reasons, score thresholds, max-record limits, and output hashes
 
 Example `backend_config` for a terminal benchmark runner:
 

@@ -970,7 +970,7 @@ Group=thinclaw
 WorkingDirectory=/var/lib/thinclaw
 Environment=THINCLAW_HOME=/var/lib/thinclaw/.thinclaw
 Environment=HOME=/var/lib/thinclaw
-ExecStart=/usr/local/bin/thinclaw run --no-onboard
+ExecStart=/usr/local/bin/thinclaw run --skip-setup-check
 Restart=always
 RestartSec=5
 

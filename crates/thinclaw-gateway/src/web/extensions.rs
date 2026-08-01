@@ -129,7 +129,7 @@ pub fn extension_manager_unavailable_install_message(
 ) -> String {
     match input.registry_source {
         Some(ExtensionRegistryEntrySource::WasmBuildable) => format!(
-            "'{}' requires building from source. Run `thinclaw registry install {}` from the CLI.",
+            "'{}' requires building from source. Run `thinclaw extensions registry install {}` from the CLI.",
             input.name, input.name
         ),
         Some(ExtensionRegistryEntrySource::Other) => format!(
@@ -790,7 +790,7 @@ mod tests {
                 name: "telegram",
                 registry_source: Some(ExtensionRegistryEntrySource::WasmBuildable),
             }),
-            "'telegram' requires building from source. Run `thinclaw registry install telegram` from the CLI."
+            "'telegram' requires building from source. Run `thinclaw extensions registry install telegram` from the CLI."
         );
 
         assert_eq!(

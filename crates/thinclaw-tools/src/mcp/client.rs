@@ -1099,7 +1099,7 @@ impl McpClient {
                 }
 
                 return Err(ToolError::ExternalService(format!(
-                    "MCP server '{}' requires authentication. Run: thinclaw mcp auth {}",
+                    "MCP server '{}' requires authentication. Run: thinclaw extensions mcp server auth {}",
                     self.server_name, self.server_name
                 )));
             }

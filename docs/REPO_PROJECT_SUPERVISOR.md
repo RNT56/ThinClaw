@@ -76,7 +76,7 @@ a thin adapter over it.
 | Surface | How to use the connector |
 |---|---|
 | Agent chat (all surfaces) | Tools `repo_project_setup`, `repo_project_set_credential`, `repo_project_list_repos`, `repo_project_connect`, `repo_project_enroll` (+ `create/plan/status/pause/resume/approve`). The credential tool/value is stored encrypted and never echoed. |
-| CLI | `thinclaw repo-projects setup`, `set-credential`, `repos`, `connect [repos…] [--all]`, `enroll`, plus `list/show/status/create/start/pause/resume/cancel/events`. |
+| CLI | `thinclaw automation projects setup`, `set-credential`, `repos`, `connect [repos…] [--all]`, `enroll`, plus `list/show/status/create/start/pause/resume/cancel/events`. |
 | Gateway HTTP | `GET /api/repo-projects/readiness`, `POST /api/repo-projects/setup`, `POST /api/repo-projects/credentials`, `GET /api/repo-projects/connectable-repos`, `POST /api/repo-projects/connect`, `POST /api/repo-projects/{id}/enroll` (+ the existing project CRUD/command routes). |
 | WebUI (gateway dashboard) | *Operations → Repo Projects* tab: a GitHub Connector card (enable, readiness checklist, masked credential entry, App config + install link, repo picker with select-all/specific) plus a projects list/detail with start/pause/resume/cancel. |
 | Desktop app | The Repo Projects view embeds a `ThinClawRepoConnector` card (same connector flow) and can spawn coding/worker containers locally when the Docker sandbox is enabled. |

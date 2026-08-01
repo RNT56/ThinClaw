@@ -976,7 +976,7 @@ impl AppBuilder {
                                         {
                                             tracing::warn!(
                                                 "MCP server '{}' requires authentication. \
-                                                 Run: thinclaw mcp auth {}",
+                                                 Run: thinclaw extensions mcp server auth {}",
                                                 server_name,
                                                 server_name
                                             );

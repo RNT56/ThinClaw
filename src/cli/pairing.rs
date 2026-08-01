@@ -199,7 +199,7 @@ pub fn run_pairing_command_with_store(
         } => {
             if actor.is_some() || name.is_some() {
                 return Err(
-                    "Identity linking requires a database-backed run. Use `thinclaw pairing approve ...` directly."
+                    "Identity linking requires a database-backed run. Use `thinclaw access senders approve ...` directly."
                         .to_string(),
                 );
             }

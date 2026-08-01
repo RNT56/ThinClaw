@@ -526,7 +526,10 @@ async fn add_server(
         println!();
         println!(
             "  {}",
-            branding.muted(format!("Run `thinclaw mcp auth {}` to authenticate.", name))
+            branding.muted(format!(
+                "Run `thinclaw extensions mcp server auth {}` to authenticate.",
+                name
+            ))
         );
     }
 
@@ -564,13 +567,13 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
         println!("{}", branding.warn("No MCP servers configured."));
         println!();
         println!("{}", branding.body_bold("Add a server with:"));
-        println!("    thinclaw mcp add <name> <url>");
-        println!("    thinclaw mcp add <name> --command <cmd> --args <args>");
+        println!("    thinclaw extensions mcp server add <name> <url>");
+        println!("    thinclaw extensions mcp server add <name> --command <cmd> --args <args>");
         println!();
         println!("  Examples:");
-        println!("    thinclaw mcp add notion https://mcp.notion.com");
+        println!("    thinclaw extensions mcp server add notion https://mcp.notion.com");
         println!(
-            "    thinclaw mcp add fs --command npx --args '-y,@modelcontextprotocol/server-filesystem,/tmp'"
+            "    thinclaw extensions mcp server add fs --command npx --args '-y,@modelcontextprotocol/server-filesystem,/tmp'"
         );
         println!();
         return Ok(());
@@ -1067,9 +1070,9 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
                 branding.body("You may need to configure OAuth manually:")
             );
             println!();
-            println!("    thinclaw mcp remove {}", name);
+            println!("    thinclaw extensions mcp server remove {}", name);
             println!(
-                "    thinclaw mcp add {} {} --client-id YOUR_CLIENT_ID",
+                "    thinclaw extensions mcp server add {} {} --client-id YOUR_CLIENT_ID",
                 name, server.url
             );
             println!();
@@ -1158,7 +1161,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
             println!(
                 "  {}",
                 branding.bad(format!(
-                    "Not authenticated. Run `thinclaw mcp auth {}` first.",
+                    "Not authenticated. Run `thinclaw extensions mcp server auth {}` first.",
                     name
                 ))
             );
@@ -1185,14 +1188,14 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                                 "Authentication failed (token may be expired). Try re-authenticating:"
                             )
                         );
-                        println!("    thinclaw mcp auth {}", name);
+                        println!("    thinclaw extensions mcp server auth {}", name);
                     } else {
                         println!("  {}", branding.bad("Server requires authentication."));
                         println!();
                         println!(
                             "  {}",
                             branding.muted(format!(
-                                "Run `thinclaw mcp auth {}` to authenticate.",
+                                "Run `thinclaw extensions mcp server auth {}` to authenticate.",
                                 name
                             ))
                         );
@@ -1309,9 +1312,7 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
     let config = Config::from_env().await?;
 
     let master_key = config.secrets.master_key().ok_or_else(|| {
-        anyhow::anyhow!(
-            "SECRETS_MASTER_KEY not set. Run 'thinclaw onboard' first or set it in .env"
-        )
+        anyhow::anyhow!("SECRETS_MASTER_KEY not set. Run 'thinclaw setup' first or set it in .env")
     })?;
 
     let crypto = SecretsCrypto::new(master_key.clone())?;

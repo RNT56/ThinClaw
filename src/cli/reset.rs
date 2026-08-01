@@ -195,7 +195,7 @@ pub async fn run_reset_command(cmd: ResetCommand) -> anyhow::Result<()> {
     println!();
     println!(
         "{}",
-        branding.muted("Next step: run `thinclaw onboard` to set ThinClaw up again.")
+        branding.muted("Next step: run `thinclaw setup` to set ThinClaw up again.")
     );
 
     Ok(())

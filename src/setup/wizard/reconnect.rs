@@ -34,7 +34,7 @@ impl SetupWizard {
 
         #[allow(unreachable_code)]
         Err(SetupError::Database(
-            "No database configured. Run full setup first (thinclaw onboard).".to_string(),
+            "No database configured. Run full setup first (thinclaw setup).".to_string(),
         ))
     }
 
@@ -43,7 +43,7 @@ impl SetupWizard {
     async fn reconnect_postgres(&mut self) -> Result<(), SetupError> {
         let url = std::env::var("DATABASE_URL").map_err(|_| {
             SetupError::Database(
-                "DATABASE_URL not set. Run full setup first (thinclaw onboard).".to_string(),
+                "DATABASE_URL not set. Run full setup first (thinclaw setup).".to_string(),
             )
         })?;
 

@@ -947,7 +947,9 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
                         println!();
                         println!(
                             "{}",
-                            branding.muted("Run `thinclaw update install` to apply the update.")
+                            branding.muted(
+                                "Run `thinclaw runtime update install` to apply the update."
+                            )
                         );
                     } else {
                         println!(

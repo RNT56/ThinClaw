@@ -90,7 +90,7 @@ cycles are removed through narrow ports/adapters:
   `src/channels/web/server.rs`, the first-party mobile push notifier
   (`src/channels/first_party_push.rs`: `FirstPartyPushNotifier` +
   `ApnsPushSender`, spawned from `src/async_main.rs` only when APNs config is
-  present), and the `thinclaw devices` CLI
+  present), and the `thinclaw access devices` CLI
   (`src/cli/devices.rs`) — these depend on root app-state, the concrete
   `DeviceRegistry`/`DeviceStore` wiring, and root gateway config
 - root config entrypoints that load dotenv/TOML/DB/settings overlays, construct

@@ -95,14 +95,14 @@ auto-attached. Arbitrary model-authored file paths are never auto-sent.
 ## CLI
 
 ```bash
-thinclaw comfy health
-thinclaw comfy hardware-check
-thinclaw comfy setup --gpu cpu
-thinclaw comfy launch
-thinclaw comfy stop
-thinclaw comfy list-workflows
-thinclaw comfy check-deps sdxl_txt2img
-thinclaw comfy generate "a cinematic product photo of a matte black espresso machine" --aspect-ratio wide
+thinclaw media comfy health
+thinclaw media comfy hardware-check
+thinclaw media comfy setup --gpu cpu
+thinclaw media comfy launch
+thinclaw media comfy stop
+thinclaw media comfy list-workflows
+thinclaw media comfy check-deps sdxl_txt2img
+thinclaw media comfy generate "a cinematic product photo of a matte black espresso machine" --aspect-ratio wide
 ```
 
 `generate` uses the configured default workflow unless `--workflow` is provided.

@@ -34,7 +34,7 @@ Slack uses a **Bot Token** from a Slack App installed to your workspace.
 
 4. **Authenticate the tool**
    ```bash
-   thinclaw tool auth slack-tool
+   thinclaw extensions tools auth slack-tool
    ```
 
    Or provide `SLACK_BOT_TOKEN` through your deployment's env/secret flow if that is how you manage credentials.

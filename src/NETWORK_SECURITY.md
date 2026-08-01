@@ -346,7 +346,7 @@ Both IPv4 and IPv6 loopback addresses are security-equivalent — they are only 
 
 ### Lifecycle
 
-The listener is **ephemeral** — it is started only when an OAuth flow is initiated (e.g., `thinclaw tool auth <name>`) and shut down after the callback is received or the timeout expires.
+The listener is **ephemeral** — it is started only when an OAuth flow is initiated (e.g., `thinclaw extensions tools auth <name>`) and shut down after the callback is received or the timeout expires.
 
 ### Timeout
 

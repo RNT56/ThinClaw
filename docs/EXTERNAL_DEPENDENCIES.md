@@ -358,10 +358,10 @@ pullable before reporting the fallback as ready.
 
 ## Linux Runtime Readiness
 
-Use `thinclaw doctor --profile server` for Ubuntu/Debian server or Docker hosts,
-`thinclaw doctor --profile pi-os-lite-64` for Raspberry Pi OS Lite 64-bit,
-`thinclaw doctor --profile desktop-linux` for the supported interactive Linux
-desktop path, and `thinclaw doctor --profile all-features` before building or
+Use `thinclaw doctor --readiness-profile server` for Ubuntu/Debian server or Docker hosts,
+`thinclaw doctor --readiness-profile pi-os-lite-64` for Raspberry Pi OS Lite 64-bit,
+`thinclaw doctor --readiness-profile desktop` for the supported interactive Linux
+desktop path, and `thinclaw doctor --readiness-profile all-features` before building or
 running with every optional feature enabled. `desktop-gnome` remains accepted as
 a compatibility alias.
 
@@ -375,7 +375,7 @@ Pi OS Lite quick checks:
 uname -m                    # expected: aarch64
 cat /etc/os-release         # expected: Raspberry Pi OS / Debian bookworm
 systemctl --version
-thinclaw doctor --profile pi-os-lite-64
+thinclaw doctor --readiness-profile pi-os-lite-64
 ```
 
 Pi OS Lite native service defaults:
@@ -508,7 +508,7 @@ Live channel validation requires the relevant provider setup:
 | Voice-call | Twilio/Telnyx or equivalent call webhook path plus a transcription/media callback path |
 | WASM provider packages | Provider-specific bot/app credentials for Mattermost, Twilio SMS, DingTalk, Feishu/Lark, WeCom, Weixin, QQ, LINE, Google Chat, Microsoft Teams, or Twitch |
 
-Use `thinclaw channels validate <name>` for local readiness and the WebUI
+Use `thinclaw extensions channels check-config <name>` for local readiness and the WebUI
 extension/channel setup validator for Provider Vault-backed secret checks.
 
 ---
@@ -560,7 +560,7 @@ ThinClaw gracefully falls back when ffmpeg is not available — video processing
 | Priority | Source | How to Set |
 |----------|--------|------------|
 | 1 | `ANTHROPIC_API_KEY` env var | `export ANTHROPIC_API_KEY=sk-ant-api03-...` |
-| 2 | OS secure store | Set during `thinclaw onboard` when Claude Code credentials are configured |
+| 2 | OS secure store | Set during `thinclaw setup` when Claude Code credentials are configured |
 | 3 | Claude Code OAuth | Run `claude login` on the host machine |
 
 **ThinClaw configuration:**
@@ -752,7 +752,7 @@ LLAMA_CPP_SERVER_URL=http://localhost:8080
 ### ComfyUI / comfy-cli
 
 **What it does:** Runs the ComfyUI media-generation server used by
-`image_generate`, `comfy_run_workflow`, and the `thinclaw comfy ...` CLI
+`image_generate`, `comfy_run_workflow`, and the `thinclaw media comfy ...` CLI
 commands. ThinClaw talks to ComfyUI over REST/WebSocket APIs; `comfy-cli` is
 used only for explicit lifecycle actions such as install, launch, stop, model
 download, and custom node installation.
@@ -761,8 +761,8 @@ download, and custom node installation.
 
 | Component | Install Command | Notes |
 |-----------|----------------|-------|
-| comfy-cli | `python -m pip install --user comfy-cli` | Required only for `thinclaw comfy setup`, `launch`, `stop`, and lifecycle management |
-| ComfyUI server | `thinclaw comfy setup --gpu cpu` | Use `--gpu nvidia`, `--gpu amd`, or `--gpu m-series` when appropriate |
+| comfy-cli | `python -m pip install --user comfy-cli` | Required only for `thinclaw media comfy setup`, `launch`, `stop`, and lifecycle management |
+| ComfyUI server | `thinclaw media comfy setup --gpu cpu` | Use `--gpu nvidia`, `--gpu amd`, or `--gpu m-series` when appropriate |
 | Comfy Cloud | Provider account/API key | Store the key as ThinClaw secret `comfy_cloud_api_key` or set `COMFY_CLOUD_API_KEY` |
 
 **ThinClaw configuration:**

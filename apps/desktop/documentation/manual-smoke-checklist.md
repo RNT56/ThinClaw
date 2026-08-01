@@ -48,9 +48,9 @@ Use these result values:
 4. For remote mode, start or identify a root ThinClaw gateway and token:
 
    ```bash
-   thinclaw gateway start --host 0.0.0.0 --port 18789 --foreground
-   thinclaw gateway access --show-token
-   curl http://REMOTE_HOST:18789/api/health
+   thinclaw runtime web start --host 0.0.0.0 --port 3000 --foreground
+   thinclaw runtime web access --reveal-token --yes
+   curl http://REMOTE_HOST:3000/api/health
    ```
 
 5. Leave desktop autonomy execution disabled unless running on a disposable

@@ -460,7 +460,7 @@ impl RegistryInstaller {
             .map_err(RegistryError::Io)?;
 
         // Use manifest.name for installed filenames so discovery, auth, and
-        // CLI commands (`thinclaw tool auth <name>`) all agree on the stem.
+        // CLI commands (`thinclaw extensions tools auth <name>`) all agree on the stem.
         let target_wasm = target_dir.join(format!("{}.wasm", manifest.name));
 
         // Check if already exists
@@ -767,7 +767,7 @@ impl RegistryInstaller {
         let mut auth_hints = Vec::new();
         if let Some(shared) = &bundle.shared_auth {
             auth_hints.push(format!(
-                "Bundle uses shared auth '{}'. Run `thinclaw tool auth <any-member>` to authenticate all members.",
+                "Bundle uses shared auth '{}'. Run `thinclaw extensions tools auth <any-member>` to authenticate all members.",
                 shared
             ));
         }

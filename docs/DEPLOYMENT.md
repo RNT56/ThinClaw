@@ -49,13 +49,13 @@ release artifact for native installs, or the multi-arch Docker image for
 Compose:
 
 ```bash
-thinclaw doctor --profile pi-os-lite-64
+thinclaw doctor --readiness-profile pi-os-lite-64
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh -s -- --profile edge
 docker compose pull thinclaw
 ```
 
-Use `thinclaw onboard --profile pi-os-lite-64` for interactive Pi setup. Keep
+Use `thinclaw setup --profile pi-os-lite-64 --mode advanced` for interactive Pi setup. Keep
 `DESKTOP_AUTONOMY_ENABLED=false` on Pi OS Lite; the native installer also writes
 `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and `THINCLAW_HEADLESS=true`, which
 block desktop autonomy tool registration at runtime. The detailed native and
@@ -93,7 +93,7 @@ complete optional dependency catalog is [EXTERNAL_DEPENDENCIES.md](EXTERNAL_DEPE
 | Local CLI and gateway | Supported | Supported | Supported | Supported |
 | Full-screen TUI | Supported | Supported | Supported | Supported when built with TUI support |
 | OS secure store | Supported | Supported | Supported | Headless env master key by default |
-| `thinclaw service` lifecycle | launchd | Windows Service Control Manager | `systemd --user` | system-level systemd through `deploy/setup.sh` |
+| `thinclaw runtime service` lifecycle | launchd | Windows Service Control Manager | `systemd --user` | system-level systemd through `deploy/setup.sh` |
 | Local browser automation | Chrome, Brave, Edge | Chrome, Edge, Brave | Chrome, Chromium, Brave, Edge | Local browser only if installed |
 | Docker browser fallback | Supported | Docker Desktop | Supported | Supported when Docker is installed |
 | Docker sandbox jobs | Supported when Docker is installed | Docker Desktop | Supported when Docker is installed | Supported when Docker is installed |
@@ -110,7 +110,7 @@ macOS and Linux release install:
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh
 
-thinclaw onboard
+thinclaw setup
 thinclaw
 ```
 
@@ -123,7 +123,7 @@ https://github.com/RNT56/ThinClaw/releases
 Then in PowerShell:
 
 ```powershell
-thinclaw onboard
+thinclaw setup
 thinclaw
 ```
 
@@ -142,31 +142,31 @@ feature was not built or is unavailable on the current host.
 |---|---|
 | Start standard runtime | `thinclaw` or `thinclaw run` |
 | Start full-screen runtime | `thinclaw tui` |
-| Run onboarding | `thinclaw onboard` |
-| Force TUI onboarding | `thinclaw onboard --ui tui` |
-| Revisit guided setup | `thinclaw onboard --guide` |
-| Reconfigure channels only | `thinclaw onboard --channels-only` |
-| Reset local state | `thinclaw reset --yes` |
-| Verbose startup | `thinclaw --debug run --no-onboard` |
-| Tail logs | `thinclaw logs tail` |
-| Tail error logs | `thinclaw logs tail -l error` |
+| Run onboarding | `thinclaw setup` |
+| Force TUI onboarding | `thinclaw setup --ui tui` |
+| Revisit guided setup | `thinclaw setup edit` |
+| Reconfigure channels only | `thinclaw setup edit channels` |
+| Reset local state | `thinclaw setup reset --yes` |
+| Verbose startup | `thinclaw --debug run --skip-setup-check` |
+| Tail logs | `thinclaw runtime logs tail` |
+| Tail error logs | `thinclaw runtime logs tail -l error` |
 | Health check | `thinclaw status` |
 | Dependency probe | `thinclaw doctor` |
-| Linux server readiness | `thinclaw doctor --profile server` |
-| Remote/headless readiness | `thinclaw doctor --profile remote` |
-| Linux desktop readiness | `thinclaw doctor --profile desktop-linux` |
-| Pi OS Lite readiness | `thinclaw doctor --profile pi-os-lite-64` |
-| All optional Linux feature readiness | `thinclaw doctor --profile all-features` |
+| Linux server readiness | `thinclaw doctor --readiness-profile server` |
+| Remote/headless readiness | `thinclaw doctor --readiness-profile remote` |
+| Linux desktop readiness | `thinclaw doctor --readiness-profile desktop` |
+| Pi OS Lite readiness | `thinclaw doctor --readiness-profile pi-os-lite-64` |
+| All optional Linux feature readiness | `thinclaw doctor --readiness-profile all-features` |
 | Manage config | `thinclaw config list`, `get`, `set` |
-| Manage secrets | `thinclaw secrets status`, `list`, `set`, `delete` |
-| Inspect providers/models | `thinclaw models` |
-| Manage gateway | `thinclaw gateway` |
-| Inspect channels | `thinclaw channels list` |
-| Manage tools | `thinclaw tool list`, `install`, `remove` |
-| Manage MCP servers | `thinclaw mcp list`, `add`, `auth`, `test` |
-| Manage routines | `thinclaw cron` |
-| Manage service | `thinclaw service install`, `start`, `status`, `stop`, `uninstall` |
-| Self-update | `thinclaw update` |
+| Manage secrets | `thinclaw config secrets status`, `list`, `set`, `delete` |
+| Inspect providers/models | `thinclaw config models` |
+| Manage gateway | `thinclaw runtime web` |
+| Inspect channels | `thinclaw extensions channels list` |
+| Manage tools | `thinclaw extensions tools list`, `install`, `remove` |
+| Manage MCP servers | `thinclaw extensions mcp server list`, `add`, `auth`, `test` |
+| Manage routines | `thinclaw automation routines` |
+| Manage service | `thinclaw runtime service install`, `start`, `status`, `stop`, `uninstall` |
+| Self-update | `thinclaw runtime update` |
 
 For the complete command surface, use [CLI_REFERENCE.md](CLI_REFERENCE.md).
 
@@ -175,11 +175,11 @@ For the complete command surface, use [CLI_REFERENCE.md](CLI_REFERENCE.md).
 ThinClaw ships one service command surface:
 
 ```bash
-thinclaw service install
-thinclaw service start
-thinclaw service status
-thinclaw service stop
-thinclaw service uninstall
+thinclaw runtime service install
+thinclaw runtime service start
+thinclaw runtime service status
+thinclaw runtime service stop
+thinclaw runtime service uninstall
 ```
 
 Platform backends:
@@ -194,7 +194,7 @@ Platform backends:
 The service path runs:
 
 ```bash
-thinclaw run --no-onboard
+thinclaw run --skip-setup-check
 ```
 
 If you are diagnosing service startup, inspect the platform service manager

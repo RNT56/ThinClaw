@@ -9,7 +9,7 @@ Linux-like environment, but the primary Windows user path is native Windows.
 |---|---|
 | Normal Windows install | MSI from GitHub Releases |
 | Portable or side-by-side install | Portable ZIP from GitHub Releases |
-| Always-on background runtime | `thinclaw service install` using Windows Service Control Manager |
+| Always-on background runtime | `thinclaw runtime service install` using Windows Service Control Manager |
 | Docker-backed browser or sandbox fallback | Docker Desktop |
 | Linux-style development | WSL 2, then follow the Linux docs inside WSL |
 
@@ -56,7 +56,7 @@ https://github.com/RNT56/ThinClaw/releases
 Then run in PowerShell:
 
 ```powershell
-thinclaw onboard
+thinclaw setup
 thinclaw
 ```
 
@@ -77,14 +77,14 @@ Common post-install checks:
 ```powershell
 thinclaw status
 thinclaw doctor
-thinclaw logs tail
+thinclaw runtime logs tail
 ```
 
 Verbose startup diagnostics:
 
 ```powershell
 thinclaw --debug
-thinclaw --debug run --no-onboard
+thinclaw --debug run --skip-setup-check
 ```
 
 ## Windows Service
@@ -92,16 +92,16 @@ thinclaw --debug run --no-onboard
 After onboarding:
 
 ```powershell
-thinclaw service install
-thinclaw service start
-thinclaw service status
+thinclaw runtime service install
+thinclaw runtime service start
+thinclaw runtime service status
 ```
 
 Service management:
 
 ```powershell
-thinclaw service stop
-thinclaw service uninstall
+thinclaw runtime service stop
+thinclaw runtime service uninstall
 ```
 
 The service registers with the Windows Service Control Manager. Service logs
@@ -112,7 +112,7 @@ If service setup looks wrong, check:
 - onboarding completed on the same Windows account that will run ThinClaw
 - the Windows OS secure store is available for local installs
 - `SECRETS_MASTER_KEY` is set only for CI, container, or intentionally headless flows
-- `thinclaw service status` reflects the Service Control Manager state
+- `thinclaw runtime service status` reflects the Service Control Manager state
 
 ## Remote Gateway Access
 

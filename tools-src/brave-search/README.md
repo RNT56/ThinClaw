@@ -18,7 +18,7 @@ Get a free API key (2,000 queries/month):
 3. Store the key:
 
 ```bash
-thinclaw tool auth brave-search
+thinclaw extensions tools auth brave-search
 ```
 
 Or set an environment variable (picked up automatically on next auth call):
@@ -33,14 +33,14 @@ Or configure via the **WebUI**: the first time the agent needs to search, it wil
 The tool is published in the ThinClaw registry. Install it with:
 
 ```bash
-thinclaw registry install brave-search
+thinclaw extensions registry install brave-search
 ```
 
 Or install directly from a local source checkout:
 
 ```bash
-thinclaw tool install tools-src/brave-search
-thinclaw tool auth brave-search
+thinclaw extensions tools install tools-src/brave-search
+thinclaw extensions tools auth brave-search
 ```
 
 ## Example Usage

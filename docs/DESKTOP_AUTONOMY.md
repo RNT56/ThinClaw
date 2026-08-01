@@ -97,7 +97,7 @@ headless-server feature.
 |---|---|---|
 | macOS | Logged-in GUI session, Calendar, Numbers, Pages, TextEdit, privacy/accessibility permissions approved for the ThinClaw launcher/session, secure store access | `thinclaw doctor`, `autonomy_control bootstrap` |
 | Windows | Logged-in interactive session, Outlook, Excel, Word, Notepad or compatible local apps, PowerShell/COM access, service/session launcher access, secure store access | `thinclaw doctor`, `autonomy_control bootstrap` |
-| Linux | Logged-in X11 or Wayland desktop session such as GNOME, KDE/Plasma, XFCE, LXQt, MATE, Cinnamon, Unity, Budgie, Sway, or another compositor/window manager with the same backend support; DBus session; AT-SPI accessibility bus; LibreOffice; Evolution; OCR/screenshot tools; Python GI/pyatspi modules; xdotool, ydotool, or dotool input backend | `thinclaw doctor --profile desktop-linux` |
+| Linux | Logged-in X11 or Wayland desktop session such as GNOME, KDE/Plasma, XFCE, LXQt, MATE, Cinnamon, Unity, Budgie, Sway, or another compositor/window manager with the same backend support; DBus session; AT-SPI accessibility bus; LibreOffice; Evolution; OCR/screenshot tools; Python GI/pyatspi modules; xdotool, ydotool, or dotool input backend | `thinclaw doctor --readiness-profile desktop` |
 
 Dedicated-user mode additionally requires:
 
@@ -116,7 +116,7 @@ Desktop autonomy should stay disabled on:
 Linux desktop readiness:
 
 ```bash
-thinclaw doctor --profile desktop-linux
+thinclaw doctor --readiness-profile desktop
 sudo apt install python3 python3-gi python3-pyatspi libreoffice \
   libreoffice-script-provider-python evolution evolution-data-server-bin \
   xdotool ydotool wmctrl tesseract-ocr gnome-screenshot scrot grim spectacle imagemagick \

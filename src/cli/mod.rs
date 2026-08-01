@@ -426,8 +426,8 @@ pub enum Command {
     #[command(subcommand, hide = true)]
     Memory(MemoryCommand),
 
-    /// Send messages to the agent
-    #[command(subcommand)]
+    /// Deprecated alias for `send`
+    #[command(subcommand, hide = true)]
     Message(MessageCommand),
 
     /// Deprecated alias for `config models`
@@ -840,6 +840,60 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn canonical_moved_commands_and_artifact_flags_parse() {
+        for argv in [
+            vec!["thinclaw", "extensions", "registry", "check", "gmail"],
+            vec!["thinclaw", "config", "init", "--out", "config.toml"],
+            vec![
+                "thinclaw",
+                "dev",
+                "browser",
+                "screenshot",
+                "https://example.com",
+                "--out",
+                "page.png",
+            ],
+            vec![
+                "thinclaw",
+                "data",
+                "trajectories",
+                "export",
+                "--out",
+                "records.jsonl",
+            ],
+        ] {
+            Cli::try_parse_from(argv).expect("parse canonical command");
+        }
+    }
+
+    #[test]
+    fn compatibility_paths_parse_but_stay_out_of_root_help() {
+        Cli::try_parse_from(["thinclaw", "extensions", "registry", "validate", "gmail"])
+            .expect("parse hidden registry alias");
+        Cli::try_parse_from(["thinclaw", "message", "send", "--text", "hello"])
+            .expect("parse hidden message alias");
+
+        let command = Cli::command();
+        let visible = command
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
+            .map(|subcommand| subcommand.get_name())
+            .collect::<Vec<_>>();
+        for canonical in ["runtime", "extensions", "automation", "data", "access"] {
+            assert!(
+                visible.contains(&canonical),
+                "root help omitted {canonical}"
+            );
+        }
+        for hidden in ["onboard", "message", "gateway", "registry", "trajectory"] {
+            assert!(
+                !visible.contains(&hidden),
+                "root help exposed hidden path {hidden}"
+            );
+        }
     }
 
     #[test]

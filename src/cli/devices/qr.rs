@@ -1,4 +1,4 @@
-//! Terminal QR code rendering for `thinclaw devices pair`.
+//! Terminal QR code rendering for `thinclaw access devices pair`.
 //!
 //! Renders the `thinclaw://pair?d=...` payload as a scannable QR code using
 //! Unicode half-block characters (two module rows per printed line), via the

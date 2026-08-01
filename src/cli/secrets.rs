@@ -307,7 +307,7 @@ pub(crate) async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore +
     let master_key = config
         .secrets
         .master_key()
-        .ok_or_else(|| anyhow::anyhow!("secrets are not configured; run `thinclaw onboard`"))?;
+        .ok_or_else(|| anyhow::anyhow!("secrets are not configured; run `thinclaw setup`"))?;
     let crypto = Arc::new(SecretsCrypto::new(SecretString::from(
         master_key.expose_secret().to_string(),
     ))?);

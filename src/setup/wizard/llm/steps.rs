@@ -413,7 +413,7 @@ impl SetupWizard {
             category: crate::settings::OnboardingFollowupCategory::Authentication,
             status: crate::settings::OnboardingFollowupStatus::Optional,
             instructions: "Embeddings were requested, but neither a usable OpenAI key nor a local Ollama embeddings path was detected during onboarding.".to_string(),
-            action_hint: Some("Set OPENAI_API_KEY or configure Ollama, then rerun `thinclaw onboard` to enable semantic search.".to_string()),
+            action_hint: Some("Set OPENAI_API_KEY or configure Ollama, then rerun `thinclaw setup` to enable semantic search.".to_string()),
         });
         print_info("A follow-up was saved so onboarding can continue now.");
 

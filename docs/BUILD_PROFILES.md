@@ -274,9 +274,9 @@ Postgres, or the local WASM runtime.
 Before deploying or enabling new runtime capabilities:
 
 ```bash
-thinclaw onboard --profile pi-os-lite-64
-thinclaw doctor --profile pi-os-lite-64
-thinclaw status --profile pi-os-lite-64
+thinclaw setup --profile pi-os-lite-64 --mode advanced
+thinclaw doctor --readiness-profile pi-os-lite-64
+thinclaw status --readiness-profile pi-os-lite-64
 ```
 
 That onboarding profile writes `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and
@@ -306,7 +306,7 @@ users don't need:
 
 Use `full` for production. Use `--all-features` for CI test coverage or when you
 specifically need one of the extras above. On Linux, run
-`thinclaw doctor --profile all-features` before using `--all-features` locally.
+`thinclaw doctor --readiness-profile all-features` before using `--all-features` locally.
 
 ## CI/CD
 

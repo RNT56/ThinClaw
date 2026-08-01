@@ -41,6 +41,8 @@ jobs:
         run: scripts/ci/check-msrv-sync.py
       - name: Check release automation contract
         run: python3 scripts/ci/check-release-automation.py
+      - name: Check CLI command migration drift
+        run: python3 scripts/ci/check-cli-command-drift.py
       - name: Check coverage gate accounting
         run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
       - name: Check desktop bridge command boundaries
@@ -373,7 +375,7 @@ jobs:
             ID=debian
             VERSION_CODENAME=bookworm
           THINCLAW_LINUX_READINESS_RPI_ISSUE: "Raspberry Pi reference 2026-04-25"
-        run: ./target/release/thinclaw doctor --profile pi-os-lite-64
+        run: ./target/release/thinclaw doctor --readiness-profile pi-os-lite-64
       - name: Pi OS Lite ARM64 artifact gateway health
         env:
           THINCLAW_RUNTIME_PROFILE: pi-os-lite-64
@@ -414,7 +416,7 @@ jobs:
           export USERPROFILE="$tmp/home"
           export GATEWAY_PORT="$port"
           mkdir -p "$THINCLAW_HOME"
-          ./target/release/thinclaw run --no-onboard >"$tmp/stdout.log" 2>"$tmp/stderr.log" &
+          ./target/release/thinclaw run --skip-setup-check >"$tmp/stdout.log" 2>"$tmp/stderr.log" &
           pid="$!"
           trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$tmp"' EXIT
           for _ in $(seq 1 90); do
@@ -550,7 +552,7 @@ jobs:
 
           # Create a compose override to neutralize hardcoded environment
           # values from docker-compose.yml that would override .env entries.
-          printf 'services:\n  thinclaw:\n    command: ["run", "--no-onboard"]\n    environment:\n      - HEARTBEAT_ENABLED=false\n      - HEARTBEAT_NOTIFY_CHANNEL=gateway\n      - ROUTINES_ENABLED=false\n      - CLI_ENABLED=false\n      - ONBOARD_COMPLETED=true\n      - THINCLAW_ALLOW_ENV_MASTER_KEY=1\n      - RUST_BACKTRACE=1\n      - RUST_LOG=thinclaw=debug\n' > deploy/docker-compose.override.yml
+          printf 'services:\n  thinclaw:\n    command: ["run", "--skip-setup-check"]\n    environment:\n      - HEARTBEAT_ENABLED=false\n      - HEARTBEAT_NOTIFY_CHANNEL=gateway\n      - ROUTINES_ENABLED=false\n      - CLI_ENABLED=false\n      - ONBOARD_COMPLETED=true\n      - THINCLAW_ALLOW_ENV_MASTER_KEY=1\n      - RUST_BACKTRACE=1\n      - RUST_LOG=thinclaw=debug\n' > deploy/docker-compose.override.yml
 
           echo "=== Final .env (non-comment lines) ==="
           grep -v '^#' deploy/.env | grep -v '^$' || true

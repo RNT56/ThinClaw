@@ -16,7 +16,7 @@ token and should be configured once through the tool auth flow.
 
 1. **Google Cloud Project** with Gmail API and Pub/Sub enabled
 2. **Pub/Sub Topic** with Gmail push configured
-3. **Shared Google OAuth token** from `thinclaw tool auth gmail`
+3. **Shared Google OAuth token** from `thinclaw extensions tools auth gmail`
 
 ### Setup Steps
 
@@ -25,7 +25,7 @@ token and should be configured once through the tool auth flow.
 3. Create a Pub/Sub topic and subscription
 4. Grant `gmail-api-push@system.gserviceaccount.com` Pub/Sub Publisher on your topic
 5. Set up a Gmail watch: the agent does this automatically on startup
-6. Run `thinclaw tool auth gmail` once; the channel reuses the shared token
+6. Run `thinclaw extensions tools auth gmail` once; the channel reuses the shared token
 
 ## Configuration
 
@@ -68,7 +68,7 @@ For headless servers (Mac Mini via SSH):
 ssh -L 9876:127.0.0.1:9876 user@server
 
 # On server:
-thinclaw tool auth gmail
+thinclaw extensions tools auth gmail
 ```
 Copy the auth URL to your local browser. The callback is forwarded to the server.
 

@@ -238,7 +238,7 @@ async fn list_routines(
         println!(
             "{}",
             branding.muted(
-                "Create one with: thinclaw cron add <name> --schedule '<schedule>' --prompt '<prompt>'"
+                "Create one with: thinclaw automation routines add <name> --schedule '<schedule>' --prompt '<prompt>'"
             )
         );
         return Ok(());

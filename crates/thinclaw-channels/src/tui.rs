@@ -247,7 +247,7 @@ impl From<StatusUpdate> for TuiUpdate {
                 reason,
                 ..
             } => TuiUpdate::Status(format!(
-                "Credential needed: {reason} — store it with `thinclaw secrets set {secret_name}`"
+                "Credential needed: {reason} — store it with `thinclaw config secrets set {secret_name}`"
             )),
             StatusUpdate::CanvasAction(ref action) => {
                 let summary = match action {

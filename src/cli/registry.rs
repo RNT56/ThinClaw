@@ -67,7 +67,14 @@ pub enum RegistryCommand {
         name: String,
     },
 
-    /// Validate registry metadata and capabilities without installing
+    /// Check registry metadata and capabilities without installing
+    Check {
+        /// Extension or bundle name (e.g. "slack", "google", "channels/line")
+        name: String,
+    },
+
+    /// Deprecated alias for `check`.
+    #[command(hide = true)]
     Validate {
         /// Extension or bundle name (e.g. "slack", "google", "channels/line")
         name: String,
@@ -104,7 +111,9 @@ pub async fn run_registry_command(cmd: RegistryCommand) -> anyhow::Result<()> {
             cmd_install(&catalog, &repo_root, "default", force, build).await
         }
         RegistryCommand::Remove { name } => cmd_remove(&name).await,
-        RegistryCommand::Validate { name } => cmd_validate(&catalog, &repo_root, &name),
+        RegistryCommand::Check { name } | RegistryCommand::Validate { name } => {
+            cmd_validate(&catalog, &repo_root, &name)
+        }
     }
 }
 
@@ -181,7 +190,7 @@ fn cmd_list(
         println!("{}", branding.key_value("Bundles", bundle_names.join(", ")));
         println!(
             "{}",
-            branding.muted("Use `thinclaw registry info <bundle>` for details.")
+            branding.muted("Use `thinclaw extensions registry info <bundle>` for details.")
         );
     }
 
@@ -356,7 +365,7 @@ async fn cmd_install(
             && auth.method.as_deref() != Some("none")
         {
             println!(
-                "\nNext step: authenticate with `thinclaw tool auth {}`",
+                "\nNext step: authenticate with `thinclaw extensions tools auth {}`",
                 manifest.name
             );
             if let Some(url) = &auth.setup_url {

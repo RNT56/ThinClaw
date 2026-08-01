@@ -13,7 +13,7 @@ The Telegram channel lets you interact with ThinClaw via Telegram DMs and groups
 
 ## Prerequisites
 
-- ThinClaw installed and configured (`thinclaw onboard`)
+- ThinClaw installed and configured (`thinclaw setup`)
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
 ## Quick Start
@@ -27,7 +27,7 @@ The Telegram channel lets you interact with ThinClaw via Telegram DMs and groups
 ### 2. Configure via Setup Wizard
 
 ```bash
-thinclaw onboard
+thinclaw setup
 ```
 
 When prompted, enable the Telegram channel and paste your bot token. The wizard will:
@@ -56,26 +56,27 @@ Set the tunnel URL in settings or via `TUNNEL_URL` env var. Without a tunnel, th
 
 ## DM Pairing
 
-When an unknown user DMs your bot, they receive a pairing code. You must approve them before they can message the agent.
+When an unknown user DMs your bot, ThinClaw records a pending request. You must approve it by its durable, non-secret request ID before messages are delivered to the agent.
 
 ### Flow
 
 1. Unknown user sends a message to your bot
-2. Bot replies: `To pair with this bot, run: thinclaw pairing approve telegram ABC12345`
-3. You run: `thinclaw pairing approve telegram ABC12345`
-4. User is added to the allow list; future messages are delivered
+2. ThinClaw records the request without exposing an approval secret to the sender
+3. You run `thinclaw access senders list telegram` and copy the request ID
+4. You run `thinclaw access senders approve telegram <REQUEST_ID>`
+5. User is added to the allow list; future messages are delivered
 
 ### Commands
 
 ```bash
 # List pending pairing requests
-thinclaw pairing list telegram
+thinclaw access senders list telegram
 
 # List as JSON
-thinclaw pairing list telegram --json
+thinclaw access senders list telegram --json
 
-# Approve a user by code
-thinclaw pairing approve telegram ABC12345
+# Approve a user by stable request ID
+thinclaw access senders approve telegram <REQUEST_ID>
 ```
 
 ### Configuration

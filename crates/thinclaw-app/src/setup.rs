@@ -547,10 +547,10 @@ pub fn setup_what_next_commands(input: &SetupRuntimeCommandInput) -> Vec<String>
     if input.profile.is_headless_remote() {
         let mut commands = vec![
             "Service-safe runtime: thinclaw run --skip-setup-check".to_string(),
-            "Install OS service: thinclaw service install".to_string(),
-            "Start OS service: thinclaw service start".to_string(),
+            "Install OS service: thinclaw runtime service install".to_string(),
+            "Start OS service: thinclaw runtime service start".to_string(),
             "Show WebUI access: thinclaw runtime web access".to_string(),
-            "Reveal WebUI credential: thinclaw runtime web access --reveal-token".to_string(),
+            "Reveal WebUI credential: thinclaw runtime web access --reveal-token --yes".to_string(),
         ];
         if input.profile == SetupOnboardingProfile::PiOsLite64 {
             commands.push(
@@ -1901,7 +1901,7 @@ mod tests {
         assert!(
             !setup_what_next_commands(&desktop)
                 .iter()
-                .any(|command| command == "Topic guide: thinclaw onboard --guide")
+                .any(|command| command == "Topic guide: thinclaw setup edit")
         );
 
         let headless = SetupRuntimeCommandInput {

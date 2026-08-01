@@ -39,7 +39,7 @@
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh
 
-thinclaw onboard
+thinclaw setup
 thinclaw
 ```
 
@@ -69,7 +69,7 @@ Install the latest MSI or portable ZIP from
 [GitHub Releases](https://github.com/RNT56/ThinClaw/releases), then run:
 
 ```powershell
-thinclaw onboard
+thinclaw setup
 thinclaw
 ```
 
@@ -78,10 +78,10 @@ thinclaw
 For a Mac Mini, Raspberry Pi, VPS, or another always-on host:
 
 ```bash
-thinclaw onboard --profile remote
-thinclaw gateway access
-thinclaw service install
-thinclaw service start
+thinclaw setup --profile remote --mode advanced
+thinclaw runtime web access
+thinclaw runtime service install
+thinclaw runtime service start
 ```
 
 Use [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full deployment decision
@@ -282,7 +282,7 @@ privacy, consent, permissions, or safety boundaries.
 |---|---|---|---|
 | Local CLI / gateway host | Supported | Supported | Supported |
 | Native OS secure store | Supported | Supported | Supported |
-| `thinclaw service` lifecycle | Supported | Supported | Supported |
+| `thinclaw runtime service` lifecycle | Supported | Supported | Supported |
 | Local browser automation | Chrome / Brave / Edge | Chrome / Chromium / Brave / Edge | Chrome / Edge / Brave |
 | Docker browser fallback | Supported | Supported | Docker Desktop |
 | Camera / microphone capture | Supported | Supported | Supported with `ffmpeg` |
@@ -353,13 +353,13 @@ Source builds, feature profiles, and maintainer workflows live in
 
 | Task | Command |
 |---|---|
-| Run onboarding | `thinclaw onboard` |
+| Run onboarding | `thinclaw setup` |
 | Start the local runtime | `thinclaw` |
 | Start the full-screen runtime | `thinclaw tui` |
-| Force full-screen onboarding | `thinclaw onboard --ui tui` |
-| Reset local ThinClaw state | `thinclaw reset --yes` |
-| Show verbose startup logs | `thinclaw --debug --no-onboard` |
-| Show verbose `run` logs | `thinclaw --debug run --no-onboard` |
+| Force full-screen onboarding | `thinclaw setup --ui tui` |
+| Reset local ThinClaw state | `thinclaw setup reset --yes` |
+| Show verbose startup logs | `thinclaw --debug run --skip-setup-check` |
+| Show verbose `run` logs | `thinclaw --debug run --skip-setup-check` |
 
 `thinclaw` and `thinclaw run` share the same quiet startup path by default. For
 targeted log filtering, `RUST_LOG=...` still takes precedence.

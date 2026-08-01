@@ -5,7 +5,7 @@
 //! - **Linux**: systemd user unit at `~/.config/systemd/user/thinclaw.service`
 //! - **Windows**: Service Control Manager entry backed by a ThinClaw wrapper
 //!
-//! The installed service runs `thinclaw run --no-onboard` and is configured to
+//! The installed service runs `thinclaw run --skip-setup-check` and is configured to
 //! restart automatically on failure.
 
 use std::path::PathBuf;
@@ -53,7 +53,7 @@ fn install() -> Result<()> {
         && !force_install
     {
         bail!(
-            "Service install blocked: onboarding is not ready ({reason}). Run `thinclaw onboard` first, or set THINCLAW_FORCE_SERVICE_INSTALL=true to bypass this guard intentionally."
+            "Service install blocked: onboarding is not ready ({reason}). Run `thinclaw setup` first, or set THINCLAW_FORCE_SERVICE_INSTALL=true to bypass this guard intentionally."
         );
     }
     if let Some(reason) = onboarding_blocker
@@ -224,7 +224,7 @@ fn guard_remote_gateway_install(force_install: bool) -> Result<()> {
         && !force_install
     {
         bail!(
-            "Service install blocked: remote gateway is enabled without GATEWAY_AUTH_TOKEN. Run `thinclaw onboard --profile remote` or set a long random token in {}.",
+            "Service install blocked: remote gateway is enabled without GATEWAY_AUTH_TOKEN. Run `thinclaw setup --profile remote` or set a long random token in {}.",
             crate::platform::state_paths().env_file.display()
         );
     }
@@ -256,7 +256,7 @@ fn print_service_install_summary() {
     let env_path = crate::platform::state_paths().env_file;
 
     println!("  Env file: {}", env_path.display());
-    println!("  Runtime command: thinclaw run --no-onboard");
+    println!("  Runtime command: thinclaw run --skip-setup-check");
     println!("  WebUI URL: {}", access.local_url());
     println!("  SSH tunnel: {}", access.ssh_tunnel_command());
 }
@@ -333,7 +333,7 @@ fn install_macos(force_no_onboard: bool) -> Result<()> {
 
     thinclaw_platform::write_regular_file_atomic(&file, plist.as_bytes(), true)?;
     println!("Installed launchd service: {}", file.display());
-    println!("  Start with: thinclaw service start");
+    println!("  Start with: thinclaw runtime service start");
     Ok(())
 }
 
@@ -369,7 +369,7 @@ fn install_linux(force_no_onboard: bool) -> Result<()> {
     run_checked(Command::new("systemctl").args(["--user", "daemon-reload"])).ok();
     run_checked(Command::new("systemctl").args(["--user", "enable", SYSTEMD_UNIT])).ok();
     println!("Installed systemd user service: {}", file.display());
-    println!("  Start with: thinclaw service start");
+    println!("  Start with: thinclaw runtime service start");
     Ok(())
 }
 
@@ -377,7 +377,7 @@ fn install_linux(force_no_onboard: bool) -> Result<()> {
 fn start_macos() -> Result<()> {
     let plist = macos_plist_path()?;
     if !plist.exists() {
-        bail!("Service not installed. Run `thinclaw service install` first.");
+        bail!("Service not installed. Run `thinclaw runtime service install` first.");
     }
     run_checked(Command::new("launchctl").arg("load").arg("-w").arg(&plist))?;
     run_checked(Command::new("launchctl").arg("start").arg(SERVICE_LABEL))?;
@@ -634,7 +634,7 @@ mod windows_impl {
             "Installed Windows service: {}",
             WINDOWS_SERVICE_DISPLAY_NAME
         );
-        println!("  Start with: thinclaw service start");
+        println!("  Start with: thinclaw runtime service start");
         Ok(())
     }
 
@@ -648,7 +648,7 @@ mod windows_impl {
             )
             .with_context(|| {
                 format!(
-                    "Windows service '{}' is not installed. Run `thinclaw service install` first.",
+                    "Windows service '{}' is not installed. Run `thinclaw runtime service install` first.",
                     WINDOWS_SERVICE_NAME
                 )
             })?;
@@ -685,7 +685,7 @@ mod windows_impl {
             )
             .with_context(|| {
                 format!(
-                    "Windows service '{}' is not installed. Run `thinclaw service install` first.",
+                    "Windows service '{}' is not installed. Run `thinclaw runtime service install` first.",
                     WINDOWS_SERVICE_NAME
                 )
             })?;
@@ -719,7 +719,7 @@ mod windows_impl {
             )
             .with_context(|| {
                 format!(
-                    "Windows service '{}' is not installed. Run `thinclaw service install` first.",
+                    "Windows service '{}' is not installed. Run `thinclaw runtime service install` first.",
                     WINDOWS_SERVICE_NAME
                 )
             })?;

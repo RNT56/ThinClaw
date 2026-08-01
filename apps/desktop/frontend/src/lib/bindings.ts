@@ -1230,7 +1230,7 @@ async thinclawCronHistory(key: string, limit: number) : Promise<Result<JsonValue
 },
 /**
  * Validates a cron expression and returns next fire times.
- * This is a frontend-facing version of `thinclaw cron lint`.
+ * This is a frontend-facing version of `thinclaw automation routines lint`.
  */
 async thinclawCronLint(expression: string) : Promise<Result<JsonValue, BridgeError>> {
     try {

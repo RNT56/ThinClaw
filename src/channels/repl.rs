@@ -881,7 +881,7 @@ impl Channel for ReplChannel {
                 eprintln!(
                     "  {}",
                     branding.body(format!(
-                        "Store it with `thinclaw secrets set {secret_name}`"
+                        "Store it with `thinclaw config secrets set {secret_name}`"
                     ))
                 );
                 eprintln!();

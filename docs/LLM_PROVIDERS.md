@@ -28,7 +28,7 @@ more.
 OPENROUTER_API_KEY=sk-or-...
 ```
 
-3. Run `thinclaw onboard` — OpenRouter is the first (recommended) option.
+3. Run `thinclaw setup` — OpenRouter is the first (recommended) option.
 
 That's it. ThinClaw auto-resolves the base URL, default model, and routing
 configuration. You can add direct provider keys later for lower latency or
@@ -558,7 +558,7 @@ chain.
 Instead of editing `.env` manually, run the onboarding wizard:
 
 ```bash
-thinclaw onboard
+thinclaw setup
 ```
 
 The wizard covers all native backends (Anthropic, OpenAI, Gemini, Tinfoil,

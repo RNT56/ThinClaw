@@ -69,9 +69,9 @@ cache_ttl_secs = 0
 strict_sensitive_routes = true
 ```
 
-Use `thinclaw secrets status` or `thinclaw doctor` to check secure-store readiness, env-fallback risk, schema posture, and sensitive-route policy. Provider Vault writes require header/proxy authentication; query-string bearer tokens are rejected for credential write/delete routes.
+Use `thinclaw config secrets status` or `thinclaw doctor` to check secure-store readiness, env-fallback risk, schema posture, and sensitive-route policy. Provider Vault writes require header/proxy authentication; query-string bearer tokens are rejected for credential write/delete routes.
 
-Master-key rotation is exposed as `thinclaw secrets rotate-master`. The command decrypts active v2 rows with the current key, re-encrypts them with a newly generated OS-secure-store key, verifies decryptability, and advances the local key version. Existing legacy or incompatible rows are not silently decrypted after this hardening change; re-enter those credentials through Provider Vault or `thinclaw secrets set`.
+Master-key rotation is exposed as `thinclaw config secrets rotate-master`. The command decrypts active v2 rows with the current key, re-encrypts them with a newly generated OS-secure-store key, verifies decryptability, and advances the local key version. Existing legacy or incompatible rows are not silently decrypted after this hardening change; re-enter those credentials through Provider Vault or `thinclaw config secrets set`.
 
 Backups need both pieces: the database and the OS secure-store master key. Losing the secure-store item makes encrypted local secret values unrecoverable. A host compromise while ThinClaw is running can still access secrets that the trusted host is authorized to inject; encryption protects at-rest storage, not a fully compromised runtime.
 

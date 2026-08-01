@@ -66,7 +66,7 @@ WASM_CHANNELS_DIR=~/.thinclaw/channels/
 
 Some WASM channels come bundled with ThinClaw and can be installed via:
 ```bash
-thinclaw registry install <channel-name>
+thinclaw extensions registry install <channel-name>
 ```
 
 ## Managing Channels

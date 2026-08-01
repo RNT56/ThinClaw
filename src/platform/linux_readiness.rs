@@ -338,7 +338,7 @@ fn probe_remote_gateway() -> LinuxProbe {
             "remote_gateway",
             "Remote gateway",
             "GATEWAY_ENABLED disables the WebUI gateway.",
-            "Run `thinclaw onboard --profile remote` or set GATEWAY_ENABLED=true.",
+            "Run `thinclaw setup --profile remote` or set GATEWAY_ENABLED=true.",
         );
     }
     if access.auth_token.is_none() {
@@ -346,7 +346,7 @@ fn probe_remote_gateway() -> LinuxProbe {
             "remote_gateway",
             "Remote gateway",
             "GATEWAY_AUTH_TOKEN is not configured.",
-            "Run `thinclaw onboard --profile remote`, or set a long random GATEWAY_AUTH_TOKEN before remote access.",
+            "Run `thinclaw setup --profile remote`, or set a long random GATEWAY_AUTH_TOKEN before remote access.",
         );
     }
     LinuxProbe::pass(
@@ -403,7 +403,7 @@ async fn probe_remote_gateway_health() -> LinuxProbe {
             "remote_gateway_health",
             "Gateway health",
             "Could not create the HTTP client for the health check.",
-            "Retry `thinclaw doctor --profile remote` after checking local networking.",
+            "Retry `thinclaw doctor --readiness-profile remote` after checking local networking.",
         );
     };
 
@@ -417,7 +417,7 @@ async fn probe_remote_gateway_health() -> LinuxProbe {
             "remote_gateway_health",
             "Gateway health",
             format!("Could not reach {}.", access.health_url()),
-            "Start the runtime with `thinclaw run --no-onboard` or `thinclaw service start`, then retry.",
+            "Start the runtime with `thinclaw run --skip-setup-check` or `thinclaw runtime service start`, then retry.",
         ),
     }
 }

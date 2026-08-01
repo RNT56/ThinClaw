@@ -30,7 +30,7 @@ if [ -f "$WASM_PATH" ]; then
     echo "  cp brave-search-tool.capabilities.json ~/.thinclaw/tools/brave-search.capabilities.json"
     echo ""
     echo "Then authenticate:"
-    echo "  thinclaw tool auth brave-search"
+    echo "  thinclaw extensions tools auth brave-search"
     echo ""
     echo "Or set via environment variable:"
     echo "  export BRAVE_SEARCH_API_KEY=your-key-here"

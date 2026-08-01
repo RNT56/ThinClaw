@@ -340,7 +340,7 @@ async fn list_tools(dir: Option<PathBuf>, verbose: bool) -> anyhow::Result<()> {
 
     if !tools_dir.exists() {
         println!("No tools directory found at {}", tools_dir.display());
-        println!("Install a tool with: thinclaw tool install <path>");
+        println!("Install a tool with: thinclaw extensions tools install <path>");
         return Ok(());
     }
     let directory_metadata = fs::symlink_metadata(&tools_dir).await?;
@@ -634,9 +634,7 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
     // Initialize secrets store
     let config = Config::from_env().await?;
     let master_key = config.secrets.master_key().ok_or_else(|| {
-        anyhow::anyhow!(
-            "SECRETS_MASTER_KEY not set. Run 'thinclaw onboard' first or set it in .env"
-        )
+        anyhow::anyhow!("SECRETS_MASTER_KEY not set. Run 'thinclaw setup' first or set it in .env")
     })?;
 
     let crypto = SecretsCrypto::new(master_key.clone())?;

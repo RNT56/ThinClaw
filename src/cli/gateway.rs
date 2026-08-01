@@ -412,7 +412,7 @@ async fn start_gateway(
     if let Some(record) = read_gateway_pid_record(&pid_path)? {
         if record_matches_process(&record) {
             anyhow::bail!(
-                "Gateway is already running (PID {}). Stop it first with: thinclaw gateway stop",
+                "Gateway is already running (PID {}). Stop it first with: thinclaw runtime web stop",
                 record.pid
             );
         } else {
@@ -554,7 +554,10 @@ async fn start_gateway(
                 gw_host, gw_port, pid
             ))
         );
-        println!("  {}", branding.muted("Stop with: thinclaw gateway stop"));
+        println!(
+            "  {}",
+            branding.muted("Stop with: thinclaw runtime web stop")
+        );
     }
 
     Ok(())

@@ -8,8 +8,8 @@ and development boxes. For Raspberry Pi OS Lite, use
 
 | Goal | Recommended Path |
 |---|---|
-| Fast local install | Release installer, then `thinclaw onboard` |
-| Generic always-on server | Release installer, `thinclaw onboard --profile remote`, then service install |
+| Fast local install | Release installer, then `thinclaw setup` |
+| Generic always-on server | Release installer, `thinclaw setup --profile remote --mode advanced`, then service install |
 | Small VPS / SD-card host | Release installer with `--profile edge` |
 | Container deployment | [docker.md](docker.md) |
 | Raspberry Pi OS Lite 64-bit | [raspberry-pi-os-lite.md](raspberry-pi-os-lite.md) |
@@ -65,8 +65,8 @@ Optional feature prerequisites:
 Verify after install:
 
 ```bash
-thinclaw doctor --profile server
-thinclaw status --profile server
+thinclaw doctor --readiness-profile server
+thinclaw status --readiness-profile server
 ```
 
 ## Fast Local Install
@@ -75,7 +75,7 @@ thinclaw status --profile server
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh
 
-thinclaw onboard
+thinclaw setup
 thinclaw
 ```
 
@@ -101,16 +101,16 @@ thinclaw tui
 Common post-install checks:
 
 ```bash
-thinclaw status --profile server
-thinclaw doctor --profile server
-thinclaw logs tail
+thinclaw status --readiness-profile server
+thinclaw doctor --readiness-profile server
+thinclaw runtime logs tail
 ```
 
 Verbose startup diagnostics:
 
 ```bash
 thinclaw --debug
-thinclaw --debug run --no-onboard
+thinclaw --debug run --skip-setup-check
 ```
 
 ## Build From Source
@@ -127,7 +127,7 @@ rustup target add wasm32-wasip2
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
 cargo build --release --features full --bin thinclaw
-./target/release/thinclaw onboard
+./target/release/thinclaw setup
 ```
 
 Fedora:
@@ -141,7 +141,7 @@ rustup target add wasm32-wasip2
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
 cargo build --release --features full --bin thinclaw
-./target/release/thinclaw onboard
+./target/release/thinclaw setup
 ```
 
 Use `cargo build --release --bin thinclaw` only when you intentionally want the
@@ -152,29 +152,29 @@ smaller default `light` profile. See [../BUILD_PROFILES.md](../BUILD_PROFILES.md
 For an SSH-managed server or VPS, prefer the remote profile first:
 
 ```bash
-thinclaw onboard --profile remote
-thinclaw gateway access
+thinclaw setup --profile remote --mode advanced
+thinclaw runtime web access
 ```
 
 After onboarding:
 
 ```bash
-thinclaw service install
-thinclaw service start
-thinclaw service status
+thinclaw runtime service install
+thinclaw runtime service start
+thinclaw runtime service status
 ```
 
 Service management:
 
 ```bash
-thinclaw service stop
-thinclaw service uninstall
+thinclaw runtime service stop
+thinclaw runtime service uninstall
 ```
 
 The service uses `systemd --user` and runs:
 
 ```bash
-thinclaw run --no-onboard
+thinclaw run --skip-setup-check
 ```
 
 If `systemd --user` is not reachable, start from a normal user login session

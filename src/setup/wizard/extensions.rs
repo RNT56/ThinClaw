@@ -11,7 +11,7 @@ impl SetupWizard {
             Some(c) => c,
             None => {
                 print_info("Extension registry not found. Tool installation will be skipped.");
-                print_info("Install tools manually with: thinclaw tool install <path>");
+                print_info("Install tools manually with: thinclaw extensions tools install <path>");
                 return Ok(());
             }
         };
@@ -29,7 +29,7 @@ impl SetupWizard {
 
         print_info("Tools available from the registry:");
         print_info("Pick the tools to install now. You can add more later with:");
-        print_info("  thinclaw registry install <name>");
+        print_info("  thinclaw extensions registry install <name>");
         crate::setup::prompts::print_blank_line();
 
         let default_bundle = match self.selected_profile {
@@ -136,7 +136,10 @@ impl SetupWizard {
                             && auth.method.is_some()
                         {
                             let provider = auth.provider.as_deref().unwrap_or(&tool.name);
-                            let hint = format!("  {} - thinclaw tool auth {}", provider, tool.name);
+                            let hint = format!(
+                                "  {} - thinclaw extensions tools auth {}",
+                                provider, tool.name
+                            );
                             if !auth_needed
                                 .iter()
                                 .any(|h| h.starts_with(&format!("  {} -", provider)))
@@ -172,7 +175,10 @@ impl SetupWizard {
                     {
                         let provider = auth.provider.as_deref().unwrap_or(&tool.name);
                         // Only mention unique providers (Google tools share auth)
-                        let hint = format!("  {} - thinclaw tool auth {}", provider, tool.name);
+                        let hint = format!(
+                            "  {} - thinclaw extensions tools auth {}",
+                            provider, tool.name
+                        );
                         if !auth_needed
                             .iter()
                             .any(|h| h.starts_with(&format!("  {} -", provider)))

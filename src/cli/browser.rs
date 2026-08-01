@@ -42,7 +42,12 @@ pub enum BrowserCommand {
         url: String,
 
         /// Output file path (default: screenshot.png)
-        #[arg(short, long, default_value = "screenshot.png")]
+        #[arg(
+            short,
+            long = "out",
+            alias = "output",
+            default_value = "screenshot.png"
+        )]
         output: String,
 
         /// Viewport width
@@ -348,7 +353,9 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
             screenshot,
         } => {
             let browser = find_browser().ok_or_else(|| {
-                anyhow::anyhow!("No browser found. Run `thinclaw browser check` for setup info.")
+                anyhow::anyhow!(
+                    "No browser found. Run `thinclaw dev browser check` for setup info."
+                )
             })?;
 
             let html = headless_dom_dump(&browser, &url, wait).await?;
@@ -388,7 +395,9 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
             height,
         } => {
             let browser = find_browser().ok_or_else(|| {
-                anyhow::anyhow!("No browser found. Run `thinclaw browser check` for setup info.")
+                anyhow::anyhow!(
+                    "No browser found. Run `thinclaw dev browser check` for setup info."
+                )
             })?;
 
             headless_screenshot(&browser, &url, &output, width, height).await?;
@@ -397,7 +406,9 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
 
         BrowserCommand::Links { url, external_only } => {
             let browser = find_browser().ok_or_else(|| {
-                anyhow::anyhow!("No browser found. Run `thinclaw browser check` for setup info.")
+                anyhow::anyhow!(
+                    "No browser found. Run `thinclaw dev browser check` for setup info."
+                )
             })?;
 
             let html = headless_dom_dump(&browser, &url, 3).await?;
