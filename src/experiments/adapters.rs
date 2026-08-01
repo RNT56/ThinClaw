@@ -652,6 +652,19 @@ pub async fn try_auto_launch(
     auth: &ExperimentLeaseAuthentication,
     provider_api_key: Option<&str>,
 ) -> Result<RunnerLaunchOutcome, String> {
+    // Remote launchers previously installed a command containing
+    // `--auth-stdin` but never delivered the one-use private envelope to that
+    // stdin. That launches a stranded process and risks encouraging callers to
+    // smuggle the bearer through argv/templates. Until a backend supplies a
+    // concrete private auth sink, fail before building a provider request,
+    // opening SSH, submitting Slurm, or applying a Kubernetes manifest.
+    if runner.backend.is_remote() {
+        return Err(format!(
+            "secure_delivery_required: {:?} cannot be launched until its adapter provides a private one-use runner-auth sink; no provider or remote side effect was attempted",
+            runner.backend
+        ));
+    }
+
     let gateway_url = validate_gateway_url(gateway_url.unwrap_or_default())?;
     let bootstrap_command = build_bootstrap_command(&gateway_url, auth)?;
 

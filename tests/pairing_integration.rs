@@ -30,14 +30,13 @@ fn test_pairing_flow_unknown_user_to_approved() {
         )
         .unwrap();
     assert!(r1.created);
-    assert!(!r1.code.is_empty());
-    assert_eq!(r1.code.len(), 8);
+    assert!(uuid::Uuid::parse_str(&r1.request_id).is_ok());
 
     // 2. List pending shows the request
     let pending = store.list_pending(channel).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, "user_12345");
-    assert_eq!(pending[0].code, r1.code);
+    assert_eq!(pending[0].request_id, r1.request_id);
 
     // 3. User is not allowed yet
     assert!(
@@ -46,8 +45,8 @@ fn test_pairing_flow_unknown_user_to_approved() {
             .unwrap()
     );
 
-    // 4. Approve via code
-    let approved = store.approve(channel, &r1.code).unwrap();
+    // 4. Approve via stable request ID
+    let approved = store.approve_request(channel, &r1.request_id).unwrap();
     assert!(approved.is_some());
     assert_eq!(approved.unwrap().id, "user_12345");
 
@@ -128,10 +127,12 @@ fn test_pairing_multiple_channels_isolated() {
     assert_eq!(store.list_pending("slack").unwrap().len(), 1);
 
     // Approve in one channel doesn't affect the other
-    store.approve("telegram", &r_telegram.code).unwrap();
+    store
+        .approve_request("telegram", &r_telegram.request_id)
+        .unwrap();
     assert!(store.is_sender_allowed("telegram", "user_a", None).unwrap());
     assert!(!store.is_sender_allowed("slack", "user_a", None).unwrap());
 
-    store.approve("slack", &r_slack.code).unwrap();
+    store.approve_request("slack", &r_slack.request_id).unwrap();
     assert!(store.is_sender_allowed("slack", "user_b", None).unwrap());
 }

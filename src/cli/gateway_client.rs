@@ -124,6 +124,41 @@ impl GatewayClient {
         Self::new(origin, token, GatewayRequestBudget::control_plane())
     }
 
+    /// Resolve against the fully hydrated root configuration used by runtime
+    /// startup. Environment values remain explicit compatibility overrides.
+    pub fn resolve_from_config(
+        explicit_origin: Option<&str>,
+        explicit_token: Option<GatewayAuthToken>,
+        config: &crate::config::Config,
+    ) -> Result<Self, GatewayClientError> {
+        let gateway = config.channels.gateway.as_ref();
+        let origin = explicit_origin
+            .map(str::to_string)
+            .or_else(|| std::env::var("THINCLAW_GATEWAY_URL").ok())
+            .unwrap_or_else(|| {
+                let host = std::env::var("GATEWAY_HOST")
+                    .ok()
+                    .or_else(|| gateway.map(|gateway| gateway.host.clone()))
+                    .unwrap_or_else(|| "127.0.0.1".into());
+                let port = std::env::var("GATEWAY_PORT")
+                    .ok()
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .or_else(|| gateway.map(|gateway| gateway.port))
+                    .unwrap_or(3000);
+                format!("http://{host}:{port}")
+            });
+        let origin = validate_origin(&origin)?;
+        let token = match explicit_token {
+            Some(token) => Some(token),
+            None => std::env::var("GATEWAY_AUTH_TOKEN")
+                .ok()
+                .or_else(|| gateway.and_then(|gateway| gateway.auth_token.clone()))
+                .map(GatewayAuthToken::new)
+                .transpose()?,
+        };
+        Self::new(origin, token, GatewayRequestBudget::control_plane())
+    }
+
     pub fn new(
         origin: Url,
         token: Option<GatewayAuthToken>,
@@ -159,6 +194,36 @@ impl GatewayClient {
     {
         let url = self.join_path(path)?;
         let mut request = self.client.post(url).json(body);
+        if let Some(token) = self.token.as_ref() {
+            request = request.bearer_auth(token.0.expose_secret());
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| GatewayClientError::Transport(error.without_url().to_string()))?;
+        let status = response.status();
+        let bytes = bounded_response_bytes(response, self.budget.max_response_bytes).await?;
+        if !status.is_success() {
+            return Err(GatewayClientError::Api {
+                status: status.as_u16(),
+                message: safe_api_message(&bytes),
+            });
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|error| GatewayClientError::MalformedResponse(error.to_string()))
+    }
+
+    pub async fn get_json<Query, Response>(
+        &self,
+        path: &str,
+        query: &Query,
+    ) -> Result<Response, GatewayClientError>
+    where
+        Query: Serialize + ?Sized,
+        Response: DeserializeOwned,
+    {
+        let url = self.join_path(path)?;
+        let mut request = self.client.get(url).query(query);
         if let Some(token) = self.token.as_ref() {
             request = request.bearer_auth(token.0.expose_secret());
         }

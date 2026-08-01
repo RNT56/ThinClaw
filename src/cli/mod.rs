@@ -13,7 +13,9 @@
 //! - Active health diagnostics (`doctor`)
 //! - Checking system health (`status`)
 
+mod access;
 pub mod agents;
+mod automation;
 mod backup;
 mod browser;
 mod channels;
@@ -22,14 +24,20 @@ mod completion;
 mod config;
 mod context;
 mod cron;
+mod data;
+mod dev;
 mod devices;
 mod doctor;
 mod experiments;
+mod extensions;
 mod gateway;
 mod gateway_client;
 mod identity;
+mod jobs;
+mod labs;
 mod logs;
 mod mcp;
+mod media;
 pub mod memory;
 mod message;
 mod models;
@@ -40,6 +48,7 @@ mod pairing;
 mod registry;
 mod repo_projects;
 mod reset;
+mod runtime;
 mod secrets;
 #[cfg(feature = "repl")]
 mod service;
@@ -49,7 +58,9 @@ mod tool;
 pub mod trajectory;
 mod update;
 
+pub use access::AccessCommand;
 pub use agents::{AgentCommand, run_agents_command};
+pub use automation::AutomationCommand;
 pub use backup::{BackupCommand, run_backup_command};
 pub use browser::{BrowserCommand, run_browser_command};
 pub use channels::{ChannelCommand, run_channels_command};
@@ -58,16 +69,22 @@ pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use context::{CliContext, CliContextOptions};
 pub use cron::{CronCommand, run_cron_command};
+pub use data::DataCommand;
+pub use dev::DevCommand;
 pub use devices::{DeviceCommand, run_devices_command};
 pub use doctor::run_doctor_command;
 pub use experiments::{ExperimentsCommand, run_experiments_command};
+pub use extensions::ExtensionsCommand;
 pub use gateway::{GatewayCommand, run_gateway_command};
 pub use gateway_client::{
     GatewayAuthToken, GatewayClient, GatewayClientError, GatewayRequestBudget,
 };
 pub use identity::{IdentityCommand, run_identity_command};
+pub use jobs::{JobCommand, run_jobs_command};
+pub use labs::LabsCommand;
 pub use logs::{LogCommand, run_log_command};
 pub use mcp::{McpCommand, run_mcp_command};
+pub use media::MediaCommand;
 pub use memory::MemoryCommand;
 #[cfg(feature = "postgres")]
 pub use memory::run_memory_command;
@@ -80,6 +97,7 @@ pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_
 pub use registry::{RegistryCommand, run_registry_command};
 pub use repo_projects::{RepoProjectCommand, run_repo_projects_command};
 pub use reset::{ResetCommand, run_reset_command};
+pub use runtime::RuntimeCommand;
 pub use secrets::{SecretsCommand, run_secrets_command};
 #[cfg(feature = "repl")]
 pub use service::{ServiceCommand, run_service_command};
@@ -275,6 +293,38 @@ pub enum Command {
         gateway_url: Option<String>,
     },
 
+    /// Repeated and supervised work
+    #[command(subcommand)]
+    Automation(AutomationCommand),
+
+    /// Long-running process operations
+    #[command(subcommand)]
+    Runtime(RuntimeCommand),
+
+    /// Agent integrations and capabilities
+    #[command(subcommand)]
+    Extensions(ExtensionsCommand),
+
+    /// Durable user and agent data
+    #[command(subcommand)]
+    Data(DataCommand),
+
+    /// People, senders, and devices
+    #[command(subcommand)]
+    Access(AccessCommand),
+
+    /// Optional experimental capabilities
+    #[command(subcommand)]
+    Labs(LabsCommand),
+
+    /// Media generation administration
+    #[command(subcommand)]
+    Media(MediaCommand),
+
+    /// Developer utilities
+    #[command(subcommand)]
+    Dev(DevCommand),
+
     /// Interactive onboarding wizard
     Onboard {
         /// Skip authentication (use existing session)
@@ -309,56 +359,56 @@ pub enum Command {
     #[command(subcommand)]
     Config(ConfigCommand),
 
-    /// Manage scheduled routines (cron jobs)
-    #[command(subcommand)]
+    /// Deprecated alias for `automation routines`
+    #[command(subcommand, hide = true)]
     Cron(CronCommand),
 
-    /// Manage paired mobile devices (pair, list, rename, revoke)
-    #[command(subcommand)]
+    /// Deprecated alias for `access devices`
+    #[command(subcommand, hide = true)]
     Devices(DeviceCommand),
 
-    /// Manage optional experiment/research automation, including opportunities, targets, providers, and campaigns.
-    #[command(subcommand)]
+    /// Deprecated alias for `labs experiments`
+    #[command(subcommand, hide = true)]
     Experiments(ExperimentsCommand),
 
-    /// Manage the web gateway
-    #[command(subcommand)]
+    /// Deprecated alias for `runtime web`
+    #[command(subcommand, hide = true)]
     Gateway(GatewayCommand),
 
-    /// Manage household actors and linked endpoints
-    #[command(subcommand)]
+    /// Deprecated alias for `access identities`
+    #[command(subcommand, hide = true)]
     Identity(IdentityCommand),
 
-    /// Manage messaging channels
-    #[command(subcommand)]
+    /// Deprecated alias for `extensions channels`
+    #[command(subcommand, hide = true)]
     Channels(ChannelCommand),
 
-    /// Manage ComfyUI media generation
-    #[command(subcommand)]
+    /// Deprecated alias for `media comfy`
+    #[command(subcommand, hide = true)]
     Comfy(ComfyCommand),
 
-    /// Manage WASM tools
-    #[command(subcommand)]
+    /// Deprecated alias for `extensions tools`
+    #[command(subcommand, hide = true)]
     Tool(ToolCommand),
 
-    /// Browse and install extensions from the registry
-    #[command(subcommand)]
+    /// Deprecated alias for `extensions registry`
+    #[command(subcommand, hide = true)]
     Registry(RegistryCommand),
 
-    /// Manage the GitHub repository project supervisor
-    #[command(subcommand)]
+    /// Deprecated alias for `automation projects`
+    #[command(subcommand, hide = true)]
     RepoProjects(RepoProjectCommand),
 
-    /// Export or restore an encrypted whole-agent backup
-    #[command(subcommand)]
+    /// Deprecated alias for `data backup`
+    #[command(subcommand, hide = true)]
     Backup(BackupCommand),
 
-    /// Manage MCP servers (hosted tool providers)
-    #[command(subcommand)]
+    /// Deprecated alias for `extensions mcp`
+    #[command(subcommand, hide = true)]
     Mcp(McpCommand),
 
-    /// Query and manage workspace memory
-    #[command(subcommand)]
+    /// Deprecated alias for `data memory`
+    #[command(subcommand, hide = true)]
     Memory(MemoryCommand),
 
     /// Send messages to the agent
@@ -369,21 +419,21 @@ pub enum Command {
     #[command(subcommand)]
     Models(ModelCommand),
 
-    /// DM pairing (approve inbound requests from unknown senders)
-    #[command(subcommand)]
+    /// Deprecated alias for `access senders`
+    #[command(subcommand, hide = true)]
     Pairing(PairingCommand),
 
     /// Manage agent workspaces (register, list, remove agents)
     #[command(subcommand)]
     Agents(AgentCommand),
 
-    /// Manage active sessions (list, show, prune)
-    #[command(subcommand)]
+    /// Deprecated alias for `data conversations`
+    #[command(subcommand, hide = true)]
     Sessions(SessionCommand),
 
     /// Manage OS service (launchd / systemd / Windows Service Control Manager)
     #[cfg(feature = "repl")]
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Service(ServiceCommand),
 
     /// Internal Windows SCM entrypoint.
@@ -398,31 +448,41 @@ pub enum Command {
     /// Probe external dependencies and validate configuration
     Doctor {
         /// Linux readiness profile to evaluate
-        #[arg(long, value_enum, default_value_t = LinuxReadinessCliProfile::Server)]
+        #[arg(
+            long = "readiness-profile",
+            alias = "profile",
+            value_enum,
+            default_value_t = LinuxReadinessCliProfile::Server
+        )]
         profile: LinuxReadinessCliProfile,
     },
 
     /// Show system health and diagnostics
     Status {
         /// Linux readiness profile to summarize
-        #[arg(long, value_enum, default_value_t = LinuxReadinessCliProfile::Server)]
+        #[arg(
+            long = "readiness-profile",
+            alias = "profile",
+            value_enum,
+            default_value_t = LinuxReadinessCliProfile::Server
+        )]
         profile: LinuxReadinessCliProfile,
     },
 
-    /// Query and filter logs
-    #[command(subcommand)]
+    /// Deprecated alias for `runtime logs`
+    #[command(subcommand, hide = true)]
     Logs(LogCommand),
 
-    /// Browser automation (headless Chrome)
-    #[command(subcommand)]
+    /// Deprecated alias for `dev browser`
+    #[command(subcommand, hide = true)]
     Browser(BrowserCommand),
 
-    /// Export or inspect archived agent trajectories
-    #[command(subcommand)]
+    /// Deprecated alias for `data trajectories`
+    #[command(subcommand, hide = true)]
     Trajectory(TrajectoryCommand),
 
-    /// Check for updates and self-update
-    #[command(subcommand)]
+    /// Deprecated alias for `runtime update`
+    #[command(subcommand, hide = true)]
     Update(UpdateCommand),
 
     /// Generate shell completion scripts

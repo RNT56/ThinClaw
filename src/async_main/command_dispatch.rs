@@ -20,6 +20,14 @@ pub(super) async fn run_terminal_command(
 
     debug_assert_eq!(context.debug(), cli.debug);
 
+    if let Some(Command::Doctor { profile }) = &cli.command {
+        init_cli_tracing(cli.debug);
+        thinclaw::cli::run_doctor_command((*profile).into(), context).await?;
+        return Ok(thinclaw::cli::CliDispatch::Handled(
+            thinclaw::cli::CliOutcome::Success,
+        ));
+    }
+
     let result = match &cli.command {
         Some(Command::Tool(tool_cmd)) => {
             init_cli_tracing(cli.debug);
@@ -68,10 +76,7 @@ pub(super) async fn run_terminal_command(
         Some(Command::WindowsServiceRuntime { home }) => {
             thinclaw::service::run_windows_service_dispatcher(home.clone())
         }
-        Some(Command::Doctor { profile }) => {
-            init_cli_tracing(cli.debug);
-            thinclaw::cli::run_doctor_command((*profile).into()).await
-        }
+        Some(Command::Doctor { .. }) => unreachable!("doctor handled before generic dispatch"),
         Some(Command::Status { profile }) => {
             init_cli_tracing(cli.debug);
             run_status_command((*profile).into()).await
@@ -86,7 +91,115 @@ pub(super) async fn run_terminal_command(
         }
         Some(Command::Cron(cron_cmd)) => {
             init_cli_tracing(cli.debug);
-            thinclaw::cli::run_cron_command(cron_cmd.clone()).await
+            thinclaw::cli::run_cron_command(cron_cmd.clone(), context).await
+        }
+        Some(Command::Automation(automation_cmd)) => {
+            init_cli_tracing(cli.debug);
+            match automation_cmd {
+                thinclaw::cli::AutomationCommand::Routines(command) => {
+                    thinclaw::cli::run_cron_command(command.clone(), context).await
+                }
+                thinclaw::cli::AutomationCommand::Jobs(command) => {
+                    thinclaw::cli::run_jobs_command(command.clone(), context)
+                        .await
+                        .map_err(anyhow::Error::from)
+                }
+                thinclaw::cli::AutomationCommand::Projects(command) => {
+                    thinclaw::cli::run_repo_projects_command(command.clone()).await
+                }
+            }
+        }
+        Some(Command::Runtime(runtime_cmd)) => {
+            init_cli_tracing(cli.debug);
+            match runtime_cmd {
+                thinclaw::cli::RuntimeCommand::Web(command) => {
+                    run_gateway_command(command.clone(), context).await
+                }
+                #[cfg(feature = "repl")]
+                thinclaw::cli::RuntimeCommand::Service(command) => {
+                    thinclaw::cli::run_service_command(command)
+                }
+                thinclaw::cli::RuntimeCommand::Logs(command) => {
+                    thinclaw::cli::run_log_command(command.clone()).await
+                }
+                thinclaw::cli::RuntimeCommand::Update(command) => {
+                    thinclaw::cli::run_update_command(command.clone()).await
+                }
+            }
+        }
+        Some(Command::Extensions(extensions_cmd)) => {
+            init_cli_tracing(cli.debug);
+            match extensions_cmd {
+                thinclaw::cli::ExtensionsCommand::Channels(command) => {
+                    run_channels_command(command.clone()).await
+                }
+                thinclaw::cli::ExtensionsCommand::Tools(command) => {
+                    run_tool_command(command.clone()).await
+                }
+                thinclaw::cli::ExtensionsCommand::Registry(command) => {
+                    thinclaw::cli::run_registry_command(command.clone()).await
+                }
+                thinclaw::cli::ExtensionsCommand::Mcp(command) => {
+                    run_mcp_command(command.clone()).await
+                }
+            }
+        }
+        Some(Command::Data(data_cmd)) => {
+            init_cli_tracing(cli.debug);
+            match data_cmd {
+                thinclaw::cli::DataCommand::Memory(command) => run_memory_command(command).await,
+                thinclaw::cli::DataCommand::Conversations(command) => {
+                    thinclaw::cli::run_sessions_command(command.clone(), context)
+                        .await
+                        .map_err(anyhow::Error::from)
+                }
+                thinclaw::cli::DataCommand::Backup(command) => {
+                    thinclaw::cli::run_backup_command(command.clone()).await
+                }
+                thinclaw::cli::DataCommand::Trajectories(command) => {
+                    run_trajectory_command(command.clone()).await
+                }
+            }
+        }
+        Some(Command::Access(access_cmd)) => {
+            init_cli_tracing(cli.debug);
+            match access_cmd {
+                thinclaw::cli::AccessCommand::Identities(command) => {
+                    run_identity_command(command.clone()).await
+                }
+                thinclaw::cli::AccessCommand::Senders(command) => {
+                    run_pairing_command(command.clone())
+                        .await
+                        .map_err(|error| anyhow::anyhow!("{error}"))
+                }
+                thinclaw::cli::AccessCommand::Devices(command) => {
+                    thinclaw::cli::run_devices_command(command.clone()).await
+                }
+            }
+        }
+        Some(Command::Labs(labs_cmd)) => {
+            init_cli_tracing(cli.debug);
+            match labs_cmd {
+                thinclaw::cli::LabsCommand::Experiments(command) => {
+                    thinclaw::cli::run_experiments_command(command.clone()).await
+                }
+            }
+        }
+        Some(Command::Media(media_cmd)) => {
+            init_cli_tracing(cli.debug);
+            match media_cmd {
+                thinclaw::cli::MediaCommand::Comfy(command) => {
+                    thinclaw::cli::run_comfy_command(command.clone()).await
+                }
+            }
+        }
+        Some(Command::Dev(dev_cmd)) => {
+            init_cli_tracing(cli.debug);
+            match dev_cmd {
+                thinclaw::cli::DevCommand::Browser(command) => {
+                    thinclaw::cli::run_browser_command(command.clone()).await
+                }
+            }
         }
         Some(Command::Experiments(experiments_cmd)) => {
             init_cli_tracing(cli.debug);
@@ -94,7 +207,7 @@ pub(super) async fn run_terminal_command(
         }
         Some(Command::Gateway(gw_cmd)) => {
             init_cli_tracing(cli.debug);
-            run_gateway_command(gw_cmd.clone()).await
+            run_gateway_command(gw_cmd.clone(), context).await
         }
         Some(Command::Identity(identity_cmd)) => {
             init_cli_tracing(cli.debug);
@@ -171,19 +284,15 @@ pub(super) async fn run_terminal_command(
         }
         Some(Command::Agents(agent_cmd)) => {
             init_cli_tracing(cli.debug);
-            // In standalone CLI mode, create a fresh router.
-            // Runtime agent routing state is in-memory only.
-            let router = thinclaw::agent::AgentRouter::new();
-            thinclaw::cli::run_agents_command(agent_cmd.clone(), &router).await;
-            Ok(())
+            thinclaw::cli::run_agents_command(agent_cmd.clone(), context)
+                .await
+                .map_err(anyhow::Error::from)
         }
         Some(Command::Sessions(session_cmd)) => {
             init_cli_tracing(cli.debug);
-            // In standalone CLI mode, create a fresh session manager.
-            // Runtime session state is in-memory only.
-            let mgr = std::sync::Arc::new(thinclaw::agent::SessionManager::new());
-            thinclaw::cli::run_sessions_command(session_cmd.clone(), &mgr).await;
-            Ok(())
+            thinclaw::cli::run_sessions_command(session_cmd.clone(), context)
+                .await
+                .map_err(anyhow::Error::from)
         }
         Some(Command::Logs(log_cmd)) => {
             init_cli_tracing(cli.debug);

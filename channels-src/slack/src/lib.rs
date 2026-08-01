@@ -558,7 +558,7 @@ fn download_slack_files(files: &[SlackFile]) -> Vec<channel_host::MediaAttachmen
 // ============================================================================
 
 /// Check if a sender is permitted. Returns true if allowed.
-/// For pairing mode, sends a pairing code DM if denied.
+/// For pairing mode, sends the stable pending request ID if denied.
 fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool {
     // 1. Owner check (highest priority, applies to all contexts)
     let owner_id = channel_host::workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());

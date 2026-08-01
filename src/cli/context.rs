@@ -2,6 +2,9 @@
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use tokio::sync::OnceCell;
 
 use super::{CliError, ColorChoice, OutputFormat, OutputPolicy};
 
@@ -15,10 +18,23 @@ pub struct CliContextOptions {
     pub config_path: Option<PathBuf>,
 }
 
-#[derive(Debug)]
 pub struct CliContext {
     output: OutputPolicy,
     config_path: Option<PathBuf>,
+    config: OnceCell<crate::config::Config>,
+    database: OnceCell<Arc<dyn crate::db::Database>>,
+}
+
+impl std::fmt::Debug for CliContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CliContext")
+            .field("output", &self.output)
+            .field("config_path", &self.config_path)
+            .field("config_resolved", &self.config.initialized())
+            .field("database_connected", &self.database.initialized())
+            .finish()
+    }
 }
 
 impl CliContext {
@@ -41,6 +57,8 @@ impl CliContext {
         Ok(Self {
             output,
             config_path,
+            config: OnceCell::new(),
+            database: OnceCell::new(),
         })
     }
 
@@ -54,6 +72,56 @@ impl CliContext {
 
     pub const fn debug(&self) -> bool {
         self.output.debug
+    }
+
+    /// Resolve configuration once for this invocation, honoring the explicit
+    /// global `--config` file selected before command dispatch.
+    pub async fn config(&self) -> Result<&crate::config::Config, CliError> {
+        self.config
+            .get_or_try_init(|| async {
+                crate::config::Config::from_env_with_toml(self.config_path())
+                    .await
+                    .map_err(|error| {
+                        CliError::operational(format!("failed to resolve configuration: {error}"))
+                    })
+            })
+            .await
+    }
+
+    /// Connect to the configured durable store once for this invocation using
+    /// the same backend factory and migration path as runtime startup.
+    pub async fn database(&self) -> Result<Arc<dyn crate::db::Database>, CliError> {
+        let database = self
+            .database
+            .get_or_try_init(|| async {
+                let config = self.config().await?;
+                crate::db::connect_from_config(&config.database)
+                    .await
+                    .map_err(|error| {
+                        CliError::operational(format!(
+                            "failed to initialize configured database: {error}"
+                        ))
+                    })
+            })
+            .await?;
+        Ok(Arc::clone(database))
+    }
+
+    /// Construct the durable registry used by both runtime startup and CLI
+    /// administration. Loading is part of construction so reads never observe
+    /// a freshly-created empty router.
+    pub async fn agent_registry(
+        &self,
+    ) -> Result<crate::agent::agent_registry::AgentRegistry, CliError> {
+        let database = self.database().await?;
+        let registry = crate::agent::agent_registry::AgentRegistry::new(
+            Arc::new(crate::agent::AgentRouter::new()),
+            Some(database),
+        );
+        registry.load_from_db().await.map_err(|error| {
+            CliError::operational(format!("failed to load durable agent registry: {error}"))
+        })?;
+        Ok(registry)
     }
 }
 

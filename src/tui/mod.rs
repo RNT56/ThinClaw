@@ -173,8 +173,6 @@ pub struct TuiApp {
     status_text: String,
     /// Currently streaming response.
     active_stream: Option<StreamState>,
-    /// Whether to show thinking blocks.
-    show_thinking: bool,
     /// Ctrl+C double-tap tracking.
     last_ctrl_c: Option<Instant>,
     /// Exit requested by a slash command.
@@ -226,7 +224,6 @@ impl TuiApp {
             default_skin_name,
             status_text: "Connected • ready".to_string(),
             active_stream: None,
-            show_thinking: true,
             last_ctrl_c: None,
             pending_exit: false,
             pending_approvals: VecDeque::new(),
@@ -330,10 +327,23 @@ impl TuiApp {
         match (key.modifiers, key.code) {
             // Ctrl+C: abort active or double-tap to exit
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                if self.active_stream.is_some() {
+                if self.active_stream.is_some() || !self.pending_approvals.is_empty() {
                     self.active_stream = None;
                     let tx = self.outgoing_tx.clone();
+                    let pending_request_ids: Vec<_> = self
+                        .pending_approvals
+                        .drain(..)
+                        .map(|prompt| prompt.request_id)
+                        .collect();
                     tokio::spawn(async move {
+                        for request_id in pending_request_ids {
+                            let _ = tx
+                                .send(TuiEvent::ApprovalResponse {
+                                    request_id,
+                                    decision: TuiApprovalDecision::Deny,
+                                })
+                                .await;
+                        }
                         let _ = tx.send(TuiEvent::Abort).await;
                     });
                     self.messages.push(ChatMessage::Warning {
@@ -864,11 +874,9 @@ impl TuiApp {
                 self.status_text = "Jumped to oldest activity".to_string();
             }
             "/think" => {
-                self.show_thinking = !self.show_thinking;
-                self.push_info(format!(
-                    "Thinking display: {}",
-                    if self.show_thinking { "on" } else { "off" }
-                ));
+                self.push_warning(
+                    "`/think` was removed because it did not control a real reasoning view.",
+                );
             }
             "/status" => {
                 self.push_system_note(format!(

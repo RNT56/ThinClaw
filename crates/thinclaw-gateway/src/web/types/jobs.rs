@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct JobInfo {
     pub id: Uuid,
@@ -22,13 +22,31 @@ pub struct JobInfo {
     pub unknown_job_mode_raw: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct JobListResponse {
     pub jobs: Vec<JobInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub has_more: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Deserialize)]
+pub struct JobListQuery {
+    pub state: Option<String>,
+    pub backend: Option<String>,
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct JobEventsQuery {
+    pub limit: Option<usize>,
+    pub after: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct JobSummaryResponse {
     pub total: usize,
@@ -41,7 +59,7 @@ pub struct JobSummaryResponse {
     pub stuck: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct JobDetailResponse {
     pub id: Uuid,
@@ -78,19 +96,19 @@ pub struct JobDetailResponse {
 
 // --- Project Files ---
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProjectFileEntry {
     pub name: String,
     pub path: String,
     pub is_dir: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProjectFilesResponse {
     pub entries: Vec<ProjectFileEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProjectFileReadResponse {
     pub path: String,
     pub content: String,
@@ -101,7 +119,7 @@ pub struct FilePathQuery {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TransitionInfo {
     pub from: String,

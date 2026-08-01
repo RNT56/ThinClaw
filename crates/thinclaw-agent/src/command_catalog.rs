@@ -593,9 +593,7 @@ Local TUI:\n\
   /back, /close          Close the most recent detail card\n\
   /top, /bottom          Jump to oldest/newest activity\n\
   /cls                   Clear the visible log\n\
-  /think                 Toggle thinking updates\n\
-  /exit, /quit           Leave the TUI\n\
-  !<command>             Run a local shell command\n\n\
+  /exit, /quit           Leave the TUI\n\n\
 ━━━ Movement ━━━\n\n\
   Enter                  Send a message\n\
   Ctrl+C                 Abort active run, press twice to exit\n\
@@ -627,8 +625,8 @@ Local TUI:\n\
 const TUI_ONLY_FORWARDED: &[&str] = &["/job", "/cancel", "/list", "/thread", "/resume"];
 
 const TUI_ONLY_AUTOCOMPLETE: &[&str] = &[
-    "/back", "/close", "/dismiss", "/top", "/bottom", "/reset", "/think", "/job", "/cancel",
-    "/list", "/thread", "/resume", "/cls",
+    "/back", "/close", "/dismiss", "/top", "/bottom", "/reset", "/job", "/cancel", "/list",
+    "/thread", "/resume", "/cls",
 ];
 
 pub fn tui_forwarded_commands() -> &'static [&'static str] {

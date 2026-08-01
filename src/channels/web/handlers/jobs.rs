@@ -240,6 +240,7 @@ async fn load_owned_direct_job(
 pub(crate) async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
+    Query(query): Query<JobListQuery>,
 ) -> Result<Json<JobListResponse>, (StatusCode, String)> {
     let direct_jobs = load_owned_direct_jobs(state.as_ref(), &request_identity).await?;
     let sandbox_jobs = load_owned_sandbox_jobs(state.as_ref(), &request_identity).await?;
@@ -270,7 +271,46 @@ pub(crate) async fn jobs_list_handler(
         }));
     }
 
-    Ok(Json(job_list_response(jobs)))
+    let mut response = job_list_response(jobs);
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    if let Some(state) = query.state.as_deref() {
+        response
+            .jobs
+            .retain(|job| job.state.eq_ignore_ascii_case(state));
+    }
+    if let Some(backend) = query.backend.as_deref() {
+        let expected = match backend {
+            "direct" => "local_host",
+            "sandbox" => "docker_sandbox",
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "backend must be direct or sandbox".to_string(),
+                ));
+            }
+        };
+        response
+            .jobs
+            .retain(|job| job.execution_backend.as_deref() == Some(expected));
+    }
+    if let Some(cursor) = query.cursor.as_deref() {
+        let Some(position) = response
+            .jobs
+            .iter()
+            .position(|job| job.id.to_string() == cursor)
+        else {
+            return Err((StatusCode::BAD_REQUEST, "invalid job cursor".to_string()));
+        };
+        response.jobs.drain(..=position);
+    }
+    response.has_more = response.jobs.len() > limit;
+    response.jobs.truncate(limit);
+    response.next_cursor = if response.has_more {
+        response.jobs.last().map(|job| job.id.to_string())
+    } else {
+        None
+    };
+    Ok(Json(response))
 }
 
 #[utoipa::path(
@@ -622,6 +662,7 @@ pub(crate) async fn jobs_events_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
+    Query(query): Query<JobEventsQuery>,
 ) -> Result<Json<JobEventsResponse>, (StatusCode, String)> {
     let job_id = parse_job_id(&id)?;
 
@@ -635,6 +676,7 @@ pub(crate) async fn jobs_events_handler(
         return Err(job_not_found_error());
     }
 
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
     let events = if let Some(store) = state.store.as_ref() {
         store
             .list_job_events(job_id, None)
@@ -644,8 +686,9 @@ pub(crate) async fn jobs_events_handler(
         Vec::new()
     };
 
-    let events = events
+    let mut events: Vec<_> = events
         .into_iter()
+        .filter(|event| query.after.is_none_or(|after| event.id > after))
         .map(|event| {
             job_event_info(JobEventInfoInput {
                 id: event.id,
@@ -656,7 +699,11 @@ pub(crate) async fn jobs_events_handler(
         })
         .collect();
 
-    Ok(Json(job_events_response(job_id, events)))
+    let has_more = events.len() > limit;
+    events.truncate(limit);
+    let mut response = job_events_response(job_id, events);
+    response.has_more = has_more;
+    Ok(Json(response))
 }
 
 pub(crate) async fn job_files_list_handler(
@@ -912,9 +959,13 @@ mod tests {
         .await;
         let state = test_gateway_state(None, Some(Arc::clone(&job_manager)), None);
 
-        let Json(response) = jobs_list_handler(State(state), test_identity())
-            .await
-            .expect("jobs list should succeed");
+        let Json(response) = jobs_list_handler(
+            State(state),
+            test_identity(),
+            Query(JobListQuery::default()),
+        )
+        .await
+        .expect("jobs list should succeed");
 
         assert_eq!(response.jobs.len(), 1);
         let job = &response.jobs[0];
@@ -1038,10 +1089,14 @@ mod tests {
         .await;
         let state = test_gateway_state(None, Some(Arc::clone(&job_manager)), None);
 
-        let Json(response) =
-            jobs_events_handler(State(state), test_identity(), Path(job_id.to_string()))
-                .await
-                .expect("events handler should succeed");
+        let Json(response) = jobs_events_handler(
+            State(state),
+            test_identity(),
+            Path(job_id.to_string()),
+            Query(JobEventsQuery::default()),
+        )
+        .await
+        .expect("events handler should succeed");
 
         assert_eq!(response.job_id, job_id.to_string());
         assert!(response.events.is_empty());

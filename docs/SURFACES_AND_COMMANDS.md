@@ -29,7 +29,6 @@ The following commands can be typed directly into the agent's chat input:
 
 Local clients (CLI, TUI, WebUI) may add extra client-specific controls such as:
 - `/skin <name>` — Change the interface visual theme (e.g., `/skin midnight`).
-- `/think` — Force the agent to perform an explicit reasoning step.
 - Shell escapes (e.g., `!ls`) if enabled by sandbox policy.
 
 However, the core commands above form the baseline shared vocabulary across all surfaces.

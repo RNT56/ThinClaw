@@ -1,314 +1,616 @@
-//! Session management CLI commands.
-//!
-//! Subcommands:
-//! - `sessions list`     — list all active sessions
-//! - `sessions show`     — show session details (threads, owners)
-//! - `sessions prune`    — force-prune stale sessions
-//! - `sessions export`   — export a session transcript
+//! Durable conversation inspection and administration.
 
-use std::sync::Arc;
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
 
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
+use serde::Serialize;
+use uuid::Uuid;
 
-use crate::agent::SessionManager;
-use crate::terminal_branding::TerminalBranding;
+use crate::cli::{CliContext, CliError};
+use crate::db::Database;
+
+const DEFAULT_PRINCIPAL: &str = "default";
+const DEFAULT_CHANNEL: &str = "cli";
+const MAX_LIST_LIMIT: i64 = 500;
+const MAX_EXPORT_MESSAGES: i64 = 100_000;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ConversationArtifactFormat {
+    Markdown,
+    Json,
+}
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SessionCommand {
-    /// List all active sessions
+    /// List durable conversations
     List {
-        /// Output format: table (default) or json
-        #[arg(long, default_value = "table")]
-        format: String,
+        #[arg(long, default_value = DEFAULT_PRINCIPAL)]
+        principal: String,
+        #[arg(long, default_value = DEFAULT_CHANNEL)]
+        channel: String,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        /// Reserved opaque pagination cursor
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Deprecated; use global --output-format
+        #[arg(long, hide = true)]
+        format: Option<String>,
     },
-
-    /// Show details for a session
+    /// Show a durable conversation and its recent messages
     Show {
-        /// User ID to look up
-        user_id: String,
-
-        /// Channel to filter by
+        id: Uuid,
+        #[arg(long, default_value = DEFAULT_PRINCIPAL)]
+        principal: String,
+        #[arg(long, default_value_t = 50)]
+        messages: i64,
+        #[arg(long)]
+        before: Option<Uuid>,
+    },
+    /// Search durable conversation messages
+    Search {
+        query: String,
+        #[arg(long, default_value = DEFAULT_PRINCIPAL)]
+        principal: String,
         #[arg(long)]
         channel: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
     },
-
-    /// Force-prune sessions idle longer than the given threshold
-    Prune {
-        /// Idle threshold in seconds (default: 3600 = 1 hour)
-        #[arg(long, default_value = "3600")]
-        idle_secs: u64,
-    },
-
-    /// Export a session transcript
+    /// Export one durable conversation
     Export {
-        /// User ID whose session to export
-        user_id: String,
-
-        /// Channel to export from
-        #[arg(long, default_value = "cli")]
+        id: Uuid,
+        #[arg(long, default_value = DEFAULT_PRINCIPAL)]
+        principal: String,
+        #[arg(long, value_enum, default_value_t = ConversationArtifactFormat::Markdown)]
+        artifact_format: ConversationArtifactFormat,
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Permanently delete one durable conversation
+    Delete {
+        id: Uuid,
+        #[arg(long, default_value = DEFAULT_PRINCIPAL)]
+        principal: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Delete conversations older than a duration (defaults to dry-run)
+    Prune {
+        #[arg(long)]
+        older_than: String,
+        #[arg(long, default_value = DEFAULT_PRINCIPAL)]
+        principal: String,
+        #[arg(long, default_value = DEFAULT_CHANNEL)]
         channel: String,
-
-        /// Output format: markdown (default) or json
-        #[arg(long, default_value = "markdown")]
-        format: String,
-
-        /// Output file path (prints to stdout if not specified)
-        #[arg(short, long)]
-        output: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
     },
 }
 
-/// Run a sessions CLI command against the given session manager.
-pub async fn run_sessions_command(cmd: SessionCommand, session_mgr: &Arc<SessionManager>) {
-    let branding = TerminalBranding::current();
+#[derive(Debug, Serialize)]
+struct ConversationSummaryOutput {
+    id: Uuid,
+    principal: String,
+    actor_id: Option<String>,
+    channel: String,
+    message_count: i64,
+    preview: Option<String>,
+    started_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ConversationMessageOutput {
+    id: Uuid,
+    role: String,
+    content: String,
+    actor_id: Option<String>,
+    actor_display_name: Option<String>,
+    metadata: serde_json::Value,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum ConversationResult {
+    List {
+        conversations: Vec<ConversationSummaryOutput>,
+        next_cursor: Option<String>,
+    },
+    Show {
+        id: Uuid,
+        metadata: serde_json::Value,
+        message_count: i64,
+        messages: Vec<ConversationMessageOutput>,
+    },
+    Search {
+        hits: Vec<thinclaw_history::SessionSearchHit>,
+    },
+    DeletePlan {
+        conversation_ids: Vec<Uuid>,
+        count: usize,
+    },
+    Deleted {
+        conversation_ids: Vec<Uuid>,
+        count: usize,
+    },
+    Exported {
+        id: Uuid,
+        path: PathBuf,
+        bytes: usize,
+    },
+}
+
+pub async fn run_sessions_command(
+    cmd: SessionCommand,
+    context: &CliContext,
+) -> Result<(), CliError> {
+    let database = context.database().await?;
     match cmd {
-        SessionCommand::List { format } => list_sessions(session_mgr, &format).await,
-        SessionCommand::Show { user_id, channel } => {
-            show_session(session_mgr, &user_id, channel.as_deref()).await;
-        }
-        SessionCommand::Prune { idle_secs } => {
-            branding.print_banner("Sessions", Some("Prune idle conversations"));
-            let duration = std::time::Duration::from_secs(idle_secs);
-            let pruned = session_mgr.prune_stale_sessions(duration).await;
-            println!(
-                "  {}",
-                branding.good(format!("Pruned {} stale session(s).", pruned))
-            );
-        }
         SessionCommand::Export {
-            user_id,
-            channel,
-            format,
-            output,
+            id,
+            principal,
+            artifact_format,
+            out,
+            force,
         } => {
-            export_session(session_mgr, &user_id, &channel, &format, output.as_deref()).await;
+            export(
+                database.as_ref(),
+                context,
+                id,
+                &principal,
+                artifact_format,
+                out,
+                force,
+            )
+            .await
+        }
+        other => {
+            let result = execute(database.as_ref(), other).await?;
+            context
+                .output()
+                .write_record("data.conversations", &result, render_human)
         }
     }
 }
 
-async fn list_sessions(session_mgr: &Arc<SessionManager>, format: &str) {
-    let branding = TerminalBranding::current();
-    let summary = session_mgr.list_sessions().await;
-
-    if summary.is_empty() {
-        branding.print_banner("Sessions", Some("Inspect active conversations"));
-        println!("{}", branding.warn("No active sessions."));
-        return;
-    }
-
-    if format == "json" {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&summary).unwrap_or_default()
-        );
-        return;
-    }
-
-    branding.print_banner("Sessions", Some("Inspect active conversations"));
-    println!(
-        "{}",
-        branding.body_bold(format!(
-            "{:<20}  {:<14}  {:<10}  {:<20}  OWNER",
-            "USER", "CHANNEL", "THREADS", "LAST ACTIVE"
-        ))
-    );
-    println!("{}", branding.separator(80));
-
-    for session in &summary {
-        let user = session["user_id"].as_str().unwrap_or("?");
-        let channel = session["channel"].as_str().unwrap_or("?");
-        let threads = session["thread_count"].as_u64().unwrap_or(0);
-        let last_active = session["last_active"].as_str().unwrap_or("—");
-        let owner = session["owner"].as_str().unwrap_or("—");
-
-        println!(
-            "{:<20}  {:<14}  {:<10}  {:<20}  {}",
-            user, channel, threads, last_active, owner
-        );
-    }
-
-    println!();
-    println!(
-        "{}",
-        branding.muted(format!("{} session(s) active.", summary.len()))
-    );
-}
-
-async fn show_session(session_mgr: &Arc<SessionManager>, user_id: &str, channel: Option<&str>) {
-    let branding = TerminalBranding::current();
-    let detail = session_mgr
-        .describe_session(user_id, channel.unwrap_or("cli"))
-        .await;
-
-    match detail {
-        Some(info) => {
-            branding.print_banner("Sessions", Some("Inspect a single conversation"));
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&info).unwrap_or_default()
-            );
-        }
-        None => {
-            let ch = channel.unwrap_or("cli");
-            eprintln!(
-                "{}",
-                branding.bad(format!(
-                    "No session found for user '{}' on channel '{}'.",
-                    user_id, ch
-                ))
-            );
-        }
-    }
-}
-
-async fn export_session(
-    session_mgr: &Arc<SessionManager>,
-    user_id: &str,
-    channel: &str,
-    format: &str,
-    output: Option<&str>,
-) {
-    let branding = TerminalBranding::current();
-    let detail = session_mgr.describe_session(user_id, channel).await;
-
-    let info = match detail {
-        Some(info) => info,
-        Option::None => {
-            eprintln!(
-                "{}",
-                branding.bad(format!(
-                    "No session found for user '{}' on channel '{}'.",
-                    user_id, channel
-                ))
-            );
-            return;
-        }
-    };
-
-    let transcript = match format {
-        "json" => serde_json::to_string_pretty(&info).unwrap_or_default(),
-        _ => format_as_markdown(user_id, channel, &info),
-    };
-
-    match output {
-        Some(path) => {
-            if let Err(e) = std::fs::write(path, &transcript) {
-                eprintln!(
-                    "{}",
-                    branding.bad(format!("Failed to write to '{}': {}", path, e))
-                );
-            } else {
-                branding.print_banner("Sessions", Some("Export a conversation"));
-                println!(
-                    "  {}",
-                    branding.good(format!("Session exported to '{}'.", path))
-                );
+async fn execute(db: &dyn Database, cmd: SessionCommand) -> Result<ConversationResult, CliError> {
+    match cmd {
+        SessionCommand::List {
+            principal,
+            channel,
+            limit,
+            cursor,
+            format: _,
+        } => {
+            if cursor.is_some() {
+                return Err(CliError::usage(
+                    "conversation cursors are not available with this database schema",
+                ));
             }
+            let limit = validate_limit(limit, MAX_LIST_LIMIT)?;
+            let conversations = db
+                .list_conversations_with_preview(&principal, &channel, limit)
+                .await
+                .map_err(database_error)?
+                .into_iter()
+                .map(summary_output)
+                .collect();
+            Ok(ConversationResult::List {
+                conversations,
+                next_cursor: None,
+            })
         }
-        Option::None => println!("{}", transcript),
-    }
-}
-
-/// Format session data as a markdown transcript.
-fn format_as_markdown(user_id: &str, channel: &str, info: &serde_json::Value) -> String {
-    let mut md = String::new();
-    md.push_str("# Session Transcript\n\n");
-    md.push_str(&format!("- **User:** {}\n", user_id));
-    md.push_str(&format!("- **Channel:** {}\n", channel));
-
-    if let Some(exported) = chrono::Utc::now().to_rfc3339().into() {
-        md.push_str(&format!("- **Exported:** {}\n", exported));
-    }
-
-    md.push_str("\n---\n\n");
-
-    // If the session info contains messages, format them
-    if let Some(messages) = info.get("messages").and_then(|m| m.as_array()) {
-        for msg in messages {
-            let role = msg
-                .get("role")
-                .and_then(|r| r.as_str())
-                .unwrap_or("unknown");
-            let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-            let timestamp = msg.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
-
-            let role_label = match role {
-                "user" => "🧑 User",
-                "assistant" => "🤖 Assistant",
-                "system" => "⚙️ System",
-                "tool" => "🔧 Tool",
-                _ => role,
+        SessionCommand::Show {
+            id,
+            principal,
+            messages,
+            before,
+        } => {
+            authorize(db, id, &principal).await?;
+            let metadata = db
+                .get_conversation_metadata(id)
+                .await
+                .map_err(database_error)?
+                .ok_or_else(|| CliError::operational(format!("conversation '{id}' not found")))?;
+            let all = load_messages(db, id).await?;
+            let end = match before {
+                Some(before) => all
+                    .iter()
+                    .position(|message| message.id == before)
+                    .ok_or_else(|| {
+                        CliError::operational(format!(
+                            "message '{before}' was not found in conversation '{id}'"
+                        ))
+                    })?,
+                None => all.len(),
             };
-
-            if !timestamp.is_empty() {
-                md.push_str(&format!("### {} ({})\n\n", role_label, timestamp));
-            } else {
-                md.push_str(&format!("### {}\n\n", role_label));
-            }
-
-            md.push_str(content);
-            md.push_str("\n\n");
+            let limit = validate_limit(messages, 500)? as usize;
+            let start = end.saturating_sub(limit);
+            let selected = all[start..end]
+                .iter()
+                .cloned()
+                .map(message_output)
+                .collect();
+            Ok(ConversationResult::Show {
+                id,
+                metadata,
+                message_count: all.len() as i64,
+                messages: selected,
+            })
         }
-    } else {
-        // Fallback: dump the entire session info as JSON
-        md.push_str("```json\n");
-        md.push_str(&serde_json::to_string_pretty(info).unwrap_or_default());
-        md.push_str("\n```\n");
+        SessionCommand::Search {
+            query,
+            principal,
+            channel,
+            limit,
+        } => {
+            if query.trim().is_empty() {
+                return Err(CliError::usage("search query cannot be empty"));
+            }
+            let limit = validate_limit(limit, MAX_LIST_LIMIT)?;
+            let hits = db
+                .search_conversation_messages(
+                    &principal,
+                    query.trim(),
+                    None,
+                    channel.as_deref(),
+                    None,
+                    limit,
+                )
+                .await
+                .map_err(database_error)?;
+            Ok(ConversationResult::Search { hits })
+        }
+        SessionCommand::Delete {
+            id,
+            principal,
+            dry_run,
+            yes,
+        } => {
+            authorize(db, id, &principal).await?;
+            if dry_run {
+                return Ok(ConversationResult::DeletePlan {
+                    conversation_ids: vec![id],
+                    count: 1,
+                });
+            }
+            require_confirmation(yes, &[id])?;
+            if !db.delete_conversation(id).await.map_err(database_error)? {
+                return Err(CliError::operational(format!(
+                    "conversation '{id}' was not found"
+                )));
+            }
+            Ok(ConversationResult::Deleted {
+                conversation_ids: vec![id],
+                count: 1,
+            })
+        }
+        SessionCommand::Prune {
+            older_than,
+            principal,
+            channel,
+            dry_run,
+            yes,
+        } => {
+            let age = parse_duration(&older_than)?;
+            let cutoff = chrono::Utc::now()
+                - chrono::Duration::from_std(age)
+                    .map_err(|_| CliError::usage("duration is too large"))?;
+            let ids: Vec<Uuid> = db
+                .list_conversations_with_preview(&principal, &channel, 10_000)
+                .await
+                .map_err(database_error)?
+                .into_iter()
+                .filter(|conversation| conversation.last_activity < cutoff)
+                .map(|conversation| conversation.id)
+                .collect();
+            if dry_run || !yes {
+                return Ok(ConversationResult::DeletePlan {
+                    count: ids.len(),
+                    conversation_ids: ids,
+                });
+            }
+            let mut deleted = Vec::with_capacity(ids.len());
+            for id in ids {
+                if db.delete_conversation(id).await.map_err(database_error)? {
+                    deleted.push(id);
+                }
+            }
+            Ok(ConversationResult::Deleted {
+                count: deleted.len(),
+                conversation_ids: deleted,
+            })
+        }
+        SessionCommand::Export { .. } => unreachable!("export is handled at the artifact boundary"),
     }
+}
 
-    md
+async fn export(
+    db: &dyn Database,
+    context: &CliContext,
+    id: Uuid,
+    principal: &str,
+    format: ConversationArtifactFormat,
+    out: Option<PathBuf>,
+    force: bool,
+) -> Result<(), CliError> {
+    authorize(db, id, principal).await?;
+    let messages = load_messages(db, id).await?;
+    let output_messages: Vec<_> = messages.into_iter().map(message_output).collect();
+    let artifact = match format {
+        ConversationArtifactFormat::Json => serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "conversation_id": id,
+            "messages": output_messages,
+        }))
+        .map_err(|error| CliError::operational(format!("failed to encode export: {error}")))?,
+        ConversationArtifactFormat::Markdown => render_markdown(id, &output_messages).into_bytes(),
+    };
+
+    if let Some(path) = out {
+        write_artifact_atomically(&path, &artifact, force)?;
+        let result = ConversationResult::Exported {
+            id,
+            path,
+            bytes: artifact.len(),
+        };
+        context
+            .output()
+            .write_record("data.conversations.export", &result, render_human)
+    } else {
+        std::io::stdout()
+            .lock()
+            .write_all(&artifact)
+            .and_then(|_| std::io::stdout().lock().flush())
+            .map_err(|error| CliError::operational(format!("failed to write export: {error}")))
+    }
+}
+
+async fn authorize(db: &dyn Database, id: Uuid, principal: &str) -> Result<(), CliError> {
+    if !db
+        .conversation_belongs_to_user(id, principal)
+        .await
+        .map_err(database_error)?
+    {
+        return Err(CliError::operational(format!(
+            "conversation '{id}' not found"
+        )));
+    }
+    Ok(())
+}
+
+async fn load_messages(
+    db: &dyn Database,
+    id: Uuid,
+) -> Result<Vec<thinclaw_history::ConversationMessage>, CliError> {
+    let count = db
+        .count_conversation_messages(id)
+        .await
+        .map_err(database_error)?;
+    if count > MAX_EXPORT_MESSAGES {
+        return Err(CliError::operational(format!(
+            "conversation has {count} messages; export limit is {MAX_EXPORT_MESSAGES}"
+        )));
+    }
+    db.list_conversation_messages_window(id, 0, count)
+        .await
+        .map_err(database_error)
+}
+
+fn summary_output(summary: thinclaw_history::ConversationSummary) -> ConversationSummaryOutput {
+    ConversationSummaryOutput {
+        id: summary.id,
+        principal: summary.user_id,
+        actor_id: summary.actor_id,
+        channel: summary.channel,
+        message_count: summary.message_count,
+        preview: summary.title,
+        started_at: summary.started_at.to_rfc3339(),
+        updated_at: summary.last_activity.to_rfc3339(),
+    }
+}
+
+fn message_output(message: thinclaw_history::ConversationMessage) -> ConversationMessageOutput {
+    ConversationMessageOutput {
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        actor_id: message.actor_id,
+        actor_display_name: message.actor_display_name,
+        metadata: message.metadata,
+        created_at: message.created_at.to_rfc3339(),
+    }
+}
+
+fn validate_limit(limit: i64, max: i64) -> Result<i64, CliError> {
+    if !(1..=max).contains(&limit) {
+        return Err(CliError::usage(format!(
+            "limit must be between 1 and {max}"
+        )));
+    }
+    Ok(limit)
+}
+
+fn require_confirmation(yes: bool, ids: &[Uuid]) -> Result<(), CliError> {
+    if yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(CliError::usage(
+            "conversation deletion requires --yes in noninteractive mode",
+        ));
+    }
+    eprint!("Permanently delete conversation {}? [y/N] ", ids[0]);
+    std::io::stderr()
+        .flush()
+        .map_err(|error| CliError::operational(format!("failed to prompt: {error}")))?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| CliError::operational(format!("failed to read confirmation: {error}")))?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Err(CliError::operational("conversation deletion cancelled"));
+    }
+    Ok(())
+}
+
+fn parse_duration(value: &str) -> Result<std::time::Duration, CliError> {
+    let value = value.trim();
+    let split = value
+        .find(|character: char| !character.is_ascii_digit())
+        .ok_or_else(|| CliError::usage("duration requires a unit: s, m, h, or d"))?;
+    let amount = value[..split]
+        .parse::<u64>()
+        .map_err(|_| CliError::usage("duration amount is invalid"))?;
+    let unit = &value[split..];
+    let multiplier = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        _ => return Err(CliError::usage("duration unit must be s, m, h, or d")),
+    };
+    amount
+        .checked_mul(multiplier)
+        .map(std::time::Duration::from_secs)
+        .ok_or_else(|| CliError::usage("duration is too large"))
+}
+
+fn write_artifact_atomically(path: &Path, bytes: &[u8], force: bool) -> Result<(), CliError> {
+    if path.exists() && !force {
+        return Err(CliError::operational(format!(
+            "refusing to overwrite existing artifact '{}'; pass --force",
+            path.display()
+        )));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| CliError::usage("artifact output path needs a file name"))?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        Uuid::new_v4()
+    ));
+    let write_result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write_result.map_err(|error| {
+        CliError::operational(format!(
+            "failed to write artifact '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn render_markdown(id: Uuid, messages: &[ConversationMessageOutput]) -> String {
+    let mut markdown = format!("# Conversation {id}\n\n");
+    for message in messages {
+        markdown.push_str(&format!(
+            "## {} — {}\n\n{}\n\n",
+            message.role, message.created_at, message.content
+        ));
+    }
+    markdown
+}
+
+fn render_human(result: &ConversationResult) -> String {
+    match result {
+        ConversationResult::List { conversations, .. } if conversations.is_empty() => {
+            "No durable conversations found.".to_string()
+        }
+        ConversationResult::List { conversations, .. } => conversations
+            .iter()
+            .map(|conversation| {
+                format!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    conversation.id,
+                    conversation.channel,
+                    conversation.principal,
+                    conversation.message_count,
+                    conversation.preview.as_deref().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ConversationResult::Show { id, messages, .. } => {
+            let mut rendered = format!("Conversation {id}");
+            for message in messages {
+                rendered.push_str(&format!(
+                    "\n\n{} {}\n{}",
+                    message.created_at, message.role, message.content
+                ));
+            }
+            rendered
+        }
+        ConversationResult::Search { hits } if hits.is_empty() => "No matches found.".to_string(),
+        ConversationResult::Search { hits } => hits
+            .iter()
+            .map(|hit| {
+                format!(
+                    "{}\t{}\t{}\t{}",
+                    hit.conversation_id, hit.created_at, hit.role, hit.excerpt
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ConversationResult::DeletePlan {
+            conversation_ids,
+            count,
+        } => format!(
+            "Dry run: {count} conversation(s) would be deleted: {}",
+            conversation_ids
+                .iter()
+                .map(Uuid::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ConversationResult::Deleted { count, .. } => {
+            format!("Deleted {count} durable conversation(s).")
+        }
+        ConversationResult::Exported { path, bytes, .. } => {
+            format!("Wrote {bytes} bytes to '{}'.", path.display())
+        }
+    }
+}
+
+fn database_error(error: impl std::fmt::Display) -> CliError {
+    CliError::operational(format!("conversation store operation failed: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_list_empty_sessions() {
-        let mgr = Arc::new(SessionManager::new());
-        // Just verify it doesn't panic
-        run_sessions_command(
-            SessionCommand::List {
-                format: "table".to_string(),
-            },
-            &mgr,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_prune_sessions() {
-        let mgr = Arc::new(SessionManager::new());
-        run_sessions_command(SessionCommand::Prune { idle_secs: 60 }, &mgr).await;
+    #[test]
+    fn duration_parser_is_bounded_and_explicit() {
+        assert_eq!(parse_duration("2h").unwrap().as_secs(), 7200);
+        assert!(parse_duration("2").is_err());
+        assert!(parse_duration("2weeks").is_err());
     }
 
     #[test]
-    fn test_format_as_markdown_fallback() {
-        let info = serde_json::json!({
-            "user_id": "test-user",
-            "channel": "cli",
-            "thread_count": 0
-        });
-        let md = format_as_markdown("test-user", "cli", &info);
-        assert!(md.contains("# Session Transcript"));
-        assert!(md.contains("**User:** test-user"));
-        assert!(md.contains("**Channel:** cli"));
-        // No messages → should contain JSON fallback
-        assert!(md.contains("```json"));
-    }
-
-    #[test]
-    fn test_format_as_markdown_with_messages() {
-        let info = serde_json::json!({
-            "messages": [
-                {"role": "user", "content": "Hello!", "timestamp": "2026-03-03T12:00:00Z"},
-                {"role": "assistant", "content": "Hi there!", "timestamp": "2026-03-03T12:00:01Z"},
-            ]
-        });
-        let md = format_as_markdown("user-1", "cli", &info);
-        assert!(md.contains("🧑 User"));
-        assert!(md.contains("🤖 Assistant"));
-        assert!(md.contains("Hello!"));
-        assert!(md.contains("Hi there!"));
+    fn markdown_export_is_deterministic() {
+        let id = Uuid::nil();
+        let rendered = render_markdown(id, &[]);
+        assert_eq!(rendered, format!("# Conversation {id}\n\n"));
     }
 }
