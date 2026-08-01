@@ -207,14 +207,8 @@ pub fn print_boot_screen(info: &BootInfo) {
     println!();
     println!("  {bold}Access{reset}");
     if let Some(ref url) = info.gateway_url {
-        // Show the full tokenized URL so the user can copy-paste it directly.
-        // This is a local terminal on the operator's own machine — safe to display.
-        println!("    {muted}gateway{reset}   {warn}{url}{reset}",);
-        if url.contains("token=") {
-            println!(
-                "    {muted}open{reset}      Copy the URL above and paste it into your browser."
-            );
-        }
+        let origin = credential_free_gateway_display(url);
+        println!("    {muted}gateway{reset}   {warn}{origin}{reset}",);
     }
     if let Some(ref url) = info.tunnel_url {
         let provider_tag = info
@@ -239,10 +233,31 @@ pub fn print_boot_screen(info: &BootInfo) {
     println!();
 }
 
+fn credential_free_gateway_display(value: &str) -> String {
+    let Ok(mut url) = url::Url::parse(value) else {
+        return "gateway URL unavailable".to_string();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sandbox::detect::DockerStatus;
+
+    #[test]
+    fn gateway_display_drops_credentials_and_query_material() {
+        let display = credential_free_gateway_display(
+            "https://user:secret@example.com:8443/?token=known-secret#fragment",
+        );
+        assert_eq!(display, "https://example.com:8443/");
+        assert!(!display.contains("known-secret"));
+        assert!(!display.contains("secret"));
+    }
 
     #[test]
     fn test_print_boot_screen_full() {

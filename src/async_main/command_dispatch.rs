@@ -12,6 +12,10 @@ pub(super) async fn run_terminal_command(
             Command::Run(_)
             | Command::Tui(_)
             | Command::Ask { .. }
+            | Command::Setup(thinclaw::cli::SetupCommand {
+                action: None | Some(thinclaw::cli::SetupAction::Edit { .. }),
+                ..
+            })
             | Command::Onboard { .. }
             | Command::AutonomyShadowCanary { .. },
         ) => return Ok(thinclaw::cli::CliDispatch::Runtime),
@@ -19,6 +23,20 @@ pub(super) async fn run_terminal_command(
     }
 
     debug_assert_eq!(context.debug(), cli.debug);
+
+    if let Some(Command::Setup(thinclaw::cli::SetupCommand {
+        action: Some(thinclaw::cli::SetupAction::Reset(command)),
+        ..
+    })) = &cli.command
+    {
+        init_cli_tracing(cli.debug);
+        run_reset_command(command.clone())
+            .await
+            .map_err(thinclaw::cli::CliError::from)?;
+        return Ok(thinclaw::cli::CliDispatch::Handled(
+            thinclaw::cli::CliOutcome::Success,
+        ));
+    }
 
     if let Some(Command::Doctor { profile }) = &cli.command {
         init_cli_tracing(cli.debug);
@@ -28,6 +46,12 @@ pub(super) async fn run_terminal_command(
         ));
     }
 
+    if let Some(Command::Status { profile }) = &cli.command {
+        init_cli_tracing(cli.debug);
+        let outcome = thinclaw::cli::run_status_command((*profile).into(), context).await?;
+        return Ok(thinclaw::cli::CliDispatch::Handled(outcome));
+    }
+
     let result = match &cli.command {
         Some(Command::Tool(tool_cmd)) => {
             init_cli_tracing(cli.debug);
@@ -35,7 +59,7 @@ pub(super) async fn run_terminal_command(
         }
         Some(Command::Config(config_cmd)) => {
             init_cli_tracing(cli.debug);
-            thinclaw::cli::run_config_command(config_cmd.clone()).await
+            thinclaw::cli::run_config_command(config_cmd.clone(), context).await
         }
         Some(Command::Registry(registry_cmd)) => {
             init_cli_tracing(cli.debug);
@@ -77,10 +101,7 @@ pub(super) async fn run_terminal_command(
             thinclaw::service::run_windows_service_dispatcher(home.clone())
         }
         Some(Command::Doctor { .. }) => unreachable!("doctor handled before generic dispatch"),
-        Some(Command::Status { profile }) => {
-            init_cli_tracing(cli.debug);
-            run_status_command((*profile).into()).await
-        }
+        Some(Command::Status { .. }) => unreachable!("status handled before generic dispatch"),
         Some(Command::Reset(reset_cmd)) => {
             init_cli_tracing(cli.debug);
             run_reset_command(reset_cmd.clone()).await

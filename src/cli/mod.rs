@@ -53,6 +53,7 @@ mod secrets;
 #[cfg(feature = "repl")]
 mod service;
 pub mod sessions;
+mod setup;
 pub mod status;
 mod tool;
 pub mod trajectory;
@@ -102,6 +103,7 @@ pub use secrets::{SecretsCommand, run_secrets_command};
 #[cfg(feature = "repl")]
 pub use service::{ServiceCommand, run_service_command};
 pub use sessions::{SessionCommand, run_sessions_command};
+pub use setup::{SetupAction, SetupCommand};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
 pub use trajectory::{TrajectoryCommand, run_trajectory_command};
@@ -293,6 +295,9 @@ pub enum Command {
         gateway_url: Option<String>,
     },
 
+    /// Configure ThinClaw and exit unless --run is supplied
+    Setup(SetupCommand),
+
     /// Repeated and supervised work
     #[command(subcommand)]
     Automation(AutomationCommand),
@@ -325,7 +330,8 @@ pub enum Command {
     #[command(subcommand)]
     Dev(DevCommand),
 
-    /// Interactive onboarding wizard
+    /// Deprecated alias for `setup --run`
+    #[command(hide = true)]
     Onboard {
         /// Skip authentication (use existing session)
         #[arg(long)]
@@ -348,11 +354,12 @@ pub enum Command {
         profile: Option<OnboardingProfile>,
     },
 
-    /// Fully reset ThinClaw state so onboarding can start fresh
+    /// Deprecated alias for `setup reset`
+    #[command(hide = true)]
     Reset(ResetCommand),
 
-    /// Manage encrypted user/API secrets
-    #[command(subcommand)]
+    /// Deprecated alias for `config secrets`
+    #[command(subcommand, hide = true)]
     Secrets(SecretsCommand),
 
     /// Manage configuration settings
@@ -415,8 +422,8 @@ pub enum Command {
     #[command(subcommand)]
     Message(MessageCommand),
 
-    /// List and inspect available LLM models
-    #[command(subcommand)]
+    /// Deprecated alias for `config models`
+    #[command(subcommand, hide = true)]
     Models(ModelCommand),
 
     /// Deprecated alias for `access senders`
@@ -593,6 +600,9 @@ impl Cli {
         matches!(
             self.command,
             None | Some(Command::Run(_)) | Some(Command::Tui(_)) | Some(Command::Ask { .. })
+        ) || matches!(
+            self.command,
+            Some(Command::Setup(SetupCommand { run: true, .. }))
         ) || self.legacy_message.is_some()
     }
 

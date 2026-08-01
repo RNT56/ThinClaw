@@ -6,6 +6,7 @@
 
 pub mod acp;
 pub mod assembly;
+pub mod capabilities;
 pub mod model;
 pub mod runtime;
 pub mod setup;
@@ -17,6 +18,9 @@ pub use assembly::{
     RuntimeDependencyPlan, RuntimeDependencyProvider, RuntimeEntrypointPlan, RuntimeLifecyclePhase,
     RuntimeLifecyclePolicy, RuntimeWorkspaceMode, ToolRuntimeAssemblyInput,
     ToolRuntimeAssemblyPlan, WorkspaceDirectoryPlan, WorkspaceFilesystemScope,
+};
+pub use capabilities::{
+    ActivityState, CapabilityFact, CapabilitySnapshot, FactState, ReadinessState,
 };
 pub use model::{apply_model_override, overridden_model_for_backend};
 pub use runtime::{

@@ -1,328 +1,275 @@
-//! System health and diagnostics CLI command.
-//!
-//! Checks database connectivity, session validity, embeddings,
-//! WASM runtime, tool count, and channel availability.
+//! Compact, typed capability and readiness snapshot.
 
-use std::path::PathBuf;
+use thinclaw_app::{ActivityState, CapabilityFact, CapabilitySnapshot, FactState, ReadinessState};
 
+use crate::cli::{CliContext, CliError, CliOutcome};
 use crate::settings::Settings;
-use crate::terminal_branding::TerminalBranding;
 
-fn shell_safety_options(settings: &Settings) -> thinclaw_tools::builtin::ShellSafetyOptions {
-    thinclaw_tools::builtin::ShellSafetyOptions {
-        smart_approval_mode: None,
-        external_scanner_mode: settings.safety.external_scanner_mode.parse().ok(),
-        external_scanner_path: settings.safety.external_scanner_path.clone(),
-        external_scanner_require_verified: Some(settings.safety.external_scanner_require_verified),
-        allow_temp_paths: Some(settings.safety.allow_temp_paths),
-    }
-}
-
-/// Run the status command, printing system health info.
 pub async fn run_status_command(
     linux_profile: crate::platform::LinuxReadinessProfile,
-) -> anyhow::Result<()> {
-    let branding = TerminalBranding::current();
+    context: &CliContext,
+) -> Result<CliOutcome, CliError> {
     let settings = Settings::load();
+    let linux = crate::platform::linux_readiness_report(linux_profile).await;
+    let mut snapshot = CapabilitySnapshot {
+        schema_version: 1,
+        revision: String::new(),
+        profile: linux_profile.as_str().to_string(),
+        runtime_active: FactState::Unknown,
+        healthy: linux.failed() == 0,
+        facts: vec![
+            database_fact(),
+            llm_fact(&settings),
+            gateway_fact(&settings),
+            embeddings_fact(&settings),
+            wasm_fact(&settings),
+            sandbox_fact(&settings),
+            heartbeat_fact(&settings),
+            linux_fact(&linux),
+        ],
+    };
+    snapshot.sort_facts();
+    let encoded = serde_json::to_vec(&snapshot.facts).map_err(|error| {
+        CliError::operational(format!("failed to encode capability snapshot: {error}"))
+    })?;
+    snapshot.revision = blake3::hash(&encoded).to_hex().to_string();
 
-    branding.print_banner(
-        "ThinClaw Status",
-        Some("Runtime health, configured surfaces, and storage posture at a glance."),
-    );
+    context
+        .output()
+        .write_record("status", &snapshot, render_human)?;
+    Ok(if snapshot.healthy {
+        CliOutcome::Success
+    } else {
+        CliOutcome::Unhealthy
+    })
+}
 
-    // Version
-    println!(
-        "{}",
-        branding.key_value(
-            "Version",
-            format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
-        )
-    );
-
-    // Database
-    print!("{}", branding.muted("  Database      "));
-    let db_backend = std::env::var("DATABASE_BACKEND")
-        .ok()
-        .unwrap_or_else(|| "postgres".to_string());
-    match db_backend.as_str() {
-        "libsql" | "turso" | "sqlite" => {
-            let path = std::env::var("LIBSQL_PATH")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| crate::config::default_libsql_path());
-            if path.exists() {
-                let turso = if std::env::var("LIBSQL_URL").is_ok() {
-                    " + Turso sync"
-                } else {
-                    ""
-                };
-                println!("libSQL ({}{})", path.display(), turso);
+fn database_fact() -> CapabilityFact {
+    let backend = std::env::var("DATABASE_BACKEND").unwrap_or_else(|_| "postgres".to_string());
+    let compiled = match backend.as_str() {
+        "libsql" | "sqlite" | "turso" => {
+            if cfg!(feature = "libsql") {
+                FactState::Yes
             } else {
-                println!("libSQL (file missing: {})", path.display());
+                FactState::No
             }
         }
         _ => {
-            if std::env::var("DATABASE_URL").is_ok() {
-                match check_database().await {
-                    Ok(()) => println!("connected (PostgreSQL)"),
-                    Err(e) => println!("error ({})", e),
-                }
+            if cfg!(feature = "postgres") {
+                FactState::Yes
             } else {
-                println!("not configured");
+                FactState::No
             }
         }
-    }
-
-    // LLM Backend
-    print!("{}", branding.muted("  LLM backend   "));
-    let llm_backend = std::env::var("LLM_BACKEND")
-        .ok()
-        .unwrap_or_else(|| "openai_compatible".to_string());
-    println!("{}", llm_backend);
-
-    // Secrets (auto-detect from env only; skip keychain probe to avoid
-    // triggering macOS system password dialogs on a simple status check)
-    print!("{}", branding.muted("  Secrets       "));
-    if std::env::var("SECRETS_MASTER_KEY").is_ok() {
-        println!("configured (env)");
-    } else {
-        // We don't probe the keychain here because get_generic_password()
-        // triggers macOS unlock+authorization dialogs, which is bad UX for
-        // a read-only status command. If onboarding completed with keychain
-        // storage, the key is there; we just can't cheaply verify it.
-        println!(
-            "env not set ({} may be configured)",
-            crate::platform::secure_store::display_name()
-        );
-    }
-
-    // Embeddings
-    print!("{}", branding.muted("  Embeddings    "));
-    let emb_enabled = settings.embeddings.enabled
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("EMBEDDING_ENABLED")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-    if emb_enabled {
-        println!(
-            "enabled (provider: {}, model: {})",
-            settings.embeddings.provider, settings.embeddings.model
-        );
-    } else {
-        println!("disabled");
-    }
-
-    // WASM tools
-    print!("{}", branding.muted("  WASM tools    "));
-    let tools_dir = settings
-        .wasm
-        .tools_dir
-        .clone()
-        .unwrap_or_else(default_tools_dir);
-    if tools_dir.exists() {
-        let count = count_wasm_files(&tools_dir);
-        println!("{} installed ({})", count, tools_dir.display());
-    } else {
-        println!("directory not found ({})", tools_dir.display());
-    }
-
-    // WASM channels
-    print!("{}", branding.muted("  Channels      "));
-    let channels_dir = settings
-        .channels
-        .wasm_channels_dir
-        .clone()
-        .unwrap_or_else(default_channels_dir);
-    let mut channel_info = Vec::new();
-    if settings.channels.cli_enabled.unwrap_or(true) {
-        channel_info.push("cli".to_string());
-    }
-    if settings.channels.gateway_enabled.unwrap_or(true) {
-        let access = crate::platform::gateway_access::GatewayAccessInfo::from_env_and_settings(
-            Some(&settings),
-        );
-        channel_info.push(format!("gateway:{}", access.bind_display()));
-    }
-    if settings.channels.http_enabled {
-        channel_info.push(format!(
-            "http:{}",
-            settings.channels.http_port.unwrap_or(3000)
-        ));
-    }
-    if channels_dir.exists() {
-        let wasm_count = count_wasm_files(&channels_dir);
-        if wasm_count > 0 {
-            channel_info.push(format!("{} wasm", wasm_count));
-        }
-    }
-    println!("{}", channel_info.join(", "));
-
-    // Heartbeat
-    print!("{}", branding.muted("  Heartbeat     "));
-    let hb_enabled = settings.heartbeat.enabled
-        || std::env::var("HEARTBEAT_ENABLED")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-    if hb_enabled {
-        println!("enabled (interval: {}s)", settings.heartbeat.interval_secs);
-    } else {
-        println!("disabled");
-    }
-
-    // Shell scanner (defense-in-depth external command scanner; fail-closed by default).
-    // Surfaced so an operator can diagnose scanner availability and deliberately
-    // opt into the weaker fail-open mode if needed.
-    print!("{}", branding.muted("  Shell scanner "));
-    {
-        let opts = shell_safety_options(&settings);
-        let scanner = thinclaw_tools::builtin::ShellTool::new()
-            .with_safety_options(&opts)
-            .scanner_status();
-        let mode = scanner
-            .get("mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("off");
-        if scanner
-            .get("configured")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            let available = scanner
-                .get("available")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let fail_open = scanner
-                .get("fail_open")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            print!(
-                "mode: {}, {}",
-                mode,
-                if available {
-                    "reachable"
-                } else {
-                    "UNAVAILABLE"
-                }
-            );
-            if !available && fail_open {
-                print!(" (fail-open: commands NOT blocked)");
-            }
-            if let Some(err) = scanner.get("last_error").and_then(|v| v.as_str()) {
-                print!(" — {}", err);
-            }
-            println!();
+    };
+    let configured = match backend.as_str() {
+        "libsql" | "sqlite" | "turso" => FactState::Yes,
+        _ if std::env::var_os("DATABASE_URL").is_some() => FactState::Yes,
+        _ => FactState::No,
+    };
+    CapabilityFact {
+        id: "database".to_string(),
+        label: format!("Database ({backend})"),
+        compiled,
+        configured,
+        available: FactState::Unknown,
+        active: ActivityState::Unknown,
+        ready: if compiled == FactState::No || configured == FactState::No {
+            ReadinessState::NotReady
         } else {
-            println!("not configured (mode: {}; scanner blocking inactive)", mode);
-        }
+            ReadinessState::Unknown
+        },
+        reasons: vec!["static status does not open the database".to_string()],
+        remediation: Vec::new(),
     }
+}
 
-    // MCP servers
-    print!("{}", branding.muted("  MCP servers   "));
-    match crate::tools::mcp::config::load_mcp_servers().await {
-        Ok(servers) => {
-            let enabled = servers.servers.iter().filter(|s| s.enabled).count();
-            let total = servers.servers.len();
-            println!("{} enabled / {} configured", enabled, total);
-        }
-        Err(_) => println!("none configured"),
-    }
+fn llm_fact(_settings: &Settings) -> CapabilityFact {
+    let configured = std::env::var_os("LLM_BASE_URL").is_some()
+        || std::env::var_os("OPENAI_API_KEY").is_some()
+        || std::env::var_os("ANTHROPIC_API_KEY").is_some()
+        || std::env::var_os("LLM_BACKEND").is_some();
+    fact(
+        "llm",
+        "Language model",
+        FactState::Yes,
+        yes_no(configured),
+        FactState::Unknown,
+        ActivityState::Inactive,
+        if configured {
+            ReadinessState::Unknown
+        } else {
+            ReadinessState::NotReady
+        },
+    )
+}
 
-    // Linux readiness
-    print!("{}", branding.muted("  Linux ready   "));
-    let linux = crate::platform::linux_readiness_report(linux_profile).await;
-    println!(
-        "{} pass / {} fail / {} skip ({})",
-        linux.passed(),
-        linux.failed(),
-        linux.skipped(),
-        linux.profile.as_str()
+fn gateway_fact(settings: &Settings) -> CapabilityFact {
+    let access =
+        crate::platform::gateway_access::GatewayAccessInfo::from_env_and_settings(Some(settings));
+    let mut value = fact(
+        "gateway",
+        "Web gateway",
+        FactState::Yes,
+        yes_no(access.enabled),
+        FactState::Unknown,
+        ActivityState::Unknown,
+        if access.enabled && access.auth_token.is_some() {
+            ReadinessState::Unknown
+        } else {
+            ReadinessState::NotReady
+        },
     );
-    for probe in linux
+    if access.auth_token.is_none() {
+        value
+            .reasons
+            .push("gateway authentication token is unavailable".to_string());
+        value
+            .remediation
+            .push("configure a gateway credential source".to_string());
+    }
+    value
+}
+
+fn embeddings_fact(settings: &Settings) -> CapabilityFact {
+    fact(
+        "embeddings",
+        "Embeddings",
+        FactState::Yes,
+        yes_no(settings.embeddings.enabled),
+        FactState::Unknown,
+        ActivityState::Inactive,
+        if settings.embeddings.enabled {
+            ReadinessState::Unknown
+        } else {
+            ReadinessState::NotApplicable
+        },
+    )
+}
+
+fn wasm_fact(settings: &Settings) -> CapabilityFact {
+    fact(
+        "wasm_runtime",
+        "WASM extensions",
+        yes_no(cfg!(feature = "wasm-runtime")),
+        yes_no(settings.wasm.enabled),
+        FactState::Unknown,
+        ActivityState::Inactive,
+        if !cfg!(feature = "wasm-runtime") {
+            ReadinessState::NotApplicable
+        } else if settings.wasm.enabled {
+            ReadinessState::Unknown
+        } else {
+            ReadinessState::NotApplicable
+        },
+    )
+}
+
+fn sandbox_fact(settings: &Settings) -> CapabilityFact {
+    fact(
+        "sandbox",
+        "Sandbox jobs",
+        yes_no(cfg!(feature = "docker-sandbox")),
+        yes_no(settings.sandbox.enabled),
+        FactState::Unknown,
+        ActivityState::Inactive,
+        if !cfg!(feature = "docker-sandbox") || !settings.sandbox.enabled {
+            ReadinessState::NotApplicable
+        } else {
+            ReadinessState::Unknown
+        },
+    )
+}
+
+fn heartbeat_fact(settings: &Settings) -> CapabilityFact {
+    fact(
+        "heartbeat",
+        "Heartbeat",
+        FactState::Yes,
+        yes_no(settings.heartbeat.enabled),
+        FactState::NotApplicable,
+        ActivityState::Inactive,
+        if settings.heartbeat.enabled {
+            ReadinessState::Unknown
+        } else {
+            ReadinessState::NotApplicable
+        },
+    )
+}
+
+fn linux_fact(report: &crate::platform::LinuxReadinessReport) -> CapabilityFact {
+    let mut value = fact(
+        "platform_readiness",
+        "Platform readiness",
+        FactState::Yes,
+        FactState::Yes,
+        if report.failed() == 0 {
+            FactState::Yes
+        } else {
+            FactState::No
+        },
+        ActivityState::NotApplicable,
+        if report.failed() == 0 {
+            ReadinessState::Ready
+        } else {
+            ReadinessState::NotReady
+        },
+    );
+    value.reasons = report
         .probes
         .iter()
         .filter(|probe| probe.status == crate::platform::LinuxProbeStatus::Fail)
-    {
-        println!("    {}: {}", probe.label, probe.detail);
+        .map(|probe| format!("{}: {}", probe.label, probe.detail))
+        .collect();
+    value
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fact(
+    id: &str,
+    label: &str,
+    compiled: FactState,
+    configured: FactState,
+    available: FactState,
+    active: ActivityState,
+    ready: ReadinessState,
+) -> CapabilityFact {
+    CapabilityFact {
+        id: id.to_string(),
+        label: label.to_string(),
+        compiled,
+        configured,
+        available,
+        active,
+        ready,
+        reasons: Vec::new(),
+        remediation: Vec::new(),
     }
-
-    // Config path
-    println!(
-        "\n{}",
-        branding.key_value("Config", crate::bootstrap::thinclaw_env_path().display())
-    );
-
-    Ok(())
 }
 
-#[cfg(feature = "postgres")]
-async fn check_database() -> anyhow::Result<()> {
-    let url = std::env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL not set"))?;
-
-    let config: deadpool_postgres::Config = deadpool_postgres::Config {
-        url: Some(url),
-        ..Default::default()
-    };
-    let pool = config
-        .create_pool(
-            Some(deadpool_postgres::Runtime::Tokio1),
-            tokio_postgres::NoTls,
-        )
-        .map_err(|e| anyhow::anyhow!("pool error: {}", e))?;
-
-    let client = tokio::time::timeout(std::time::Duration::from_secs(5), pool.get())
-        .await
-        .map_err(|_| anyhow::anyhow!("timeout"))?
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    client
-        .execute("SELECT 1", &[])
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    Ok(())
+const fn yes_no(value: bool) -> FactState {
+    if value { FactState::Yes } else { FactState::No }
 }
 
-#[cfg(not(feature = "postgres"))]
-async fn check_database() -> anyhow::Result<()> {
-    // For non-postgres backends, just report configured
-    Ok(())
-}
-
-fn count_wasm_files(dir: &std::path::Path) -> usize {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "wasm"))
-                .count()
-        })
-        .unwrap_or(0)
-}
-
-fn default_tools_dir() -> PathBuf {
-    crate::platform::state_paths().tools_dir
-}
-
-fn default_channels_dir() -> PathBuf {
-    crate::platform::state_paths().channels_dir
-}
-
-#[cfg(test)]
-mod tests {
-    use super::shell_safety_options;
-    use crate::settings::Settings;
-
-    #[test]
-    fn status_shell_options_include_temp_path_policy() {
-        let mut settings = Settings::default();
-        settings.safety.external_scanner_mode = "off".to_string();
-        settings.safety.allow_temp_paths = true;
-
-        let options = shell_safety_options(&settings);
-
-        assert_eq!(options.allow_temp_paths, Some(true));
-        assert_eq!(
-            options.external_scanner_mode,
-            Some(thinclaw_tools::builtin::shell::ExternalScannerMode::Off)
-        );
+fn render_human(snapshot: &CapabilitySnapshot) -> String {
+    let mut lines = vec![format!(
+        "ThinClaw {} — profile {} — revision {}",
+        if snapshot.healthy {
+            "ready"
+        } else {
+            "not ready"
+        },
+        snapshot.profile,
+        &snapshot.revision[..12]
+    )];
+    for fact in &snapshot.facts {
+        lines.push(format!(
+            "{}: compiled={:?}, configured={:?}, available={:?}, active={:?}, ready={:?}",
+            fact.label, fact.compiled, fact.configured, fact.available, fact.active, fact.ready
+        ));
+        for reason in &fact.reasons {
+            lines.push(format!("  - {reason}"));
+        }
     }
+    lines.join("\n")
 }

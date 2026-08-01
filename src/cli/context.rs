@@ -44,6 +44,13 @@ impl CliContext {
             .as_deref()
             .map(validate_explicit_config)
             .transpose()?;
+        if let Some(path) = config_path.as_deref() {
+            crate::config::select_cli_toml(path).map_err(|error| {
+                CliError::operational(format!(
+                    "failed to select explicit configuration file: {error}"
+                ))
+            })?;
+        }
         let output = OutputPolicy::resolve(
             options.output_format,
             options.color,

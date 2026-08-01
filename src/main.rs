@@ -48,7 +48,7 @@ fn runtime_command_intent(command: Option<&Command>) -> RuntimeCommandIntent {
     match command {
         None | Some(Command::Run(_) | Command::Ask { .. }) => RuntimeCommandIntent::AgentRuntime,
         Some(Command::Tui(_)) => RuntimeCommandIntent::TuiRuntime,
-        Some(Command::Onboard { .. }) => RuntimeCommandIntent::Onboarding,
+        Some(Command::Onboard { .. } | Command::Setup(_)) => RuntimeCommandIntent::Onboarding,
         #[cfg(feature = "docker-sandbox")]
         Some(Command::Worker { .. })
         | Some(Command::ClaudeBridge { .. })

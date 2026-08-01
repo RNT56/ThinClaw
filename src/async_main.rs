@@ -30,7 +30,7 @@ use thinclaw::{
         ChannelSelectionArg, Cli, CliContext, CliContextOptions, CliDispatch, CliOutcome, Command,
         ResolvedRuntimeArgs, run_channels_command, run_gateway_command, run_identity_command,
         run_mcp_command, run_pairing_command, run_reset_command, run_secrets_command,
-        run_status_command, run_tool_command, run_trajectory_command,
+        run_tool_command, run_trajectory_command,
     },
     config::Config,
     pairing::PairingStore,
@@ -95,6 +95,38 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     });
 
     match &cli.command {
+        Some(Command::Setup(setup)) => {
+            #[cfg(any(feature = "postgres", feature = "libsql"))]
+            {
+                let guide_topic = match setup.action.as_ref() {
+                    Some(thinclaw::cli::SetupAction::Edit { topic }) => Some(*topic),
+                    None => None,
+                    Some(thinclaw::cli::SetupAction::Reset(_)) => {
+                        unreachable!("setup reset is handled by immediate dispatch")
+                    }
+                };
+                let config = thinclaw::setup::SetupConfig {
+                    skip_auth: setup.skip_provider_auth || setup.legacy_skip_auth,
+                    channels_only: false,
+                    guide_topic,
+                    ui_mode: setup.ui,
+                    profile: setup.profile,
+                    pause_after_completion: !setup.run,
+                };
+                let mut wizard = SetupWizard::with_config(config);
+                wizard.run().await?;
+                if wizard.should_continue_to_runtime() {
+                    runtime_entry_mode = runtime_entry_mode_from_ui_mode(wizard.runtime_ui_mode());
+                } else {
+                    return Ok(());
+                }
+            }
+            #[cfg(not(any(feature = "postgres", feature = "libsql")))]
+            {
+                let _ = setup;
+                anyhow::bail!("setup requires the 'postgres' or 'libsql' feature");
+            }
+        }
         Some(Command::Onboard {
             skip_auth,
             channels_only,
