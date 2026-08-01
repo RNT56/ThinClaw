@@ -1,6 +1,6 @@
 [package]
 name = "thinclaw-desktop"
-version = "0.15.0"
+version = "0.16.0"
 description = "ThinClaw desktop companion app"
 authors = ["RNT56"]
 license = "GPL-3.0-only"
