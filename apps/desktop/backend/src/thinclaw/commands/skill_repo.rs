@@ -259,7 +259,7 @@ fn configure_git_command(runtime: &GitRuntime, allow_lazy_fetch: bool) -> Comman
         "DEVELOPER_DIR",
     ];
 
-    let mut command = Command::new(&runtime.executable);
+    let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.thinclaw.commands.skill_repo.tokio.101", &runtime.executable);
     command.env_clear();
     for key in PRESERVED_ENV {
         if let Some(value) = std::env::var_os(key) {

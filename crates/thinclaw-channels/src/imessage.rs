@@ -189,7 +189,10 @@ impl IMessageChannel {
         }
 
         // Check sqlite3
-        let mut sqlite3_check = tokio::process::Command::new("sqlite3");
+        let mut sqlite3_check = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.imessage.tokio.1",
+            "sqlite3"
+        );
         sqlite3_check.arg("--version");
         let sqlite3_available = output_with_timeout(&mut sqlite3_check, "sqlite3 diagnostic")
             .await
@@ -200,7 +203,10 @@ impl IMessageChannel {
         }
 
         // Check osascript
-        let mut osascript_check = tokio::process::Command::new("osascript");
+        let mut osascript_check = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.imessage.tokio.2",
+            "osascript"
+        );
         osascript_check.arg("-e").arg("return \"ok\"");
         let osascript_available = output_with_timeout(&mut osascript_check, "osascript diagnostic")
             .await
@@ -211,7 +217,10 @@ impl IMessageChannel {
         }
 
         // Check Messages.app running
-        let mut pgrep = tokio::process::Command::new("pgrep");
+        let mut pgrep = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.imessage.tokio.3",
+            "pgrep"
+        );
         pgrep.arg("-x").arg("Messages");
         let messages_running = output_with_timeout(&mut pgrep, "pgrep Messages diagnostic")
             .await
@@ -223,7 +232,10 @@ impl IMessageChannel {
 
         // Get total message count
         let total_messages = if db_exists && sqlite3_available {
-            let mut count = tokio::process::Command::new("sqlite3");
+            let mut count = thinclaw_platform::tokio_process_command!(
+                "crates.thinclaw-channels.src.imessage.tokio.4",
+                "sqlite3"
+            );
             count
                 .arg(&config.db_path)
                 .arg("SELECT COUNT(*) FROM message;");
@@ -253,7 +265,10 @@ impl IMessageChannel {
 
     /// Get the latest ROWID from chat.db using sqlite3 CLI.
     async fn get_latest_rowid(db_path: &std::path::Path) -> Result<i64, ChannelError> {
-        let mut cmd = tokio::process::Command::new("sqlite3");
+        let mut cmd = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.imessage.tokio.5",
+            "sqlite3"
+        );
         cmd.arg(db_path).arg("SELECT MAX(ROWID) FROM message;");
         let output = output_with_timeout(&mut cmd, "sqlite3 max-rowid")
             .await
@@ -310,7 +325,10 @@ impl IMessageChannel {
 
         let query = format!("SELECT MIN(ROWID) FROM message WHERE date > {cutoff_ns};");
 
-        let mut cmd = tokio::process::Command::new("sqlite3");
+        let mut cmd = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.imessage.tokio.6",
+            "sqlite3"
+        );
         cmd.arg(db_path).arg(&query);
         match output_with_timeout(&mut cmd, "sqlite3 age-floor").await {
             Ok(output) if output.status.success() => {
@@ -372,7 +390,10 @@ impl IMessageChannel {
              LIMIT 50;"
         );
 
-        let mut cmd = tokio::process::Command::new("sqlite3");
+        let mut cmd = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.imessage.tokio.7",
+            "sqlite3"
+        );
         cmd.arg("-separator").arg("|").arg(db_path).arg(&query);
         let output = output_with_timeout(&mut cmd, "sqlite3 poll")
             .await
@@ -440,7 +461,10 @@ impl IMessageChannel {
         let chunks = split_message(text);
 
         for chunk in chunks {
-            let mut cmd = tokio::process::Command::new("osascript");
+            let mut cmd = thinclaw_platform::tokio_process_command!(
+                "crates.thinclaw-channels.src.imessage.tokio.8",
+                "osascript"
+            );
             cmd.arg("-e")
                 .arg(SEND_MESSAGE_APPLESCRIPT)
                 .arg("--")
@@ -519,7 +543,10 @@ impl IMessageChannel {
     ) -> Result<bool, ChannelError> {
         let posix_path = file_path.to_string_lossy();
 
-        let mut cmd = tokio::process::Command::new("osascript");
+        let mut cmd = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.imessage.tokio.9",
+            "osascript"
+        );
         cmd.arg("-e")
             .arg(SEND_FILE_APPLESCRIPT)
             .arg("--")
@@ -958,7 +985,10 @@ async fn fetch_imessage_attachments(
         message_rowid, MAX_INBOUND_ATTACHMENTS
     );
 
-    let mut cmd = tokio::process::Command::new("sqlite3");
+    let mut cmd = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-channels.src.imessage.tokio.10",
+        "sqlite3"
+    );
     cmd.arg("-separator").arg("|").arg(db_path).arg(&query);
     let output = match output_with_timeout(&mut cmd, "sqlite3 attachments").await {
         Ok(o) if o.status.success() => o,

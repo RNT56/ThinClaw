@@ -1,7 +1,6 @@
 //! Custom tunnel via an arbitrary shell command.
 
 use anyhow::{Result, bail};
-use tokio::process::Command;
 
 use crate::tunnel::{
     SharedProcess, SharedUrl, Tunnel, TunnelProcess, drain_tunnel_output, kill_shared,
@@ -64,7 +63,8 @@ impl Tunnel for CustomTunnel {
             bail!("Custom tunnel start_command is empty");
         }
 
-        let mut command = Command::new(&parts[0]);
+        let mut command =
+            thinclaw_platform::tokio_process_command!("src.tunnel.custom.tokio.101", &parts[0]);
         command
             .args(&parts[1..])
             .stdout(std::process::Stdio::piped())

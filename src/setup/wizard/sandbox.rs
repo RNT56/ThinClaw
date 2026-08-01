@@ -212,7 +212,10 @@ impl SetupWizard {
             // Async process spawn so a slow `docker` call never blocks the tokio
             // runtime (a multi-minute `docker build` below would otherwise freeze
             // every other async task, including the UI runtime in the Tauri path).
-            let mut inspect_command = tokio::process::Command::new("docker");
+            let mut inspect_command = thinclaw_platform::tokio_process_command!(
+                "src.setup.wizard.sandbox.tokio.1",
+                "docker"
+            );
             inspect_command
                 .args(["image", "inspect", image_name])
                 .stdin(std::process::Stdio::null())
@@ -244,7 +247,10 @@ impl SetupWizard {
                     let repo_root =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-                    let mut build_command = tokio::process::Command::new("docker");
+                    let mut build_command = thinclaw_platform::tokio_process_command!(
+                        "src.setup.wizard.sandbox.tokio.2",
+                        "docker"
+                    );
                     build_command
                         .args(["build", "-f", "Dockerfile.worker", "-t", image_name, "."])
                         .current_dir(&repo_root)

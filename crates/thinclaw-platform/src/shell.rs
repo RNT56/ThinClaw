@@ -51,13 +51,17 @@ impl ShellLauncher {
     }
 
     pub fn std_command(self, script: &str) -> StdCommand {
-        let mut cmd = StdCommand::new(self.program());
+        let mut cmd =
+            crate::std_process_command!("crates.thinclaw-platform.src.shell.std.1", self.program());
         cmd.args(self.prefix_args()).arg(script);
         cmd
     }
 
     pub fn tokio_command(self, script: &str) -> TokioCommand {
-        let mut cmd = TokioCommand::new(self.program());
+        let mut cmd = crate::tokio_process_command!(
+            "crates.thinclaw-platform.src.shell.tokio.2",
+            self.program()
+        );
         cmd.args(self.prefix_args()).arg(script);
         cmd
     }

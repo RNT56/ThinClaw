@@ -379,7 +379,10 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
 
     let repo_url = format!("https://github.com/{}.git", plan.target_repo);
     run_skill_publish_cmd({
-        let mut command = Command::new("git");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "src.tools.builtin.skill_tools.publish.tokio.101",
+            "git"
+        );
         command
             .arg("clone")
             .arg("--no-hardlinks")
@@ -391,7 +394,10 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
 
     let base_branch = if let Some(base_branch) = plan.base_branch.as_ref() {
         run_skill_publish_cmd({
-            let mut command = Command::new("git");
+            let mut command = thinclaw_platform::tokio_process_command!(
+                "src.tools.builtin.skill_tools.publish.tokio.102",
+                "git"
+            );
             command
                 .arg("-C")
                 .arg(&scratch_dir)
@@ -404,7 +410,10 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
         base_branch.clone()
     } else {
         let detected = run_skill_publish_cmd({
-            let mut command = Command::new("git");
+            let mut command = thinclaw_platform::tokio_process_command!(
+                "src.tools.builtin.skill_tools.publish.tokio.103",
+                "git"
+            );
             command
                 .arg("-C")
                 .arg(&scratch_dir)
@@ -419,7 +428,10 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
     };
 
     run_skill_publish_cmd({
-        let mut command = Command::new("git");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "src.tools.builtin.skill_tools.publish.tokio.104",
+            "git"
+        );
         command
             .arg("-C")
             .arg(&scratch_dir)
@@ -434,7 +446,10 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
     let package_dir = write_publish_package(&scratch_dir, &plan.package_path, &plan.files).await?;
 
     run_skill_publish_cmd({
-        let mut command = Command::new("git");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "src.tools.builtin.skill_tools.publish.tokio.105",
+            "git"
+        );
         command
             .arg("-C")
             .arg(&scratch_dir)
@@ -446,7 +461,10 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
     .await?;
 
     let diff_output = capture_skill_publish_cmd({
-        let mut command = Command::new("git");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "src.tools.builtin.skill_tools.publish.tokio.106",
+            "git"
+        );
         command
             .arg("-C")
             .arg(&scratch_dir)
@@ -471,7 +489,10 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
     }
 
     run_skill_publish_cmd({
-        let mut command = Command::new("git");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "src.tools.builtin.skill_tools.publish.tokio.107",
+            "git"
+        );
         command
             .arg("-C")
             .arg(&scratch_dir)
@@ -483,7 +504,10 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
     .await?;
 
     run_skill_publish_cmd({
-        let mut command = Command::new("git");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "src.tools.builtin.skill_tools.publish.tokio.108",
+            "git"
+        );
         command
             .arg("-C")
             .arg(&scratch_dir)
@@ -503,7 +527,10 @@ async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, T
         plan.files.len()
     );
     let pr_url = run_skill_publish_cmd({
-        let mut command = Command::new("gh");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "src.tools.builtin.skill_tools.publish.tokio.109",
+            "gh"
+        );
         command
             .arg("pr")
             .arg("create")

@@ -93,7 +93,10 @@ impl AgentBrowserTool {
             },
         )?;
 
-        let mut command = Command::new(&self.command);
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-tools.src.builtin.browser_a11y.tokio.101",
+            &self.command
+        );
         command
             .arg("--config")
             .arg(config_path)
@@ -275,7 +278,10 @@ impl Drop for AgentBrowserTool {
         let session = self.session.clone();
         let cleanup_config = create_controlled_agent_browser_config().ok();
         handle.spawn(async move {
-            let mut command = Command::new(command_name);
+            let mut command = thinclaw_platform::tokio_process_command!(
+                "crates.thinclaw-tools.src.builtin.browser_a11y.tokio.102",
+                command_name
+            );
             if let Some(config) = cleanup_config.as_ref() {
                 command.arg("--config").arg(config.path());
             }

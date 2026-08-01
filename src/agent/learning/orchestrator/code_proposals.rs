@@ -386,54 +386,69 @@ impl LearningOrchestrator {
         let scratch_dir = scratch.path().join("repository");
 
         run_cmd(
-            Command::new("git")
-                .arg("clone")
-                .arg("--no-hardlinks")
-                .arg("--")
-                .arg(&source_origin)
-                .arg(scratch_dir.as_os_str()),
+            thinclaw_platform::tokio_process_command!(
+                "src.agent.learning.orchestrator.code_proposals.tokio.101",
+                "git"
+            )
+            .arg("clone")
+            .arg("--no-hardlinks")
+            .arg("--")
+            .arg(&source_origin)
+            .arg(scratch_dir.as_os_str()),
         )
         .await?;
 
         run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(scratch_dir.as_os_str())
-                .arg("fetch")
-                .arg("--force")
-                .arg("origin")
-                .arg(&source_revision),
+            thinclaw_platform::tokio_process_command!(
+                "src.agent.learning.orchestrator.code_proposals.tokio.102",
+                "git"
+            )
+            .arg("-C")
+            .arg(scratch_dir.as_os_str())
+            .arg("fetch")
+            .arg("--force")
+            .arg("origin")
+            .arg(&source_revision),
         )
         .await?;
         let source_commit = run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(scratch_dir.as_os_str())
-                .arg("rev-parse")
-                .arg("--verify")
-                .arg("FETCH_HEAD^{commit}"),
+            thinclaw_platform::tokio_process_command!(
+                "src.agent.learning.orchestrator.code_proposals.tokio.103",
+                "git"
+            )
+            .arg("-C")
+            .arg(scratch_dir.as_os_str())
+            .arg("rev-parse")
+            .arg("--verify")
+            .arg("FETCH_HEAD^{commit}"),
         )
         .await?
         .trim()
         .to_string();
         validate_learning_git_ref(&source_commit)?;
         run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(scratch_dir.as_os_str())
-                .arg("reset")
-                .arg("--hard")
-                .arg(&source_commit),
+            thinclaw_platform::tokio_process_command!(
+                "src.agent.learning.orchestrator.code_proposals.tokio.104",
+                "git"
+            )
+            .arg("-C")
+            .arg(scratch_dir.as_os_str())
+            .arg("reset")
+            .arg("--hard")
+            .arg(&source_commit),
         )
         .await?;
 
         let base_branch = run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(scratch_dir.as_os_str())
-                .arg("symbolic-ref")
-                .arg("--short")
-                .arg("refs/remotes/origin/HEAD"),
+            thinclaw_platform::tokio_process_command!(
+                "src.agent.learning.orchestrator.code_proposals.tokio.105",
+                "git"
+            )
+            .arg("-C")
+            .arg(scratch_dir.as_os_str())
+            .arg("symbolic-ref")
+            .arg("--short")
+            .arg("refs/remotes/origin/HEAD"),
         )
         .await
         .unwrap_or_else(|_| "origin/main".to_string())
@@ -449,43 +464,55 @@ impl LearningOrchestrator {
             .map_err(|e| e.to_string())?;
 
         run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(scratch_dir.as_os_str())
-                .arg("apply")
-                .arg("--check")
-                .arg("--")
-                .arg(patch_path.as_os_str()),
+            thinclaw_platform::tokio_process_command!(
+                "src.agent.learning.orchestrator.code_proposals.tokio.106",
+                "git"
+            )
+            .arg("-C")
+            .arg(scratch_dir.as_os_str())
+            .arg("apply")
+            .arg("--check")
+            .arg("--")
+            .arg(patch_path.as_os_str()),
         )
         .await?;
         run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(scratch_dir.as_os_str())
-                .arg("apply")
-                .arg("--")
-                .arg(patch_path.as_os_str()),
+            thinclaw_platform::tokio_process_command!(
+                "src.agent.learning.orchestrator.code_proposals.tokio.107",
+                "git"
+            )
+            .arg("-C")
+            .arg(scratch_dir.as_os_str())
+            .arg("apply")
+            .arg("--")
+            .arg(patch_path.as_os_str()),
         )
         .await?;
 
         let branch_name = format!("codex/learning-proposal-{}", &proposal.id.to_string()[..8]);
         validate_learning_git_ref(&branch_name)?;
         run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(scratch_dir.as_os_str())
-                .arg("checkout")
-                .arg("-B")
-                .arg(&branch_name)
-                .arg("--"),
+            thinclaw_platform::tokio_process_command!(
+                "src.agent.learning.orchestrator.code_proposals.tokio.108",
+                "git"
+            )
+            .arg("-C")
+            .arg(scratch_dir.as_os_str())
+            .arg("checkout")
+            .arg("-B")
+            .arg(&branch_name)
+            .arg("--"),
         )
         .await?;
         run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(scratch_dir.as_os_str())
-                .arg("add")
-                .arg("-A"),
+            thinclaw_platform::tokio_process_command!(
+                "src.agent.learning.orchestrator.code_proposals.tokio.109",
+                "git"
+            )
+            .arg("-C")
+            .arg(scratch_dir.as_os_str())
+            .arg("add")
+            .arg("-A"),
         )
         .await?;
 
@@ -494,12 +521,15 @@ impl LearningOrchestrator {
             &proposal.id.to_string()[..8]
         );
         run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(scratch_dir.as_os_str())
-                .arg("commit")
-                .arg("-m")
-                .arg(commit_message),
+            thinclaw_platform::tokio_process_command!(
+                "src.agent.learning.orchestrator.code_proposals.tokio.110",
+                "git"
+            )
+            .arg("-C")
+            .arg(scratch_dir.as_os_str())
+            .arg("commit")
+            .arg("-m")
+            .arg(commit_message),
         )
         .await?;
 
@@ -581,14 +611,17 @@ impl LearningOrchestrator {
 
         if mode != "bundle_only" {
             run_cmd(
-                Command::new("git")
-                    .arg("-C")
-                    .arg(scratch_dir.as_os_str())
-                    .arg("push")
-                    .arg("-u")
-                    .arg("--")
-                    .arg("origin")
-                    .arg(&branch_name),
+                thinclaw_platform::tokio_process_command!(
+                    "src.agent.learning.orchestrator.code_proposals.tokio.111",
+                    "git"
+                )
+                .arg("-C")
+                .arg(scratch_dir.as_os_str())
+                .arg("push")
+                .arg("-u")
+                .arg("--")
+                .arg("origin")
+                .arg(&branch_name),
             )
             .await?;
         }
@@ -600,19 +633,22 @@ impl LearningOrchestrator {
             );
             let pr_title = format!("[learning] {}", proposal.title);
             let pr_output = run_cmd(
-                Command::new("gh")
-                    .arg("pr")
-                    .arg("create")
-                    .arg("--draft")
-                    .arg("--base")
-                    .arg(&base_branch)
-                    .arg("--head")
-                    .arg(&branch_name)
-                    .arg("--title")
-                    .arg(pr_title)
-                    .arg("--body")
-                    .arg(pr_body)
-                    .current_dir(&scratch_dir),
+                thinclaw_platform::tokio_process_command!(
+                    "src.agent.learning.orchestrator.code_proposals.tokio.112",
+                    "gh"
+                )
+                .arg("pr")
+                .arg("create")
+                .arg("--draft")
+                .arg("--base")
+                .arg(&base_branch)
+                .arg("--head")
+                .arg(&branch_name)
+                .arg("--title")
+                .arg(pr_title)
+                .arg("--body")
+                .arg(pr_body)
+                .current_dir(&scratch_dir),
             )
             .await;
             let pr_output = match pr_output {

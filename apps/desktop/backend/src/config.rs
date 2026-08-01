@@ -842,18 +842,18 @@ pub fn open_config_file(app: AppHandle) -> Result<(), crate::thinclaw::bridge::B
     #[cfg(target_os = "macos")]
     {
         thinclaw_platform::spawn_reaped_std(
-            std::process::Command::new("open").arg(&config_path),
+            thinclaw_platform::std_process_command!("apps.desktop.backend.src.config.std.1", "open").arg(&config_path),
         )
             .map_err(|error| format!("Failed to open config file: {error}"))?;
     }
     #[cfg(target_os = "linux")]
     thinclaw_platform::spawn_reaped_std(
-        std::process::Command::new("xdg-open").arg(&config_path),
+        thinclaw_platform::std_process_command!("apps.desktop.backend.src.config.std.2", "xdg-open").arg(&config_path),
     )
     .map_err(|error| format!("Failed to open config file: {error}"))?;
     #[cfg(target_os = "windows")]
     thinclaw_platform::spawn_reaped_std(
-        std::process::Command::new("explorer").arg(&config_path),
+        thinclaw_platform::std_process_command!("apps.desktop.backend.src.config.std.3", "explorer").arg(&config_path),
     )
     .map_err(|error| format!("Failed to open config file: {error}"))?;
 

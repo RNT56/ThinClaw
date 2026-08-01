@@ -366,8 +366,19 @@ fn install_linux(force_no_onboard: bool) -> Result<()> {
     );
 
     thinclaw_platform::write_regular_file_atomic(&file, unit.as_bytes(), true)?;
-    run_checked(Command::new("systemctl").args(["--user", "daemon-reload"])).ok();
-    run_checked(Command::new("systemctl").args(["--user", "enable", SYSTEMD_UNIT])).ok();
+    run_checked(
+        thinclaw_platform::std_process_command!("src.service.std.101", "systemctl")
+            .args(["--user", "daemon-reload"]),
+    )
+    .ok();
+    run_checked(
+        thinclaw_platform::std_process_command!("src.service.std.102", "systemctl").args([
+            "--user",
+            "enable",
+            SYSTEMD_UNIT,
+        ]),
+    )
+    .ok();
     println!("Installed systemd user service: {}", file.display());
     println!("  Start with: thinclaw runtime service start");
     Ok(())
@@ -379,16 +390,34 @@ fn start_macos() -> Result<()> {
     if !plist.exists() {
         bail!("Service not installed. Run `thinclaw runtime service install` first.");
     }
-    run_checked(Command::new("launchctl").arg("load").arg("-w").arg(&plist))?;
-    run_checked(Command::new("launchctl").arg("start").arg(SERVICE_LABEL))?;
+    run_checked(
+        thinclaw_platform::std_process_command!("src.service.std.103", "launchctl")
+            .arg("load")
+            .arg("-w")
+            .arg(&plist),
+    )?;
+    run_checked(
+        thinclaw_platform::std_process_command!("src.service.std.104", "launchctl")
+            .arg("start")
+            .arg(SERVICE_LABEL),
+    )?;
     println!("Service started");
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn start_linux() -> Result<()> {
-    run_checked(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
-    run_checked(Command::new("systemctl").args(["--user", "start", SYSTEMD_UNIT]))?;
+    run_checked(
+        thinclaw_platform::std_process_command!("src.service.std.105", "systemctl")
+            .args(["--user", "daemon-reload"]),
+    )?;
+    run_checked(
+        thinclaw_platform::std_process_command!("src.service.std.106", "systemctl").args([
+            "--user",
+            "start",
+            SYSTEMD_UNIT,
+        ]),
+    )?;
     println!("Service started");
     Ok(())
 }
@@ -396,9 +425,14 @@ fn start_linux() -> Result<()> {
 #[cfg(target_os = "macos")]
 fn stop_macos() -> Result<()> {
     let plist = macos_plist_path()?;
-    run_checked(Command::new("launchctl").arg("stop").arg(SERVICE_LABEL)).ok();
     run_checked(
-        Command::new("launchctl")
+        thinclaw_platform::std_process_command!("src.service.std.107", "launchctl")
+            .arg("stop")
+            .arg(SERVICE_LABEL),
+    )
+    .ok();
+    run_checked(
+        thinclaw_platform::std_process_command!("src.service.std.108", "launchctl")
             .arg("unload")
             .arg("-w")
             .arg(&plist),
@@ -410,14 +444,23 @@ fn stop_macos() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn stop_linux() -> Result<()> {
-    run_checked(Command::new("systemctl").args(["--user", "stop", SYSTEMD_UNIT])).ok();
+    run_checked(
+        thinclaw_platform::std_process_command!("src.service.std.109", "systemctl").args([
+            "--user",
+            "stop",
+            SYSTEMD_UNIT,
+        ]),
+    )
+    .ok();
     println!("Service stopped");
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn status_macos() -> Result<()> {
-    let out = run_capture(Command::new("launchctl").arg("list"))?;
+    let out = run_capture(
+        thinclaw_platform::std_process_command!("src.service.std.110", "launchctl").arg("list"),
+    )?;
     let running = out.lines().any(|line| line.contains(SERVICE_LABEL));
     println!(
         "Service: {}",
@@ -433,8 +476,14 @@ fn status_macos() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn status_linux() -> Result<()> {
-    let state = run_capture(Command::new("systemctl").args(["--user", "is-active", SYSTEMD_UNIT]))
-        .unwrap_or_else(|_| "unknown".into());
+    let state = run_capture(
+        thinclaw_platform::std_process_command!("src.service.std.111", "systemctl").args([
+            "--user",
+            "is-active",
+            SYSTEMD_UNIT,
+        ]),
+    )
+    .unwrap_or_else(|_| "unknown".into());
     println!("Service state: {}", state.trim());
     println!("Unit: {}", linux_unit_path()?.display());
     Ok(())
@@ -458,7 +507,11 @@ fn uninstall_linux() -> Result<()> {
         std::fs::remove_file(&file)
             .with_context(|| format!("failed to remove {}", file.display()))?;
     }
-    run_checked(Command::new("systemctl").args(["--user", "daemon-reload"])).ok();
+    run_checked(
+        thinclaw_platform::std_process_command!("src.service.std.112", "systemctl")
+            .args(["--user", "daemon-reload"]),
+    )
+    .ok();
     println!("Service uninstalled ({})", file.display());
     Ok(())
 }
@@ -892,7 +945,7 @@ mod windows_impl {
         let stdout = open_service_log(&logs_dir.join("service.stdout.log"))?;
         let stderr = open_service_log(&logs_dir.join("service.stderr.log"))?;
 
-        let mut cmd = Command::new(exe);
+        let mut cmd = thinclaw_platform::std_process_command!("src.service.std.113", exe);
         for arg in super::service_run_args(false) {
             cmd.arg(arg);
         }

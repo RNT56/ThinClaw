@@ -12,6 +12,26 @@ use tauri_plugin_shell::ShellExt;
 use super::core::SidecarManager;
 use super::types::{ChatServerOptions, SidecarChild, SidecarEvent, SidecarProcess};
 
+fn wait_for_private_auth_read(port: u16, timeout: std::time::Duration) -> Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            std::time::Duration::from_millis(200),
+        )
+        .is_ok()
+        {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "Sidecar did not read its private auth file before readiness timeout"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 impl SidecarManager {
     fn resolve_inventory_model(
         app: &AppHandle,
@@ -534,6 +554,11 @@ impl SidecarManager {
             .to_str()
             .ok_or_else(|| anyhow!("Prompt cache path is not valid UTF-8"))?
             .to_string();
+        let auth = crate::sidecar_auth::EphemeralSidecarAuth::from_value(token.clone())
+            .map_err(anyhow::Error::msg)?;
+        let auth_file = crate::sidecar_auth::PrivateSidecarAuthFile::create(&cache_dir, &auth)
+            .map_err(anyhow::Error::msg)?;
+        let auth_path = auth_file.path().to_string_lossy().to_string();
 
         let command = app
             .shell()
@@ -567,8 +592,8 @@ impl SidecarManager {
             "127.0.0.1".to_string(),
             "--port".to_string(),
             port.to_string(),
-            "--api-key".to_string(),
-            token.clone(),
+            "--api-key-file".to_string(),
+            auth_path,
             "--alias".to_string(),
             "default".to_string(),
             "--slot-save-path".to_string(),
@@ -627,6 +652,11 @@ impl SidecarManager {
             .args(&args)
             .spawn()
             .map_err(|e| anyhow!("Failed to spawn llama-server: {}", e))?;
+        if let Err(error) = wait_for_private_auth_read(port, std::time::Duration::from_secs(120)) {
+            let _ = child.kill();
+            return Err(error);
+        }
+        auth_file.remove().map_err(anyhow::Error::msg)?;
 
         let pid = child.pid();
         let instance_id = uuid::Uuid::new_v4();
@@ -758,6 +788,17 @@ impl SidecarManager {
         }
 
         let (port, token) = Self::generate_config(Some(53756))?;
+        let auth_root = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| anyhow!("Failed to resolve app data directory: {error}"))?
+            .join("sidecar-auth");
+        Self::ensure_private_directory(&auth_root, "sidecar auth")?;
+        let auth = crate::sidecar_auth::EphemeralSidecarAuth::from_value(token.clone())
+            .map_err(anyhow::Error::msg)?;
+        let auth_file = crate::sidecar_auth::PrivateSidecarAuthFile::create(&auth_root, &auth)
+            .map_err(anyhow::Error::msg)?;
+        let auth_path = auth_file.path().to_string_lossy().to_string();
 
         let command = app
             .shell()
@@ -788,8 +829,8 @@ impl SidecarManager {
             "127.0.0.1".to_string(),
             "--port".to_string(),
             port.to_string(),
-            "--api-key".to_string(),
-            token.clone(),
+            "--api-key-file".to_string(),
+            auth_path,
             "--alias".to_string(),
             "thinclaw-embedding".to_string(),
             "--no-webui".to_string(),
@@ -814,6 +855,11 @@ impl SidecarManager {
             .args(&args)
             .spawn()
             .map_err(|e| anyhow!("Failed to spawn embedding server: {}", e))?;
+        if let Err(error) = wait_for_private_auth_read(port, std::time::Duration::from_secs(120)) {
+            let _ = child.kill();
+            return Err(error);
+        }
+        auth_file.remove().map_err(anyhow::Error::msg)?;
 
         let pid = child.pid();
         let instance_id = uuid::Uuid::new_v4();
@@ -1033,8 +1079,14 @@ impl SidecarManager {
         }
 
         let (port, token) = Self::generate_config(Some(preferred_port))?;
+        let auth_root = app_data.join("sidecar-auth");
+        Self::ensure_private_directory(&auth_root, "sidecar auth")?;
+        let auth = crate::sidecar_auth::EphemeralSidecarAuth::from_value(token.clone())
+            .map_err(anyhow::Error::msg)?;
+        let auth_file = crate::sidecar_auth::PrivateSidecarAuthFile::create(&auth_root, &auth)
+            .map_err(anyhow::Error::msg)?;
         let port_arg = port.to_string();
-        let mut command = tokio::process::Command::new(&server_path);
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.sidecar.lifecycle.tokio.1", &server_path);
         command
             .args([
                 "launch",
@@ -1060,7 +1112,7 @@ impl SidecarManager {
             .env("PYTHONNOUSERSITE", "1")
             .env("HF_HUB_OFFLINE", "1")
             .env("TRANSFORMERS_OFFLINE", "1")
-            .env("THINCLAW_MLX_API_KEY", &token)
+            .env("THINCLAW_MLX_AUTH_FILE", auth_file.path())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -1097,6 +1149,12 @@ impl SidecarManager {
                 .await
                 .is_ok_and(|response| response.status().is_success())
             {
+                if !auth_file.consumed() {
+                    let _ = child.kill().await;
+                    return Err(anyhow!(
+                        "MLX {service} did not consume its private auth file"
+                    ));
+                }
                 break;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1147,6 +1205,17 @@ impl SidecarManager {
         }
 
         let (port, token) = Self::generate_config(Some(53758))?;
+        let auth_root = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| anyhow!("Failed to resolve app data directory: {error}"))?
+            .join("sidecar-auth");
+        Self::ensure_private_directory(&auth_root, "sidecar auth")?;
+        let auth = crate::sidecar_auth::EphemeralSidecarAuth::from_value(token.clone())
+            .map_err(anyhow::Error::msg)?;
+        let auth_file = crate::sidecar_auth::PrivateSidecarAuthFile::create(&auth_root, &auth)
+            .map_err(anyhow::Error::msg)?;
+        let auth_path = auth_file.path().to_string_lossy().to_string();
 
         let command = app
             .shell()
@@ -1180,8 +1249,8 @@ impl SidecarManager {
             "127.0.0.1".to_string(),
             "--port".to_string(),
             port.to_string(),
-            "--api-key".to_string(),
-            token.clone(),
+            "--api-key-file".to_string(),
+            auth_path,
             "--alias".to_string(),
             "thinclaw-summarizer".to_string(),
             "--no-webui".to_string(),
@@ -1198,6 +1267,11 @@ impl SidecarManager {
             .args(&args)
             .spawn()
             .map_err(|e| anyhow!("Failed to spawn summarizer server: {}", e))?;
+        if let Err(error) = wait_for_private_auth_read(port, std::time::Duration::from_secs(120)) {
+            let _ = child.kill();
+            return Err(error);
+        }
+        auth_file.remove().map_err(anyhow::Error::msg)?;
 
         let pid = child.pid();
         let instance_id = uuid::Uuid::new_v4();
@@ -1418,18 +1492,9 @@ impl SidecarManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
 
-        if thinclaw_config::helpers::optional_env("THINCLAW_MANAGED_WHISPER_ENDPOINT")
-            .ok()
-            .flatten()
-            .is_some_and(|value| value == "1")
-        {
-            thinclaw_config::helpers::remove_bridge_vars(&[
-                "THINCLAW_MANAGED_WHISPER_ENDPOINT",
-                "WHISPER_HTTP_ENDPOINT",
-                "WHISPER_HTTP_TOKEN",
-                "WHISPER_HTTP_MODEL",
-            ]);
-        }
+        thinclaw_core::media::local_endpoints::managed_local_endpoints().remove(
+            thinclaw_core::media::local_endpoints::ManagedLocalEndpointKind::SpeechToText,
+        );
 
         Ok(())
     }

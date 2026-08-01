@@ -93,6 +93,7 @@ pub mod rig_lib;
 pub mod secret_store;
 pub mod setup;
 pub mod sidecar;
+mod sidecar_auth;
 pub mod stt;
 pub mod system;
 pub mod templates;

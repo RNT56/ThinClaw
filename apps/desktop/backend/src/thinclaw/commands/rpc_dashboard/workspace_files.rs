@@ -47,13 +47,13 @@ pub async fn thinclaw_reveal_workspace(
 
     // Open in Finder (macOS) / Explorer (Windows) using OS built-ins
     #[cfg(target_os = "macos")]
-    thinclaw_platform::spawn_reaped_std(std::process::Command::new("open").arg(&path_str))
+    thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.1", "open").arg(&path_str))
         .map_err(|e| format!("Failed to open Finder: {}", e))?;
     #[cfg(target_os = "windows")]
-    thinclaw_platform::spawn_reaped_std(std::process::Command::new("explorer").arg(&path_str))
+    thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.2", "explorer").arg(&path_str))
         .map_err(|e| format!("Failed to open Explorer: {}", e))?;
     #[cfg(target_os = "linux")]
-    thinclaw_platform::spawn_reaped_std(std::process::Command::new("xdg-open").arg(&path_str))
+    thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.3", "xdg-open").arg(&path_str))
         .map_err(|e| format!("Failed to open folder: {}", e))?;
 
     info!("[thinclaw-runtime] Revealed workspace: {}", path_str);
@@ -239,7 +239,7 @@ pub async fn thinclaw_reveal_file(
 
     #[cfg(target_os = "macos")]
     thinclaw_platform::spawn_reaped_std(
-        std::process::Command::new("open")
+        thinclaw_platform::std_process_command!("apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.4", "open")
             .arg("-R") // -R = reveal (select in Finder)
             .arg(&p),
     )
@@ -247,7 +247,7 @@ pub async fn thinclaw_reveal_file(
 
     #[cfg(target_os = "windows")]
     thinclaw_platform::spawn_reaped_std(
-        std::process::Command::new("explorer")
+        thinclaw_platform::std_process_command!("apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.5", "explorer")
             .arg("/select,")
             .arg(&p),
     )
@@ -255,7 +255,7 @@ pub async fn thinclaw_reveal_file(
 
     #[cfg(target_os = "linux")]
     thinclaw_platform::spawn_reaped_std(
-        std::process::Command::new("xdg-open").arg(p.parent().unwrap_or(&p)),
+        thinclaw_platform::std_process_command!("apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.6", "xdg-open").arg(p.parent().unwrap_or(&p)),
     )
         .map_err(|e| format!("Failed to open folder: {}", e))?;
 

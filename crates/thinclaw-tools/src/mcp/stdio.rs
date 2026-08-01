@@ -13,7 +13,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -142,7 +141,10 @@ impl StdioTransport {
             })?;
         let private_root = private_environment.path();
 
-        let mut command_builder = Command::new(executable);
+        let mut command_builder = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-tools.src.mcp.stdio.tokio.101",
+            executable
+        );
         command_builder
             .env_clear()
             .args(args)

@@ -1,12 +1,263 @@
 //! Owned, bounded execution for trusted argv-constructed host utilities.
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+
+/// Stable, non-secret identity for one reviewed production process boundary.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProcessLaunchId(String);
+
+impl ProcessLaunchId {
+    pub fn new(value: impl Into<String>) -> Self {
+        let value = value.into();
+        assert!(
+            !value.is_empty()
+                && value.len() <= 160
+                && value.bytes().all(|byte| byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'-' | b'_')),
+            "invalid process launch id"
+        );
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessClass {
+    PlatformUtility,
+    ToolExecutor,
+    RuntimeReexec,
+    ChannelAdapter,
+    DatabaseUtility,
+    LocalSidecar,
+    DesktopAdapter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildEnvironmentPolicy {
+    Empty,
+    ExactReviewed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutablePolicy {
+    AbsolutePinned { digest: Option<String> },
+    ValidatedSearchPath,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HomePolicy {
+    LauncherPrivate,
+    WorkspaceScoped,
+    ReviewedOperatorHome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TempPolicy {
+    LauncherPrivate,
+    ReviewedSystemTemp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesystemPolicy {
+    pub cwd_required: bool,
+    pub reviewed_roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkPolicy {
+    Denied,
+    LoopbackOnly,
+    ReviewedExternal,
+    InheritedSandbox,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationPolicy {
+    HostUnconfined,
+    ReviewedDirectHost,
+    WorkspaceSandbox,
+    Container,
+    DedicatedUser,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessIoPolicy {
+    pub stdin: String,
+    pub stdout_limit: usize,
+    pub stderr_limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessLifetimePolicy {
+    pub timeout_ms: u64,
+    pub owns_process_tree: bool,
+    pub reap_on_drop: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialSlot {
+    pub name: String,
+    pub purpose: String,
+    pub sink: String,
+}
+
+/// Complete review metadata for a process-launch identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessLaunchDescriptor {
+    pub id: ProcessLaunchId,
+    pub owner: String,
+    pub process_class: ProcessClass,
+    pub child_environment: ChildEnvironmentPolicy,
+    pub executable: ExecutablePolicy,
+    pub argument_schema: String,
+    pub filesystem: FilesystemPolicy,
+    pub home: HomePolicy,
+    pub temp: TempPolicy,
+    pub exact_environment: Vec<String>,
+    pub credential_slots: Vec<CredentialSlot>,
+    pub network: NetworkPolicy,
+    pub isolation: IsolationPolicy,
+    pub io: ProcessIoPolicy,
+    pub lifetime: ProcessLifetimePolicy,
+    pub availability: Vec<String>,
+    pub proof_id: String,
+}
+
+impl ProcessLaunchDescriptor {
+    /// Baseline for a reviewed argv-constructed utility. Individual launch
+    /// classes may replace fields before handing the descriptor to the
+    /// launcher; the checked manifest records the final policy.
+    pub fn reviewed_utility(id: &str, owner: &str) -> Self {
+        Self {
+            id: ProcessLaunchId::new(id),
+            owner: owner.to_string(),
+            process_class: ProcessClass::PlatformUtility,
+            child_environment: ChildEnvironmentPolicy::ExactReviewed,
+            executable: ExecutablePolicy::ValidatedSearchPath,
+            argument_schema: "argv_reviewed_at_typed_call_site".to_string(),
+            filesystem: FilesystemPolicy {
+                cwd_required: false,
+                reviewed_roots: Vec::new(),
+            },
+            home: HomePolicy::ReviewedOperatorHome,
+            temp: TempPolicy::ReviewedSystemTemp,
+            exact_environment: Vec::new(),
+            credential_slots: Vec::new(),
+            network: NetworkPolicy::Denied,
+            isolation: IsolationPolicy::ReviewedDirectHost,
+            io: ProcessIoPolicy {
+                stdin: "null_or_typed_input".to_string(),
+                stdout_limit: 8 * 1024 * 1024,
+                stderr_limit: 8 * 1024 * 1024,
+            },
+            lifetime: ProcessLifetimePolicy {
+                timeout_ms: 30 * 60 * 1000,
+                owns_process_tree: true,
+                reap_on_drop: true,
+            },
+            availability: Vec::new(),
+            proof_id: format!("process-launch:{}.ambient-isolation", id),
+        }
+    }
+}
+
+static OBSERVED_PROCESS_LAUNCHES: OnceLock<
+    Mutex<BTreeMap<ProcessLaunchId, ProcessLaunchDescriptor>>,
+> = OnceLock::new();
+
+fn observe_descriptor(descriptor: ProcessLaunchDescriptor) {
+    let descriptors = OBSERVED_PROCESS_LAUNCHES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut descriptors = descriptors
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match descriptors.get(&descriptor.id) {
+        Some(existing) => assert_eq!(existing, &descriptor, "process launch id was rebound"),
+        None => {
+            descriptors.insert(descriptor.id.clone(), descriptor);
+        }
+    }
+}
+
+/// Constructor-level process boundary. Clearing the environment here is
+/// deliberate: direct `output`, `status`, and `spawn` calls cannot bypass the
+/// ambient credential boundary.
+pub struct ProcessLauncher;
+
+impl ProcessLauncher {
+    pub fn tokio(descriptor: ProcessLaunchDescriptor, program: impl AsRef<OsStr>) -> Command {
+        observe_descriptor(descriptor);
+        let mut command = Command::new(program);
+        apply_child_environment_policy(command.as_std_mut())
+            .expect("reviewed process environment policy must be constructible");
+        command
+    }
+
+    pub fn std(
+        descriptor: ProcessLaunchDescriptor,
+        program: impl AsRef<OsStr>,
+    ) -> std::process::Command {
+        observe_descriptor(descriptor);
+        let mut command = std::process::Command::new(program);
+        apply_child_environment_policy(&mut command)
+            .expect("reviewed process environment policy must be constructible");
+        command
+    }
+
+    pub fn observed_descriptors() -> Vec<ProcessLaunchDescriptor> {
+        OBSERVED_PROCESS_LAUNCHES
+            .get()
+            .map(|descriptors| {
+                descriptors
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .values()
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[macro_export]
+macro_rules! tokio_process_command {
+    ($id:literal, $program:expr) => {
+        $crate::process::ProcessLauncher::tokio(
+            $crate::process::ProcessLaunchDescriptor::reviewed_utility($id, module_path!()),
+            $program,
+        )
+    };
+}
+
+#[macro_export]
+macro_rules! std_process_command {
+    ($id:literal, $program:expr) => {
+        $crate::process::ProcessLauncher::std(
+            $crate::process::ProcessLaunchDescriptor::reviewed_utility($id, module_path!()),
+            $program,
+        )
+    };
+}
 
 /// A child process plus ownership of every descendant it creates.
 ///

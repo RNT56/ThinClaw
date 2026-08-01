@@ -165,7 +165,10 @@ impl ClaudeCodeConfig {
     pub fn extract_oauth_token() -> Option<String> {
         // macOS: extract from Keychain
         if cfg!(target_os = "macos") {
-            let mut command = std::process::Command::new("security");
+            let mut command = thinclaw_platform::std_process_command!(
+                "crates.thinclaw-config.src.sandbox.std.1",
+                "security"
+            );
             command.args([
                 "find-generic-password",
                 "-s",

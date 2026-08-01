@@ -332,7 +332,7 @@ fn check_workspace_dir() -> CheckResult {
 }
 
 fn check_binary(name: &str, args: &[&str]) -> CheckResult {
-    let mut command = std::process::Command::new(name);
+    let mut command = thinclaw_platform::std_process_command!("src.cli.doctor.std.1", name);
     command.args(args);
     match thinclaw_platform::bounded_std_command_output(
         &mut command,

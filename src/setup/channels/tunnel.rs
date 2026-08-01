@@ -253,7 +253,8 @@ async fn setup_tunnel_cloudflare(
 /// is not in `$PATH` (common for processes spawned by launchd/IDEs).
 async fn test_tailscale_cli() -> bool {
     let binary = crate::util::resolve_binary("tailscale");
-    let mut command = tokio::process::Command::new(&binary);
+    let mut command =
+        thinclaw_platform::tokio_process_command!("src.setup.channels.tunnel.tokio.1", &binary);
     command.arg("version");
     let output = thinclaw_platform::bounded_command_output(
         &mut command,
@@ -314,7 +315,10 @@ async fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
                     true,
                 )? {
                     print_info("Installing tailscale via Homebrew (this may take a minute)...");
-                    let mut command = tokio::process::Command::new("brew");
+                    let mut command = thinclaw_platform::tokio_process_command!(
+                        "src.setup.channels.tunnel.tokio.2",
+                        "brew"
+                    );
                     command.args(["install", "tailscale"]);
                     let install_result = thinclaw_platform::bounded_command_output(
                         &mut command,

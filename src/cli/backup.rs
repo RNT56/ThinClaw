@@ -336,7 +336,8 @@ async fn pg_dump_export(config: &Config) -> anyhow::Result<Option<(Vec<u8>, Stri
     } else {
         None
     };
-    let mut command = tokio::process::Command::new("pg_dump");
+    let mut command =
+        thinclaw_platform::tokio_process_command!("src.cli.backup.tokio.1", "pg_dump");
     command
         .arg("--format=custom")
         .arg("--no-owner")

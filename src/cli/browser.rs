@@ -109,7 +109,7 @@ fn find_browser() -> Option<PathBuf> {
 async fn headless_dom_dump(browser: &Path, url: &str, wait_secs: u64) -> anyhow::Result<String> {
     validate_browser_url(url)?;
     let wait_secs = wait_secs.min(120);
-    let mut command = tokio::process::Command::new(browser);
+    let mut command = thinclaw_platform::tokio_process_command!("src.cli.browser.tokio.1", browser);
     command.args([
         "--headless",
         "--disable-gpu",
@@ -169,7 +169,7 @@ async fn headless_screenshot(
         .prefix(".thinclaw-screenshot-")
         .tempdir_in(&canonical_parent)?;
     let staged_path = stage_dir.path().join("screenshot.png");
-    let mut command = tokio::process::Command::new(browser);
+    let mut command = thinclaw_platform::tokio_process_command!("src.cli.browser.tokio.2", browser);
     command.args([
         "--headless",
         "--disable-gpu",
@@ -308,7 +308,8 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
                     println!("✅ Browser found: {}", path.display());
 
                     // Try getting version
-                    let mut command = tokio::process::Command::new(&path);
+                    let mut command =
+                        thinclaw_platform::tokio_process_command!("src.cli.browser.tokio.3", &path);
                     command.arg("--version");
                     if let Ok(output) = thinclaw_platform::bounded_command_output(
                         &mut command,

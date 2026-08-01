@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinuxReadinessProfile {
@@ -956,7 +955,8 @@ fn probe_command_required(
 }
 
 fn command_success(program: &str, args: &[&str]) -> bool {
-    let mut command = Command::new(program);
+    let mut command =
+        thinclaw_platform::std_process_command!("src.platform.linux_readiness.std.101", program);
     command.args(args);
     thinclaw_platform::bounded_std_command_output(
         &mut command,
@@ -968,7 +968,8 @@ fn command_success(program: &str, args: &[&str]) -> bool {
 }
 
 fn command_output_trimmed(program: &str, args: &[&str]) -> Option<String> {
-    let mut command = Command::new(program);
+    let mut command =
+        thinclaw_platform::std_process_command!("src.platform.linux_readiness.std.102", program);
     command.args(args);
     let output = thinclaw_platform::bounded_std_command_output(
         &mut command,
@@ -1591,7 +1592,8 @@ fn python_module_available(module: &str) -> bool {
 }
 
 fn rustup_has_wasm32_wasip2() -> bool {
-    let mut command = Command::new("rustup");
+    let mut command =
+        thinclaw_platform::std_process_command!("src.platform.linux_readiness.std.103", "rustup");
     command.args(["target", "list", "--installed"]);
     let Ok(output) = thinclaw_platform::bounded_std_command_output(
         &mut command,

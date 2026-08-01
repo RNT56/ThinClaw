@@ -314,7 +314,10 @@ async fn build_channel_artifact(name: &str) -> Result<(), String> {
         ));
     }
 
-    let mut command = tokio::process::Command::new("cargo");
+    let mut command = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-channels.src.wasm.bundled.tokio.1",
+        "cargo"
+    );
     command
         .args(["component", "build", "--release"])
         .current_dir(&channel_dir);

@@ -1,7 +1,6 @@
 //! Cloudflare Tunnel via the `cloudflared` binary.
 
 use anyhow::{Result, bail};
-use tokio::process::Command;
 
 use crate::tunnel::{
     SharedProcess, SharedUrl, Tunnel, TunnelProcess, drain_tunnel_output, kill_shared,
@@ -40,7 +39,10 @@ impl Tunnel for CloudflareTunnel {
             bail!("managed Cloudflare tunnel hostname must be a valid HTTPS URL");
         }
         let public_url = public_url.as_str().trim_end_matches('/').to_string();
-        let mut command = Command::new(crate::tunnel::resolve_binary("cloudflared"));
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "src.tunnel.cloudflare.tokio.101",
+            crate::tunnel::resolve_binary("cloudflared")
+        );
         command
             .args(["tunnel", "--no-autoupdate", "run", "--url", &origin])
             // Keep the credential out of argv/process listings. cloudflared

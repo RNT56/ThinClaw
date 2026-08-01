@@ -81,11 +81,14 @@ impl DesktopAutonomyManager {
                 }
                 for (name, reason, script) in command_checks {
                     let result = run_cmd(
-                        Command::new("powershell")
-                            .arg("-NoLogo")
-                            .arg("-NoProfile")
-                            .arg("-Command")
-                            .arg(script),
+                        thinclaw_platform::tokio_process_command!(
+                            "src.desktop_autonomy.prerequisites.tokio.101",
+                            "powershell"
+                        )
+                        .arg("-NoLogo")
+                        .arg("-NoProfile")
+                        .arg("-Command")
+                        .arg(script),
                     )
                     .await;
                     let evidence = self.attach_runtime_evidence(
@@ -176,9 +179,12 @@ impl DesktopAutonomyManager {
                         serde_json::json!({ "command": command_name }),
                     );
                     match run_cmd(
-                        Command::new("sh")
-                            .arg("-lc")
-                            .arg(format!("command -v {command_name}")),
+                        thinclaw_platform::tokio_process_command!(
+                            "src.desktop_autonomy.prerequisites.tokio.102",
+                            "sh"
+                        )
+                        .arg("-lc")
+                        .arg(format!("command -v {command_name}")),
                     )
                     .await
                     {
@@ -245,9 +251,12 @@ impl DesktopAutonomyManager {
                 );
                 for (name, module) in [("pyatspi_module", "pyatspi"), ("pygobject_module", "gi")] {
                     match run_cmd(
-                        Command::new("python3")
-                            .arg("-c")
-                            .arg(format!("import {module}")),
+                        thinclaw_platform::tokio_process_command!(
+                            "src.desktop_autonomy.prerequisites.tokio.103",
+                            "python3"
+                        )
+                        .arg("-c")
+                        .arg(format!("import {module}")),
                     )
                     .await
                     {
@@ -273,7 +282,16 @@ impl DesktopAutonomyManager {
                         }
                     }
                 }
-                match run_cmd(Command::new("python3").arg("-c").arg("import uno")).await {
+                match run_cmd(
+                    thinclaw_platform::tokio_process_command!(
+                        "src.desktop_autonomy.prerequisites.tokio.104",
+                        "python3"
+                    )
+                    .arg("-c")
+                    .arg("import uno"),
+                )
+                .await
+                {
                     Ok(_) => checks.push(passed_check(
                         "libreoffice_uno",
                         None,
@@ -295,7 +313,16 @@ impl DesktopAutonomyManager {
                         ));
                     }
                 }
-                match run_cmd(Command::new("sh").arg("-lc").arg("command -v tesseract")).await {
+                match run_cmd(
+                    thinclaw_platform::tokio_process_command!(
+                        "src.desktop_autonomy.prerequisites.tokio.105",
+                        "sh"
+                    )
+                    .arg("-lc")
+                    .arg("command -v tesseract"),
+                )
+                .await
+                {
                     Ok(_) => checks.push(passed_check(
                         "ocr_tooling",
                         None,
@@ -318,9 +345,12 @@ impl DesktopAutonomyManager {
                     }
                 }
                 match run_cmd(
-                    Command::new("sh")
-                        .arg("-lc")
-                        .arg("command -v gedit || command -v xdg-text-editor"),
+                    thinclaw_platform::tokio_process_command!(
+                        "src.desktop_autonomy.prerequisites.tokio.106",
+                        "sh"
+                    )
+                    .arg("-lc")
+                    .arg("command -v gedit || command -v xdg-text-editor"),
                 )
                 .await
                 {

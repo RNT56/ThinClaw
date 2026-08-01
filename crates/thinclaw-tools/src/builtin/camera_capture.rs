@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::process::Command;
 
 use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};
 use thinclaw_types::JobContext;
@@ -71,7 +70,10 @@ async fn capture_camera(path: &std::path::Path, warmup_secs: f32) -> Result<Stri
 
     // Try imagesnap first (most reliable on macOS)
     let deadline = tokio::time::Instant::now() + CAMERA_HELPER_TIMEOUT;
-    let mut imagesnap_command = Command::new("imagesnap");
+    let mut imagesnap_command = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-tools.src.builtin.camera_capture.tokio.101",
+        "imagesnap"
+    );
     imagesnap_command
         .arg("-w")
         .arg(format!("{warmup_secs}"))
@@ -94,7 +96,10 @@ async fn capture_camera(path: &std::path::Path, warmup_secs: f32) -> Result<Stri
 
     // Fallback to ffmpeg
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let mut ffmpeg_command = Command::new("ffmpeg");
+    let mut ffmpeg_command = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-tools.src.builtin.camera_capture.tokio.102",
+        "ffmpeg"
+    );
     ffmpeg_command
         .args([
             "-f",
@@ -184,7 +189,10 @@ async fn capture_camera(
     let deadline = tokio::time::Instant::now() + CAMERA_HELPER_TIMEOUT;
 
     // Try fswebcam first
-    let mut fswebcam_command = Command::new("fswebcam");
+    let mut fswebcam_command = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-tools.src.builtin.camera_capture.tokio.103",
+        "fswebcam"
+    );
     fswebcam_command
         .args(["-d", &device, "-r", "1280x720", "--no-banner"])
         .arg(path);
@@ -206,7 +214,10 @@ async fn capture_camera(
 
     // Fallback to ffmpeg
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let mut ffmpeg_command = Command::new("ffmpeg");
+    let mut ffmpeg_command = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-tools.src.builtin.camera_capture.tokio.104",
+        "ffmpeg"
+    );
     ffmpeg_command
         .args([
             "-f",
@@ -244,7 +255,10 @@ async fn capture_camera(
 /// Capture from camera on Windows.
 #[cfg(target_os = "windows")]
 async fn list_windows_video_devices() -> Result<Vec<String>, ToolError> {
-    let mut command = Command::new("ffmpeg");
+    let mut command = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-tools.src.builtin.camera_capture.tokio.105",
+        "ffmpeg"
+    );
     command.args([
         "-hide_banner",
         "-list_devices",
@@ -317,7 +331,10 @@ async fn capture_camera(
         ));
     }
 
-    let mut command = Command::new("ffmpeg");
+    let mut command = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-tools.src.builtin.camera_capture.tokio.106",
+        "ffmpeg"
+    );
     command
         .args([
             "-f",

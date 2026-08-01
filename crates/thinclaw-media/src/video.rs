@@ -291,7 +291,10 @@ impl VideoAnalyzer {
 
     /// Extract metadata using `ffprobe -print_format json`.
     fn extract_metadata_ffprobe(&self, path: &Path) -> Result<VideoMetadata, VideoError> {
-        let mut command = Command::new("ffprobe");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-media.src.video.tokio.101",
+            "ffprobe"
+        );
         command
             .args([
                 "-v",
@@ -486,7 +489,10 @@ impl VideoAnalyzer {
         let filter = format!("{},{}", fps_filter, scale_filter);
         let frame_limit = self.config.max_keyframes.to_string();
         let duration_limit = self.config.max_duration_secs.to_string();
-        let mut command = Command::new("ffmpeg");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-media.src.video.tokio.102",
+            "ffmpeg"
+        );
         command
             .args([
                 "-nostdin",
@@ -572,7 +578,10 @@ impl VideoAnalyzer {
         let audio_out = out_dir.join("audio.wav");
 
         let duration_limit = self.config.max_duration_secs.to_string();
-        let mut command = Command::new("ffmpeg");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-media.src.video.tokio.103",
+            "ffmpeg"
+        );
         command
             .args([
                 "-nostdin",

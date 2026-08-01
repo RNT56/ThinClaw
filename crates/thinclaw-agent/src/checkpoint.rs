@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thinclaw_tools::execution::{BoundedProcessOutput, bounded_command_output};
 use thinclaw_types::JobContext;
-use tokio::process::Command;
 
 const DEFAULT_MAX_CHECKPOINTS: usize = 50;
 const GIT_AUTHOR_NAME: &str = "ThinClaw";
@@ -180,7 +179,10 @@ fn git_output(
     work_tree: Option<&Path>,
     current_dir: Option<&Path>,
 ) -> Result<BoundedProcessOutput, CheckpointError> {
-    let mut command = Command::new("git");
+    let mut command = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-agent.src.checkpoint.tokio.101",
+        "git"
+    );
     command.args(args);
     command.env("GIT_AUTHOR_NAME", GIT_AUTHOR_NAME);
     command.env("GIT_AUTHOR_EMAIL", GIT_AUTHOR_EMAIL);

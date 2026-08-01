@@ -3,8 +3,8 @@
 //! The Python environment is assembled in a private staging directory from a
 //! pinned server release, validated, and atomically activated. The model server
 //! runs inside a descendant-owned process boundary and is protected by a
-//! per-launch bearer token injected through a small, validated `sitecustomize`
-//! shim because upstream `mlx-openai-server` does not implement authentication.
+//! per-launch bearer credential delivered through an owner-private, one-use
+//! auth file consumed by a validated `sitecustomize` shim.
 
 use async_trait::async_trait;
 use rand::{rngs::OsRng, RngCore};
@@ -51,7 +51,15 @@ _thinclaw_original_fastapi_init = FastAPI.__init__
 
 def _thinclaw_fastapi_init(self, *args, **kwargs):
     _thinclaw_original_fastapi_init(self, *args, **kwargs)
-    token = os.environ.get("THINCLAW_MLX_API_KEY", "")
+    auth_path = os.environ.pop("THINCLAW_MLX_AUTH_FILE", "")
+    if not auth_path:
+        raise RuntimeError("ThinClaw MLX API credential is unavailable")
+    fd = os.open(auth_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        token = os.read(fd, 4097).decode("ascii")
+    finally:
+        os.close(fd)
+        os.unlink(auth_path)
     if len(token) < 32:
         raise RuntimeError("ThinClaw MLX API credential is unavailable")
     expected = "Bearer " + token
@@ -213,7 +221,7 @@ impl MlxEngine {
     }
 
     fn hardened_uv_command(uv: &Path, data_root: &Path) -> Command {
-        let mut command = Command::new(uv);
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.engine.engine_mlx.tokio.101", uv);
         for (key, _) in std::env::vars_os() {
             let name = key.to_string_lossy().to_ascii_uppercase();
             if name.starts_with("UV_")
@@ -311,7 +319,7 @@ impl MlxEngine {
         if !Self::regular_resolved_file(&executable) {
             return Err("Could not inspect the macOS version".to_string());
         }
-        let mut command = Command::new(executable);
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.engine.engine_mlx.tokio.102", executable);
         command.arg("-productVersion");
         let output = bounded_command_output(&mut command, Duration::from_secs(10), 4096, 4096)
             .await
@@ -368,7 +376,7 @@ print("thinclaw-mlx-runtime-ok")
             packages = RUNTIME_PACKAGES_JSON,
             python_version = PYTHON_VERSION,
         );
-        let mut command = Command::new(python);
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.engine.engine_mlx.tokio.103", python);
         command
             .arg("-c")
             .arg(validation)
@@ -378,8 +386,13 @@ print("thinclaw-mlx-runtime-ok")
             .env("PYTHONNOUSERSITE", "1")
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .env("HF_HUB_OFFLINE", "1")
-            .env("TRANSFORMERS_OFFLINE", "1")
-            .env("THINCLAW_MLX_API_KEY", "0".repeat(64));
+            .env("TRANSFORMERS_OFFLINE", "1");
+        let auth = crate::sidecar_auth::EphemeralSidecarAuth::generate();
+        let auth_file = crate::sidecar_auth::PrivateSidecarAuthFile::create(
+            python.parent().and_then(Path::parent).unwrap_or_else(|| Path::new(".")),
+            &auth,
+        )?;
+        command.env("THINCLAW_MLX_AUTH_FILE", auth_file.path());
         let output = bounded_command_output(
             &mut command,
             Duration::from_secs(3 * 60),
@@ -397,12 +410,15 @@ print("thinclaw-mlx-runtime-ok")
         if !String::from_utf8_lossy(&output.stdout).contains("thinclaw-mlx-runtime-ok") {
             return Err("MLX runtime validation returned an unexpected result".to_string());
         }
+        if !auth_file.consumed() {
+            return Err("MLX validation did not consume its private auth file".to_string());
+        }
         Ok(())
     }
 
     async fn validate_activated_environment(venv: &Path) -> Result<(), String> {
         let server = Self::server_path_for(venv);
-        let mut command = Command::new(server);
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.engine.engine_mlx.tokio.104", server);
         command
             .arg("--help")
             .env_remove("PYTHONPATH")
@@ -411,8 +427,13 @@ print("thinclaw-mlx-runtime-ok")
             .env("PYTHONNOUSERSITE", "1")
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .env("HF_HUB_OFFLINE", "1")
-            .env("TRANSFORMERS_OFFLINE", "1")
-            .env("THINCLAW_MLX_API_KEY", "0".repeat(64));
+            .env("TRANSFORMERS_OFFLINE", "1");
+        let auth = crate::sidecar_auth::EphemeralSidecarAuth::generate();
+        let auth_file = crate::sidecar_auth::PrivateSidecarAuthFile::create(
+            venv.parent().unwrap_or_else(|| Path::new(".")),
+            &auth,
+        )?;
+        command.env("THINCLAW_MLX_AUTH_FILE", auth_file.path());
         let output = bounded_command_output(
             &mut command,
             Duration::from_secs(60),
@@ -426,6 +447,9 @@ print("thinclaw-mlx-runtime-ok")
                 "Activated MLX executable validation failed: {}",
                 Self::clean_process_detail(&output.stderr)
             ));
+        }
+        if !auth_file.consumed() {
+            return Err("Activated MLX server did not consume its private auth file".to_string());
         }
         Ok(())
     }
@@ -749,10 +773,13 @@ impl InferenceEngine for MlxEngine {
             .map_err(|error| format!("Could not create private MLX prompt cache: {error}"))?;
 
         let port = Self::find_free_port()?;
-        let token = Self::generate_api_token();
+        let auth = crate::sidecar_auth::EphemeralSidecarAuth::generate();
+        let token = auth.expose().to_string();
+        let auth_file =
+            crate::sidecar_auth::PrivateSidecarAuthFile::create(runtime_dir.path(), &auth)?;
         let client = Self::local_client()?;
         self.diagnostics.reset().await;
-        let mut command = Command::new(&server);
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.engine.engine_mlx.tokio.105", &server);
         command
             .args([
                 "launch",
@@ -795,7 +822,7 @@ impl InferenceEngine for MlxEngine {
             .env("HF_HUB_OFFLINE", "1")
             .env("TRANSFORMERS_OFFLINE", "1")
             .env("TOKENIZERS_PARALLELISM", "false")
-            .env("THINCLAW_MLX_API_KEY", &token)
+            .env("THINCLAW_MLX_AUTH_FILE", auth_file.path())
             .current_dir(runtime_dir.path())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -840,6 +867,10 @@ impl InferenceEngine for MlxEngine {
                 .await
                 .is_ok_and(|response| response.status().is_success())
             {
+                if !auth_file.consumed() {
+                    let _ = child.kill().await;
+                    return Err("MLX sidecar did not consume its private auth file".to_string());
+                }
                 *self.port.lock().unwrap_or_else(|error| error.into_inner()) = Some(port);
                 *self
                     .process

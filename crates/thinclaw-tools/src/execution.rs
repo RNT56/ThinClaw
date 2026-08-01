@@ -1017,7 +1017,10 @@ fn build_shell_command(command: &str, allow_network: bool, confine_root: Option<
     #[cfg(target_os = "macos")]
     if Path::new("/usr/bin/sandbox-exec").is_file() {
         if let Some(root) = confine_root {
-            let mut sandboxed = Command::new("/usr/bin/sandbox-exec");
+            let mut sandboxed = thinclaw_platform::tokio_process_command!(
+                "crates.thinclaw-tools.src.execution.tokio.101",
+                "/usr/bin/sandbox-exec"
+            );
             sandboxed
                 .arg("-p")
                 .arg(macos_confined_profile(root, allow_network));
@@ -1025,7 +1028,10 @@ fn build_shell_command(command: &str, allow_network: bool, confine_root: Option<
             return sandboxed;
         }
         if !allow_network {
-            let mut sandboxed = Command::new("/usr/bin/sandbox-exec");
+            let mut sandboxed = thinclaw_platform::tokio_process_command!(
+                "crates.thinclaw-tools.src.execution.tokio.102",
+                "/usr/bin/sandbox-exec"
+            );
             sandboxed.arg("-p").arg(macos_network_deny_profile());
             add_shell_args(&mut sandboxed, command);
             return sandboxed;
@@ -1036,7 +1042,10 @@ fn build_shell_command(command: &str, allow_network: bool, confine_root: Option<
     if (!allow_network || confine_root.is_some())
         && let Some(wrapper) = linux_bubblewrap_program()
     {
-        let mut sandboxed = Command::new(wrapper);
+        let mut sandboxed = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-tools.src.execution.tokio.103",
+            wrapper
+        );
         sandboxed.arg("--die-with-parent");
         if !allow_network {
             sandboxed.arg("--unshare-net");
@@ -1053,14 +1062,20 @@ fn build_shell_command(command: &str, allow_network: bool, confine_root: Option<
 fn shell_command(command: &str) -> Command {
     #[cfg(windows)]
     {
-        let mut cmd = Command::new("cmd.exe");
+        let mut cmd = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-tools.src.execution.tokio.104",
+            "cmd.exe"
+        );
         cmd.arg("/C").arg(command);
         cmd
     }
     #[cfg(not(windows))]
     {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        let mut cmd = Command::new(shell);
+        let mut cmd = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-tools.src.execution.tokio.105",
+            shell
+        );
         cmd.arg("-lc").arg(command);
         cmd
     }
@@ -1093,7 +1108,10 @@ fn build_script_command(
     #[cfg(target_os = "macos")]
     if Path::new("/usr/bin/sandbox-exec").is_file() {
         if let Some(root) = confine_root {
-            let mut sandboxed = Command::new("/usr/bin/sandbox-exec");
+            let mut sandboxed = thinclaw_platform::tokio_process_command!(
+                "crates.thinclaw-tools.src.execution.tokio.106",
+                "/usr/bin/sandbox-exec"
+            );
             sandboxed
                 .arg("-p")
                 .arg(macos_confined_profile(root, allow_network));
@@ -1101,7 +1119,10 @@ fn build_script_command(
             return sandboxed;
         }
         if !allow_network {
-            let mut sandboxed = Command::new("/usr/bin/sandbox-exec");
+            let mut sandboxed = thinclaw_platform::tokio_process_command!(
+                "crates.thinclaw-tools.src.execution.tokio.107",
+                "/usr/bin/sandbox-exec"
+            );
             sandboxed.arg("-p").arg(macos_network_deny_profile());
             sandboxed.arg(program).args(args);
             return sandboxed;
@@ -1112,7 +1133,10 @@ fn build_script_command(
     if (!allow_network || confine_root.is_some())
         && let Some(wrapper) = linux_bubblewrap_program()
     {
-        let mut sandboxed = Command::new(wrapper);
+        let mut sandboxed = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-tools.src.execution.tokio.108",
+            wrapper
+        );
         sandboxed.arg("--die-with-parent");
         if !allow_network {
             sandboxed.arg("--unshare-net");
@@ -1123,7 +1147,10 @@ fn build_script_command(
         return sandboxed;
     }
 
-    let mut command = Command::new(program);
+    let mut command = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-tools.src.execution.tokio.109",
+        program
+    );
     command.args(args);
     command
 }
@@ -1545,14 +1572,17 @@ mod macos_sandbox_tests {
     }
 
     fn run_sandboxed_write(profile: &str, target: &Path) -> bool {
-        std::process::Command::new("/usr/bin/sandbox-exec")
-            .arg("-p")
-            .arg(profile)
-            .arg("/bin/sh")
-            .arg("-c")
-            .arg(format!("printf hi > '{}'", target.display()))
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+        thinclaw_platform::std_process_command!(
+            "crates.thinclaw-tools.src.execution.std.1",
+            "/usr/bin/sandbox-exec"
+        )
+        .arg("-p")
+        .arg(profile)
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(format!("printf hi > '{}'", target.display()))
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
     }
 }

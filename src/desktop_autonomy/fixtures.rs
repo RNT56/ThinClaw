@@ -169,7 +169,10 @@ impl DesktopAutonomyManager {
         binary_path: &Path,
         manifest: &DesktopCanaryManifest,
     ) -> Result<DesktopCanaryReport, String> {
-        let mut command = Command::new(binary_path);
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "src.desktop_autonomy.fixtures.tokio.101",
+            binary_path
+        );
         command.arg("autonomy-shadow-canary");
         command.arg("--manifest");
         command.arg(manifest.report_path.with_file_name("canary-manifest.json"));

@@ -1,7 +1,6 @@
 //! Tailscale tunnel via `tailscale serve` or `tailscale funnel`.
 
 use anyhow::{Result, bail};
-use tokio::process::Command;
 
 use crate::tunnel::{
     SharedProcess, SharedUrl, Tunnel, TunnelProcess, drain_tunnel_output, kill_shared,
@@ -41,7 +40,10 @@ impl Tunnel for TailscaleTunnel {
         let hostname = if let Some(ref h) = self.hostname {
             h.clone()
         } else {
-            let mut command = Command::new(crate::tunnel::resolve_binary("tailscale"));
+            let mut command = thinclaw_platform::tokio_process_command!(
+                "src.tunnel.tailscale.tokio.101",
+                crate::tunnel::resolve_binary("tailscale")
+            );
             command.args(["status", "--json"]);
             let output = thinclaw_platform::bounded_command_output(
                 &mut command,
@@ -99,7 +101,8 @@ impl Tunnel for TailscaleTunnel {
         // for port 443" if ThinClaw was killed without a clean shutdown.
         let ts_bin = crate::tunnel::resolve_binary("tailscale");
         tracing::debug!("Resetting stale tailscale {subcommand} config before start");
-        let mut reset_command = Command::new(&ts_bin);
+        let mut reset_command =
+            thinclaw_platform::tokio_process_command!("src.tunnel.tailscale.tokio.102", &ts_bin);
         reset_command.args([subcommand, "reset"]);
         let reset_output = thinclaw_platform::bounded_command_output(
             &mut reset_command,
@@ -129,7 +132,8 @@ impl Tunnel for TailscaleTunnel {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         // Spawn the tailscale serve/funnel process
-        let mut command = Command::new(&ts_bin);
+        let mut command =
+            thinclaw_platform::tokio_process_command!("src.tunnel.tailscale.tokio.103", &ts_bin);
         command
             .args([subcommand, &target])
             .stdout(std::process::Stdio::piped())
@@ -235,7 +239,10 @@ impl Tunnel for TailscaleTunnel {
 
     async fn stop(&self) -> Result<()> {
         let subcommand = if self.funnel { "funnel" } else { "serve" };
-        let mut command = Command::new(crate::tunnel::resolve_binary("tailscale"));
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "src.tunnel.tailscale.tokio.104",
+            crate::tunnel::resolve_binary("tailscale")
+        );
         command.args([subcommand, "reset"]);
         if let Err(e) = thinclaw_platform::bounded_command_output(
             &mut command,

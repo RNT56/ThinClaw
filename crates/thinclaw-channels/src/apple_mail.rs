@@ -228,7 +228,10 @@ impl AppleMailChannel {
         }
 
         // Check sqlite3
-        let mut sqlite3_check = tokio::process::Command::new("sqlite3");
+        let mut sqlite3_check = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.apple_mail.tokio.1",
+            "sqlite3"
+        );
         sqlite3_check.arg("--version");
         let sqlite3_available = output_with_timeout(&mut sqlite3_check, "sqlite3 diagnostic")
             .await
@@ -239,7 +242,10 @@ impl AppleMailChannel {
         }
 
         // Check osascript
-        let mut osascript_check = tokio::process::Command::new("osascript");
+        let mut osascript_check = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.apple_mail.tokio.2",
+            "osascript"
+        );
         osascript_check.arg("-e").arg("return \"ok\"");
         let osascript_available = output_with_timeout(&mut osascript_check, "osascript diagnostic")
             .await
@@ -250,7 +256,10 @@ impl AppleMailChannel {
         }
 
         // Check Mail.app running
-        let mut pgrep = tokio::process::Command::new("pgrep");
+        let mut pgrep = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.apple_mail.tokio.3",
+            "pgrep"
+        );
         pgrep.arg("-x").arg("Mail");
         let mail_running = output_with_timeout(&mut pgrep, "pgrep Mail diagnostic")
             .await
@@ -262,7 +271,10 @@ impl AppleMailChannel {
 
         // Get total message count
         let total_messages = if db_exists && sqlite3_available {
-            let mut count = tokio::process::Command::new("sqlite3");
+            let mut count = thinclaw_platform::tokio_process_command!(
+                "crates.thinclaw-channels.src.apple_mail.tokio.4",
+                "sqlite3"
+            );
             count.arg(&db_path).arg("SELECT COUNT(*) FROM messages;");
             output_with_timeout(&mut count, "sqlite3 Mail count diagnostic")
                 .await
@@ -291,7 +303,10 @@ impl AppleMailChannel {
 
     /// Get the latest ROWID from the messages table.
     async fn get_latest_rowid(db_path: &std::path::Path) -> Result<i64, ChannelError> {
-        let mut cmd = tokio::process::Command::new("sqlite3");
+        let mut cmd = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.apple_mail.tokio.5",
+            "sqlite3"
+        );
         cmd.arg(db_path).arg("SELECT MAX(ROWID) FROM messages;");
         let output = output_with_timeout(&mut cmd, "sqlite3 max-rowid")
             .await
@@ -357,7 +372,10 @@ impl AppleMailChannel {
             read_filter
         );
 
-        let mut cmd = tokio::process::Command::new("sqlite3");
+        let mut cmd = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.apple_mail.tokio.6",
+            "sqlite3"
+        );
         cmd.arg("-separator").arg("|").arg(db_path).arg(&query);
         let output = output_with_timeout(&mut cmd, "sqlite3 poll")
             .await
@@ -425,7 +443,10 @@ impl AppleMailChannel {
 
     /// Mark a message as read via AppleScript.
     async fn mark_as_read_applescript(subject: &str, sender: &str) -> Result<(), ChannelError> {
-        let mut cmd = tokio::process::Command::new("osascript");
+        let mut cmd = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.apple_mail.tokio.7",
+            "osascript"
+        );
         cmd.arg("-e")
             .arg(MARK_READ_APPLESCRIPT)
             .arg("--")
@@ -455,7 +476,10 @@ impl AppleMailChannel {
     ) -> Result<(), ChannelError> {
         let temp_files = write_temp_attachments(attachments).await?;
 
-        let mut cmd = tokio::process::Command::new("osascript");
+        let mut cmd = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.apple_mail.tokio.8",
+            "osascript"
+        );
         cmd.arg("-e")
             .arg(SEND_REPLY_APPLESCRIPT)
             .arg("--")
@@ -494,7 +518,10 @@ impl AppleMailChannel {
     ) -> Result<(), ChannelError> {
         let temp_files = write_temp_attachments(attachments).await?;
 
-        let mut cmd = tokio::process::Command::new("osascript");
+        let mut cmd = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-channels.src.apple_mail.tokio.9",
+            "osascript"
+        );
         cmd.arg("-e")
             .arg(SEND_EMAIL_APPLESCRIPT)
             .arg("--")
@@ -938,7 +965,10 @@ async fn cleanup_temp_attachments(paths: &[std::path::PathBuf]) {
 /// when their channels are active.
 pub async fn ensure_app_running(app_name: &str) -> bool {
     // Check if already running
-    let mut pgrep = tokio::process::Command::new("pgrep");
+    let mut pgrep = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-channels.src.apple_mail.tokio.10",
+        "pgrep"
+    );
     pgrep.arg("-x").arg(app_name);
     let running = output_with_timeout(&mut pgrep, "pgrep")
         .await
@@ -953,7 +983,10 @@ pub async fn ensure_app_running(app_name: &str) -> bool {
 
     // `open` receives the application name as an argv value, so even a future
     // non-constant caller cannot turn it into executable AppleScript source.
-    let mut launch = tokio::process::Command::new("open");
+    let mut launch = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-channels.src.apple_mail.tokio.11",
+        "open"
+    );
     launch.args(["-g", "-j", "-a"]).arg(app_name);
     let result = output_with_timeout(&mut launch, "open application").await;
 

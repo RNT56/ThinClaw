@@ -208,18 +208,9 @@ impl SidecarManager {
                     .stt_model_path
                     .lock()
                     .unwrap_or_else(|error| error.into_inner()) = None;
-                if thinclaw_config::helpers::optional_env("THINCLAW_MANAGED_WHISPER_ENDPOINT")
-                    .ok()
-                    .flatten()
-                    .is_some_and(|value| value == "1")
-                {
-                    thinclaw_config::helpers::remove_bridge_vars(&[
-                        "THINCLAW_MANAGED_WHISPER_ENDPOINT",
-                        "WHISPER_HTTP_ENDPOINT",
-                        "WHISPER_HTTP_TOKEN",
-                        "WHISPER_HTTP_MODEL",
-                    ]);
-                }
+                thinclaw_core::media::local_endpoints::managed_local_endpoints().remove(
+                    thinclaw_core::media::local_endpoints::ManagedLocalEndpointKind::SpeechToText,
+                );
             }
             stt_process
         };

@@ -25,7 +25,6 @@ use base64::Engine as _;
 use chrono::Utc;
 use rust_decimal::Decimal;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -1227,11 +1226,12 @@ async fn complete_trial_terminal_rejects_repeated_completed_lease() {
 }
 
 fn git(repo: &std::path::Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .status()
-        .expect("git command should start");
+    let status =
+        thinclaw_platform::std_process_command!("src.api.experiments.tests.std.101", "git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("git command should start");
     assert!(status.success(), "git {:?} failed with {:?}", args, status);
 }
 

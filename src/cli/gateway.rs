@@ -449,7 +449,7 @@ async fn start_gateway(
 
         let exe = std::env::current_exe()?;
         let instance_token = uuid::Uuid::new_v4().to_string();
-        let mut command = std::process::Command::new(&exe);
+        let mut command = thinclaw_platform::std_process_command!("src.cli.gateway.std.1", &exe);
         command
             .arg("run")
             .env("GATEWAY_ENABLED", "true")
@@ -493,7 +493,7 @@ async fn start_gateway(
         let exe = std::env::current_exe()?;
 
         let instance_token = uuid::Uuid::new_v4().to_string();
-        let mut command = std::process::Command::new(&exe);
+        let mut command = thinclaw_platform::std_process_command!("src.cli.gateway.std.2", &exe);
         command
             .arg("run")
             .env("GATEWAY_ENABLED", "true")

@@ -600,7 +600,10 @@ impl VoiceWakeRuntime {
             .unwrap_or(std::path::Path::new("."))
             .join("keywords.txt");
 
-        let mut command = Command::new("sherpa-onnx-keyword-spotter");
+        let mut command = thinclaw_platform::std_process_command!(
+            "src.voice_wake.std.101",
+            "sherpa-onnx-keyword-spotter"
+        );
         command
             .args([
                 "--encoder",

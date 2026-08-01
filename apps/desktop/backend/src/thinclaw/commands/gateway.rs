@@ -673,7 +673,7 @@ pub async fn thinclaw_copy_gateway_token(
         use thinclaw_tools::execution::OwnedChild;
         use tokio::io::AsyncWriteExt;
 
-        let mut command = tokio::process::Command::new("/usr/bin/pbcopy");
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.thinclaw.commands.gateway.tokio.1", "/usr/bin/pbcopy");
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())

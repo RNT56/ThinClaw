@@ -139,7 +139,10 @@ impl AppleMailTool {
              LIMIT {limit};"
         );
 
-        let mut command = tokio::process::Command::new("sqlite3");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-tools.src.builtin.apple_mail.tokio.1",
+            "sqlite3"
+        );
         command
             .arg("-separator")
             .arg("|")
@@ -231,7 +234,10 @@ impl AppleMailTool {
             )));
         }
 
-        let mut command = tokio::process::Command::new("osascript");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-tools.src.builtin.apple_mail.tokio.2",
+            "osascript"
+        );
         command
             .arg("-e")
             .arg(SEND_EMAIL_APPLESCRIPT)
