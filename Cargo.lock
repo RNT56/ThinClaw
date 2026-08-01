@@ -8151,7 +8151,9 @@ name = "thinclaw-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "serde",
+ "serde_json",
  "thinclaw-config",
  "thinclaw-platform",
  "tokio",

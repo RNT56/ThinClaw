@@ -2,19 +2,23 @@
 
 use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SetupMode {
     #[default]
     Quick,
     Advanced,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupAskRequest {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "request", rename_all = "snake_case")]
 pub enum SetupContinuation {
     Exit,
     Run,
@@ -28,17 +32,170 @@ impl SetupContinuation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SetupInvocationKind {
     Explicit,
     AutomaticFirstRun,
     LegacyOnboard,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupInvocation {
     pub kind: SetupInvocationKind,
     pub continuation: SetupContinuation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum SetupSettingValue {
+    Bool(bool),
+    Integer(i64),
+    Text(String),
+    StringList(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupSettingChange {
+    pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<SetupSettingValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<SetupSettingValue>,
+}
+
+impl SetupSettingChange {
+    pub fn new(
+        key: impl Into<String>,
+        before: Option<SetupSettingValue>,
+        after: Option<SetupSettingValue>,
+    ) -> Result<Self, String> {
+        let key = key.into();
+        let normalized = key.to_ascii_lowercase();
+        if key.is_empty()
+            || key.len() > 128
+            || key.chars().any(char::is_control)
+            || [
+                "secret",
+                "token",
+                "password",
+                "api_key",
+                "private_key",
+                "credential",
+            ]
+            .iter()
+            .any(|marker| normalized.contains(marker))
+        {
+            return Err("setup setting key is invalid or credential-shaped".to_string());
+        }
+        Ok(Self { key, before, after })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupDraft {
+    pub schema_version: u8,
+    pub baseline_revision: String,
+    pub mode: SetupMode,
+    pub profile: String,
+    pub settings: Vec<SetupSettingChange>,
+    /// Opaque source IDs only; values and source locations never enter a draft.
+    pub credential_source_ids: Vec<String>,
+    pub continuation: SetupContinuation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SetupAction {
+    CreateDatabase {
+        backend: String,
+        path: String,
+    },
+    RunMigrations {
+        backend: String,
+        versions: Vec<String>,
+    },
+    WriteSettings {
+        keys: Vec<String>,
+    },
+    CreateSecretBindings {
+        purposes: Vec<String>,
+    },
+    InstallExtension {
+        source_id: String,
+        digest: String,
+    },
+    WriteOwnedFile {
+        path: String,
+    },
+    BindListener {
+        origin: String,
+    },
+    ExternalRequest {
+        host: String,
+        purpose: String,
+        billable: bool,
+    },
+    MarkSetupCompleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupPlan {
+    pub schema_version: u8,
+    pub baseline_revision: String,
+    pub digest: String,
+    pub mode: SetupMode,
+    pub profile: String,
+    pub settings_diff: Vec<SetupSettingChange>,
+    pub actions: Vec<SetupAction>,
+    pub warnings: Vec<String>,
+    pub blockers: Vec<String>,
+    pub continuation: SetupContinuation,
+}
+
+impl SetupPlan {
+    pub fn seal(mut self) -> Result<Self, serde_json::Error> {
+        self.digest.clear();
+        let canonical = serde_json::to_vec(&self)?;
+        self.digest = blake3::hash(&canonical).to_hex().to_string();
+        Ok(self)
+    }
+
+    pub fn digest_matches(&self, expected: &str) -> bool {
+        let mut candidate = self.clone();
+        candidate.digest.clear();
+        serde_json::to_vec(&candidate)
+            .map(|canonical| blake3::hash(&canonical).to_hex().as_str() == expected)
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupApplyState {
+    Applied,
+    Partial,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupActionOutcome {
+    pub index: usize,
+    pub applied: bool,
+    pub code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupApplyReport {
+    pub schema_version: u8,
+    pub plan_digest: String,
+    pub state: SetupApplyState,
+    pub outcomes: Vec<SetupActionOutcome>,
+    pub setup_completed: bool,
+    pub continuation_started: bool,
 }
 
 impl Default for SetupInvocation {
@@ -1604,6 +1761,36 @@ mod tests {
         assert_eq!(ids.len(), 27);
         assert_eq!(unique.len(), 27);
         assert_eq!(plan.steps.len(), 27);
+    }
+
+    #[test]
+    fn setup_plan_digest_binds_secret_free_review_content() {
+        assert!(SetupSettingChange::new("provider.api_key", None, None).is_err());
+        let setting = SetupSettingChange::new(
+            "runtime.profile",
+            None,
+            Some(SetupSettingValue::Text("remote".to_string())),
+        )
+        .unwrap();
+        let plan = SetupPlan {
+            schema_version: 1,
+            baseline_revision: "baseline-1".to_string(),
+            digest: String::new(),
+            mode: SetupMode::Advanced,
+            profile: "remote".to_string(),
+            settings_diff: vec![setting],
+            actions: vec![SetupAction::MarkSetupCompleted],
+            warnings: Vec::new(),
+            blockers: Vec::new(),
+            continuation: SetupContinuation::Exit,
+        }
+        .seal()
+        .unwrap();
+        assert!(plan.digest_matches(&plan.digest));
+
+        let mut changed = plan.clone();
+        changed.profile = "balanced".to_string();
+        assert!(!changed.digest_matches(&plan.digest));
     }
 
     #[test]
