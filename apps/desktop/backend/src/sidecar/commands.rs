@@ -504,8 +504,6 @@ pub fn direct_runtime_get_chat_server_config(
     state.get_chat_config().map(
         |(port, _token, context_size, model_family)| ChatServerConfig {
             port,
-            // Runtime credentials are backend state and never renderer state.
-            token: String::new(),
             context_size,
             model_family,
         },

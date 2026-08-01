@@ -1181,17 +1181,13 @@ pub async fn direct_runtime_start_engine(
 
     // Endpoint credentials stay in the backend runtime snapshot. They are not
     // renderer state and must not cross the Tauri IPC boundary.
-    Ok(EngineStartResult {
-        port,
-        token: String::new(),
-    })
+    Ok(EngineStartResult { port })
 }
 
 /// Result of starting an engine.
 #[derive(Clone, Serialize, Type)]
 pub struct EngineStartResult {
     pub port: u16,
-    pub token: String,
 }
 
 impl std::fmt::Debug for EngineStartResult {
@@ -1199,7 +1195,6 @@ impl std::fmt::Debug for EngineStartResult {
         formatter
             .debug_struct("EngineStartResult")
             .field("port", &self.port)
-            .field("token", &crate::debug_redaction::Redacted)
             .finish()
     }
 }

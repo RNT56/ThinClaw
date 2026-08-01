@@ -3833,7 +3833,7 @@ export type CacheStats = { hits: number; misses: number; evictions: number; size
  * Per-channel status entry with live state
  */
 export type ChannelStatusEntry = { id: string; name: string; type: string; state: string; enabled: boolean; uptime_secs: number | null; messages_sent: number; messages_received: number; last_error: string | null; stream_mode: string }
-export type ChatServerConfig = { port: number; token: string; context_size: number; model_family: string }
+export type ChatServerConfig = { port: number; context_size: number; model_family: string }
 /**
  * Frontend-facing checkpoint record. Mirrors `thinclaw_core` `CheckpointEntry`
  * but renders the timestamp as an RFC3339 string so the type is specta-exportable.
@@ -3979,7 +3979,7 @@ error: string | null }
 /**
  * Result of starting an engine.
  */
-export type EngineStartResult = { port: number; token: string }
+export type EngineStartResult = { port: number }
 /**
  * Extension action response (install, activate, remove)
  */
