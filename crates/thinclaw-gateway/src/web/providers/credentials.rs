@@ -226,10 +226,10 @@ fn provider_credential_mode_from_api(value: &str) -> ProviderCredentialMode {
     }
 }
 
-#[derive(serde::Deserialize)]
+/// ID-only request for binding a principal-owned encrypted source.
+#[derive(Debug, serde::Deserialize)]
 pub struct ProviderKeyRequest {
-    #[serde(default)]
-    pub api_key: Option<String>,
+    pub secret_source_id: uuid::Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

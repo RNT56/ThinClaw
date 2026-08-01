@@ -96,20 +96,11 @@ pub struct SecretFieldInfo {
     pub auto_generate: bool,
 }
 
-#[derive(Deserialize)]
+/// Secret-slot bindings accepted by remote clients. Values are opaque source IDs,
+/// never credential text.
+#[derive(Debug, Deserialize)]
 pub struct ExtensionSetupRequest {
-    pub secrets: std::collections::HashMap<String, String>,
-}
-
-impl std::fmt::Debug for ExtensionSetupRequest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut secret_names = self.secrets.keys().collect::<Vec<_>>();
-        secret_names.sort_unstable();
-        formatter
-            .debug_struct("ExtensionSetupRequest")
-            .field("secret_names", &secret_names)
-            .finish()
-    }
+    pub secret_sources: std::collections::HashMap<String, Uuid>,
 }
 
 // --- Registry ---

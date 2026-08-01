@@ -4806,7 +4806,6 @@ function renderConfigureModal(name, secrets) {
   const form = document.createElement('div');
   form.className = 'configure-form';
 
-  const fields = [];
   for (const secret of secrets) {
     const field = document.createElement('div');
     field.className = 'configure-field';
@@ -4823,15 +4822,12 @@ function renderConfigureModal(name, secrets) {
 
     const inputRow = document.createElement('div');
     inputRow.className = 'configure-input-row';
-
-    const input = document.createElement('input');
-    input.type = 'password';
-    input.name = secret.name;
-    input.placeholder = secret.provided ? '(already set — leave empty to keep)' : '';
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') submitConfigureModal(name, fields);
-    });
-    inputRow.appendChild(input);
+    const guidance = document.createElement('span');
+    guidance.className = 'ui-resource-note';
+    guidance.textContent = secret.provided
+      ? 'An encrypted source is already bound.'
+      : 'Create this secret with the local CLI and bind its opaque source ID. Remote clients never accept credential text.';
+    inputRow.appendChild(guidance);
 
     if (secret.provided) {
       const badge = document.createElement('span');
@@ -4848,7 +4844,6 @@ function renderConfigureModal(name, secrets) {
 
     field.appendChild(inputRow);
     form.appendChild(field);
-    fields.push({ name: secret.name, input: input });
   }
 
   modal.appendChild(form);
@@ -4856,15 +4851,9 @@ function renderConfigureModal(name, secrets) {
   const actions = document.createElement('div');
   actions.className = 'configure-actions';
 
-  const submitBtn = document.createElement('button');
-  submitBtn.className = 'btn-ext activate';
-  submitBtn.textContent = 'Save';
-  submitBtn.addEventListener('click', () => submitConfigureModal(name, fields));
-  actions.appendChild(submitBtn);
-
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-ext remove';
-  cancelBtn.textContent = 'Cancel';
+  cancelBtn.textContent = 'Close';
   cancelBtn.addEventListener('click', closeConfigureModal);
   actions.appendChild(cancelBtn);
 
@@ -4878,46 +4867,6 @@ function renderConfigureModal(name, secrets) {
     dialog.setAttribute('open', 'open');
   }
 
-  if (fields.length > 0) fields[0].input.focus();
-}
-
-function submitConfigureModal(name, fields) {
-  const secrets = {};
-  for (const f of fields) {
-    if (f.input.value.trim()) {
-      secrets[f.name] = f.input.value.trim();
-    }
-  }
-
-  // Disable buttons to prevent double-submit
-  var btns = document.querySelectorAll('.configure-actions button');
-  btns.forEach(function(b) { b.disabled = true; });
-
-  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
-    method: 'POST',
-    body: { secrets },
-  })
-    .then((res) => {
-      closeConfigureModal();
-      if (res.success) {
-        if (res.activated && name === 'telegram') {
-          showToast('Configured and activated ' + name, 'success');
-        } else if (res.activated) {
-          showToast('Configured ' + name + ' successfully', 'success');
-        } else if (res.needs_restart) {
-          showToast('Configured ' + name + '. Restart required to activate.', 'info');
-        } else {
-          showToast(res.message, 'success');
-        }
-      } else {
-        showToast(res.message || 'Configuration failed', 'error');
-      }
-      loadExtensions();
-    })
-    .catch((err) => {
-      btns.forEach(function(b) { b.disabled = false; });
-      showToast('Configuration failed: ' + err.message, 'error');
-    });
 }
 
 function closeConfigureModal() {
@@ -7395,7 +7344,6 @@ function renderResearchGpuCloudCard(config) {
   const inventory = getResearchGpuCloudInventoryState(config.slug);
   const cloudState = researchCloudCardState(config, inventory);
   const draft = getResearchGpuCloudDraft(config.slug);
-  const keyValue = document.getElementById('research-cloud-key-' + config.slug)?.value || '';
   const templateHint = inventory && inventory.template_hint ? parseResearchObject(inventory.template_hint) : {};
   const quantityNote = firstDefined(templateHint.quantity_note, '');
   const lambdaForm = config.slug === 'lambda'
@@ -7437,10 +7385,8 @@ function renderResearchGpuCloudCard(config) {
       '<button class="research-cloud-link button" type="button" onclick="applyResearchGpuCloudTemplate(\'' + escapeJsString(config.slug) + '\')">Use template</button>' +
     '</div>' +
     '<div class="research-cloud-credential">' +
-      '<label class="research-field-label" for="research-cloud-key-' + escapeHtml(config.slug) + '">' + escapeHtml(config.providerKeyLabel) + '</label>' +
-      '<input type="password" class="research-input" id="research-cloud-key-' + escapeHtml(config.slug) + '" placeholder="' + escapeHtml(config.providerKeyPlaceholder) + '" value="' + escapeHtml(keyValue) + '">' +
+      '<div class="research-cloud-template-hint">Create the provider credential with <code>thinclaw config secrets set ' + escapeHtml(config.secretReference) + '</code>, then bind its opaque source ID through the local CLI. Remote clients never accept API-key text.</div>' +
       '<div class="research-cloud-credential-actions">' +
-        '<button class="btn-restart" type="button" onclick="saveResearchGpuCloudCredential(\'' + escapeJsString(config.slug) + '\')">Connect</button>' +
         '<button class="btn-cancel" type="button" onclick="validateResearchGpuCloud(\'' + escapeJsString(config.slug) + '\')">Validate</button>' +
       '</div>' +
     '</div>' +
@@ -7478,33 +7424,10 @@ function renderResearchGpuClouds() {
   grid.innerHTML = cards.map((config) => renderResearchGpuCloudCard(config)).join('');
 }
 
-function saveResearchGpuCloudCredential(slug) {
-  const config = getResearchGpuCloudConfig(slug);
-  syncResearchGpuCloudDraftFromDom(slug);
-  const input = document.getElementById('research-cloud-key-' + slug);
-  const apiKey = input ? input.value.trim() : '';
-  if (!apiKey) {
-    showToast('Enter a ' + (config ? config.providerKeyLabel : 'provider') + ' first.', 'error');
-    return;
-  }
-  apiFetch('/api/experiments/providers/gpu-clouds/' + encodeURIComponent(slug) + '/connect', {
-    method: 'POST',
-    body: { api_key: apiKey },
-  }).then((data) => {
-    showToast(data.message || (config ? config.name + ' credential saved' : 'Credential saved'), 'success');
-    experimentsState.gpuCloudConnections.set(slug, true);
-    loadExperiments();
-  }).catch((err) => {
-    showToast('Failed to save credential: ' + err.message, 'error');
-  });
-}
-
 function validateResearchGpuCloud(slug) {
   const config = getResearchGpuCloudConfig(slug);
   syncResearchGpuCloudDraftFromDom(slug);
-  const input = document.getElementById('research-cloud-key-' + slug);
-  const apiKey = input ? input.value.trim() : '';
-  if (!apiKey && !getResearchGpuCloudInventoryState(slug)?.connected) {
+  if (!getResearchGpuCloudInventoryState(slug)?.connected) {
     showToast('Add a credential first for ' + (config ? config.name : slug) + '.', 'warning');
     return;
   }
@@ -11156,8 +11079,7 @@ function renderProviderApiKeyControls(provider) {
     html += '<span class="vault-key-status">API key stored</span>';
     html += '<button class="btn-vault-remove inline" data-slug="' + escapeHtml(provider.slug) + '" data-name="' + escapeHtml(provider.display_name) + '">Remove</button>';
   } else {
-    html += '<input type="password" id="vault-key-' + escapeHtml(provider.slug) + '" class="vault-key-input" placeholder="' + escapeHtml(provider.env_key_name || 'API key') + '">';
-    html += '<button class="btn-vault-save inline" data-slug="' + escapeHtml(provider.slug) + '">Save</button>';
+    html += '<span class="provider-editor-inline-note">Create this credential with the local <code>thinclaw config secrets set</code> command and bind its opaque source ID. Remote clients never accept API-key text.</span>';
   }
   html += '</div>';
   return html;
@@ -11672,11 +11594,6 @@ function attachProvidersEvents() {
       openResearchGpuClouds();
       return;
     }
-    const saveKeyBtn = event.target.closest('.btn-vault-save[data-slug]');
-    if (saveKeyBtn) {
-      saveProviderKey(saveKeyBtn.dataset.slug);
-      return;
-    }
     const removeKeyBtn = event.target.closest('.btn-vault-remove[data-slug]');
     if (removeKeyBtn) {
       removeProviderKey(removeKeyBtn.dataset.slug, removeKeyBtn.dataset.name);
@@ -11977,24 +11894,6 @@ function toggleProviderCardEnabled(row) {
   reconcileProviderRoleAssignments(nextEnabled ? getProviderCardSlug(row) : '');
   updateAliasSummaries();
   saveProvidersRoutingConfig({ quietSuccess: true, reloadAfterSave: false });
-}
-
-function saveProviderKey(slug) {
-  const input = document.getElementById('vault-key-' + slug);
-  if (!input || !input.value.trim()) { showToast('Please enter an API key', 'error'); return; }
-  const body = { api_key: input.value.trim() };
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  fetch('/api/providers/' + encodeURIComponent(slug) + '/key', {
-    method: 'POST', headers,
-    body: JSON.stringify(body),
-  }).then(async (r) => {
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.message || ('HTTP ' + r.status));
-    return data;
-  })
-    .then(d => { showToast(d.message || 'Key saved', 'success'); loadProviderVault(); })
-    .catch(e => showToast('Failed to save key: ' + e.message, 'error'));
 }
 
 function removeProviderKey(slug, displayName) {

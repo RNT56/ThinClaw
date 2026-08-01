@@ -7,6 +7,7 @@ use axum::{
 };
 
 use crate::api::extensions as extensions_api;
+use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::extensions::manager::AuthRequestContext;
@@ -369,6 +370,7 @@ pub(crate) async fn extensions_setup_handler(
 
 pub(crate) async fn extensions_setup_submit_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(name): Path<String>,
     Json(req): Json<ExtensionSetupRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
@@ -377,7 +379,35 @@ pub(crate) async fn extensions_setup_submit_handler(
         .as_ref()
         .ok_or_else(extension_manager_unavailable_error)?;
 
-    match ext_mgr.save_setup_secrets(&name, &req.secrets).await {
+    let secrets_store = state.secrets_store.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Secrets store is not available".to_string(),
+        )
+    })?;
+    let available = secrets_store
+        .list(&request_identity.principal_id)
+        .await
+        .map_err(extension_internal_error)?;
+    let mut resolved = std::collections::HashMap::with_capacity(req.secret_sources.len());
+    for (slot, source_id) in req.secret_sources {
+        let source = available
+            .iter()
+            .find(|source| source.id == Some(source_id))
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    format!("Secret source for slot '{slot}' is unavailable"),
+                )
+            })?;
+        let value = secrets_store
+            .get_decrypted(&request_identity.principal_id, &source.name)
+            .await
+            .map_err(extension_internal_error)?;
+        resolved.insert(slot, value.expose().to_string());
+    }
+
+    match ext_mgr.save_setup_secrets(&name, &resolved).await {
         Ok(result) => Ok(Json(extension_setup_save_response(
             result.message,
             result.activated,

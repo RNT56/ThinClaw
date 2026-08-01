@@ -1121,8 +1121,19 @@ pub(crate) async fn providers_save_key_handler(
     let spec =
         provider_credential_spec(&slug).ok_or_else(provider_credential_spec_not_found_status)?;
 
-    let api_key =
-        validate_provider_api_key(body.api_key.as_deref()).map_err(|error| error.status_code())?;
+    let source = secrets
+        .list(&request_identity.principal_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .find(|source| source.id == Some(body.secret_source_id))
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let source_value = secrets
+        .get_decrypted(&request_identity.principal_id, &source.name)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let api_key = validate_provider_api_key(Some(source_value.expose()))
+        .map_err(|error| error.status_code())?;
     let masked = mask_provider_key(&api_key);
     let fingerprint = provider_key_fingerprint(&api_key);
     let params = crate::secrets::CreateSecretParams::new(spec.secret_name.clone(), api_key)
