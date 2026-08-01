@@ -6048,10 +6048,8 @@ function renderRepoConnectorPanel() {
   }
 
   html += '<div class="repo-form-grid">';
-  html += '<div class="repo-form-block"><div class="autonomy-section-label">Store credential (encrypted)</div>'
-    + '<input id="repo-cred-name" type="text" placeholder="Secret name (e.g. github_token)" value="github_token" />'
-    + '<input id="repo-cred-value" type="password" autocomplete="off" placeholder="Paste token or PEM key — stored encrypted" />'
-    + '<div class="repo-form-actions"><button onclick="repoSaveCredential()">Store Securely</button></div></div>';
+  html += '<div class="repo-form-block"><div class="autonomy-section-label">Credential sources</div>'
+    + '<p>Create credentials locally with <code>thinclaw automation projects set-credential SLOT</code>. The Web UI never accepts credential text.</p></div>';
 
   const appId = (r && r.app_id != null) ? r.app_id : '';
   const instId = (r && r.installation_id != null) ? r.installation_id : '';
@@ -6194,19 +6192,6 @@ function repoSaveAppConfig() {
   repoSetup(body, 'GitHub App configuration saved');
 }
 
-function repoSaveCredential() {
-  const name = (document.getElementById('repo-cred-name').value || '').trim() || 'github_token';
-  const value = document.getElementById('repo-cred-value').value || '';
-  if (!value.trim()) { showToast('Enter the credential value', 'error'); return; }
-  apiFetch('/api/repo-projects/credentials', { method: 'POST', body: { name: name, value: value } }).then(function () {
-    document.getElementById('repo-cred-value').value = '';
-    showToast('Stored ' + name + ' securely', 'success');
-    return apiFetch('/api/repo-projects/readiness');
-  }).then(function (readiness) {
-    if (readiness) { repoProjectsState.readiness = readiness; renderRepoConnectorPanel(); }
-  }).catch(function (err) { showToast('Failed to store credential: ' + err.message, 'error'); });
-}
-
 function repoDiscover() {
   apiFetch('/api/repo-projects/connectable-repos').then(function (res) {
     repoProjectsState.repos = (res && res.repos) || [];
@@ -6259,8 +6244,8 @@ function repoProjectAction(action) {
   }).catch(function (err) { showToast('Action failed: ' + err.message, 'error'); });
 }
 
-// Inline secure credential prompt card (agent-driven). The masked value POSTs
-// straight to the secrets endpoint, never through chat/the LLM.
+// Credential requests provide local secure-input guidance. Browser chat never
+// receives or transports credential text.
 function renderCredentialPrompt(data) {
   if (!data || !data.secret_name) return;
   const container = turnCardStack(ensureLiveTurnCard());
@@ -6275,43 +6260,12 @@ function renderCredentialPrompt(data) {
 
   const desc = document.createElement('div');
   desc.className = 'approval-description';
-  desc.textContent = (data.reason || ('Enter a value for ' + data.secret_name + '.'))
-    + ' Stored encrypted — it is never sent to the model.';
+  desc.textContent = (data.reason || ('Credential source required for ' + data.secret_name + '.'))
+    + ' Create it with the local config secrets or automation projects CLI.';
   card.appendChild(desc);
-
-  const input = document.createElement('input');
-  input.type = 'password';
-  input.autocomplete = 'off';
-  input.className = 'credential-input';
-  input.placeholder = data.secret_name + ' value';
-  card.appendChild(input);
-
-  const actions = document.createElement('div');
-  actions.className = 'approval-actions';
-  const submitBtn = document.createElement('button');
-  submitBtn.className = 'approve';
-  submitBtn.textContent = 'Store securely';
-  submitBtn.addEventListener('click', function () { submitInChatCredential(data.secret_name, input.value, card); });
-  actions.appendChild(submitBtn);
-  card.appendChild(actions);
 
   container.appendChild(card);
   finishChatMutation(shouldPinChatToLatest());
-}
-
-function submitInChatCredential(name, value, card) {
-  if (!value || !value.trim()) { showToast('Enter the credential value', 'error'); return; }
-  apiFetch('/api/repo-projects/credentials', { method: 'POST', body: { name: name, value: value } })
-    .then(function () {
-      showToast('Stored ' + name + ' securely', 'success');
-      if (card) {
-        const input = card.querySelector('.credential-input');
-        if (input) input.value = '';
-        const actions = card.querySelector('.approval-actions');
-        if (actions) actions.innerHTML = '<span class="approval-resolved">Stored securely</span>';
-      }
-    })
-    .catch(function (err) { showToast('Failed to store credential: ' + err.message, 'error'); });
 }
 
 function renderAutonomySummaryCard(label, value, statusClass, detail) {
@@ -13624,39 +13578,23 @@ function renderNostrSecretControl(status) {
   labelWrap.className = 'setting-label-wrap';
   labelWrap.innerHTML =
     '<label class="setting-label">Private key</label>'
-    + '<span class="setting-desc">Stored in the secrets store. This key is never written through the general settings API.</span>';
+    + '<span class="setting-desc">Secret values are accepted only by the local CLI; remote clients bind opaque source IDs.</span>';
   row.appendChild(labelWrap);
 
   const controlWrap = document.createElement('div');
   controlWrap.className = 'setting-control';
-
-  const input = document.createElement('input');
-  input.type = 'password';
-  input.id = 'nostr-private-key-input';
-  input.className = 'setting-input';
-  input.placeholder = status && (status.public_key_npub || status.public_key_hex)
-    ? 'Saved already — enter a new nsec or hex key to replace it'
-    : 'nsec or hex private key';
-  controlWrap.appendChild(input);
 
   const statusNote = document.createElement('div');
   statusNote.className = 'setting-desc';
   statusNote.style.marginTop = '0.5rem';
   statusNote.textContent = status && (status.public_key_npub || status.public_key_hex)
     ? ('Saved for ' + (status.public_key_npub || status.public_key_hex))
-    : 'No Nostr private key is currently saved for this user.';
+    : 'No Nostr private key is currently bound. Create it locally with `thinclaw config secrets set nostr_private_key`, then activate Nostr from the CLI.';
   controlWrap.appendChild(statusNote);
 
   const actions = document.createElement('div');
   actions.className = 'ui-resource-actions';
   actions.style.marginTop = '0.75rem';
-
-  const saveBtn = document.createElement('button');
-  saveBtn.type = 'button';
-  saveBtn.className = 'btn-restart';
-  saveBtn.textContent = 'Save key';
-  saveBtn.addEventListener('click', saveNostrPrivateKey);
-  actions.appendChild(saveBtn);
 
   const removeBtn = document.createElement('button');
   removeBtn.type = 'button';
@@ -14402,32 +14340,6 @@ function buildSkinSettingOptions(field, currentValue) {
     options.unshift({ value: '', label: field.followLabel || 'Not set' });
   }
   return options;
-}
-
-function saveNostrPrivateKey() {
-  const input = document.getElementById('nostr-private-key-input');
-  if (!input || !input.value.trim()) {
-    showToast('Enter a Nostr private key first.', 'error');
-    return;
-  }
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  fetch('/api/nostr/key', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ private_key: input.value.trim() }),
-  }).then(async (response) => {
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.message || ('HTTP ' + response.status));
-    return data;
-  }).then((data) => {
-    input.value = '';
-    var identity = data.public_key_npub || data.public_key_hex || '';
-    showToast((data.message || 'Nostr private key saved') + (identity ? (' (' + identity + ')') : ''), 'success');
-    loadSettings();
-  }).catch((error) => {
-    showToast('Failed to save Nostr key: ' + error.message, 'error');
-  });
 }
 
 function removeNostrPrivateKey() {

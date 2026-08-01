@@ -486,8 +486,8 @@ impl Tool for RepoProjectSetupTool {
 
 #[derive(Debug, Deserialize)]
 struct CredentialParams {
-    name: String,
-    value: String,
+    slot: String,
+    secret_source_id: Uuid,
 }
 
 pub struct RepoProjectSetCredentialTool {
@@ -507,20 +507,17 @@ impl Tool for RepoProjectSetCredentialTool {
     }
 
     fn description(&self) -> &str {
-        "Securely store a GitHub credential (e.g. a personal access token or the GitHub App PEM \
-         private key) in the encrypted secrets store under a name. The value is encrypted at rest \
-         and never written to settings, events, or logs. Reference it from repo_project_setup by \
-         name (e.g. github_token, repo_projects_github_private_key)."
+        "Bind a pre-authorized encrypted secret source ID to one declared repository-project credential slot. Credential text is never accepted through the tool transcript."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "name": { "type": "string", "description": "Secret name to store under (e.g. github_token)." },
-                "value": { "type": "string", "description": "The credential value (token or PEM key). Stored encrypted." }
+                "slot": { "type": "string", "enum": ["github_token", "github_fork_token", "github_app_private_key", "github_webhook_secret"] },
+                "secret_source_id": { "type": "string", "format": "uuid", "description": "Opaque authorized secret source ID." }
             },
-            "required": ["name", "value"]
+            "required": ["slot", "secret_source_id"]
         })
     }
 
@@ -543,11 +540,11 @@ impl Tool for RepoProjectSetCredentialTool {
             .map_err(|error| ToolError::InvalidParameters(error.to_string()))?;
         output(
             started,
-            repo_projects_api::store_repo_credential(
+            repo_projects_api::bind_repo_credential_source(
                 &self.secrets,
                 user_id(ctx),
-                params.name,
-                params.value,
+                params.slot,
+                params.secret_source_id,
             )
             .await,
         )

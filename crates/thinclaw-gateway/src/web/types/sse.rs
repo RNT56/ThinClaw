@@ -207,9 +207,8 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
-    /// Agent requests a credential; the browser renders an inline masked-input
-    /// card that POSTs the value straight to `/api/repo-projects/credentials`.
-    /// Carries NO secret value — only the name to store under and a reason.
+    /// Agent requests a credential. Remote clients render local secure-input
+    /// remediation and never accept or transport the credential value.
     #[serde(rename = "credential_prompt")]
     CredentialPrompt {
         prompt_id: String,

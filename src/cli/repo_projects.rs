@@ -3,6 +3,8 @@
 //! the framework-free `crate::api::repo_projects` layer (the same one the
 //! desktop commands and gateway handlers use).
 
+use std::io::{IsTerminal, Read};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Subcommand;
@@ -52,12 +54,15 @@ pub enum RepoProjectCommand {
         #[arg(long)]
         watchdog_interval_secs: Option<u64>,
     },
-    /// Store a GitHub credential in the encrypted secrets store (prompts if
-    /// `--value` is omitted).
+    /// Create a purpose-bound GitHub credential source through secure local input.
     SetCredential {
-        name: String,
-        #[arg(long)]
-        value: Option<String>,
+        slot: String,
+        #[arg(long, conflicts_with_all = ["from_env", "from_file"])]
+        from_stdin: bool,
+        #[arg(long, value_name = "VAR", conflicts_with_all = ["from_stdin", "from_file"])]
+        from_env: Option<String>,
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["from_stdin", "from_env"])]
+        from_file: Option<PathBuf>,
     },
     /// Create a project and enroll its first repository.
     Create {
@@ -171,15 +176,17 @@ pub async fn run_repo_projects_command(cmd: RepoProjectCommand) -> anyhow::Resul
             };
             print(api::configure_supervisor(&db, secrets.as_ref(), USER, input).await)
         }
-        RepoProjectCommand::SetCredential { name, value } => {
-            let value = match value {
-                Some(value) => value,
-                None => crate::setup::secret_input("Credential value")?
-                    .expose_secret()
-                    .to_string(),
-            };
+        RepoProjectCommand::SetCredential {
+            slot,
+            from_stdin,
+            from_env,
+            from_file,
+        } => {
+            let slot = canonical_credential_slot(&slot)?;
+            let value =
+                resolve_credential_input(from_stdin, from_env.as_deref(), from_file.as_deref())?;
             let secrets = crate::cli::secrets::get_secrets_store().await?;
-            print(api::store_repo_credential(&secrets, USER, name, value).await)
+            print(api::store_repo_credential(&secrets, USER, slot.to_string(), value).await)
         }
         RepoProjectCommand::Create {
             name,
@@ -270,6 +277,75 @@ pub async fn run_repo_projects_command(cmd: RepoProjectCommand) -> anyhow::Resul
             print(api::list_events(&db, parse(&project_id)?, limit).await)
         }
     }
+}
+
+fn canonical_credential_slot(slot: &str) -> anyhow::Result<&'static str> {
+    match slot.trim() {
+        "github_token" => Ok("github_token"),
+        "github_fork_token" => Ok("github_fork_token"),
+        "github_app_private_key" => Ok("repo_projects_github_private_key"),
+        "github_webhook_secret" => Ok("repo_projects_github_webhook"),
+        _ => anyhow::bail!(
+            "unsupported slot; expected github_token, github_fork_token, github_app_private_key, or github_webhook_secret"
+        ),
+    }
+}
+
+fn resolve_credential_input(
+    from_stdin: bool,
+    from_env: Option<&str>,
+    from_file: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
+    const MAX_BYTES: u64 = 1024 * 1024;
+    if from_stdin {
+        let mut value = String::new();
+        std::io::stdin()
+            .take(MAX_BYTES + 1)
+            .read_to_string(&mut value)?;
+        if value.len() as u64 > MAX_BYTES {
+            anyhow::bail!("credential exceeds 1 MiB");
+        }
+        return Ok(value.trim_end_matches(['\r', '\n']).to_string());
+    }
+    if let Some(variable) = from_env {
+        if variable.is_empty()
+            || variable.len() > 128
+            || !variable
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            anyhow::bail!("environment variable name is invalid");
+        }
+        return std::env::var(variable)
+            .map_err(|_| anyhow::anyhow!("environment variable {variable} is unavailable"));
+    }
+    if let Some(path) = from_file {
+        if !path.is_absolute() {
+            anyhow::bail!("--from-file requires an absolute path");
+        }
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > MAX_BYTES {
+            anyhow::bail!("credential source must be a regular non-symlink file up to 1 MiB");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.mode() & 0o077 != 0 {
+                anyhow::bail!("credential source must not grant group or other permissions");
+            }
+        }
+        return String::from_utf8(thinclaw_platform::read_regular_file_bounded_single_link(
+            path, MAX_BYTES,
+        )?)
+        .map(|value| value.trim_end_matches(['\r', '\n']).to_string())
+        .map_err(|_| anyhow::anyhow!("credential source is not UTF-8"));
+    }
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("secure input is unavailable; use --from-stdin, --from-env, or --from-file");
+    }
+    Ok(crate::setup::secret_input("Credential value")?
+        .expose_secret()
+        .to_string())
 }
 
 async fn connect_db() -> anyhow::Result<Arc<dyn Database>> {

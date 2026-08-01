@@ -9095,8 +9095,7 @@ html[data-chrome-style="aerial"] .presentation-preview-card::after {
   gap: 16px;
 }
 .repo-form-block { display: flex; flex-direction: column; gap: 8px; }
-.repo-form-block input,
-.credential-input {
+.repo-form-block input {
   border: 1px solid var(--border);
   background: var(--bg-secondary);
   color: var(--text);
@@ -9105,8 +9104,7 @@ html[data-chrome-style="aerial"] .presentation-preview-card::after {
   font-size: 13px;
   outline: none;
 }
-.repo-form-block input:focus,
-.credential-input:focus { border-color: var(--border-strong); }
+.repo-form-block input:focus { border-color: var(--border-strong); }
 .repo-form-actions { display: flex; gap: 10px; align-items: center; }
 .repo-form-actions button,
 .repo-install-link {
@@ -9171,6 +9169,3 @@ html[data-chrome-style="aerial"] .presentation-preview-card::after {
   border-radius: 10px;
   padding: 8px 10px;
 }
-
-/* Inline secure credential prompt card */
-.credential-card .credential-input { width: 100%; margin-top: 8px; }

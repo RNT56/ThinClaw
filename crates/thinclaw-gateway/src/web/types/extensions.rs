@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use thinclaw_types::IntegrationSetupStatus;
+use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
 pub struct ExtensionInfo {
@@ -139,20 +140,8 @@ pub struct ExtensionActivateRequest {
     pub kind: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub struct NostrPrivateKeyRequest {
-    #[serde(default)]
-    pub private_key: Option<String>,
-}
-
-impl std::fmt::Debug for NostrPrivateKeyRequest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NostrPrivateKeyRequest")
-            .field(
-                "private_key",
-                &self.private_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .finish()
-    }
+/// ID-only request for binding an encrypted secret source to the Nostr key slot.
+#[derive(Debug, Deserialize)]
+pub struct NostrSecretSourceRequest {
+    pub secret_source_id: Uuid,
 }

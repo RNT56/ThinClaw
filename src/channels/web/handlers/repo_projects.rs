@@ -341,14 +341,14 @@ pub(crate) async fn repo_project_setup_handler(
 pub(crate) async fn repo_project_credential_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Json(input): Json<repo_projects_api::RepoCredentialInput>,
+    Json(input): Json<repo_projects_api::RepoCredentialBindingInput>,
 ) -> Result<Json<repo_projects_api::RepoCredentialStored>, (StatusCode, String)> {
     let secrets = repo_project_secrets(&state)?;
-    repo_projects_api::store_repo_credential(
+    repo_projects_api::bind_repo_credential_source(
         secrets,
         &request_identity.principal_id,
-        input.name,
-        input.value,
+        input.slot,
+        input.secret_source_id,
     )
     .await
     .map(Json)
