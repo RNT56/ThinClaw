@@ -190,6 +190,11 @@ pub(super) async fn run_terminal_command(
                 thinclaw::cli::DataCommand::Trajectories(command) => {
                     run_trajectory_command(command.clone()).await
                 }
+                thinclaw::cli::DataCommand::Learning(command) => {
+                    thinclaw::cli::run_learning_command(command.clone(), context)
+                        .await
+                        .map_err(anyhow::Error::from)
+                }
             }
         }
         Some(Command::Access(access_cmd)) => {

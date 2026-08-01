@@ -35,6 +35,7 @@ mod gateway_client;
 mod identity;
 mod jobs;
 mod labs;
+mod learning;
 mod logs;
 mod mcp;
 mod media;
@@ -84,6 +85,7 @@ pub use gateway_client::{
 pub use identity::{IdentityCommand, run_identity_command};
 pub use jobs::{JobCommand, run_jobs_command};
 pub use labs::LabsCommand;
+pub use learning::{LearningCommand, run_learning_command};
 pub use logs::{LogCommand, run_log_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use media::MediaCommand;

@@ -2,7 +2,7 @@
 
 use clap::Subcommand;
 
-use super::{BackupCommand, MemoryCommand, SessionCommand, TrajectoryCommand};
+use super::{BackupCommand, LearningCommand, MemoryCommand, SessionCommand, TrajectoryCommand};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum DataCommand {
@@ -14,4 +14,6 @@ pub enum DataCommand {
     Backup(BackupCommand),
     #[command(subcommand)]
     Trajectories(TrajectoryCommand),
+    #[command(subcommand)]
+    Learning(LearningCommand),
 }
