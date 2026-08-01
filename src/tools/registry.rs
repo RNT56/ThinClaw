@@ -129,7 +129,7 @@ impl ToolRegistry {
         if !registered {
             tracing::warn!(
                 tool = name,
-                "Rejected dynamic tool registration because its name is protected"
+                "Rejected dynamic tool registration because its identity is protected or already registered"
             );
         }
         registered
@@ -138,13 +138,26 @@ impl ToolRegistry {
     /// Register a tool as built-in using async locks.
     ///
     /// Built-in tools are protected from shadowing by dynamic registrations.
-    pub async fn register_builtin(&self, tool: Arc<dyn Tool>) {
-        self.inner.register_builtin(tool).await;
+    pub async fn register_builtin(&self, tool: Arc<dyn Tool>) -> bool {
+        let name = tool.name().to_string();
+        let registered = self.inner.register_builtin(tool).await;
+        if !registered {
+            tracing::error!(tool = name, "Rejected duplicate built-in tool identity");
+        }
+        registered
     }
 
     /// Register a tool (sync version for startup, marks as built-in).
-    pub fn register_sync(&self, tool: Arc<dyn Tool>) {
-        self.inner.register_sync(tool);
+    pub fn register_sync(&self, tool: Arc<dyn Tool>) -> bool {
+        let name = tool.name().to_string();
+        let registered = self.inner.register_sync(tool);
+        if !registered {
+            tracing::error!(
+                tool = name,
+                "Rejected duplicate or contended startup tool identity"
+            );
+        }
+        registered
     }
 
     /// Unregister a tool.

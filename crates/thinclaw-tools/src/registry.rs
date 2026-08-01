@@ -185,34 +185,48 @@ impl ToolRegistry {
         &self.rate_limiter
     }
 
-    /// Register a tool. Rejects dynamic tools that try to shadow a built-in name.
+    /// Register a tool. Every identity is single-assignment.
     pub async fn register(&self, tool: Arc<dyn Tool>) -> bool {
         let name = tool.name().to_string();
         let builtin_names = self.builtin_names.read().await;
         if builtin_names.contains(&name) || PROTECTED_TOOL_NAMES.contains(&name.as_str()) {
             return false;
         }
-        self.tools.write().await.insert(name.clone(), tool);
+        let mut tools = self.tools.write().await;
+        if tools.contains_key(&name) {
+            return false;
+        }
+        tools.insert(name, tool);
         true
     }
 
     /// Register a tool as built-in using async locks.
-    pub async fn register_builtin(&self, tool: Arc<dyn Tool>) {
+    pub async fn register_builtin(&self, tool: Arc<dyn Tool>) -> bool {
         let name = tool.name().to_string();
         let mut builtin_names = self.builtin_names.write().await;
-        self.tools.write().await.insert(name.clone(), tool);
+        let mut tools = self.tools.write().await;
+        if tools.contains_key(&name) || builtin_names.contains(&name) {
+            return false;
+        }
+        tools.insert(name.clone(), tool);
         builtin_names.insert(name);
+        true
     }
 
     /// Register a tool (sync version for startup, marks as built-in).
-    pub fn register_sync(&self, tool: Arc<dyn Tool>) {
+    pub fn register_sync(&self, tool: Arc<dyn Tool>) -> bool {
         let name = tool.name().to_string();
         if let Ok(mut builtins) = self.builtin_names.try_write()
             && let Ok(mut tools) = self.tools.try_write()
         {
+            if tools.contains_key(&name) || builtins.contains(&name) {
+                return false;
+            }
             tools.insert(name.clone(), tool);
             builtins.insert(name);
+            return true;
         }
+        false
     }
 
     /// Register the root-independent default built-ins.
@@ -1058,4 +1072,25 @@ pub struct WasmToolRegistration<'a, I: HostToolInvoker> {
     pub oauth_refresh: Option<OAuthRefreshConfig>,
     /// Optional host-mediated bridge for WASM tool_invoke aliases.
     pub tool_invoker: Option<Arc<I>>,
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn built_in_identity_is_single_assignment() {
+        let registry = ToolRegistry::new();
+        assert!(registry.register_builtin(Arc::new(EchoTool)).await);
+        assert!(!registry.register_builtin(Arc::new(EchoTool)).await);
+        assert_eq!(registry.count(), 1);
+    }
+
+    #[test]
+    fn synchronous_startup_rejects_duplicate_identity() {
+        let registry = ToolRegistry::new();
+        assert!(registry.register_sync(Arc::new(EchoTool)));
+        assert!(!registry.register_sync(Arc::new(EchoTool)));
+        assert_eq!(registry.count(), 1);
+    }
 }
