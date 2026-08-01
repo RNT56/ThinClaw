@@ -159,7 +159,7 @@ jsonwebtoken = { workspace = true }
 
 # YAML parsing for SKILL.md frontmatter
 serde_yaml_ng = "0.10"
-shlex = "1.3"
+shlex = "2.0"
 
 # Filesystem paths
 dirs = "6"
