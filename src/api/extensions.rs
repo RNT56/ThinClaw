@@ -8,12 +8,10 @@ use crate::channels::web::types::*;
 use crate::extensions::ExtensionManager;
 use crate::tools::ToolRegistry;
 use thinclaw_gateway::web::extensions::{
-    ExtensionAuthRequiredResponseInput, ExtensionInfoInput, ExtensionKindHint,
-    ExtensionReconnectSupportInput, WasmChannelActivationStatusInput, activation_error_needs_auth,
-    classify_extension_reconnect_support, classify_wasm_channel_activation_status,
-    extension_action_error_response, extension_action_success_response,
-    extension_auth_required_response, extension_auth_status_is_authenticated,
-    extension_authentication_failed_response, extension_info, parse_extension_kind_hint, tool_info,
+    ExtensionInfoInput, ExtensionKindHint, ExtensionReconnectSupportInput,
+    WasmChannelActivationStatusInput, classify_extension_reconnect_support,
+    classify_wasm_channel_activation_status, extension_action_error_response,
+    extension_action_success_response, extension_info, parse_extension_kind_hint, tool_info,
     wasm_channel_activation_status_needs_pairing_state,
 };
 
@@ -115,45 +113,14 @@ pub async fn install_extension(
     }
 }
 
-/// Activate an extension (with auto-auth retry).
+/// Activate an extension. Authentication is an explicit, separate operation.
 pub async fn activate_extension(
     ext_mgr: &Arc<ExtensionManager>,
     name: &str,
 ) -> ApiResult<ActionResponse> {
     match ext_mgr.activate(name).await {
         Ok(result) => Ok(extension_action_success_response(result.message)),
-        Err(activate_err) => {
-            let err_str = activate_err.to_string();
-            let needs_auth = activation_error_needs_auth(&err_str);
-
-            if !needs_auth {
-                return Ok(extension_action_error_response(err_str));
-            }
-
-            // Try authenticating first, then retry activation.
-            match ext_mgr.auth(name, None).await {
-                Ok(auth_result) if extension_auth_status_is_authenticated(&auth_result.status) => {
-                    match ext_mgr.activate(name).await {
-                        Ok(result) => Ok(extension_action_success_response(result.message)),
-                        Err(e) => Ok(extension_action_error_response(e.to_string())),
-                    }
-                }
-                Ok(auth_result) => Ok(extension_auth_required_response(
-                    ExtensionAuthRequiredResponseInput {
-                        extension_name: name,
-                        auth_url: auth_result.auth_url,
-                        setup_url: None,
-                        auth_mode: None,
-                        auth_status: None,
-                        awaiting_token: auth_result.awaiting_token,
-                        instructions: auth_result.instructions,
-                        shared_auth_provider: None,
-                        missing_scopes: Vec::new(),
-                    },
-                )),
-                Err(auth_err) => Ok(extension_authentication_failed_response(auth_err)),
-            }
-        }
+        Err(error) => Ok(extension_action_error_response(error.to_string())),
     }
 }
 

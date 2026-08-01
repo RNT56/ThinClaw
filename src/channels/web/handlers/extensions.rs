@@ -11,13 +11,10 @@ use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::extensions::manager::AuthRequestContext;
 use thinclaw_gateway::web::extensions::{
-    ExtensionAuthRequiredResponseInput, ExtensionInstallFallbackInput,
-    ExtensionRegistryEntrySource, ExtensionSetupResponseInput, InstalledExtensionInfoInput,
-    InstalledExtensionRegistryKey, RegistryEntryProjectionInput, ToolInfoInput,
-    WasmChannelActivationStatusInput, activation_error_needs_auth,
-    channel_manager_unavailable_error, extension_action_error_response,
-    extension_action_success_response, extension_auth_required_response,
-    extension_auth_status_allows_activation_retry, extension_authentication_failed_response,
+    ExtensionInstallFallbackInput, ExtensionRegistryEntrySource, ExtensionSetupResponseInput,
+    InstalledExtensionInfoInput, InstalledExtensionRegistryKey, RegistryEntryProjectionInput,
+    ToolInfoInput, WasmChannelActivationStatusInput, channel_manager_unavailable_error,
+    extension_action_error_response, extension_action_success_response,
     extension_info_needs_channel_diagnostics, extension_internal_error,
     extension_list_response_from_installed_inputs, extension_manager_unavailable_error,
     extension_manager_unavailable_install_response, extension_reconnect_failed_response,
@@ -161,55 +158,50 @@ pub(crate) async fn extensions_install_handler(
 
 pub(crate) async fn extensions_activate_handler(
     State(state): State<Arc<GatewayState>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    request: Option<Json<ExtensionActivateRequest>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let ext_mgr = state
         .extension_manager
         .as_ref()
         .ok_or_else(extension_manager_unavailable_error)?;
+    let kind = request
+        .and_then(|Json(request)| request.kind)
+        .map(|kind| parse_activation_kind(&kind))
+        .transpose()?;
 
-    match ext_mgr.activate(&name).await {
-        Ok(result) => Ok(Json(extension_action_success_response(result.message))),
-        Err(activate_err) => {
-            let err_str = activate_err.to_string();
-            let needs_auth = activation_error_needs_auth(&err_str);
+    match ext_mgr.activate_kind(&name, kind).await {
+        Ok(result) => Ok(Json(serde_json::json!({
+            "success": true,
+            "message": result.message,
+            "name": result.name,
+            "kind": result.kind,
+            "activated_identities": result.tools_loaded,
+            "readiness": "active"
+        }))),
+        Err(error) => Ok(Json(serde_json::json!({
+            "success": false,
+            "message": error.to_string(),
+            "name": name,
+            "kind": kind,
+            "activated_identities": [],
+            "readiness": "inactive"
+        }))),
+    }
+}
 
-            if !needs_auth {
-                return Ok(Json(extension_action_error_response(err_str)));
-            }
-
-            let auth_context = AuthRequestContext {
-                callback_base_url: request_origin_from_headers(&headers),
-                callback_type: Some("web".to_string()),
-                thread_id: None,
-            };
-
-            match ext_mgr.auth_with_context(&name, None, auth_context).await {
-                Ok(auth_result)
-                    if extension_auth_status_allows_activation_retry(&auth_result.auth_status) =>
-                {
-                    match ext_mgr.activate(&name).await {
-                        Ok(result) => Ok(Json(extension_action_success_response(result.message))),
-                        Err(e) => Ok(Json(extension_action_error_response(e.to_string()))),
-                    }
-                }
-                Ok(auth_result) => Ok(Json(extension_auth_required_response(
-                    ExtensionAuthRequiredResponseInput {
-                        extension_name: &name,
-                        auth_url: auth_result.auth_url,
-                        setup_url: auth_result.setup_url,
-                        auth_mode: Some(auth_result.auth_mode),
-                        auth_status: Some(auth_result.auth_status),
-                        awaiting_token: auth_result.awaiting_token,
-                        instructions: auth_result.instructions,
-                        shared_auth_provider: auth_result.shared_auth_provider,
-                        missing_scopes: auth_result.missing_scopes,
-                    },
-                ))),
-                Err(auth_err) => Ok(Json(extension_authentication_failed_response(auth_err))),
-            }
-        }
+fn parse_activation_kind(
+    kind: &str,
+) -> Result<crate::extensions::ExtensionKind, (StatusCode, String)> {
+    match kind.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "mcp" | "mcp_server" => Ok(crate::extensions::ExtensionKind::McpServer),
+        "wasm" | "wasm_tool" => Ok(crate::extensions::ExtensionKind::WasmTool),
+        "channel" | "wasm_channel" => Ok(crate::extensions::ExtensionKind::WasmChannel),
+        "native" | "native_plugin" => Ok(crate::extensions::ExtensionKind::NativePlugin),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "kind must be mcp-server, wasm-tool, wasm-channel, or native-plugin".to_string(),
+        )),
     }
 }
 

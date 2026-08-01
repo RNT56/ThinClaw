@@ -151,6 +151,11 @@ pub(super) async fn run_terminal_command(
         Some(Command::Extensions(extensions_cmd)) => {
             init_cli_tracing(cli.debug);
             match extensions_cmd {
+                thinclaw::cli::ExtensionsCommand::Activate(args) => {
+                    thinclaw::cli::run_extension_activate(args.clone(), context)
+                        .await
+                        .map_err(anyhow::Error::from)
+                }
                 thinclaw::cli::ExtensionsCommand::Channels(command) => {
                     run_channels_command(command.clone()).await
                 }
@@ -162,6 +167,11 @@ pub(super) async fn run_terminal_command(
                 }
                 thinclaw::cli::ExtensionsCommand::Mcp(command) => {
                     run_mcp_command(command.clone()).await
+                }
+                thinclaw::cli::ExtensionsCommand::Skills(command) => {
+                    thinclaw::cli::run_skills_command(command.clone(), context)
+                        .await
+                        .map_err(anyhow::Error::from)
                 }
             }
         }

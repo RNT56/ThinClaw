@@ -199,8 +199,21 @@ impl ExtensionManager {
 
     /// Activate an installed (and optionally authenticated) extension.
     pub async fn activate(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
+        self.activate_kind(name, None).await
+    }
+
+    /// Activate an exact installed extension kind. A missing selector is
+    /// accepted only when the name resolves to one and only one installed kind.
+    pub async fn activate_kind(
+        &self,
+        name: &str,
+        requested_kind: Option<ExtensionKind>,
+    ) -> Result<ActivateResult, ExtensionError> {
         Self::validate_extension_name(name)?;
-        let kind = self.determine_installed_kind(name).await?;
+        let kind = match requested_kind {
+            Some(kind) => self.require_installed_kind(name, kind).await?,
+            None => self.determine_installed_kind(name).await?,
+        };
 
         self.fire_lifecycle_event(
             crate::extensions::lifecycle_hooks::LifecycleEvent::Activating {

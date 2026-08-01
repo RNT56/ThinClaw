@@ -213,6 +213,64 @@ impl GatewayClient {
             .map_err(|error| GatewayClientError::MalformedResponse(error.to_string()))
     }
 
+    /// POST a JSON mutation with the gateway's explicit confirmation header.
+    pub async fn post_json_confirmed<Request, Response>(
+        &self,
+        path: &str,
+        body: &Request,
+    ) -> Result<Response, GatewayClientError>
+    where
+        Request: Serialize + ?Sized,
+        Response: DeserializeOwned,
+    {
+        let url = self.join_path(path)?;
+        let mut request = self
+            .client
+            .post(url)
+            .header("x-confirm-action", "true")
+            .json(body);
+        if let Some(token) = self.token.as_ref() {
+            request = request.bearer_auth(token.0.expose_secret());
+        }
+        self.decode_response(request).await
+    }
+
+    pub async fn put_json_confirmed<Request, Response>(
+        &self,
+        path: &str,
+        body: &Request,
+    ) -> Result<Response, GatewayClientError>
+    where
+        Request: Serialize + ?Sized,
+        Response: DeserializeOwned,
+    {
+        let url = self.join_path(path)?;
+        let mut request = self
+            .client
+            .put(url)
+            .header("x-confirm-action", "true")
+            .json(body);
+        if let Some(token) = self.token.as_ref() {
+            request = request.bearer_auth(token.0.expose_secret());
+        }
+        self.decode_response(request).await
+    }
+
+    pub async fn delete_json_confirmed<Response>(
+        &self,
+        path: &str,
+    ) -> Result<Response, GatewayClientError>
+    where
+        Response: DeserializeOwned,
+    {
+        let url = self.join_path(path)?;
+        let mut request = self.client.delete(url).header("x-confirm-action", "true");
+        if let Some(token) = self.token.as_ref() {
+            request = request.bearer_auth(token.0.expose_secret());
+        }
+        self.decode_response(request).await
+    }
+
     pub async fn get_json<Query, Response>(
         &self,
         path: &str,
@@ -254,6 +312,29 @@ impl GatewayClient {
         self.origin
             .join(relative)
             .map_err(|_| GatewayClientError::InvalidPath)
+    }
+
+    async fn decode_response<Response>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<Response, GatewayClientError>
+    where
+        Response: DeserializeOwned,
+    {
+        let response = request
+            .send()
+            .await
+            .map_err(|error| GatewayClientError::Transport(error.without_url().to_string()))?;
+        let status = response.status();
+        let bytes = bounded_response_bytes(response, self.budget.max_response_bytes).await?;
+        if !status.is_success() {
+            return Err(GatewayClientError::Api {
+                status: status.as_u16(),
+                message: safe_api_message(&bytes),
+            });
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|error| GatewayClientError::MalformedResponse(error.to_string()))
     }
 }
 

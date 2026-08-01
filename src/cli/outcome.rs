@@ -63,6 +63,14 @@ impl CliError {
         Self::new(ExitClass::Operational, message)
     }
 
+    pub fn operational_reported() -> Self {
+        Self {
+            class: ExitClass::Operational,
+            message: "operation failed".to_string(),
+            reported: true,
+        }
+    }
+
     pub fn usage(message: impl Into<String>) -> Self {
         Self::new(ExitClass::Usage, message)
     }

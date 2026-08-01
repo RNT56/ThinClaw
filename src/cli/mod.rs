@@ -54,6 +54,7 @@ mod secrets;
 mod service;
 pub mod sessions;
 mod setup;
+mod skills;
 pub mod status;
 mod tool;
 pub mod trajectory;
@@ -75,7 +76,7 @@ pub use dev::DevCommand;
 pub use devices::{DeviceCommand, run_devices_command};
 pub use doctor::run_doctor_command;
 pub use experiments::{ExperimentsCommand, run_experiments_command};
-pub use extensions::ExtensionsCommand;
+pub use extensions::{ExtensionsCommand, run_extension_activate};
 pub use gateway::{GatewayCommand, run_gateway_command};
 pub use gateway_client::{
     GatewayAuthToken, GatewayClient, GatewayClientError, GatewayRequestBudget,
@@ -104,6 +105,7 @@ pub use secrets::{SecretsCommand, run_secrets_command};
 pub use service::{ServiceCommand, run_service_command};
 pub use sessions::{SessionCommand, run_sessions_command};
 pub use setup::{SetupAction, SetupCommand};
+pub use skills::{SkillCommand, run_skills_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
 pub use trajectory::{TrajectoryCommand, run_trajectory_command};

@@ -154,18 +154,6 @@ pub fn extension_action_error_response(message: impl Into<String>) -> ActionResp
     ActionResponse::fail(message)
 }
 
-pub fn activation_error_needs_auth(error: &str) -> bool {
-    error.contains("authentication") || error.contains("401") || error.contains("Unauthorized")
-}
-
-pub fn extension_auth_status_is_authenticated(status: &str) -> bool {
-    status == "authenticated"
-}
-
-pub fn extension_auth_status_allows_activation_retry(status: &str) -> bool {
-    matches!(status, "authenticated" | "no_auth_required")
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtensionSetupStatusInput<'a> {
     pub installed: bool,
@@ -875,21 +863,6 @@ mod tests {
         );
         assert_eq!(parse_extension_kind_hint(Some("unknown")), None);
         assert_eq!(parse_extension_kind_hint(None), None);
-    }
-
-    #[test]
-    fn auth_status_helpers_preserve_api_and_web_retry_policy() {
-        assert!(extension_auth_status_is_authenticated("authenticated"));
-        assert!(!extension_auth_status_is_authenticated("no_auth_required"));
-        assert!(extension_auth_status_allows_activation_retry(
-            "authenticated"
-        ));
-        assert!(extension_auth_status_allows_activation_retry(
-            "no_auth_required"
-        ));
-        assert!(!extension_auth_status_allows_activation_retry(
-            "awaiting_authorization"
-        ));
     }
 
     #[test]

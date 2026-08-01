@@ -610,6 +610,41 @@ impl ExtensionManager {
         }
     }
 
+    /// Validate an operator-supplied kind without falling back to a name-only
+    /// selector. This keeps cross-kind collisions non-mutating.
+    pub(super) async fn require_installed_kind(
+        &self,
+        name: &str,
+        kind: ExtensionKind,
+    ) -> Result<ExtensionKind, ExtensionError> {
+        Self::validate_extension_name(name)?;
+        let installed = match kind {
+            ExtensionKind::McpServer => match self.get_mcp_server(name).await {
+                Ok(_) => true,
+                Err(crate::tools::mcp::config::ConfigError::ServerNotFound { .. }) => false,
+                Err(error) => {
+                    return Err(ExtensionError::Config(format!(
+                        "failed to inspect MCP extension configuration: {error}"
+                    )));
+                }
+            },
+            ExtensionKind::WasmTool => {
+                is_real_extension_file(&self.wasm_tools_dir.join(format!("{name}.wasm"))).await?
+            }
+            ExtensionKind::WasmChannel => {
+                is_real_extension_file(&self.wasm_channels_dir.join(format!("{name}.wasm"))).await?
+            }
+            ExtensionKind::NativePlugin => self.native_plugins.read().await.is_registered(name),
+        };
+        if installed {
+            Ok(kind)
+        } else {
+            Err(ExtensionError::NotInstalled(format!(
+                "'{name}' is not installed as {kind}"
+            )))
+        }
+    }
+
     /// Reject names containing path separators or traversal sequences.
     pub(super) fn validate_extension_name(name: &str) -> Result<(), ExtensionError> {
         if name.is_empty()

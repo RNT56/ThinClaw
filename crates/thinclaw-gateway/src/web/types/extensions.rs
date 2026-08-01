@@ -133,6 +133,12 @@ pub struct RegistrySearchQuery {
     pub query: Option<String>,
 }
 
+/// Optional exact selector for running-runtime extension activation.
+#[derive(Debug, Default, Deserialize)]
+pub struct ExtensionActivateRequest {
+    pub kind: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct NostrPrivateKeyRequest {
     #[serde(default)]
