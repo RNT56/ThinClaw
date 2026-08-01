@@ -1,5 +1,7 @@
 //! Owned, bounded execution for trusted argv-constructed host utilities.
 
+use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -33,6 +35,7 @@ impl std::fmt::Debug for OwnedStdChild {
 
 impl OwnedStdChild {
     pub fn spawn(command: &mut std::process::Command) -> std::io::Result<Self> {
+        apply_child_environment_policy(command)?;
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt as _;
@@ -104,6 +107,7 @@ impl std::fmt::Debug for OwnedChild {
 impl OwnedChild {
     /// Spawn a command in a descendant-owned process boundary.
     pub fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        apply_child_environment_policy(command.as_std_mut())?;
         command.kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
@@ -301,6 +305,7 @@ pub fn bounded_std_command_output(
     stdout_limit: usize,
     stderr_limit: usize,
 ) -> Result<BoundedProcessOutput, BoundedProcessError> {
+    apply_child_environment_policy(command).map_err(BoundedProcessError::Spawn)?;
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -388,6 +393,60 @@ pub fn bounded_std_command_output(
         stdout,
         stderr,
     })
+}
+
+/// The mandatory ambient-environment boundary for every platform-owned child.
+///
+/// Callers may add exact descriptor-owned variables before spawn. This helper
+/// snapshots only those explicit entries, clears the inherited environment,
+/// restores the explicit set, and supplies the minimum process-start/search
+/// substrate. Parent credentials, proxy/auth-agent variables, loader controls,
+/// HOME, and temp locations therefore do not leak implicitly.
+pub fn apply_child_environment_policy(command: &mut std::process::Command) -> std::io::Result<()> {
+    let explicit = command
+        .get_envs()
+        .map(|(key, value)| (key.to_os_string(), value.map(OsStr::to_os_string)))
+        .collect::<Vec<_>>();
+    let explicit_path = explicit
+        .iter()
+        .any(|(key, value)| key == OsStr::new("PATH") && value.is_some());
+
+    command.env_clear();
+    for (key, value) in explicit {
+        if let Some(value) = value {
+            command.env(key, value);
+        }
+    }
+    if !explicit_path && let Some(path) = sanitized_search_path() {
+        command.env("PATH", path);
+    }
+
+    #[cfg(windows)]
+    for key in ["SystemRoot", "WINDIR", "ComSpec"] {
+        if command
+            .get_envs()
+            .any(|(set, value)| set == key && value.is_some())
+        {
+            continue;
+        }
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    Ok(())
+}
+
+fn sanitized_search_path() -> Option<OsString> {
+    let parent = std::env::var_os("PATH")?;
+    let directories = std::env::split_paths(&parent)
+        .filter(|path| path.is_absolute())
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .filter(|path| path.is_dir())
+        .take(64)
+        .collect::<Vec<PathBuf>>();
+    (!directories.is_empty())
+        .then(|| std::env::join_paths(directories).ok())
+        .flatten()
 }
 
 fn capture_bounded_std_pipe<R: std::io::Read>(
@@ -559,6 +618,27 @@ mod tests {
         .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"seen:hello");
+    }
+
+    #[tokio::test]
+    async fn owned_children_clear_ambient_environment_and_keep_explicit_slots() {
+        const AMBIENT: &str = "THINCLAW_TEST_AMBIENT_CREDENTIAL";
+        // SAFETY: this test uses a unique key and removes it before returning.
+        unsafe { std::env::set_var(AMBIENT, "must-not-leak") };
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "printf '%s|%s' \"${THINCLAW_TEST_AMBIENT_CREDENTIAL-unset}\" \"${DECLARED_SLOT-unset}\"",
+            ])
+            .env("DECLARED_SLOT", "declared");
+        let output = bounded_command_output(&mut command, Duration::from_secs(5), 1024, 1024)
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var(AMBIENT) };
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"unset|declared");
     }
 
     #[test]

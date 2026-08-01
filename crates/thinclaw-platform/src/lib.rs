@@ -28,8 +28,8 @@ pub use paths::{
 };
 pub use process::{
     BoundedLine, BoundedProcessError, BoundedProcessOutput, OwnedChild, OwnedStdChild,
-    bounded_command_output, bounded_command_output_with_input, bounded_std_command_output,
-    read_bounded_line,
+    apply_child_environment_policy, bounded_command_output, bounded_command_output_with_input,
+    bounded_std_command_output, read_bounded_line,
 };
 pub use shell::{ShellFlavor, ShellLauncher, shell_launcher};
 
