@@ -508,6 +508,8 @@ pub(crate) async fn build_inner(
             if cfg.local_inference_enabled {
                 let sidecar = app_handle.state::<crate::sidecar::SidecarManager>();
                 let engine_mgr = app_handle.state::<crate::engine::EngineManager>();
+                let local_api_key =
+                    crate::engine::local_runtime_api_key(&sidecar, &engine_mgr).await;
                 let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_mgr).await;
 
                 if let Some(endpoint) = snapshot.endpoint {
@@ -517,7 +519,7 @@ pub(crate) async fn build_inner(
                     );
                     bridge_config.insert("LLM_BACKEND".into(), "openai_compatible".into());
                     bridge_config.insert("LLM_BASE_URL".into(), endpoint.base_url);
-                    if let Some(token) = endpoint.api_key.filter(|token| !token.is_empty()) {
+                    if let Some(token) = local_api_key {
                         bridge_config.insert("LLM_API_KEY".into(), token);
                     }
                 } else {

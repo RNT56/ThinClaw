@@ -26,6 +26,7 @@ pub async fn agent_chat(
     if request.trim().is_empty() || request.len() > 2 * 1024 * 1024 || request.contains('\0') {
         return Err("Chat request is missing, malformed, or oversized".into());
     }
+    let api_key = crate::engine::local_runtime_api_key(&state, &engine_manager).await;
     let snapshot = crate::engine::local_runtime_snapshot(&state, &engine_manager).await;
     let endpoint = snapshot.endpoint.as_ref().ok_or_else(|| {
         format!(
@@ -37,11 +38,7 @@ pub async fn agent_chat(
         )
     })?;
     let base_url = endpoint.base_url.clone();
-    let api_key = endpoint
-        .api_key
-        .clone()
-        .filter(|token| !token.is_empty())
-        .unwrap_or_else(|| "sk-no-key-required".to_string());
+    let api_key = api_key.unwrap_or_else(|| "sk-no-key-required".to_string());
     let model_id = endpoint
         .model_id
         .clone()

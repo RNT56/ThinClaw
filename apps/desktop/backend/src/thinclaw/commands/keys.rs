@@ -1037,7 +1037,8 @@ pub async fn thinclaw_toggle_local_tools(
     // Regenerate config to reflect the change
     let existing_thinclaw_engine = cfg.load_config().ok();
     let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
-    let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot);
+    let api_key = crate::engine::local_runtime_api_key(&sidecar, &engine_manager).await;
+    let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot, api_key);
     let thinclaw_engine = cfg.generate_config(
         existing_thinclaw_engine
             .as_ref()
@@ -1131,7 +1132,8 @@ pub async fn thinclaw_set_workspace_mode(
     // Regenerate config to reflect the change
     let existing_thinclaw_engine = cfg.load_config().ok();
     let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
-    let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot);
+    let api_key = crate::engine::local_runtime_api_key(&sidecar, &engine_manager).await;
+    let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot, api_key);
     let thinclaw_engine = cfg.generate_config(
         existing_thinclaw_engine
             .as_ref()
@@ -1183,7 +1185,8 @@ pub async fn thinclaw_toggle_local_inference(
     // Regenerate config to reflect priority change
     let existing_thinclaw_engine = cfg.load_config().ok();
     let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
-    let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot);
+    let api_key = crate::engine::local_runtime_api_key(&sidecar, &engine_manager).await;
+    let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot, api_key);
     let thinclaw_engine = cfg.generate_config(
         existing_thinclaw_engine
             .as_ref()

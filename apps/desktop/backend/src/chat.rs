@@ -284,6 +284,7 @@ pub async fn resolve_provider(
     // ── Local provider ──────────────────────────────────────────────────
     info!("[resolve_provider] Routing to Local Provider");
 
+    let local_api_key = crate::engine::local_runtime_api_key(sidecar_manager, engine_manager).await;
     let snapshot = crate::engine::local_runtime_snapshot(sidecar_manager, engine_manager).await;
     if let Some(endpoint) = snapshot.endpoint {
         let port: u16 = endpoint
@@ -303,7 +304,7 @@ pub async fn resolve_provider(
             base_url: endpoint.base_url,
             model_name: endpoint.model_id.unwrap_or_else(|| "default".to_string()),
             port,
-            token: endpoint.api_key.unwrap_or_default(),
+            token: local_api_key.unwrap_or_default(),
             context_size: endpoint.context_size.unwrap_or(4096),
             model_family: endpoint.model_family,
         });
@@ -978,6 +979,7 @@ pub async fn direct_chat_count_tokens(
     }
 
     // 2. Try precise count via the shared local runtime snapshot when available.
+    let local_api_key = crate::engine::local_runtime_api_key(&state, &engine_manager).await;
     let snapshot = crate::engine::local_runtime_snapshot(&state, &engine_manager).await;
     if let Some(endpoint) = snapshot.endpoint {
         let mut check_history: Vec<serde_json::Value> = Vec::new();
@@ -986,7 +988,7 @@ pub async fn direct_chat_count_tokens(
         }
 
         let base_url = endpoint.base_url.trim_end_matches('/').to_string();
-        let token = endpoint.api_key.unwrap_or_default();
+        let token = local_api_key.unwrap_or_default();
         let model_family = endpoint
             .model_family
             .unwrap_or_else(|| "unknown".to_string());

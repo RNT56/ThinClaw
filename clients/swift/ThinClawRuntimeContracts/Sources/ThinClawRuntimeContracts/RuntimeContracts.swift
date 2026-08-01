@@ -160,9 +160,11 @@ public enum RuntimeExposurePolicy: String, Codable, Sendable {
     case networkExposed = "network_exposed"
 }
 
+public typealias LocalEndpointId = String
+
 public struct LocalRuntimeEndpoint: Codable, Sendable {
+    public let endpointId: LocalEndpointId
     public let baseUrl: String
-    public let apiKey: String?
     public let modelId: String?
     public let contextSize: UInt32?
     public let modelFamily: String?

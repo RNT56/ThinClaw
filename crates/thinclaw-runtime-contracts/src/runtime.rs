@@ -49,10 +49,24 @@ pub enum RuntimeReadiness {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LocalEndpointId(pub String);
+
+impl std::fmt::Debug for LocalEndpointId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("LocalEndpointId")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LocalRuntimeEndpoint {
+    pub endpoint_id: LocalEndpointId,
     pub base_url: String,
-    #[serde(default)]
-    pub api_key: Option<String>,
     #[serde(default)]
     pub model_id: Option<String>,
     #[serde(default)]
@@ -65,8 +79,8 @@ impl std::fmt::Debug for LocalRuntimeEndpoint {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("LocalRuntimeEndpoint")
+            .field("endpoint_id", &self.endpoint_id)
             .field("base_url", &"[REDACTED URL]")
-            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .field("model_id", &self.model_id)
             .field("context_size", &self.context_size)
             .field("model_family", &self.model_family)
@@ -114,10 +128,7 @@ impl LocalRuntimeSnapshot {
         }
     }
 
-    pub fn redacted_for_public_clients(mut self) -> Self {
-        if let Some(endpoint) = self.endpoint.as_mut() {
-            endpoint.api_key = None;
-        }
+    pub fn redacted_for_public_clients(self) -> Self {
         self
     }
 }

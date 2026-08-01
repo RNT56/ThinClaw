@@ -4117,7 +4117,8 @@ export type LatencyEntry = { provider: string; avg_latency_ms: number }
  * Plugin lifecycle event
  */
 export type LifecycleEventItem = { timestamp: string; plugin_id: string; event_type: string; details: string | null }
-export type LocalRuntimeEndpoint = { baseUrl: string; apiKey?: string | null; modelId?: string | null; contextSize?: number | null; modelFamily?: string | null }
+export type LocalEndpointId = string
+export type LocalRuntimeEndpoint = { endpointId: LocalEndpointId; baseUrl: string; modelId?: string | null; contextSize?: number | null; modelFamily?: string | null }
 export type LocalRuntimeKind = "llama_cpp" | "mlx" | "vllm" | "ollama" | "none"
 export type LocalRuntimeSnapshot = { kind: LocalRuntimeKind; displayName: string; readiness: RuntimeReadiness; endpoint?: LocalRuntimeEndpoint | null;
 /**

@@ -33,8 +33,8 @@ describe('directCommands', () => {
             displayName: 'llama.cpp',
             readiness: 'ready',
             endpoint: {
+                endpointId: 'llamacpp-chat-53755',
                 baseUrl: 'http://127.0.0.1:53755/v1',
-                apiKey: null,
                 modelId: 'default',
                 contextSize: 32768,
                 modelFamily: 'qwen',
@@ -51,7 +51,7 @@ describe('directCommands', () => {
         expect(result.status).toBe('ok');
         if (result.status === 'ok') {
             expect(result.data.supportedCapabilities).toEqual(['chat', 'embedding']);
-            expect(result.data.endpoint?.apiKey).toBeNull();
+            expect(result.data.endpoint).not.toHaveProperty('apiKey');
         }
     });
 
