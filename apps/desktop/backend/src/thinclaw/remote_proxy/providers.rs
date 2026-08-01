@@ -15,15 +15,15 @@ impl RemoteGatewayProxy {
             .await
     }
 
-    /// Approve a channel pairing code.
+    /// Approve a channel pairing by stable, non-secret request ID.
     pub async fn approve_pairing(
         &self,
         channel: &str,
-        code: &str,
+        request_id: &str,
     ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
         self.post_json(
             &format!("/api/pairing/{}/approve", urlencoding::encode(channel)),
-            &serde_json::json!({ "code": code }),
+            &serde_json::json!({ "request_id": request_id }),
         )
         .await
     }

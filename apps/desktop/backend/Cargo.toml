@@ -118,6 +118,7 @@ thinclaw-secrets = { path = "../../../crates/thinclaw-secrets", default-features
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
+thinclaw-types = { path = "../../../crates/thinclaw-types" }
 
 #[cfg] secure no-follow file opens for migration inputs
 [target.'cfg(unix)'.dependencies]

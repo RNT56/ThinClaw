@@ -17,7 +17,7 @@ fn bounded_config_text(value: &str, max_bytes: usize, allow_empty: bool) -> bool
             .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
 }
 
-fn valid_mcp_auth_token(token: &str) -> bool {
+fn valid_legacy_mcp_auth_token(token: &str) -> bool {
     token.trim() == token && token.len() <= 16 * 1024 && !token.chars().any(char::is_control)
 }
 
@@ -123,17 +123,10 @@ fn validate_user_config(config: &UserConfig) -> Result<(), String> {
         return Err("User configuration contains invalid inference models".to_string());
     }
 
-    if config
-        .mcp_auth_token
-        .as_deref()
-        .is_some_and(|token| !valid_mcp_auth_token(token))
-    {
-        return Err("MCP authentication token is invalid".to_string());
-    }
     if let Some(base_url) = config.mcp_base_url.as_deref() {
         thinclaw_desktop_tools::McpClient::new(thinclaw_desktop_tools::McpConfig {
             base_url: base_url.to_string(),
-            auth_token: config.mcp_auth_token.clone().unwrap_or_default(),
+            auth_token: String::new(),
             timeout_ms: 30_000,
         })
         .map_err(|_| "MCP endpoint configuration is invalid".to_string())?;
@@ -239,11 +232,6 @@ pub struct UserConfig {
     /// in config.
     #[serde(default = "default_mcp_base_url")]
     pub mcp_base_url: Option<String>,
-
-    /// MCP JWT auth token. Falls back to THINCLAW_MCP_TOKEN, then legacy
-    /// SCRAPPY_MCP_TOKEN.
-    #[serde(default = "default_mcp_auth_token")]
-    pub mcp_auth_token: Option<String>,
 
     /// Whether to use the Rhai sandbox (code-execution mode) instead of
     /// legacy JSON <tool_code> parsing. Requires mcp_base_url to be set.
@@ -394,9 +382,6 @@ pub struct UserConfigPatch {
     #[specta(optional, type = Option<String>)]
     mcp_base_url: PatchField<Option<String>>,
     #[serde(default)]
-    #[specta(optional, type = Option<String>)]
-    mcp_auth_token: PatchField<Option<String>>,
-    #[serde(default)]
     #[specta(optional, type = bool)]
     mcp_sandbox_enabled: PatchField<bool>,
     #[serde(default)]
@@ -477,7 +462,6 @@ impl Serialize for UserConfigPatch {
             ptt_shortcut,
             disabled_providers,
             mcp_base_url,
-            mcp_auth_token,
             mcp_sandbox_enabled,
             mcp_cache_ttl_secs,
             mcp_tool_result_max_chars,
@@ -507,10 +491,6 @@ impl std::fmt::Debug for UserConfig {
             .field("selected_persona", &self.selected_persona)
             .field("selected_chat_provider", &self.selected_chat_provider)
             .field("mcp_base_url_configured", &self.mcp_base_url.is_some())
-            .field(
-                "mcp_auth_token",
-                &crate::debug_redaction::RedactedOption(&self.mcp_auth_token),
-            )
             .field("mcp_sandbox_enabled", &self.mcp_sandbox_enabled)
             .field("mcp_cache_ttl_secs", &self.mcp_cache_ttl_secs)
             .field("mcp_tool_result_max_chars", &self.mcp_tool_result_max_chars)
@@ -550,7 +530,6 @@ impl Default for UserConfig {
             ptt_shortcut: default_ptt_shortcut(),
             disabled_providers: vec![],
             mcp_base_url: default_mcp_base_url(),
-            mcp_auth_token: default_mcp_auth_token(),
             mcp_sandbox_enabled: false,
             mcp_cache_ttl_secs: default_mcp_cache_ttl(),
             mcp_tool_result_max_chars: default_mcp_tool_result_max_chars(),
@@ -644,21 +623,10 @@ fn default_mcp_base_url() -> Option<String> {
         })
 }
 
-fn default_mcp_auth_token() -> Option<String> {
-    std::env::var("THINCLAW_MCP_TOKEN")
-        .or_else(|_| std::env::var("SCRAPPY_MCP_TOKEN"))
-        .ok()
-        .filter(|value| !value.is_empty() && valid_mcp_auth_token(value))
-}
-
 pub(crate) const MCP_AUTH_TOKEN_SECRET_KEY: &str = "desktop_mcp_auth_token";
 
 fn config_json_for_persistence(config: &UserConfig) -> Result<String, serde_json::Error> {
-    let mut value = serde_json::to_value(config)?;
-    if let Some(object) = value.as_object_mut() {
-        object.remove("mcp_auth_token");
-    }
-    serde_json::to_string_pretty(&value)
+    serde_json::to_string_pretty(config)
 }
 
 pub(crate) fn write_config_file(path: &std::path::Path, contents: &str) -> Result<(), String> {
@@ -688,6 +656,7 @@ fn normalize_user_config(mut config: UserConfig) -> UserConfig {
 
 pub struct ConfigManager {
     config: Mutex<UserConfig>,
+    mcp_auth_token: Mutex<Option<String>>,
     config_path: PathBuf,
     mutation_lock: Mutex<()>,
 }
@@ -706,7 +675,7 @@ impl ConfigManager {
         let should_create_default = metadata
             .as_ref()
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-        let mut config = match metadata {
+        let config = match metadata {
             Ok(_) => match thinclaw_platform::read_regular_file_bounded_single_link(
                 &config_path,
                 MAX_USER_CONFIG_BYTES,
@@ -717,7 +686,9 @@ impl ConfigManager {
                             legacy_mcp_token = value
                                 .get("mcp_auth_token")
                                 .and_then(serde_json::Value::as_str)
-                                .filter(|token| !token.is_empty() && valid_mcp_auth_token(token))
+                                .filter(|token| {
+                                    !token.is_empty() && valid_legacy_mcp_auth_token(token)
+                                })
                                 .map(str::to_owned);
                             if legacy_mcp_token.is_some() {
                                 if let Some(object) = value.as_object_mut() {
@@ -798,13 +769,12 @@ impl ConfigManager {
                 }
             }
         }
-        config.mcp_auth_token =
-            crate::thinclaw::config::keychain::get_key(MCP_AUTH_TOKEN_SECRET_KEY)
-                .or_else(|| legacy_mcp_token.filter(|_| !migrated_legacy_token))
-                .or_else(default_mcp_auth_token);
+        let mcp_auth_token = crate::thinclaw::config::keychain::get_key(MCP_AUTH_TOKEN_SECRET_KEY)
+            .or_else(|| legacy_mcp_token.filter(|_| !migrated_legacy_token));
 
         Self {
             config: Mutex::new(config),
+            mcp_auth_token: Mutex::new(mcp_auth_token),
             config_path,
             mutation_lock: Mutex::new(()),
         }
@@ -814,6 +784,13 @@ impl ConfigManager {
         self.config
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn get_mcp_auth_token(&self) -> Option<String> {
+        self.mcp_auth_token
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
 
@@ -836,12 +813,14 @@ impl ConfigManager {
             MAX_USER_CONFIG_BYTES,
         ) {
             if let Ok(new_config) = serde_json::from_slice(&bytes) {
-                let mut normalized = normalize_user_config(new_config);
-                normalized.mcp_auth_token =
-                    crate::thinclaw::config::keychain::get_key(MCP_AUTH_TOKEN_SECRET_KEY)
-                        .or_else(default_mcp_auth_token);
+                let normalized = normalize_user_config(new_config);
                 if validate_user_config(&normalized).is_ok() {
                     *self.config.lock().unwrap_or_else(|e| e.into_inner()) = normalized;
+                    *self
+                        .mcp_auth_token
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) =
+                        crate::thinclaw::config::keychain::get_key(MCP_AUTH_TOKEN_SECRET_KEY);
                 }
             }
         }
@@ -903,20 +882,14 @@ pub async fn get_hf_token(
 #[specta::specta]
 pub fn get_user_config(
     state: tauri::State<ConfigManager>,
-    secret_store: tauri::State<crate::secret_store::SecretStore>,
 ) -> UserConfig {
-    let mut config = state.get_config();
-    config.mcp_auth_token = secret_store
-        .get(MCP_AUTH_TOKEN_SECRET_KEY)
-        .or_else(default_mcp_auth_token);
-    config
+    state.get_config()
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn update_user_config(
     state: tauri::State<ConfigManager>,
-    secret_store: tauri::State<crate::secret_store::SecretStore>,
     config: UserConfigPatch,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let _mutation = state
@@ -927,15 +900,8 @@ pub fn update_user_config(
     let patch = patch
         .as_object()
         .ok_or_else(|| "User configuration patch must be an object".to_string())?;
-    let token_change = patch.get("mcp_auth_token").map(|value| {
-        value
-            .as_str()
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-            .map(str::to_owned)
-    });
-
-    let mut merged = serde_json::to_value(state.get_config())
+    let current = state.get_config();
+    let mut merged = serde_json::to_value(&current)
         .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
     let target = merged
         .as_object_mut()
@@ -947,30 +913,10 @@ pub fn update_user_config(
         target.insert(key.clone(), value.clone());
     }
 
-    let mut merged: UserConfig = serde_json::from_value(merged)
+    let merged: UserConfig = serde_json::from_value(merged)
         .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
-    if let Some(value) = &token_change {
-        merged.mcp_auth_token = value.clone().or_else(default_mcp_auth_token);
-    }
     validate_user_config(&normalize_user_config(merged.clone()))?;
-
-    let previous_mcp_token = secret_store.get(MCP_AUTH_TOKEN_SECRET_KEY);
-    if let Some(value) = &token_change {
-        secret_store.set(MCP_AUTH_TOKEN_SECRET_KEY, value.as_deref())?;
-    }
-    if let Err(save_error) = state.save_config(&merged) {
-        if token_change.is_none() {
-            return Err(save_error.into());
-        }
-        return match secret_store.set(MCP_AUTH_TOKEN_SECRET_KEY, previous_mcp_token.as_deref()) {
-            Ok(()) => Err(save_error.into()),
-            Err(rollback_error) => Err(format!(
-                "{save_error}; additionally failed to restore the previous MCP credential: {rollback_error}"
-            )
-            .into()),
-        };
-    }
-    Ok(())
+    state.save_config(&merged).map_err(Into::into)
 }
 
 // =============================================================================
@@ -1035,14 +981,10 @@ mod tests {
             cfg.mcp_base_url.is_none(),
             "mcp_base_url should be None when env var is unset"
         );
-        assert!(
-            cfg.mcp_auth_token.is_none(),
-            "mcp_auth_token should be None when env var is unset"
-        );
     }
 
     #[test]
-    fn mcp_defaults_read_from_thinclaw_env() {
+    fn mcp_defaults_read_endpoint_but_ignore_raw_token_env() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("THINCLAW_MCP_URL", "https://api.example.com");
@@ -1058,11 +1000,11 @@ mod tests {
         }
 
         assert_eq!(cfg.mcp_base_url.as_deref(), Some("https://api.example.com"));
-        assert_eq!(cfg.mcp_auth_token.as_deref(), Some("tok_abc123"));
+        assert!(!serde_json::to_string(&cfg).unwrap().contains("mcp_auth_token"));
     }
 
     #[test]
-    fn mcp_defaults_read_from_legacy_env() {
+    fn mcp_defaults_read_legacy_endpoint_but_ignore_raw_token_env() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::remove_var("THINCLAW_MCP_URL");
@@ -1078,7 +1020,7 @@ mod tests {
         }
 
         assert_eq!(cfg.mcp_base_url.as_deref(), Some("https://api.example.com"));
-        assert_eq!(cfg.mcp_auth_token.as_deref(), Some("tok_abc123"));
+        assert!(!serde_json::to_string(&cfg).unwrap().contains("mcp_auth_token"));
     }
 
     #[test]
@@ -1097,7 +1039,6 @@ mod tests {
         }
 
         assert!(config.mcp_base_url.is_none());
-        assert!(config.mcp_auth_token.is_none());
         assert!(validate_user_config(&config).is_ok());
     }
 
@@ -1116,11 +1057,10 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn user_config_serializes_and_deserializes_losslessly() {
+    fn user_config_serialization_has_no_raw_credential_field() {
         let original = UserConfig {
             selected_chat_provider: Some("anthropic".to_string()),
             mcp_base_url: Some("https://mcp.example.com".to_string()),
-            mcp_auth_token: Some("secret".to_string()),
             mcp_cache_ttl_secs: 600,
             mcp_tool_result_max_chars: 10_000,
             mcp_sandbox_enabled: true,
@@ -1135,16 +1075,21 @@ mod tests {
             original.selected_chat_provider
         );
         assert_eq!(restored.mcp_base_url, original.mcp_base_url);
-        assert_eq!(restored.mcp_auth_token, original.mcp_auth_token);
+        assert!(!json.contains("mcp_auth_token"));
         assert_eq!(restored.mcp_cache_ttl_secs, 600);
         assert_eq!(restored.mcp_tool_result_max_chars, 10_000);
         assert!(restored.mcp_sandbox_enabled);
     }
 
     #[test]
-    fn persisted_user_config_omits_mcp_token_and_debug_redacts_private_content() {
+    fn generic_user_config_patch_rejects_mcp_credentials() {
+        let patch = serde_json::json!({ "mcp_auth_token": "plaintext" });
+        assert!(serde_json::from_value::<UserConfigPatch>(patch).is_err());
+    }
+
+    #[test]
+    fn persisted_user_config_and_debug_omit_private_content() {
         let config = UserConfig {
-            mcp_auth_token: Some("mcp-live-secret".into()),
             knowledge_bits: vec![KnowledgeBit {
                 id: "private".into(),
                 label: "Private".into(),
@@ -1155,13 +1100,10 @@ mod tests {
         };
 
         let persisted = config_json_for_persistence(&config).unwrap();
-        assert!(!persisted.contains("mcp-live-secret"));
         assert!(!persisted.contains("mcp_auth_token"));
 
         let debug = format!("{config:?}");
-        assert!(!debug.contains("mcp-live-secret"));
         assert!(!debug.contains("private-knowledge-content"));
-        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]
@@ -1216,6 +1158,7 @@ mod tests {
     fn make_manager_from_config(cfg: UserConfig) -> ConfigManager {
         ConfigManager {
             config: Mutex::new(cfg),
+            mcp_auth_token: Mutex::new(None),
             config_path: std::path::PathBuf::from("/tmp/thinclaw_desktop_test_config.json"),
             mutation_lock: Mutex::new(()),
         }
@@ -1236,6 +1179,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mgr = ConfigManager {
             config: Mutex::new(UserConfig::default()),
+            mcp_auth_token: Mutex::new(Some("runtime-only".into())),
             config_path: directory.path().join("user_config.json"),
             mutation_lock: Mutex::new(()),
         };
@@ -1243,16 +1187,14 @@ mod tests {
         let mut updated = mgr.get_config();
         updated.max_search_results = 19;
         updated.mcp_cache_ttl_secs = 120;
-        updated.mcp_auth_token = Some("not-persisted".into());
         mgr.save_config(&updated).unwrap();
 
         let read_back = mgr.get_config();
         assert_eq!(read_back.max_search_results, 19);
         assert_eq!(read_back.mcp_cache_ttl_secs, 120);
-        assert_eq!(read_back.mcp_auth_token.as_deref(), Some("not-persisted"));
+        assert_eq!(mgr.get_mcp_auth_token().as_deref(), Some("runtime-only"));
 
         let persisted = std::fs::read_to_string(&mgr.config_path).unwrap();
-        assert!(!persisted.contains("not-persisted"));
         assert!(!persisted.contains("mcp_auth_token"));
     }
 

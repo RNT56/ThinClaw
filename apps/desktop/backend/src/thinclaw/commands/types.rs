@@ -454,6 +454,7 @@ pub struct ToolsListResponse {
 #[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct PairingItem {
     pub channel: String,
+    pub request_id: Option<String>,
     pub user_id: String,
     pub paired_at: String,
     pub status: String, // "active" | "pending"

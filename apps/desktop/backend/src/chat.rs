@@ -660,7 +660,7 @@ pub async fn direct_chat_stream(
     // Use the Orchestrator — sandbox mode is activated when MCP config is present
     let mcp_config = crate::rig_lib::orchestrator::McpOrchestratorConfig {
         mcp_base_url: user_config.mcp_base_url.clone(),
-        mcp_auth_token: user_config.mcp_auth_token.clone(),
+        mcp_auth_token: config.get_mcp_auth_token(),
         sandbox_enabled: user_config.mcp_sandbox_enabled && user_config.mcp_base_url.is_some(),
     };
     if mcp_config.sandbox_enabled {

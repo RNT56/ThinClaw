@@ -1389,6 +1389,10 @@ pub async fn thinclaw_pairing_list(
                 arr.iter()
                     .map(|req| PairingItem {
                         channel: channel.clone(),
+                        request_id: req
+                            .get("request_id")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
                         user_id: req
                             .get("sender_id")
                             .and_then(|v| v.as_str())
@@ -1408,6 +1412,7 @@ pub async fn thinclaw_pairing_list(
             pairings.extend(approved.iter().map(|item| {
                 PairingItem {
                     channel: channel.clone(),
+                    request_id: None,
                     user_id: item
                         .get("sender_id")
                         .or_else(|| item.get("user_id"))
@@ -1441,6 +1446,7 @@ pub async fn thinclaw_pairing_list(
         .iter()
         .map(|req| PairingItem {
             channel: channel.clone(),
+            request_id: Some(req.request_id.clone()),
             user_id: req.id.clone(),
             paired_at: req.created_at.clone(),
             status: "pending".to_string(),
@@ -1452,6 +1458,7 @@ pub async fn thinclaw_pairing_list(
         for user_id in allowed {
             pairings.push(PairingItem {
                 channel: channel.clone(),
+                request_id: None,
                 user_id,
                 paired_at: String::new(),
                 status: "active".to_string(),
@@ -1468,10 +1475,10 @@ pub async fn thinclaw_pairing_list(
 pub async fn thinclaw_pairing_approve(
     ironclaw: State<'_, ThinClawRuntimeState>,
     channel: String,
-    code: String,
+    request_id: String,
 ) -> Result<serde_json::Value, crate::thinclaw::bridge::BridgeError> {
     if let Some(proxy) = ironclaw.remote_proxy().await {
-        let raw = proxy.approve_pairing(&channel, &code).await?;
+        let raw = proxy.approve_pairing(&channel, &request_id).await?;
         let success = raw
             .get("success")
             .and_then(|value| value.as_bool())
@@ -1487,10 +1494,13 @@ pub async fn thinclaw_pairing_approve(
     }
 
     let store = thinclaw_core::pairing::PairingStore::new();
-    store
-        .approve(&channel, &code)
-        .map_err(|e| format!("Failed to approve pairing: {}", e))?;
-    Ok(serde_json::json!({ "ok": true }))
+    match store
+        .approve_request(&channel, &request_id)
+        .map_err(|e| format!("Failed to approve pairing: {}", e))?
+    {
+        Some(_) => Ok(serde_json::json!({ "ok": true })),
+        None => Err("Pairing request is unavailable or expired".into()),
+    }
 }
 
 // ============================================================================
