@@ -107,6 +107,7 @@ pub enum ChatMessage {
     },
     /// Sub-agent lifecycle card.
     SubagentCard {
+        agent_id: String,
         name: String,
         detail: String,
         success: Option<bool>,
@@ -137,13 +138,9 @@ struct ApprovalPrompt {
 
 impl StreamState {
     fn display_text(&self) -> String {
-        if self.thinking_text.is_empty() {
-            self.content_text.clone()
-        } else if self.content_text.is_empty() {
-            format!("💭 {}", self.thinking_text)
-        } else {
-            format!("💭 {}\n\n{}", self.thinking_text, self.content_text)
-        }
+        // Reasoning text is not a user-visible surface until a policy-safe,
+        // explicitly authorized reasoning view exists.
+        self.content_text.clone()
     }
 }
 
@@ -171,6 +168,10 @@ pub struct TuiApp {
     default_skin_name: String,
     /// Connection status text.
     status_text: String,
+    /// Whether an authoritative runtime update has been received.
+    runtime_state_seen: bool,
+    /// Local diagnostic rendering toggle.
+    debug_enabled: bool,
     /// Currently streaming response.
     active_stream: Option<StreamState>,
     /// Ctrl+C double-tap tracking.
@@ -218,11 +219,16 @@ impl TuiApp {
             input_history_idx: None,
             pre_history_input: None,
             scroll_offset: 0,
-            model: "default".to_string(),
-            agent_id: "main".to_string(),
+            model: settings
+                .selected_model
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            agent_id: settings.agent.name.clone(),
             skin,
             default_skin_name,
-            status_text: "Connected • ready".to_string(),
+            status_text: "Awaiting runtime state".to_string(),
+            runtime_state_seen: false,
+            debug_enabled: false,
             active_stream: None,
             last_ctrl_c: None,
             pending_exit: false,
@@ -697,10 +703,12 @@ impl TuiApp {
             }
             TuiUpdate::Status(text) => {
                 if !text.trim().is_empty() {
+                    self.runtime_state_seen = true;
                     self.status_text = text;
                 }
             }
             TuiUpdate::ModelChanged(model) => {
+                self.runtime_state_seen = true;
                 self.model = model;
             }
             TuiUpdate::ApprovalNeeded {
@@ -750,19 +758,30 @@ impl TuiApp {
                 });
                 self.scroll_offset = u16::MAX;
             }
-            TuiUpdate::SubagentSpawned { name, task } => {
+            TuiUpdate::SubagentSpawned {
+                agent_id,
+                name,
+                task,
+            } => {
                 self.messages.push(ChatMessage::SubagentCard {
+                    agent_id: agent_id.clone(),
                     name: name.clone(),
                     detail: format!("task: {task}"),
                     success: None,
                 });
-                self.status_text = format!("Sub-agent '{name}' running");
+                self.status_text = format!("Sub-agent '{name}' ({agent_id}) running");
                 self.scroll_offset = u16::MAX;
             }
-            TuiUpdate::SubagentProgress { name, message } => {
-                self.status_text = format!("Sub-agent '{name}': {message}");
+            TuiUpdate::SubagentProgress { agent_id, message } => {
+                if let Some(ChatMessage::SubagentCard { detail, .. }) = self.messages.iter_mut().rev().find(|message| {
+                    matches!(message, ChatMessage::SubagentCard { agent_id: id, .. } if id == &agent_id)
+                }) {
+                    *detail = message.clone();
+                }
+                self.status_text = format!("Sub-agent {agent_id}: {message}");
             }
             TuiUpdate::SubagentCompleted {
+                agent_id,
                 name,
                 success,
                 duration_ms,
@@ -774,14 +793,15 @@ impl TuiApp {
                     format!("failed after {secs:.1}s")
                 };
                 self.messages.push(ChatMessage::SubagentCard {
+                    agent_id: agent_id.clone(),
                     name: name.clone(),
                     detail,
                     success: Some(success),
                 });
                 self.status_text = if success {
-                    format!("Sub-agent '{name}' done")
+                    format!("Sub-agent '{name}' ({agent_id}) done")
                 } else {
-                    format!("Sub-agent '{name}' failed")
+                    format!("Sub-agent '{name}' ({agent_id}) failed")
                 };
                 self.scroll_offset = u16::MAX;
             }
@@ -879,9 +899,26 @@ impl TuiApp {
                 );
             }
             "/status" => {
-                self.push_system_note(format!(
-                    "Model: {} | Agent: {} | {}",
-                    self.model, self.agent_id, self.status_text
+                if self.runtime_state_seen {
+                    self.push_system_note(format!(
+                        "Runtime model: {} | Agent: {} | {}",
+                        self.model, self.agent_id, self.status_text
+                    ));
+                } else {
+                    self.push_warning(
+                        "Authoritative runtime status has not arrived yet; no placeholder health is shown.",
+                    );
+                }
+            }
+            "/debug" => {
+                self.debug_enabled = !self.debug_enabled;
+                self.push_info(format!(
+                    "TUI diagnostics {}",
+                    if self.debug_enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
                 ));
             }
             "/interrupt" => {
@@ -1007,25 +1044,12 @@ impl TuiApp {
 
     fn close_last_detail_card(&mut self) {
         if self.active_stream.is_some() {
-            self.status_text = "Cannot close detail cards while a run is active".to_string();
+            self.status_text = "No drawer can be closed while a run is active".to_string();
             return;
         }
-
-        if let Some(index) = self.messages.iter().rposition(|message| {
-            !matches!(
-                message,
-                ChatMessage::User { .. }
-                    | ChatMessage::Info { .. }
-                    | ChatMessage::Warning { .. }
-                    | ChatMessage::Error { .. }
-            )
-        }) {
-            self.messages.remove(index);
-            self.scroll_offset = u16::MAX;
-            self.status_text = "Closed last detail card".to_string();
-        } else {
-            self.push_system_note("Nothing to close.");
-        }
+        // Transcript entries are durable conversation content, not navigation
+        // state. Back may close a typed drawer/modal only; none is open here.
+        self.push_system_note("No drawer or modal is open.");
     }
 
     // Rendering methods are in tui/rendering.rs
@@ -1154,8 +1178,7 @@ mod tests {
         assert_eq!(state.display_text(), "Hello");
 
         state.thinking_text = "Let me think...".to_string();
-        assert!(state.display_text().contains("💭"));
-        assert!(state.display_text().contains("Hello"));
+        assert_eq!(state.display_text(), "Hello");
     }
 
     #[test]
@@ -1197,7 +1220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_back_command_closes_last_detail_card() {
+    async fn test_back_command_never_deletes_transcript_content() {
         let (tx, _rx) = mpsc::channel(4);
         let (_update_tx, update_rx) = mpsc::channel(4);
         let mut app = TuiApp::new(tx, update_rx);
@@ -1211,11 +1234,11 @@ mod tests {
 
         app.handle_slash_command("/back").await;
 
+        assert_eq!(app.messages.len(), 3);
         assert!(matches!(
             app.messages.last(),
-            Some(ChatMessage::User { text }) if text == "/context detail"
+            Some(ChatMessage::System { text }) if text == "No drawer or modal is open."
         ));
-        assert_eq!(app.status_text, "Closed last detail card");
     }
 
     #[tokio::test]

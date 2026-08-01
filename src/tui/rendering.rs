@@ -6,54 +6,19 @@
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
-use crate::branding::art::{best_wordmark_block, hero_block};
-
 use super::{ChatMessage, TuiApp};
 
 impl TuiApp {
     // ── Rendering ────────────────────────────────────────────────────
 
     pub(super) fn render(&mut self, frame: &mut Frame) {
-        let logo = best_wordmark_block(frame.area().width.saturating_sub(4) as usize);
-        let header_height = if let Some(logo) = &logo {
-            logo.height() as u16 + 2
-        } else {
-            1
-        };
         let outer = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(header_height), Constraint::Min(5)])
+            .constraints([Constraint::Length(1), Constraint::Min(5)])
             .split(frame.area());
 
-        self.render_header(frame, outer[0], logo);
-
-        let hero = hero_block(&self.skin);
-        let hero_width = hero
-            .as_ref()
-            .map(|art| (art.width() as u16).saturating_add(4).clamp(18, 28))
-            .unwrap_or(0);
-        let show_hero = hero.is_some() && outer[1].width >= hero_width.saturating_add(48);
-
-        let body_chunks = if show_hero {
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(hero_width), Constraint::Min(36)])
-                .split(outer[1])
-        } else {
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(1)])
-                .split(outer[1])
-        };
-
-        let main_area = if show_hero {
-            body_chunks[1]
-        } else {
-            body_chunks[0]
-        };
-        if show_hero {
-            self.render_hero(frame, body_chunks[0]);
-        }
+        self.render_header(frame, outer[0], None);
+        let main_area = outer[1];
 
         // Dynamic input height: grows with content, clamped to 3..8 lines
         let input_line_count = self.textarea.lines().len() as u16;
@@ -135,45 +100,12 @@ impl TuiApp {
         frame.render_widget(header, area);
     }
 
-    fn render_hero(&self, frame: &mut Frame, area: Rect) {
-        let Some(hero) = hero_block(&self.skin) else {
-            return;
-        };
-
-        let mut lines = Vec::new();
-        let inner_height = area.height.saturating_sub(2) as usize;
-        let top_padding = inner_height.saturating_sub(hero.height()) / 2;
-        for _ in 0..top_padding {
-            lines.push(Line::from(""));
-        }
-        lines.extend(hero.to_ratatui_lines(&self.skin));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            self.skin
-                .tagline()
-                .unwrap_or("Skin-driven operator deck")
-                .to_string(),
-            self.skin.muted_style(),
-        )));
-
-        let panel = Paragraph::new(Text::from(lines))
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(self.skin.border_style())
-                    .border_type(self.skin.tui_border_type())
-                    .title(Span::styled(
-                        format!(" {} sigil ", self.skin.name),
-                        self.skin.accent_style(),
-                    )),
-            );
-        frame.render_widget(panel, area);
-    }
-
     fn render_chat(&mut self, frame: &mut Frame, area: Rect) {
-        let line_count = self.count_chat_lines();
+        let wrap = Wrap { trim: false };
+        let line_count = {
+            let chat_text = self.build_chat_text();
+            wrapped_text_rows(&chat_text, area.width.saturating_sub(2))
+        };
         self.total_chat_lines = line_count;
 
         let visible_height = area.height.saturating_sub(2);
@@ -181,16 +113,15 @@ impl TuiApp {
             self.scroll_offset = self.total_chat_lines.saturating_sub(visible_height);
         }
 
-        let chat_text = self.build_chat_text();
-        let chat = Paragraph::new(chat_text)
+        let chat = Paragraph::new(self.build_chat_text())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(self.skin.border_style())
                     .border_type(self.skin.tui_border_type())
-                    .title(Span::styled(" Activity deck ", self.skin.muted_style())),
+                    .title(Span::styled(" Conversation ", self.skin.muted_style())),
             )
-            .wrap(Wrap { trim: false })
+            .wrap(wrap)
             .scroll((self.scroll_offset, 0));
 
         frame.render_widget(chat, area);
@@ -218,7 +149,7 @@ impl TuiApp {
         } else {
             (
                 self.skin.accent_style(),
-                format!(" Command bay ({}) ", self.skin.prompt_symbol()),
+                format!(" Message ({}) ", self.skin.prompt_symbol()),
             )
         };
         self.textarea.set_block(
@@ -285,49 +216,45 @@ impl TuiApp {
         }
     }
 
-    /// Count total lines for scroll calculation (no borrow of text data).
-    fn count_chat_lines(&self) -> u16 {
-        let mut count: u16 = 0;
-        for msg in &self.messages {
-            match msg {
-                ChatMessage::User { .. } => count += 1,
-                ChatMessage::Assistant { text, .. } => {
-                    count += 2;
-                    count += text.lines().count() as u16;
-                }
-                ChatMessage::ToolCall { args, result, .. } => {
-                    count += 2;
-                    if !args.is_empty() {
-                        count += 1;
-                        count += args.lines().take(5).count() as u16;
-                    }
-                    if let Some(r) = result {
-                        count += 1;
-                        count += r.lines().take(10).count() as u16;
-                    }
-                }
-                ChatMessage::System { text } => {
-                    count += text.lines().count() as u16;
-                }
-                ChatMessage::Info { text }
-                | ChatMessage::Warning { text }
-                | ChatMessage::Error { text } => {
-                    count += text.lines().count() as u16;
-                }
-                ChatMessage::AgentNote { content, .. } => {
-                    count += 3; // header + footer + spacing
-                    count += content.lines().count().min(20) as u16;
-                }
-                ChatMessage::SubagentCard { .. } => {
-                    count += 3; // header + detail + footer
-                }
-            }
-            count += 1;
+    fn markdown_spans(&self, line: &str) -> Vec<Span<'static>> {
+        let trimmed = line.trim_start();
+        if let Some(content) = trimmed.strip_prefix("### ") {
+            return vec![Span::styled(
+                content.to_string(),
+                self.skin.accent_soft_style().bold(),
+            )];
         }
-        if self.active_stream.is_some() {
-            count += 5;
+        if let Some(content) = trimmed
+            .strip_prefix("## ")
+            .or_else(|| trimmed.strip_prefix("# "))
+        {
+            return vec![Span::styled(
+                content.to_string(),
+                self.skin.accent_style().bold(),
+            )];
         }
-        count
+        if let Some(content) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            return vec![
+                Span::styled("• ".to_string(), self.skin.accent_style()),
+                Span::styled(content.to_string(), self.skin.body_style()),
+            ];
+        }
+        if let Some(content) = trimmed.strip_prefix("> ") {
+            return vec![Span::styled(
+                content.to_string(),
+                self.skin.muted_style().italic(),
+            )];
+        }
+        if trimmed.starts_with('`') && trimmed.ends_with('`') && trimmed.len() >= 2 {
+            return vec![Span::styled(
+                trimmed[1..trimmed.len() - 1].to_string(),
+                self.skin.warn_style(),
+            )];
+        }
+        vec![Span::styled(line.to_string(), self.skin.body_style())]
     }
 
     fn build_chat_text(&self) -> Text<'_> {
@@ -350,10 +277,12 @@ impl TuiApp {
                         Span::styled("response", self.skin.muted_style()),
                     ]));
                     for line in text.lines() {
-                        lines.push(Line::from(vec![
-                            Span::styled("│ ", self.skin.border_soft_style()),
-                            Span::styled(line, self.skin.body_style()),
-                        ]));
+                        let mut spans = vec![Span::styled(
+                            "│ ".to_string(),
+                            self.skin.border_soft_style(),
+                        )];
+                        spans.extend(self.markdown_spans(line));
+                        lines.push(Line::from(spans));
                     }
                     lines.push(Line::from(vec![
                         Span::styled("╰", self.skin.border_soft_style()),
@@ -477,10 +406,12 @@ impl TuiApp {
                         Span::styled(" ─", header_style),
                     ]));
                     for line in content.lines().take(20) {
-                        lines.push(Line::from(vec![
-                            Span::styled("│ ", self.skin.border_soft_style()),
-                            Span::styled(line, self.skin.body_style()),
-                        ]));
+                        let mut spans = vec![Span::styled(
+                            "│ ".to_string(),
+                            self.skin.border_soft_style(),
+                        )];
+                        spans.extend(self.markdown_spans(line));
+                        lines.push(Line::from(spans));
                     }
                     lines.push(Line::from(Span::styled(
                         "└────────────────────────────────",
@@ -488,6 +419,7 @@ impl TuiApp {
                     )));
                 }
                 ChatMessage::SubagentCard {
+                    agent_id,
                     name,
                     detail,
                     success,
@@ -505,6 +437,7 @@ impl TuiApp {
                     lines.push(Line::from(vec![
                         Span::styled("┌─ ", header_style),
                         Span::styled(format!("{marker} sub-agent: {name}"), header_style),
+                        Span::styled(format!(" · {agent_id}"), self.skin.muted_style()),
                     ]));
                     lines.push(Line::from(vec![
                         Span::styled("│ ", self.skin.border_soft_style()),
@@ -531,10 +464,12 @@ impl TuiApp {
                 ));
                 lines.push(Line::from(header_spans));
                 for line in display_lines {
-                    lines.push(Line::from(vec![
-                        Span::styled("│ ", self.skin.border_soft_style()),
-                        Span::styled(line, self.skin.body_style()),
-                    ]));
+                    let mut spans = vec![Span::styled(
+                        "│ ".to_string(),
+                        self.skin.border_soft_style(),
+                    )];
+                    spans.extend(self.markdown_spans(&line));
+                    lines.push(Line::from(spans));
                 }
                 lines.push(Line::from(vec![
                     Span::styled("╰", self.skin.border_soft_style()),
@@ -564,4 +499,13 @@ impl TuiApp {
 
         Text::from(lines)
     }
+}
+
+fn wrapped_text_rows(text: &Text<'_>, width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    text.lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(width))
+        .sum::<usize>()
+        .min(u16::MAX as usize) as u16
 }

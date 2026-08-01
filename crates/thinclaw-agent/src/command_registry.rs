@@ -26,6 +26,27 @@ pub enum ArgStyle {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiHandlerStrategy {
+    Local,
+    ForwardToRuntime,
+    Hidden,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandVisibility {
+    HelpAndCompletion,
+    CompletionOnly,
+    Hidden,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityPredicate {
+    Always,
+    LocalTui,
+    RunningRuntime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemCommandRoute {
     Help,
     Status,
@@ -131,6 +152,34 @@ impl CommandSpec {
     /// help listing only and must never match real input.
     pub fn is_display_only(&self) -> bool {
         self.name.contains('<')
+    }
+
+    pub const fn tui_handler_strategy(&self) -> TuiHandlerStrategy {
+        if self.tui_forwarded {
+            TuiHandlerStrategy::ForwardToRuntime
+        } else if self.tui_autocomplete {
+            TuiHandlerStrategy::Local
+        } else {
+            TuiHandlerStrategy::Hidden
+        }
+    }
+
+    pub const fn visibility(&self) -> CommandVisibility {
+        if self.in_help && self.tui_autocomplete {
+            CommandVisibility::HelpAndCompletion
+        } else if self.tui_autocomplete {
+            CommandVisibility::CompletionOnly
+        } else {
+            CommandVisibility::Hidden
+        }
+    }
+
+    pub const fn capability_predicate(&self) -> CapabilityPredicate {
+        match self.tui_handler_strategy() {
+            TuiHandlerStrategy::Local => CapabilityPredicate::LocalTui,
+            TuiHandlerStrategy::ForwardToRuntime => CapabilityPredicate::RunningRuntime,
+            TuiHandlerStrategy::Hidden => CapabilityPredicate::Always,
+        }
     }
 }
 
@@ -371,7 +420,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         system_command: Some(SystemCommandRoute::Skin),
         arg_style: ArgStyle::ExactOrSpaceDelimitedArgs,
         in_help: true,
-        tui_forwarded: true,
+        tui_forwarded: false,
         tui_autocomplete: true,
         help_text: "Show or describe the configured CLI skin",
     },

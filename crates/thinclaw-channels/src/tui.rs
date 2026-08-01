@@ -66,14 +66,16 @@ pub enum TuiUpdate {
         message_type: String,
     },
     SubagentSpawned {
+        agent_id: String,
         name: String,
         task: String,
     },
     SubagentProgress {
-        name: String,
+        agent_id: String,
         message: String,
     },
     SubagentCompleted {
+        agent_id: String,
         name: String,
         success: bool,
         duration_ms: u64,
@@ -186,19 +188,27 @@ impl From<StatusUpdate> for TuiUpdate {
                 content,
                 message_type,
             },
-            StatusUpdate::SubagentSpawned { name, task, .. } => {
-                TuiUpdate::SubagentSpawned { name, task }
-            }
-            StatusUpdate::SubagentProgress { message, .. } => TuiUpdate::SubagentProgress {
-                name: String::new(),
-                message,
+            StatusUpdate::SubagentSpawned {
+                agent_id,
+                name,
+                task,
+                ..
+            } => TuiUpdate::SubagentSpawned {
+                agent_id,
+                name,
+                task,
             },
+            StatusUpdate::SubagentProgress {
+                agent_id, message, ..
+            } => TuiUpdate::SubagentProgress { agent_id, message },
             StatusUpdate::SubagentCompleted {
+                agent_id,
                 name,
                 success,
                 duration_ms,
                 ..
             } => TuiUpdate::SubagentCompleted {
+                agent_id,
                 name,
                 success,
                 duration_ms,

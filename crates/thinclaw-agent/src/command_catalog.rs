@@ -590,7 +590,7 @@ pub fn tui_help_text() -> String {
 {}\n\n\
 {}\n\n\
 Local TUI:\n\
-  /back, /close          Close the most recent detail card\n\
+  /back, /close          Close the active drawer or modal\n\
   /top, /bottom          Jump to oldest/newest activity\n\
   /cls                   Clear the visible log\n\
   /exit, /quit           Leave the TUI\n\n\
@@ -686,10 +686,17 @@ mod tests {
             }
         }
 
-        // The two drift items the registry design fixes: /debug is
-        // autocompletable, and /skin is forwarded.
+        // Debug and skin are explicit local TUI handlers.
         assert!(autocomplete.contains(&"/debug"));
-        assert!(forwarded.contains(&"/skin"));
+        assert!(!forwarded.contains(&"/skin"));
+        assert_eq!(
+            command_registry::COMMAND_REGISTRY
+                .iter()
+                .find(|spec| spec.name == "/skin")
+                .unwrap()
+                .tui_handler_strategy(),
+            command_registry::TuiHandlerStrategy::Local
+        );
     }
 
     #[test]
