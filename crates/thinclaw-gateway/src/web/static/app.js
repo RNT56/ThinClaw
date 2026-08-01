@@ -2434,7 +2434,7 @@ function showAuthCard(data) {
     const setupLink = document.createElement('a');
     setupLink.href = data.setup_url;
     setupLink.target = '_blank';
-    setupLink.textContent = 'Get your token';
+    setupLink.textContent = 'Open secure setup';
     links.appendChild(setupLink);
   }
 
@@ -2442,19 +2442,11 @@ function showAuthCard(data) {
     card.appendChild(links);
   }
 
-  let tokenInput = null;
   if (data.auth_mode === 'manual_token' || (!data.auth_mode && !data.auth_url)) {
-    const tokenRow = document.createElement('div');
-    tokenRow.className = 'auth-token-input';
-
-    tokenInput = document.createElement('input');
-    tokenInput.type = 'password';
-    tokenInput.placeholder = 'Paste your API key or token';
-    tokenInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
-    });
-    tokenRow.appendChild(tokenInput);
-    card.appendChild(tokenRow);
+    const guidance = document.createElement('div');
+    guidance.className = 'auth-guidance';
+    guidance.textContent = 'Complete authentication through the secure setup flow. Credentials cannot be pasted into chat.';
+    card.appendChild(guidance);
   }
 
   // Error display (hidden initially)
@@ -2467,27 +2459,17 @@ function showAuthCard(data) {
   const actions = document.createElement('div');
   actions.className = 'auth-actions';
 
-  const submitBtn = document.createElement('button');
-  submitBtn.className = 'auth-submit';
-  submitBtn.textContent = 'Submit';
-  submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput ? tokenInput.value : ''));
-
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'auth-cancel';
   cancelBtn.textContent = 'Cancel';
   cancelBtn.addEventListener('click', () => cancelAuth(data.extension_name));
 
-  if (tokenInput) {
-    actions.appendChild(submitBtn);
-  }
   actions.appendChild(cancelBtn);
   card.appendChild(actions);
 
   container.appendChild(card);
   finishChatMutation(shouldPinChatToLatest(), { forceScroll: true });
-  if (tokenInput) {
-    tokenInput.focus();
-  } else if (oauthBtn) {
+  if (oauthBtn) {
     oauthBtn.focus();
   } else {
     cancelBtn.focus();
@@ -2499,36 +2481,7 @@ function removeAuthCard(extensionName) {
   if (card) card.remove();
 }
 
-function submitAuthToken(extensionName, tokenValue) {
-  if (!tokenValue || !tokenValue.trim()) return;
-
-  // Disable submit button while in flight
-  const card = document.querySelector('.auth-card[data-extension-name="' + extensionName + '"]');
-  if (card) {
-    const btns = card.querySelectorAll('button');
-    btns.forEach((b) => { b.disabled = true; });
-  }
-
-  apiFetch('/api/chat/auth-token', {
-    method: 'POST',
-    body: { extension_name: extensionName, token: tokenValue.trim() },
-  }).then((result) => {
-    if (result.success) {
-      removeAuthCard(extensionName);
-      addStandaloneMessage('system', result.message, { timestamp: new Date().toISOString() });
-    } else {
-      showAuthCardError(extensionName, result.message);
-    }
-  }).catch((err) => {
-    showAuthCardError(extensionName, 'Failed: ' + err.message);
-  });
-}
-
 function cancelAuth(extensionName) {
-  apiFetch('/api/chat/auth-cancel', {
-    method: 'POST',
-    body: { extension_name: extensionName },
-  }).catch(() => {});
   removeAuthCard(extensionName);
   enableChatInput();
 }

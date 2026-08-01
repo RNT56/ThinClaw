@@ -133,31 +133,6 @@ pub struct RegistrySearchQuery {
     pub query: Option<String>,
 }
 
-// --- Auth Token ---
-
-/// Request to submit an auth token for an extension (dedicated endpoint).
-#[derive(Deserialize)]
-pub struct AuthTokenRequest {
-    pub extension_name: String,
-    pub token: String,
-}
-
-impl std::fmt::Debug for AuthTokenRequest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("AuthTokenRequest")
-            .field("extension_name", &self.extension_name)
-            .field("token", &"[REDACTED]")
-            .finish()
-    }
-}
-
-/// Request to cancel an in-progress auth flow.
-#[derive(Debug, Deserialize)]
-pub struct AuthCancelRequest {
-    pub extension_name: String,
-}
-
 #[derive(Deserialize)]
 pub struct NostrPrivateKeyRequest {
     #[serde(default)]

@@ -22,14 +22,12 @@ use uuid::Uuid;
 use crate::agent::submission::Submission;
 #[cfg(test)]
 use crate::channels::IncomingMessage;
-use crate::channels::web::handlers::chat::{
-    active_thread_id_for_identity, clear_auth_mode_for_identity, gateway_submission_error,
-};
+use crate::channels::web::handlers::chat::gateway_submission_error;
 use crate::channels::web::identity_helpers::{
     GatewayRequestIdentity, sse_event_visible_to_identity,
 };
 use crate::channels::web::server::GatewayState;
-use crate::channels::web::types::{ModelInfo, SseEvent, WsClientMessage, WsServerMessage};
+use crate::channels::web::types::{ModelInfo, WsClientMessage, WsServerMessage};
 use thinclaw_gateway::web::devices::DeviceScope;
 use thinclaw_gateway::web::identity::DeviceContext;
 use thinclaw_gateway::web::rbac::{GatewayCapability, role_grants};
@@ -413,91 +411,6 @@ async fn handle_client_message(
                 cache.remove(&request_id);
             }
         }
-        WsClientMessage::AuthToken {
-            extension_name,
-            token,
-        } => {
-            if extension_name.trim().is_empty()
-                || extension_name.len() > 128
-                || extension_name.chars().any(char::is_control)
-                || token.trim().is_empty()
-                || token.len() > 1024 * 1024
-                || token.contains('\0')
-            {
-                let _ = direct_tx
-                    .send(WsServerMessage::Error {
-                        message: "Extension authentication input is malformed or oversized"
-                            .to_string(),
-                    })
-                    .await;
-                return;
-            }
-            if let Some(ref ext_mgr) = state.extension_manager {
-                let thread_id = active_thread_id_for_identity(state, request_identity).await;
-                match ext_mgr.auth(&extension_name, Some(&token)).await {
-                    Ok(result)
-                        if result.auth_status == "authenticated"
-                            || result.auth_status == "no_auth_required" =>
-                    {
-                        let msg = match ext_mgr.activate(&extension_name).await {
-                            Ok(r) => format!(
-                                "{} authenticated ({} tools loaded)",
-                                extension_name,
-                                r.tools_loaded.len()
-                            ),
-                            Err(e) => format!(
-                                "{} authenticated but activation failed: {}",
-                                extension_name, e
-                            ),
-                        };
-                        clear_auth_mode_for_identity(state, request_identity).await;
-                        let _ = direct_tx
-                            .send(WsServerMessage::from_sse_event(&SseEvent::AuthCompleted {
-                                extension_name,
-                                success: true,
-                                message: msg,
-                                auth_mode: Some(result.auth_mode),
-                                auth_status: Some(result.auth_status),
-                                shared_auth_provider: result.shared_auth_provider,
-                                missing_scopes: result.missing_scopes,
-                                thread_id,
-                            }))
-                            .await;
-                    }
-                    Ok(result) => {
-                        let _ = direct_tx
-                            .send(WsServerMessage::from_sse_event(&SseEvent::AuthRequired {
-                                extension_name,
-                                instructions: result.instructions,
-                                auth_url: result.auth_url,
-                                setup_url: result.setup_url,
-                                auth_mode: result.auth_mode,
-                                auth_status: result.auth_status,
-                                shared_auth_provider: result.shared_auth_provider,
-                                missing_scopes: result.missing_scopes,
-                                thread_id,
-                            }))
-                            .await;
-                    }
-                    Err(e) => {
-                        let _ = direct_tx
-                            .send(WsServerMessage::Error {
-                                message: format!("Auth failed: {}", e),
-                            })
-                            .await;
-                    }
-                }
-            } else {
-                let _ = direct_tx
-                    .send(WsServerMessage::Error {
-                        message: "Extension manager not available".to_string(),
-                    })
-                    .await;
-            }
-        }
-        WsClientMessage::AuthCancel { .. } => {
-            clear_auth_mode_for_identity(state, request_identity).await;
-        }
         WsClientMessage::Ping => {
             let _ = direct_tx.send(WsServerMessage::Pong).await;
         }
@@ -717,9 +630,7 @@ fn websocket_message_capability(message: &WsClientMessage) -> GatewayCapability 
         WsClientMessage::Message { .. } | WsClientMessage::Approval { .. } => {
             GatewayCapability::Chat
         }
-        WsClientMessage::AuthToken { .. }
-        | WsClientMessage::AuthCancel { .. }
-        | WsClientMessage::ConfigSet { .. }
+        WsClientMessage::ConfigSet { .. }
         | WsClientMessage::SecretSet { .. }
         | WsClientMessage::ModelList => GatewayCapability::ManageConfig,
     }

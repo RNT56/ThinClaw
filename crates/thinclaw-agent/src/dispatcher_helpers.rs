@@ -99,14 +99,14 @@ pub fn check_auth_required_json(
         .unwrap_or(if auth_mode == "oauth" {
             "Open the browser authentication flow to continue."
         } else {
-            "Please provide your API token/key."
+            "Create or bind a credential source through the local secure CLI; credentials cannot be sent through chat."
         })
         .to_string();
     Some(PendingAuthRequest {
         extension_name: name,
         instructions,
         auth_mode: if auth_mode == "manual_token" && auth_status == "awaiting_token" {
-            PendingAuthMode::ManualToken
+            PendingAuthMode::SecretSource
         } else {
             PendingAuthMode::ExternalOAuth
         },

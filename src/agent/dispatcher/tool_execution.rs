@@ -1135,7 +1135,7 @@ impl Agent {
                                     setup_url: auth_data.setup_url,
                                     auth_mode: auth_data.auth_mode.unwrap_or_else(|| {
                                         match auth_request.auth_mode {
-                                            crate::agent::session::PendingAuthMode::ManualToken => "manual_token".to_string(),
+                                            crate::agent::session::PendingAuthMode::SecretSource => "secure_source".to_string(),
                                             crate::agent::session::PendingAuthMode::ExternalOAuth => "oauth".to_string(),
                                         }
                                     }),

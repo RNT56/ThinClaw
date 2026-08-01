@@ -2048,29 +2048,6 @@ html[data-surface-pattern="cloud"] .chat-workspace::before {
   text-decoration: underline;
 }
 
-.auth-card .auth-token-input {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.auth-card .auth-token-input input {
-  flex: 1;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg);
-  color: var(--text);
-  font-size: 13px;
-  font-family: var(--font-mono);
-}
-
-.auth-card .auth-token-input input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1);
-}
-
 .auth-card .auth-actions {
   display: flex;
   gap: 8px;
@@ -2090,13 +2067,6 @@ html[data-surface-pattern="cloud"] .chat-workspace::before {
 .auth-card .auth-actions button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
-}
-
-.auth-card .auth-actions button.auth-submit {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #09090b;
-  font-weight: 600;
 }
 
 .auth-card .auth-actions button.auth-cancel {

@@ -33,9 +33,6 @@ pub fn required_scope(method: &str, path: &str) -> Option<DeviceScope> {
     // Extension-auth endpoints live under /api/chat/ for historical reasons
     // but are an extensions surface (they submit OAuth credentials and
     // activate extensions) — never grantable to device tokens per D-T4.
-    if path == "/api/chat/auth-token" || path == "/api/chat/auth-cancel" {
-        return None;
-    }
 
     if path.starts_with("/api/chat/") || path == "/api/chat" {
         return Some(DeviceScope::Chat);
@@ -188,8 +185,6 @@ mod tests {
     fn extension_auth_routes_under_chat_are_never_grantable() {
         // These live under /api/chat/ but submit extension OAuth credentials
         // and trigger extension activation — an extensions surface (D-T4).
-        assert_eq!(required_scope("POST", "/api/chat/auth-token"), None);
-        assert_eq!(required_scope("POST", "/api/chat/auth-cancel"), None);
     }
 
     #[test]

@@ -26,23 +26,22 @@ pub use crate::api::mcp::{
     McpResourcesResponse, McpServerInfo, McpServerListResponse, McpToolsResponse,
 };
 pub use thinclaw_gateway::web::types::{
-    ActionResponse, ApprovalRequest, AuthCancelRequest, AuthTokenRequest, AutonomyPauseRequest,
-    AutonomyPauseResponse, CacheStatsResponse, ChannelSetupStatus,
-    ExperimentGpuCloudConnectRequest, ExperimentGpuCloudLaunchTestRequest,
-    ExperimentGpuCloudTemplateRequest, ExperimentsLimitQuery, ExperimentsQuery, ExtensionInfo,
-    ExtensionListResponse, ExtensionSetupRequest, ExtensionSetupResponse, FilePathQuery,
-    GatewayStatusResponse, HealthResponse, HistoryQuery, HistoryResponse, HookInfo,
-    HookListResponse, HookRegisterRequest, HookRegisterResponse, HookUnregisterResponse,
-    InstallExtensionRequest, JobDetailResponse, JobEventsQuery, JobInfo, JobListQuery,
-    JobListResponse, JobSummaryResponse, ListEntry, ListQuery, LogLevelRequest, LogLevelResponse,
-    LogsRecentResponse, MemoryAccessScope, MemoryDeleteRequest, MemoryDeleteResponse,
-    MemoryListResponse, MemoryReadResponse, MemorySearchRequest, MemorySearchResponse,
-    MemoryTreeResponse, MemoryWriteRequest, MemoryWriteResponse, ModelInfo, ModelUsageEntry,
-    NostrPrivateKeyRequest, PairingApproveRequest, PairingApprovedInfo, PairingListResponse,
-    PairingRequestInfo, PartialChannelSetupStatus, PendingApprovalEntry, PendingApprovalsResponse,
-    ProjectFileEntry, ProjectFileReadResponse, ProjectFilesResponse, ReadQuery, RegistryEntryInfo,
-    RegistrySearchQuery, RegistrySearchResponse, ResponseAttachment, RoutineClearRunsRequest,
-    RoutineCreateRequest, RoutineDetailResponse, RoutineEventActivityInfo,
+    ActionResponse, ApprovalRequest, AutonomyPauseRequest, AutonomyPauseResponse,
+    CacheStatsResponse, ChannelSetupStatus, ExperimentGpuCloudConnectRequest,
+    ExperimentGpuCloudLaunchTestRequest, ExperimentGpuCloudTemplateRequest, ExperimentsLimitQuery,
+    ExperimentsQuery, ExtensionInfo, ExtensionListResponse, ExtensionSetupRequest,
+    ExtensionSetupResponse, FilePathQuery, GatewayStatusResponse, HealthResponse, HistoryQuery,
+    HistoryResponse, HookInfo, HookListResponse, HookRegisterRequest, HookRegisterResponse,
+    HookUnregisterResponse, InstallExtensionRequest, JobDetailResponse, JobEventsQuery, JobInfo,
+    JobListQuery, JobListResponse, JobSummaryResponse, ListEntry, ListQuery, LogLevelRequest,
+    LogLevelResponse, LogsRecentResponse, MemoryAccessScope, MemoryDeleteRequest,
+    MemoryDeleteResponse, MemoryListResponse, MemoryReadResponse, MemorySearchRequest,
+    MemorySearchResponse, MemoryTreeResponse, MemoryWriteRequest, MemoryWriteResponse, ModelInfo,
+    ModelUsageEntry, NostrPrivateKeyRequest, PairingApproveRequest, PairingApprovedInfo,
+    PairingListResponse, PairingRequestInfo, PartialChannelSetupStatus, PendingApprovalEntry,
+    PendingApprovalsResponse, ProjectFileEntry, ProjectFileReadResponse, ProjectFilesResponse,
+    ReadQuery, RegistryEntryInfo, RegistrySearchQuery, RegistrySearchResponse, ResponseAttachment,
+    RoutineClearRunsRequest, RoutineCreateRequest, RoutineDetailResponse, RoutineEventActivityInfo,
     RoutineEventActivityResponse, RoutineEventCheckInfo, RoutineInfo, RoutineListResponse,
     RoutineRunInfo, RoutineSummaryResponse, RoutineTriggerCheckInfo, SearchHit, SecretFieldInfo,
     SendMessageRequest, SendMessageResponse, SettingResponse, SettingWriteRequest,
@@ -377,36 +376,6 @@ mod tests {
         }
     }
 
-    // ---- Auth type tests ----
-
-    #[test]
-    fn test_ws_client_auth_token_parse() {
-        let json = r#"{"type":"auth_token","extension_name":"notion","token":"sk-123"}"#;
-        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            WsClientMessage::AuthToken {
-                extension_name,
-                token,
-            } => {
-                assert_eq!(extension_name, "notion");
-                assert_eq!(token, "sk-123");
-            }
-            _ => panic!("Expected AuthToken variant"),
-        }
-    }
-
-    #[test]
-    fn test_ws_client_auth_cancel_parse() {
-        let json = r#"{"type":"auth_cancel","extension_name":"notion"}"#;
-        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            WsClientMessage::AuthCancel { extension_name } => {
-                assert_eq!(extension_name, "notion");
-            }
-            _ => panic!("Expected AuthCancel variant"),
-        }
-    }
-
     #[test]
     fn test_sse_auth_required_serialize() {
         let event = SseEvent::AuthRequired {
@@ -493,20 +462,5 @@ mod tests {
             }
             _ => panic!("Expected Event variant"),
         }
-    }
-
-    #[test]
-    fn test_auth_token_request_deserialize() {
-        let json = r#"{"extension_name":"telegram","token":"bot12345"}"#;
-        let req: AuthTokenRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.extension_name, "telegram");
-        assert_eq!(req.token, "bot12345");
-    }
-
-    #[test]
-    fn test_auth_cancel_request_deserialize() {
-        let json = r#"{"extension_name":"telegram"}"#;
-        let req: AuthCancelRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.extension_name, "telegram");
     }
 }

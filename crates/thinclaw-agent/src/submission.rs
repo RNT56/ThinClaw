@@ -313,17 +313,6 @@ impl Submission {
     pub fn runs_inbound_hooks(&self) -> bool {
         matches!(self, Self::UserInput { .. })
     }
-
-    /// Whether this submission should consume a pending manual-token auth flow.
-    pub fn consumes_pending_manual_auth(&self) -> bool {
-        matches!(self, Self::UserInput { .. })
-    }
-
-    /// Whether this submission cancels a pending manual-token auth flow before
-    /// normal handling continues.
-    pub fn cancels_pending_manual_auth(&self) -> bool {
-        !self.consumes_pending_manual_auth()
-    }
 }
 
 /// Result of processing a submission.
@@ -993,25 +982,6 @@ mod tests {
             SubmissionParser::parse("/Restart"),
             Submission::Restart
         ));
-    }
-
-    #[test]
-    fn submission_auth_policy_only_user_input_consumes_manual_token() {
-        let input = SubmissionParser::parse("secret-token");
-        assert!(input.runs_inbound_hooks());
-        assert!(input.consumes_pending_manual_auth());
-        assert!(!input.cancels_pending_manual_auth());
-
-        let control = SubmissionParser::parse("/interrupt");
-        assert!(!control.runs_inbound_hooks());
-        assert!(!control.consumes_pending_manual_auth());
-        assert!(control.cancels_pending_manual_auth());
-
-        let approval = Submission::ApprovalResponse {
-            approved: true,
-            always: false,
-        };
-        assert!(approval.cancels_pending_manual_auth());
     }
 
     #[test]

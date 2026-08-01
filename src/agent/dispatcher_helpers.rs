@@ -438,7 +438,7 @@ mod tests {
         let detected = detected.unwrap();
         assert_eq!(detected.extension_name, "telegram");
         assert!(detected.instructions.contains("Telegram Bot API"));
-        assert_eq!(detected.auth_mode, PendingAuthMode::ManualToken);
+        assert_eq!(detected.auth_mode, PendingAuthMode::SecretSource);
     }
 
     #[test]
