@@ -91,12 +91,11 @@ pub(super) async fn run_terminal_command(
             init_cli_tracing(cli.debug);
             thinclaw::cli::run_devices_command(device_cmd.clone()).await
         }
-        #[cfg(feature = "repl")]
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing(cli.debug);
             thinclaw::cli::run_service_command(service_cmd)
         }
-        #[cfg(all(feature = "repl", target_os = "windows"))]
+        #[cfg(target_os = "windows")]
         Some(Command::WindowsServiceRuntime { home }) => {
             thinclaw::service::run_windows_service_dispatcher(home.clone())
         }
@@ -136,7 +135,6 @@ pub(super) async fn run_terminal_command(
                 thinclaw::cli::RuntimeCommand::Web(command) => {
                     run_gateway_command(command.clone(), context).await
                 }
-                #[cfg(feature = "repl")]
                 thinclaw::cli::RuntimeCommand::Service(command) => {
                     thinclaw::cli::run_service_command(command)
                 }

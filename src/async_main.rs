@@ -220,7 +220,6 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         Some(LocalRuntimeChannel::Repl | LocalRuntimeChannel::SingleMessage)
     );
 
-    #[cfg_attr(not(feature = "repl"), allow(unused_mut))]
     let mut quiet_startup_spinner = if should_show_quiet_startup_spinner(
         cli.should_run_agent(),
         cli.debug,
@@ -1164,7 +1163,6 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     // ── Gateway channel ────────────────────────────────────────────────
 
-    #[cfg(feature = "repl")]
     let mut gateway_url: Option<String> = None;
     let mut sse_sender: Option<
         tokio::sync::broadcast::Sender<thinclaw::channels::web::types::SseEvent>,
@@ -1272,10 +1270,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         let gateway_origin = format!("http://{}:{}/", gw_config.host, gw_config.port);
         thinclaw::tui::set_runtime_gateway_url_override(Some(gateway_origin.clone()));
 
-        #[cfg(feature = "repl")]
-        {
-            gateway_url = Some(gateway_origin);
-        }
+        gateway_url = Some(gateway_origin);
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
@@ -1312,7 +1307,6 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     // ── Boot screen ────────────────────────────────────────────────────
 
-    #[cfg(feature = "repl")]
     if matches!(
         entrypoint_plan.local_channel,
         Some(LocalRuntimeChannel::Repl)

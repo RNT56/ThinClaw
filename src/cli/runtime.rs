@@ -2,7 +2,6 @@
 
 use clap::Subcommand;
 
-#[cfg(feature = "repl")]
 use super::ServiceCommand;
 use super::{GatewayCommand, LogCommand, UpdateCommand};
 
@@ -10,7 +9,6 @@ use super::{GatewayCommand, LogCommand, UpdateCommand};
 pub enum RuntimeCommand {
     #[command(subcommand)]
     Web(GatewayCommand),
-    #[cfg(feature = "repl")]
     #[command(subcommand)]
     Service(ServiceCommand),
     #[command(subcommand)]

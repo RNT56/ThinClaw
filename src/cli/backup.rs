@@ -42,8 +42,11 @@ pub enum BackupCommand {
         #[arg(long)]
         force: bool,
         /// Skip the database section (config + workspace files only).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "require_database")]
         no_database: bool,
+        /// Fail instead of producing a partial bundle when database export is unavailable.
+        #[arg(long)]
+        require_database: bool,
     },
     /// Restore an encrypted bundle. Overwrites config + workspace files in the
     /// ThinClaw home; requires `--yes`.
@@ -80,7 +83,8 @@ pub async fn run_backup_command(cmd: BackupCommand) -> anyhow::Result<()> {
             passphrase_file,
             force,
             no_database,
-        } => export(out, passphrase_file, force, no_database).await,
+            require_database,
+        } => export(out, passphrase_file, force, no_database, require_database).await,
         BackupCommand::Import {
             input,
             passphrase_file,
@@ -100,6 +104,7 @@ async fn export(
     passphrase_file: Option<PathBuf>,
     force: bool,
     no_database: bool,
+    require_database: bool,
 ) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     branding.print_banner("ThinClaw Export", Some("Encrypted whole-agent backup"));
@@ -138,6 +143,11 @@ async fn export(
                 );
             }
             Ok(None) => {
+                if require_database {
+                    anyhow::bail!(
+                        "database export is unavailable and --require-database was requested"
+                    );
+                }
                 println!(
                     "{}",
                     branding.warn(
@@ -146,6 +156,11 @@ async fn export(
                 );
             }
             Err(error) => {
+                if require_database {
+                    anyhow::bail!(
+                        "database export failed and --require-database was requested: {error}"
+                    );
+                }
                 println!(
                     "{}",
                     branding.warn(format!(
@@ -291,6 +306,36 @@ async fn pg_dump_export(config: &Config) -> anyhow::Result<Option<(Vec<u8>, Stri
         .map(|password| SecretString::from(password.into_owned()));
     url.set_password(None)
         .map_err(|()| anyhow::anyhow!("could not sanitize Postgres database URL"))?;
+    let pgpass_path = if let Some(password) = password.as_ref() {
+        let host = url
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("Postgres database URL has no host"))?;
+        let port = url.port().unwrap_or(5432);
+        let database = url.path().trim_start_matches('/');
+        let user = url.username();
+        if database.is_empty() || user.is_empty() {
+            anyhow::bail!("Postgres database URL must include a database and user");
+        }
+        let escape = |value: &str| {
+            if value.contains(['\n', '\r']) {
+                anyhow::bail!("Postgres credential fields cannot contain newlines");
+            }
+            Ok::<String, anyhow::Error>(value.replace('\\', "\\\\").replace(':', "\\:"))
+        };
+        let line = format!(
+            "{}:{}:{}:{}:{}\n",
+            escape(host)?,
+            port,
+            escape(database)?,
+            escape(user)?,
+            escape(password.expose_secret())?
+        );
+        let path = temp_dir.path().join("pgpass");
+        thinclaw_platform::write_private_file_atomic(&path, line.as_bytes(), false)?;
+        Some(path)
+    } else {
+        None
+    };
     let mut command = tokio::process::Command::new("pg_dump");
     command
         .arg("--format=custom")
@@ -300,8 +345,8 @@ async fn pg_dump_export(config: &Config) -> anyhow::Result<Option<(Vec<u8>, Stri
         .arg(&tmp)
         .arg(url.as_str())
         .env("PGCONNECT_TIMEOUT", "15");
-    if let Some(password) = password.as_ref() {
-        command.env("PGPASSWORD", password.expose_secret());
+    if let Some(path) = pgpass_path.as_ref() {
+        command.env("PGPASSFILE", path);
     }
     let result = thinclaw_platform::bounded_command_output(
         &mut command,

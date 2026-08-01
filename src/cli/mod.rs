@@ -51,7 +51,6 @@ mod repo_projects;
 mod reset;
 mod runtime;
 mod secrets;
-#[cfg(feature = "repl")]
 mod service;
 pub mod sessions;
 mod setup;
@@ -103,7 +102,6 @@ pub use repo_projects::{RepoProjectCommand, run_repo_projects_command};
 pub use reset::{ResetCommand, run_reset_command};
 pub use runtime::RuntimeCommand;
 pub use secrets::{SecretsCommand, run_secrets_command};
-#[cfg(feature = "repl")]
 pub use service::{ServiceCommand, run_service_command};
 pub use sessions::{SessionCommand, run_sessions_command};
 pub use setup::{SetupAction, SetupCommand};
@@ -443,12 +441,11 @@ pub enum Command {
     Sessions(SessionCommand),
 
     /// Manage OS service (launchd / systemd / Windows Service Control Manager)
-    #[cfg(feature = "repl")]
     #[command(subcommand, hide = true)]
     Service(ServiceCommand),
 
     /// Internal Windows SCM entrypoint.
-    #[cfg(all(feature = "repl", target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     #[command(name = "__windows-service", hide = true)]
     WindowsServiceRuntime {
         /// Preserve the configured ThinClaw home for the service account.
