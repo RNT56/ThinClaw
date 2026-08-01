@@ -326,6 +326,11 @@ pub(crate) async fn build_inner(
 ) -> Result<ThinClawRuntimeInner, anyhow::Error> {
     migrate_legacy_runtime_files(&state_dir);
 
+    // Managed local inference credentials remain backend-local and typed. They
+    // are applied directly to the resolved LLM config after endpoint selection;
+    // they must never enter the generic bridge-variable overlay.
+    let mut local_endpoint_credential: Option<secrecy::SecretString> = None;
+
     // ── 1. Configure environment for ThinClaw ───────────────────────
     // IC-007: Use bridge overlay instead of unsafe set_var().
     // Build a HashMap of all config vars, then inject them atomically
@@ -520,7 +525,7 @@ pub(crate) async fn build_inner(
                     bridge_config.insert("LLM_BACKEND".into(), "openai_compatible".into());
                     bridge_config.insert("LLM_BASE_URL".into(), endpoint.base_url);
                     if let Some(token) = local_api_key {
-                        bridge_config.insert("LLM_API_KEY".into(), token);
+                        local_endpoint_credential = Some(secrecy::SecretString::from(token));
                     }
                 } else {
                     // If local is preferred but unavailable and the user has a
@@ -667,13 +672,22 @@ pub(crate) async fn build_inner(
         None
     };
 
-    let config = match thinclaw_core::Config::from_env_with_toml(toml_path_ref).await {
+    let mut config = match thinclaw_core::Config::from_env_with_toml(toml_path_ref).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("Failed to load ThinClaw config, using env-only: {}", e);
             thinclaw_core::Config::from_env().await?
         }
     };
+    if let Some(credential) = local_endpoint_credential {
+        let compatible = config.llm.openai_compatible.as_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "managed local endpoint credential resolved for a non-compatible LLM backend"
+            )
+        })?;
+        compatible.api_key = Some(credential.clone());
+        compatible.api_keys = vec![credential];
+    }
     let runtime_lease = thinclaw_core::runtime_lease::RuntimeLease::acquire(&state_dir)
         .map_err(|error| anyhow::anyhow!(error))?;
     #[cfg(feature = "docker-sandbox")]
@@ -1772,5 +1786,23 @@ mod tests {
                 "desktop AgentDeps should wire {required}"
             );
         }
+    }
+
+    #[test]
+    fn desktop_bridge_overlay_remains_non_secret() {
+        let source = include_str!("runtime_builder.rs");
+        for forbidden in [
+            "bridge_config.insert(\"LLM_API_KEY\"",
+            "bridge_config.insert(\"GATEWAY_AUTH_TOKEN\"",
+            "bridge_config.insert(\"GMAIL_OAUTH_TOKEN\"",
+            "bridge_config.insert(\"GMAIL_REFRESH_TOKEN\"",
+            "bridge_config.insert(\"GMAIL_CLIENT_SECRET\"",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "desktop bridge overlay must not carry {forbidden}"
+            );
+        }
+        assert!(source.contains("compatible.api_keys = vec![credential]"));
     }
 }
