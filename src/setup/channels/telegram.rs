@@ -1,11 +1,13 @@
 //! Telegram bot channel setup: token validation, owner binding (interactive
 //! polling + TUI), runtime polling-offset persistence, and webhook secret.
 
+use std::time::Duration;
+#[cfg(test)]
 use std::{
     collections::{BTreeMap, HashMap},
     io,
     path::Path,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use reqwest::Client;
@@ -14,11 +16,13 @@ use serde::Deserialize;
 use thinclaw_channels::setup as channel_setup;
 use thinclaw_tools_core::{OutboundUrlGuardOptions, validate_outbound_url_pinned_async};
 
+#[cfg(test)]
 use crate::pairing::PairingStore;
 use crate::settings::{Settings, TunnelSettings};
+#[cfg(test)]
+use crate::setup::prompts::{PromptUiMode, current_prompt_ui_mode, print_warning, select_one};
 use crate::setup::prompts::{
-    PromptUiMode, confirm, current_prompt_ui_mode, optional_input, print_blank_line, print_error,
-    print_info, print_success, print_warning, secret_input, select_one,
+    confirm, optional_input, print_blank_line, print_error, print_info, print_success, secret_input,
 };
 
 use super::{ChannelSetupError, SecretsContext};
@@ -109,24 +113,28 @@ struct TelegramUser {
 }
 
 /// Telegram Bot API response for getUpdates.
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct TelegramGetUpdatesResponse {
     ok: bool,
     result: Vec<TelegramUpdate>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct TelegramUpdate {
     update_id: i64,
     message: Option<TelegramUpdateMessage>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct TelegramUpdateMessage {
     from: Option<TelegramUpdateUser>,
     chat: Option<TelegramUpdateChat>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct TelegramUpdateUser {
     id: i64,
@@ -136,12 +144,15 @@ struct TelegramUpdateUser {
     is_bot: bool,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct TelegramUpdateChat {
     #[serde(rename = "type")]
     chat_type: String,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TelegramBindingOutcome {
     Bound(channel_setup::TelegramOwnerCandidate),
@@ -150,6 +161,8 @@ enum TelegramBindingOutcome {
     Skipped,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TelegramBindingRecovery {
     RetryAutomatic,
@@ -182,7 +195,10 @@ pub async fn setup_telegram(
         if !confirm("Replace existing token?", false)? {
             // Still offer to configure webhook secret and owner binding
             let webhook_secret = setup_telegram_webhook_secret(secrets, &settings.tunnel).await?;
-            let owner_id = bind_telegram_owner_flow(secrets, settings).await?;
+            print_info(
+                "Setup draft mode does not consume Telegram updates or change webhook state.",
+            );
+            let owner_id = prompt_manual_telegram_owner_id(settings.channels.telegram_owner_id)?;
             return Ok(TelegramSetupResult {
                 enabled: true,
                 bot_username: None,
@@ -210,7 +226,10 @@ pub async fn setup_telegram(
                 print_success("Token saved to database");
 
                 // Bind bot to owner's Telegram account
-                let owner_id = bind_telegram_owner(&token, username.as_deref()).await?;
+                print_info(
+                    "Setup draft mode does not consume Telegram updates or change webhook state.",
+                );
+                let owner_id = prompt_manual_telegram_owner_id(None)?;
 
                 // Offer webhook secret configuration
                 let webhook_secret =
@@ -243,6 +262,8 @@ pub async fn setup_telegram(
 ///
 /// Polls `getUpdates` until a message arrives, then captures the sender's user ID.
 /// Returns `None` if the user declines or the flow times out.
+#[cfg(test)]
+#[allow(dead_code)]
 async fn bind_telegram_owner(
     token: &SecretString,
     bot_username: Option<&str>,
@@ -414,6 +435,8 @@ async fn bind_telegram_owner(
 /// Bind flow when the token already exists (reads from secrets store).
 ///
 /// Retrieves the saved bot token and delegates to `bind_telegram_owner`.
+#[cfg(test)]
+#[allow(dead_code)]
 async fn bind_telegram_owner_flow(
     secrets: &SecretsContext,
     settings: &Settings,
@@ -431,6 +454,8 @@ async fn bind_telegram_owner_flow(
     bind_telegram_owner(&token, None).await
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn seed_telegram_owner_allowlist(owner_id: i64) {
     let pairing_store = PairingStore::new();
     if let Err(error) = pairing_store.ensure_allow_from("telegram", &owner_id.to_string()) {
@@ -442,6 +467,8 @@ fn seed_telegram_owner_allowlist(owner_id: i64) {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn prompt_telegram_binding_recovery(
     reason: &str,
 ) -> Result<TelegramBindingRecovery, ChannelSetupError> {
@@ -501,6 +528,7 @@ fn prompt_manual_telegram_owner_id(
     }
 }
 
+#[cfg(test)]
 fn extract_telegram_owner_capture(
     updates: &[TelegramUpdate],
 ) -> Option<channel_setup::TelegramOwnerCapture> {
@@ -508,11 +536,13 @@ fn extract_telegram_owner_capture(
     channel_setup::extract_telegram_owner_capture(&setup_updates)
 }
 
+#[cfg(test)]
 fn next_telegram_update_offset(updates: &[TelegramUpdate]) -> Option<i64> {
     let setup_updates = telegram_setup_updates(updates);
     channel_setup::next_telegram_update_offset(&setup_updates)
 }
 
+#[cfg(test)]
 fn telegram_setup_updates(updates: &[TelegramUpdate]) -> Vec<channel_setup::TelegramSetupUpdate> {
     updates
         .iter()
@@ -542,6 +572,8 @@ fn telegram_setup_updates(updates: &[TelegramUpdate]) -> Vec<channel_setup::Tele
         .collect()
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 async fn fetch_telegram_updates(
     client: &Client,
     token: &SecretString,
@@ -589,6 +621,8 @@ async fn fetch_telegram_updates(
     Ok(body.result)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 async fn capture_telegram_owner_candidate(
     token: &SecretString,
 ) -> Result<Option<channel_setup::TelegramOwnerCandidate>, ChannelSetupError> {
@@ -656,6 +690,8 @@ async fn capture_telegram_owner_candidate(
     Ok(None)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn persist_telegram_runtime_offset_from_next_offset(next_offset: Option<i64>) {
     if let Some(offset) = next_offset
         && let Err(error) =
@@ -669,6 +705,8 @@ fn persist_telegram_runtime_offset_from_next_offset(next_offset: Option<i64>) {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 async fn persist_telegram_runtime_polling_snapshot(
     token: &SecretString,
 ) -> Result<(), ChannelSetupError> {
@@ -709,6 +747,8 @@ async fn persist_telegram_runtime_polling_snapshot(
     Ok(())
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 async fn acknowledge_telegram_update_offset(
     client: &Client,
     token: &SecretString,
@@ -722,6 +762,8 @@ async fn acknowledge_telegram_update_offset(
     Ok(())
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn persist_telegram_runtime_polling_offset(
     offset: i64,
     ignored_update_upper_bound: i64,
@@ -766,6 +808,8 @@ fn persist_telegram_runtime_polling_offset(
     write_telegram_workspace_state(&workspace_path, &state)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn ensure_parent_dir(path: &Path) -> Result<(), ChannelSetupError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -773,6 +817,8 @@ fn ensure_parent_dir(path: &Path) -> Result<(), ChannelSetupError> {
     Ok(())
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn read_telegram_workspace_state(path: &Path) -> HashMap<String, String> {
     let raw = match thinclaw_platform::read_regular_file_bounded(path, 1024 * 1024) {
         Ok(content) => content,
@@ -797,6 +843,8 @@ fn read_telegram_workspace_state(path: &Path) -> HashMap<String, String> {
     })
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn write_telegram_workspace_state(
     path: &Path,
     state: &HashMap<String, String>,
@@ -813,6 +861,8 @@ fn write_telegram_workspace_state(
     Ok(())
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 async fn wait_for_telegram_owner_tui(
     token: &SecretString,
     bot_username: Option<&str>,
@@ -997,6 +1047,8 @@ async fn wait_for_telegram_owner_tui(
     result
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn centered_rect(
     area: ratatui::layout::Rect,
     desired_width: u16,

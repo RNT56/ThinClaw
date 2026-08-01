@@ -1,6 +1,6 @@
 //! Extensions wizard step: tool installation from registry.
 
-use crate::setup::prompts::{print_error, print_info, print_success, select_many, select_one};
+use crate::setup::prompts::{print_info, print_success, select_many, select_one};
 
 use super::helpers::{discover_installed_tools, load_registry_catalog};
 use super::{SetupError, SetupWizard};
@@ -101,17 +101,9 @@ impl SetupWizard {
             return Ok(());
         }
 
-        // Install selected tools that aren't already on disk
-        let repo_root = catalog.root().parent().unwrap_or(catalog.root());
-        let installer = crate::registry::installer::RegistryInstaller::new(
-            repo_root.to_path_buf(),
-            tools_dir.clone(),
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".thinclaw/channels"),
-        );
-
-        let mut installed_count = 0;
+        // Selection is side-effect-free. The final Apply transaction owns all
+        // extraction, downloads, builds, and publication.
+        let mut planned_count = 0;
         let mut auth_needed: Vec<String> = Vec::new();
 
         for idx in &selected {
@@ -120,82 +112,35 @@ impl SetupWizard {
                 continue; // Already installed, skip
             }
 
-            // Priority 1: Extract from binary-embedded WASM (--features bundled-wasm)
-            if crate::registry::bundled_wasm::is_bundled(&tool.name) {
-                match crate::registry::bundled_wasm::extract_bundled(&tool.name, &tools_dir).await {
-                    Ok(()) => {
-                        print_success(&format!(
-                            "Installed {} from the bundled binary",
-                            tool.display_name
-                        ));
-                        installed_count += 1;
+            self.queue_action(super::PendingSetupAction::InstallTool {
+                name: tool.name.clone(),
+            });
+            planned_count += 1;
 
-                        // Track auth needs
-                        if let Some(auth) = &tool.auth_summary
-                            && auth.method.as_deref() != Some("none")
-                            && auth.method.is_some()
-                        {
-                            let provider = auth.provider.as_deref().unwrap_or(&tool.name);
-                            let hint = format!(
-                                "  {} - thinclaw extensions tools auth {}",
-                                provider, tool.name
-                            );
-                            if !auth_needed
-                                .iter()
-                                .any(|h| h.starts_with(&format!("  {} -", provider)))
-                            {
-                                auth_needed.push(hint);
-                            }
-                        }
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            tool = %tool.name,
-                            error = %e,
-                            "Bundled WASM extraction failed, trying registry install"
-                        );
-                    }
-                }
-            }
-
-            // Priority 2: Registry install (download artifact or build from source)
-            match installer.install_with_source_fallback(tool, false).await {
-                Ok(outcome) => {
-                    print_success(&format!("Installed {}", outcome.name));
-                    for warning in &outcome.warnings {
-                        print_info(&format!("{}: {}", outcome.name, warning));
-                    }
-                    installed_count += 1;
-
-                    // Track auth needs
-                    if let Some(auth) = &tool.auth_summary
-                        && auth.method.as_deref() != Some("none")
-                        && auth.method.is_some()
-                    {
-                        let provider = auth.provider.as_deref().unwrap_or(&tool.name);
-                        // Only mention unique providers (Google tools share auth)
-                        let hint = format!(
-                            "  {} - thinclaw extensions tools auth {}",
-                            provider, tool.name
-                        );
-                        if !auth_needed
-                            .iter()
-                            .any(|h| h.starts_with(&format!("  {} -", provider)))
-                        {
-                            auth_needed.push(hint);
-                        }
-                    }
-                }
-                Err(e) => {
-                    print_error(&format!("Failed to install {}: {}", tool.display_name, e));
+            if let Some(auth) = &tool.auth_summary
+                && auth.method.as_deref() != Some("none")
+                && auth.method.is_some()
+            {
+                let provider = auth.provider.as_deref().unwrap_or(&tool.name);
+                let hint = format!(
+                    "  {} - thinclaw extensions tools auth {}",
+                    provider, tool.name
+                );
+                if !auth_needed
+                    .iter()
+                    .any(|h| h.starts_with(&format!("  {} -", provider)))
+                {
+                    auth_needed.push(hint);
                 }
             }
         }
 
-        if installed_count > 0 {
+        if planned_count > 0 {
             crate::setup::prompts::print_blank_line();
-            print_success(&format!("{} tool(s) installed.", installed_count));
+            print_success(&format!(
+                "{} tool installation(s) added to the Apply plan.",
+                planned_count
+            ));
         }
 
         if !auth_needed.is_empty() {

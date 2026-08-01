@@ -5573,35 +5573,6 @@
       "exact_environment": [],
       "executable_policy": "validated_search_path_or_absolute_pinned",
       "home_policy": "reviewed_operator_home",
-      "id": "src.setup.channels.tunnel.tokio.2",
-      "io_policy": {
-        "bounded": true,
-        "stderr_limit": 8388608,
-        "stdout_limit": 8388608
-      },
-      "isolation_policy": "reviewed_direct_host",
-      "lifetime_policy": {
-        "owns_process_tree": true,
-        "reap_on_drop": true,
-        "timeout_ms": 1800000
-      },
-      "network_policy": "descriptor_declared",
-      "owner": "src::setup::channels::tunnel",
-      "process_class": "channel_adapter",
-      "proof_id": "process-launch:src.setup.channels.tunnel.tokio.2.ambient-isolation",
-      "source": "src/setup/channels/tunnel.rs",
-      "temp_policy": "reviewed_system_temp"
-    },
-    {
-      "argument_schema": "argv_reviewed_at_typed_call_site",
-      "availability": [],
-      "child_environment": "exact_reviewed",
-      "constructor": "tokio",
-      "credential_slots": [],
-      "cwd_filesystem": "typed_call_site_review",
-      "exact_environment": [],
-      "executable_policy": "validated_search_path_or_absolute_pinned",
-      "home_policy": "reviewed_operator_home",
       "id": "src.setup.wizard.sandbox.tokio.1",
       "io_policy": {
         "bounded": true,
@@ -5631,7 +5602,7 @@
       "exact_environment": [],
       "executable_policy": "validated_search_path_or_absolute_pinned",
       "home_policy": "reviewed_operator_home",
-      "id": "src.setup.wizard.sandbox.tokio.2",
+      "id": "src.setup.wizard.transaction.docker_build",
       "io_policy": {
         "bounded": true,
         "stderr_limit": 8388608,
@@ -5644,10 +5615,39 @@
         "timeout_ms": 1800000
       },
       "network_policy": "descriptor_declared",
-      "owner": "src::setup::wizard::sandbox",
+      "owner": "src::setup::wizard::transaction",
       "process_class": "platform_utility",
-      "proof_id": "process-launch:src.setup.wizard.sandbox.tokio.2.ambient-isolation",
-      "source": "src/setup/wizard/sandbox.rs",
+      "proof_id": "process-launch:src.setup.wizard.transaction.docker_build.ambient-isolation",
+      "source": "src/setup/wizard/transaction.rs",
+      "temp_policy": "reviewed_system_temp"
+    },
+    {
+      "argument_schema": "argv_reviewed_at_typed_call_site",
+      "availability": [],
+      "child_environment": "exact_reviewed",
+      "constructor": "tokio",
+      "credential_slots": [],
+      "cwd_filesystem": "typed_call_site_review",
+      "exact_environment": [],
+      "executable_policy": "validated_search_path_or_absolute_pinned",
+      "home_policy": "reviewed_operator_home",
+      "id": "src.setup.wizard.transaction.docker_rollback",
+      "io_policy": {
+        "bounded": true,
+        "stderr_limit": 8388608,
+        "stdout_limit": 8388608
+      },
+      "isolation_policy": "reviewed_direct_host",
+      "lifetime_policy": {
+        "owns_process_tree": true,
+        "reap_on_drop": true,
+        "timeout_ms": 1800000
+      },
+      "network_policy": "descriptor_declared",
+      "owner": "src::setup::wizard::transaction",
+      "process_class": "platform_utility",
+      "proof_id": "process-launch:src.setup.wizard.transaction.docker_rollback.ambient-isolation",
+      "source": "src/setup/wizard/transaction.rs",
       "temp_policy": "reviewed_system_temp"
     },
     {

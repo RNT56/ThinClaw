@@ -21,7 +21,7 @@ mod wasm;
 
 pub use error::ChannelSetupError;
 pub use http::setup_http;
-pub use secrets_context::SecretsContext;
+pub use secrets_context::{SecretsContext, SetupSecretDraft};
 pub use signal::setup_signal;
 pub use telegram::{setup_telegram, validate_telegram_token};
 pub use tunnel::setup_tunnel;

@@ -113,9 +113,7 @@ impl SetupWizard {
         print_info(
             "You will move through focused phases with calm recommendations and inline readiness checks.",
         );
-        print_info(
-            "Progress is saved as you go, so you can pause and resume without redoing the stable parts.",
-        );
+        print_info("Nothing is written until you explicitly choose Apply on the final review.");
         print_info(&format!("Cockpit mode: {mode_label}"));
         crate::setup::prompts::print_blank_line();
         self.run_planned_flow(None).await
@@ -218,10 +216,6 @@ impl SetupWizard {
             self.step_statuses.insert(descriptor.id, status);
             self.persist_followups();
 
-            if self.should_persist_step(descriptor.id) {
-                self.persist_after_step().await;
-            }
-
             if shell.is_some() {
                 match status {
                     StepStatus::NeedsAttention => {
@@ -316,13 +310,6 @@ impl SetupWizard {
         Ok(true)
     }
 
-    fn should_persist_step(&self, step_id: WizardStepId) -> bool {
-        !matches!(
-            step_id,
-            WizardStepId::Profile | WizardStepId::ChannelContinuity | WizardStepId::Summary
-        )
-    }
-
     async fn execute_step(&mut self, step_id: WizardStepId) -> Result<StepStatus, SetupError> {
         match step_id {
             WizardStepId::CliSkin => {
@@ -392,9 +379,6 @@ impl SetupWizard {
                 Ok(StepStatus::Completed)
             }
             WizardStepId::Channels => {
-                if self.config.channels_only {
-                    self.reconnect_existing_db().await?;
-                }
                 if self.is_quick_setup() {
                     self.step_primary_channel_quick().await?;
                 } else {
@@ -557,8 +541,6 @@ impl SetupWizard {
 
         if self.is_quick_setup() {
             self.auto_configure_quick_runtime_defaults().await?;
-        } else if self.config.channels_only || self.is_guide_mode() {
-            let _ = self.reconnect_existing_db().await;
         }
 
         Ok(())
@@ -566,11 +548,10 @@ impl SetupWizard {
 
     /// Run the setup wizard.
     ///
-    /// Settings are persisted incrementally after each successful step so
-    /// that progress is not lost if a later step fails. On re-run, existing
-    /// settings are loaded from the database after Step 1 establishes a
-    /// connection, so users don't have to re-enter everything.
+    /// Page state is volatile. Only the final reviewed, lease-protected Apply
+    /// transaction can mutate durable state.
     pub async fn run(&mut self) -> Result<(), SetupError> {
+        self.baseline_settings = self.settings.clone();
         let requested_ui_mode = self.config.ui_mode;
         let ui_mode = self.resolve_ui_mode();
         self.resolved_ui_mode = ui_mode;

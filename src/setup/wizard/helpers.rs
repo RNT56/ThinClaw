@@ -412,6 +412,7 @@ pub(super) fn load_registry_catalog() -> Option<crate::registry::catalog::Regist
 
 /// Install selected channels from the registry that aren't already on disk
 /// and weren't handled by the bundled installer.
+#[allow(dead_code)]
 pub(super) async fn install_selected_registry_channels(
     channels_dir: &std::path::Path,
     selected_channels: &[String],
@@ -513,6 +514,7 @@ pub(super) async fn discover_installed_tools(tools_dir: &std::path::Path) -> Has
     names
 }
 
+#[allow(dead_code)]
 pub(super) async fn install_selected_bundled_channels(
     channels_dir: &std::path::Path,
     selected_channels: &[String],

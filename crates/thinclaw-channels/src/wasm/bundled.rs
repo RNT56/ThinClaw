@@ -110,6 +110,18 @@ pub fn bundled_channel_names() -> Vec<&'static str> {
     KNOWN_CHANNELS.iter().map(|(name, _)| *name).collect()
 }
 
+/// Read a bundled channel's setup descriptor without installing or building
+/// the channel. Setup uses this to collect a draft while filesystem mutation
+/// remains deferred to Apply.
+pub async fn read_bundled_channel_capabilities(
+    name: &str,
+) -> Result<ChannelCapabilitiesFile, String> {
+    let (_, capabilities_path) = locate_channel_artifacts(name)?;
+    let bytes = read_regular_file_bounded(&capabilities_path, MAX_CAPABILITIES_BYTES).await?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("failed to parse {}: {error}", capabilities_path.display()))
+}
+
 /// Resolve the channels source directory.
 ///
 /// Checks (in order):

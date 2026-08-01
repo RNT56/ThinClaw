@@ -12,21 +12,7 @@ use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
     pub(super) async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
-        self.persist_followups();
-        self.settings.onboard_completed = true;
-
-        // Final persist (idempotent — earlier incremental saves already wrote
-        // most settings, but this ensures onboard_completed is saved).
-        let saved = self.persist_settings().await?;
-
-        if !saved {
-            return Err(SetupError::Database(
-                "No database connection, cannot save settings".to_string(),
-            ));
-        }
-
-        // Write bootstrap env (also idempotent)
-        self.write_bootstrap_env()?;
+        self.review_and_apply().await?;
 
         if current_prompt_ui_mode() == PromptRenderMode::Tui {
             print_success("Configuration saved to database");
