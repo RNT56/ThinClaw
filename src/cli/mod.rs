@@ -106,7 +106,7 @@ pub use service::{ServiceCommand, run_service_command};
 pub use sessions::{SessionCommand, run_sessions_command};
 pub use setup::{SetupAction, SetupCommand};
 pub use skills::{SkillCommand, run_skills_command};
-pub use status::run_status_command;
+pub use status::{StatusArgs, run_status_command};
 pub use tool::{ToolCommand, run_tool_command};
 pub use trajectory::{TrajectoryCommand, run_trajectory_command};
 pub use update::{UpdateCommand, run_update_command};
@@ -148,13 +148,7 @@ pub struct Cli {
     pub legacy_cli_only: bool,
 
     /// Deprecated alias for `ask TEXT`
-    #[arg(
-        short = 'm',
-        long = "message",
-        global = true,
-        hide = true,
-        conflicts_with = "command"
-    )]
+    #[arg(short = 'm', long = "message", global = true, hide = true)]
     pub legacy_message: Option<String>,
 
     /// Configuration file path (optional, uses env vars by default)
@@ -243,24 +237,36 @@ pub struct ResolvedRuntimeArgs {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum LinuxReadinessCliProfile {
+pub enum ReadinessProfileArg {
     Server,
     Remote,
-    #[value(name = "desktop-linux", alias = "desktop-gnome", alias = "desktop")]
-    DesktopLinux,
+    #[value(alias = "desktop-linux", alias = "desktop-gnome")]
+    Desktop,
     #[value(name = "pi-os-lite-64")]
     PiOsLite64,
     AllFeatures,
 }
 
-impl From<LinuxReadinessCliProfile> for crate::platform::LinuxReadinessProfile {
-    fn from(value: LinuxReadinessCliProfile) -> Self {
+impl From<ReadinessProfileArg> for crate::platform::LinuxReadinessProfile {
+    fn from(value: ReadinessProfileArg) -> Self {
         match value {
-            LinuxReadinessCliProfile::Server => Self::Server,
-            LinuxReadinessCliProfile::Remote => Self::Remote,
-            LinuxReadinessCliProfile::DesktopLinux => Self::DesktopLinux,
-            LinuxReadinessCliProfile::PiOsLite64 => Self::PiOsLite64,
-            LinuxReadinessCliProfile::AllFeatures => Self::AllFeatures,
+            ReadinessProfileArg::Server => Self::Server,
+            ReadinessProfileArg::Remote => Self::Remote,
+            ReadinessProfileArg::Desktop => Self::DesktopLinux,
+            ReadinessProfileArg::PiOsLite64 => Self::PiOsLite64,
+            ReadinessProfileArg::AllFeatures => Self::AllFeatures,
+        }
+    }
+}
+
+impl From<ReadinessProfileArg> for thinclaw_app::ReadinessProfile {
+    fn from(value: ReadinessProfileArg) -> Self {
+        match value {
+            ReadinessProfileArg::Server => Self::Server,
+            ReadinessProfileArg::Remote => Self::Remote,
+            ReadinessProfileArg::Desktop => Self::Desktop,
+            ReadinessProfileArg::PiOsLite64 => Self::PiOsLite64,
+            ReadinessProfileArg::AllFeatures => Self::AllFeatures,
         }
     }
 }
@@ -460,22 +466,13 @@ pub enum Command {
             long = "readiness-profile",
             alias = "profile",
             value_enum,
-            default_value_t = LinuxReadinessCliProfile::Server
+            default_value_t = ReadinessProfileArg::Server
         )]
-        profile: LinuxReadinessCliProfile,
+        profile: ReadinessProfileArg,
     },
 
     /// Show system health and diagnostics
-    Status {
-        /// Linux readiness profile to summarize
-        #[arg(
-            long = "readiness-profile",
-            alias = "profile",
-            value_enum,
-            default_value_t = LinuxReadinessCliProfile::Server
-        )]
-        profile: LinuxReadinessCliProfile,
-    },
+    Status(StatusArgs),
 
     /// Deprecated alias for `runtime logs`
     #[command(subcommand, hide = true)]
@@ -666,7 +663,7 @@ mod tests {
         let cli = Cli::try_parse_from(["thinclaw", "--debug", "status"])
             .expect("parse cli with global debug flag");
         assert!(cli.debug);
-        assert!(matches!(cli.command, Some(Command::Status { .. })));
+        assert!(matches!(cli.command, Some(Command::Status(_))));
     }
 
     #[test]
@@ -676,7 +673,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Doctor {
-                profile: LinuxReadinessCliProfile::DesktopLinux
+                profile: ReadinessProfileArg::Desktop
             })
         ));
     }
@@ -688,7 +685,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Doctor {
-                profile: LinuxReadinessCliProfile::Remote
+                profile: ReadinessProfileArg::Remote
             })
         ));
 
@@ -696,9 +693,13 @@ mod tests {
             .expect("parse remote status profile");
         assert!(matches!(
             cli.command,
-            Some(Command::Status {
-                profile: LinuxReadinessCliProfile::Remote
-            })
+            Some(Command::Status(StatusArgs {
+                scope: status::StatusScopeArgs {
+                    readiness_profile: ReadinessProfileArg::Remote,
+                    ..
+                },
+                ..
+            }))
         ));
     }
 
@@ -735,7 +736,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Doctor {
-                profile: LinuxReadinessCliProfile::PiOsLite64
+                profile: ReadinessProfileArg::PiOsLite64
             })
         ));
 
@@ -743,9 +744,13 @@ mod tests {
             .expect("parse pi status profile");
         assert!(matches!(
             cli.command,
-            Some(Command::Status {
-                profile: LinuxReadinessCliProfile::PiOsLite64
-            })
+            Some(Command::Status(StatusArgs {
+                scope: status::StatusScopeArgs {
+                    readiness_profile: ReadinessProfileArg::PiOsLite64,
+                    ..
+                },
+                ..
+            }))
         ));
     }
 
@@ -756,7 +761,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Doctor {
-                profile: LinuxReadinessCliProfile::DesktopLinux
+                profile: ReadinessProfileArg::Desktop
             })
         ));
     }
@@ -772,6 +777,52 @@ mod tests {
     fn runtime_only_flags_are_rejected_on_status() {
         assert!(Cli::try_parse_from(["thinclaw", "status", "--no-db"]).is_err());
         assert!(Cli::try_parse_from(["thinclaw", "--no-db", "status"]).is_err());
+    }
+
+    #[test]
+    fn status_scope_flags_parse_on_either_side_of_tools() {
+        for argv in [
+            vec![
+                "thinclaw",
+                "status",
+                "--readiness-profile",
+                "desktop",
+                "--live",
+                "tools",
+                "--all",
+            ],
+            vec![
+                "thinclaw",
+                "status",
+                "tools",
+                "--all",
+                "--readiness-profile",
+                "desktop",
+                "--live",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(argv).expect("parse status tools scope");
+            assert!(matches!(
+                cli.command,
+                Some(Command::Status(StatusArgs {
+                    scope: status::StatusScopeArgs {
+                        readiness_profile: ReadinessProfileArg::Desktop,
+                        live: true,
+                    },
+                    area: Some(status::StatusArea::Tools(status::ToolStatusArgs {
+                        all: true,
+                        ..
+                    })),
+                }))
+            ));
+        }
+    }
+
+    #[test]
+    fn status_tool_exact_name_conflicts_with_match() {
+        assert!(
+            Cli::try_parse_from(["thinclaw", "status", "tools", "git", "--match", "g*"]).is_err()
+        );
     }
 
     #[test]

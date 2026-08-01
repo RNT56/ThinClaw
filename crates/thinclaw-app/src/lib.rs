@@ -20,7 +20,8 @@ pub use assembly::{
     ToolRuntimeAssemblyPlan, WorkspaceDirectoryPlan, WorkspaceFilesystemScope,
 };
 pub use capabilities::{
-    ActivityState, CapabilityFact, CapabilitySnapshot, FactState, ReadinessState,
+    ActivityState, CapabilityFact, CapabilitySnapshot, DependencyState, FactState, HealthState,
+    ReadinessProfile, ReadinessState, ToolCapabilityFact, ToolCapabilitySnapshot,
 };
 pub use model::{apply_model_override, overridden_model_for_backend};
 pub use runtime::{

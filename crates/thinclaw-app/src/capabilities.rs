@@ -3,6 +3,28 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReadinessProfile {
+    Server,
+    Remote,
+    Desktop,
+    PiOsLite64,
+    AllFeatures,
+}
+
+impl ReadinessProfile {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Server => "server",
+            Self::Remote => "remote",
+            Self::Desktop => "desktop",
+            Self::PiOsLite64 => "pi-os-lite-64",
+            Self::AllFeatures => "all-features",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FactState {
     Yes,
@@ -82,6 +104,32 @@ pub struct CapabilitySnapshot {
     pub runtime_active: FactState,
     pub healthy: bool,
     pub facts: Vec<CapabilityFact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCapabilityFact {
+    pub name: String,
+    pub source_id: String,
+    pub label: String,
+    pub origin: String,
+    pub compiled: FactState,
+    pub configured: FactState,
+    pub registered: FactState,
+    pub dependency: DependencyState,
+    pub exposed: FactState,
+    pub approval: String,
+    pub health: HealthState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCapabilitySnapshot {
+    pub schema_version: u8,
+    pub revision: String,
+    pub readiness_profile: ReadinessProfile,
+    pub live: bool,
+    pub tools: Vec<ToolCapabilityFact>,
 }
 
 impl CapabilitySnapshot {

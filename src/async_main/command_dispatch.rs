@@ -46,9 +46,9 @@ pub(super) async fn run_terminal_command(
         ));
     }
 
-    if let Some(Command::Status { profile }) = &cli.command {
+    if let Some(Command::Status(args)) = &cli.command {
         init_cli_tracing(cli.debug);
-        let outcome = thinclaw::cli::run_status_command((*profile).into(), context).await?;
+        let outcome = thinclaw::cli::run_status_command(args.clone(), context).await?;
         return Ok(thinclaw::cli::CliDispatch::Handled(outcome));
     }
 
@@ -114,7 +114,7 @@ pub(super) async fn run_terminal_command(
             thinclaw::service::run_windows_service_dispatcher(home.clone())
         }
         Some(Command::Doctor { .. }) => unreachable!("doctor handled before generic dispatch"),
-        Some(Command::Status { .. }) => unreachable!("status handled before generic dispatch"),
+        Some(Command::Status(..)) => unreachable!("status handled before generic dispatch"),
         Some(Command::Reset(reset_cmd)) => {
             init_cli_tracing(cli.debug);
             run_reset_command(reset_cmd.clone()).await

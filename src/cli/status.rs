@@ -1,22 +1,199 @@
-//! Compact, typed capability and readiness snapshot.
+//! Compact, typed capability and readiness snapshots.
 
-use thinclaw_app::{ActivityState, CapabilityFact, CapabilitySnapshot, FactState, ReadinessState};
+use clap::{Args, Subcommand, ValueEnum};
+use thinclaw_app::{
+    ActivityState, CapabilityFact, CapabilitySnapshot, DependencyState, FactState, HealthState,
+    ReadinessProfile, ReadinessState, ToolCapabilityFact, ToolCapabilitySnapshot,
+};
 
-use crate::cli::{CliContext, CliError, CliOutcome};
+use crate::cli::{CliContext, CliError, CliOutcome, ReadinessProfileArg};
+use crate::registry::{ManifestKind, RegistryCatalog};
 use crate::settings::Settings;
 
+#[derive(Args, Debug, Clone)]
+pub struct StatusArgs {
+    #[command(flatten)]
+    pub scope: StatusScopeArgs,
+
+    #[command(subcommand)]
+    pub area: Option<StatusArea>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct StatusScopeArgs {
+    /// Readiness profile used to classify required capabilities
+    #[arg(
+        long = "readiness-profile",
+        alias = "profile",
+        value_enum,
+        default_value_t = ReadinessProfileArg::Server,
+        global = true
+    )]
+    pub readiness_profile: ReadinessProfileArg,
+
+    /// Run bounded, non-billable dependency probes
+    #[arg(long, global = true)]
+    pub live: bool,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum StatusArea {
+    /// Inspect the tool capability catalog
+    Tools(ToolStatusArgs),
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ToolStatusArgs {
+    /// Exact case-sensitive stable tool ID
+    #[arg(conflicts_with = "match_pattern")]
+    pub name: Option<String>,
+
+    /// Include the complete static catalog
+    #[arg(long)]
+    pub all: bool,
+
+    /// Match stable IDs with literal characters plus `*` and `?`
+    #[arg(long = "match")]
+    pub match_pattern: Option<String>,
+
+    #[arg(long, value_enum)]
+    pub origin: Vec<ToolOriginArg>,
+    #[arg(long, value_enum)]
+    pub compiled: Vec<FactStateArg>,
+    #[arg(long, value_enum)]
+    pub configured: Vec<FactStateArg>,
+    #[arg(long, value_enum)]
+    pub registered: Vec<FactStateArg>,
+    #[arg(long, value_enum)]
+    pub dependency: Vec<DependencyStateArg>,
+    #[arg(long, value_enum)]
+    pub exposed: Vec<FactStateArg>,
+    #[arg(long, value_enum)]
+    pub approval: Vec<ApprovalPolicyArg>,
+    #[arg(long, value_enum)]
+    pub health: Vec<HealthStateArg>,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOriginArg {
+    Builtin,
+    Wasm,
+    Native,
+    Mcp,
+    Dynamic,
+    Registry,
+}
+
+impl ToolOriginArg {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Wasm => "wasm",
+            Self::Native => "native",
+            Self::Mcp => "mcp",
+            Self::Dynamic => "dynamic",
+            Self::Registry => "registry",
+        }
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactStateArg {
+    Yes,
+    No,
+    Unknown,
+    NotApplicable,
+}
+
+impl From<FactStateArg> for FactState {
+    fn from(value: FactStateArg) -> Self {
+        match value {
+            FactStateArg::Yes => Self::Yes,
+            FactStateArg::No => Self::No,
+            FactStateArg::Unknown => Self::Unknown,
+            FactStateArg::NotApplicable => Self::NotApplicable,
+        }
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyStateArg {
+    Available,
+    Missing,
+    Unknown,
+    NotApplicable,
+}
+
+impl From<DependencyStateArg> for DependencyState {
+    fn from(value: DependencyStateArg) -> Self {
+        match value {
+            DependencyStateArg::Available => Self::Available,
+            DependencyStateArg::Missing => Self::Missing,
+            DependencyStateArg::Unknown => Self::Unknown,
+            DependencyStateArg::NotApplicable => Self::NotApplicable,
+        }
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalPolicyArg {
+    Never,
+    Conditional,
+    Always,
+}
+
+impl ApprovalPolicyArg {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::Conditional => "conditional",
+            Self::Always => "always",
+        }
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthStateArg {
+    Healthy,
+    Unhealthy,
+    Unknown,
+    NotProbed,
+    NotSupported,
+}
+
+impl From<HealthStateArg> for HealthState {
+    fn from(value: HealthStateArg) -> Self {
+        match value {
+            HealthStateArg::Healthy => Self::Healthy,
+            HealthStateArg::Unhealthy => Self::Unhealthy,
+            HealthStateArg::Unknown => Self::Unknown,
+            HealthStateArg::NotProbed => Self::NotProbed,
+            HealthStateArg::NotSupported => Self::NotSupported,
+        }
+    }
+}
+
 pub async fn run_status_command(
-    linux_profile: crate::platform::LinuxReadinessProfile,
+    args: StatusArgs,
     context: &CliContext,
 ) -> Result<CliOutcome, CliError> {
+    if let Some(StatusArea::Tools(tool_args)) = &args.area {
+        return run_tool_status(&args.scope, tool_args, context);
+    }
+
     let settings = Settings::load();
-    let linux = crate::platform::linux_readiness_report(linux_profile).await;
+    let profile: ReadinessProfile = args.scope.readiness_profile.into();
+    let readiness = if args.scope.live {
+        Some(crate::platform::linux_readiness_report(args.scope.readiness_profile.into()).await)
+    } else {
+        None
+    };
     let mut snapshot = CapabilitySnapshot {
         schema_version: 1,
         revision: String::new(),
-        profile: linux_profile.as_str().to_string(),
+        profile: profile.as_str().to_string(),
         runtime_active: FactState::Unknown,
-        healthy: linux.failed() == 0,
+        healthy: readiness.as_ref().is_none_or(|report| report.failed() == 0),
         facts: vec![
             database_fact(),
             llm_fact(&settings),
@@ -25,7 +202,9 @@ pub async fn run_status_command(
             wasm_fact(&settings),
             sandbox_fact(&settings),
             heartbeat_fact(&settings),
-            linux_fact(&linux),
+            readiness
+                .as_ref()
+                .map_or_else(platform_static_fact, linux_fact),
         ],
     };
     snapshot.sort_facts();
@@ -42,6 +221,203 @@ pub async fn run_status_command(
     } else {
         CliOutcome::Unhealthy
     })
+}
+
+fn run_tool_status(
+    scope: &StatusScopeArgs,
+    args: &ToolStatusArgs,
+    context: &CliContext,
+) -> Result<CliOutcome, CliError> {
+    validate_selector(args.name.as_deref(), "NAME")?;
+    validate_pattern(args.match_pattern.as_deref())?;
+
+    let catalog = RegistryCatalog::load_or_embedded()
+        .map_err(|error| CliError::operational(format!("failed to load tool catalog: {error}")))?;
+    let mut tools = catalog
+        .list(Some(ManifestKind::Tool), None)
+        .into_iter()
+        .map(|manifest| registry_tool_fact(manifest, scope.live))
+        .collect::<Vec<_>>();
+
+    if let Some(name) = args.name.as_deref()
+        && !tools.iter().any(|tool| tool.name == name)
+    {
+        return Err(CliError::operational(format!(
+            "tool '{name}' was not found in the static or installed catalog"
+        )));
+    }
+
+    let explicit_population = args.name.is_some() || args.match_pattern.is_some() || args.all;
+    tools.retain(|tool| {
+        (explicit_population || tool.registered == FactState::Yes)
+            && args.name.as_ref().is_none_or(|name| tool.name == *name)
+            && args
+                .match_pattern
+                .as_ref()
+                .is_none_or(|pattern| wildcard_matches(pattern, &tool.name))
+            && matches_string_filter(&args.origin, &tool.origin, ToolOriginArg::as_str)
+            && matches_fact_filter(&args.compiled, tool.compiled)
+            && matches_fact_filter(&args.configured, tool.configured)
+            && matches_fact_filter(&args.registered, tool.registered)
+            && matches_dependency_filter(&args.dependency, tool.dependency)
+            && matches_fact_filter(&args.exposed, tool.exposed)
+            && matches_string_filter(&args.approval, &tool.approval, ApprovalPolicyArg::as_str)
+            && matches_health_filter(&args.health, tool.health)
+    });
+    tools.sort_by(|left, right| {
+        (&left.origin, &left.name, &left.source_id).cmp(&(
+            &right.origin,
+            &right.name,
+            &right.source_id,
+        ))
+    });
+
+    let revision_bytes = serde_json::to_vec(&tools)
+        .map_err(|error| CliError::operational(format!("failed to encode tool status: {error}")))?;
+    let snapshot = ToolCapabilitySnapshot {
+        schema_version: 1,
+        revision: blake3::hash(&revision_bytes).to_hex().to_string(),
+        readiness_profile: scope.readiness_profile.into(),
+        live: scope.live,
+        tools,
+    };
+    context
+        .output()
+        .write_record("status_tools", &snapshot, render_tools_human)?;
+    Ok(CliOutcome::Success)
+}
+
+fn registry_tool_fact(
+    manifest: &crate::registry::ExtensionManifest,
+    live: bool,
+) -> ToolCapabilityFact {
+    let installed = dirs::home_dir().is_some_and(|home| {
+        let directory = home.join(".thinclaw/tools");
+        directory.join(format!("{}.wasm", manifest.name)).is_file()
+            || directory.join(&manifest.name).is_dir()
+    });
+    let compiled = if cfg!(feature = "wasm-runtime") {
+        FactState::Yes
+    } else {
+        FactState::No
+    };
+    let registered = if installed && compiled == FactState::Yes {
+        FactState::Yes
+    } else {
+        FactState::No
+    };
+    let auth_free = manifest
+        .auth_summary
+        .as_ref()
+        .and_then(|summary| summary.method.as_deref())
+        .is_none_or(|method| method == "none");
+    ToolCapabilityFact {
+        name: manifest.name.clone(),
+        source_id: format!("registry/tools/{}", manifest.name),
+        label: manifest.display_name.clone(),
+        origin: "registry".to_string(),
+        compiled,
+        configured: if auth_free {
+            FactState::Yes
+        } else {
+            FactState::Unknown
+        },
+        registered,
+        dependency: if compiled == FactState::Yes {
+            DependencyState::Available
+        } else {
+            DependencyState::Missing
+        },
+        exposed: registered,
+        approval: "conditional".to_string(),
+        health: if live {
+            HealthState::NotSupported
+        } else {
+            HealthState::NotProbed
+        },
+        reasons: if installed && compiled == FactState::No {
+            vec!["installed WASM tool cannot load because wasm-runtime is not compiled".to_string()]
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn validate_selector(value: Option<&str>, label: &str) -> Result<(), CliError> {
+    if let Some(value) = value
+        && (value.len() > 256 || value.chars().any(char::is_control))
+    {
+        return Err(CliError::usage(format!(
+            "{label} must be at most 256 bytes and contain no control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_pattern(value: Option<&str>) -> Result<(), CliError> {
+    validate_selector(value, "--match")?;
+    if let Some(value) = value
+        && value
+            .chars()
+            .any(|character| matches!(character, '[' | ']' | '\\'))
+    {
+        return Err(CliError::usage(
+            "--match supports only literal characters plus '*' and '?'; brackets and escaping are not allowed",
+        ));
+    }
+    Ok(())
+}
+
+fn wildcard_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let mut row = vec![false; value.len() + 1];
+    row[0] = true;
+    for &token in pattern {
+        let previous = row.clone();
+        row[0] = token == b'*' && previous[0];
+        for index in 1..=value.len() {
+            row[index] = match token {
+                b'*' => row[index - 1] || previous[index],
+                b'?' => previous[index - 1],
+                literal => previous[index - 1] && literal == value[index - 1],
+            };
+        }
+    }
+    row[value.len()]
+}
+
+fn matches_fact_filter(filters: &[FactStateArg], value: FactState) -> bool {
+    filters.is_empty()
+        || filters
+            .iter()
+            .any(|filter| FactState::from(*filter) == value)
+}
+
+fn matches_dependency_filter(filters: &[DependencyStateArg], value: DependencyState) -> bool {
+    filters.is_empty()
+        || filters
+            .iter()
+            .any(|filter| DependencyState::from(*filter) == value)
+}
+
+fn matches_health_filter(filters: &[HealthStateArg], value: HealthState) -> bool {
+    filters.is_empty()
+        || filters
+            .iter()
+            .any(|filter| HealthState::from(*filter) == value)
+}
+
+fn matches_string_filter<T: Copy>(
+    filters: &[T],
+    value: &str,
+    render: impl Fn(T) -> &'static str,
+) -> bool {
+    filters.is_empty()
+        || filters
+            .iter()
+            .copied()
+            .any(|filter| render(filter) == value)
 }
 
 fn database_fact() -> CapabilityFact {
@@ -224,6 +600,22 @@ fn linux_fact(report: &crate::platform::LinuxReadinessReport) -> CapabilityFact 
     value
 }
 
+fn platform_static_fact() -> CapabilityFact {
+    let mut value = fact(
+        "platform_readiness",
+        "Platform readiness",
+        FactState::Yes,
+        FactState::Yes,
+        FactState::Unknown,
+        ActivityState::NotApplicable,
+        ReadinessState::Unknown,
+    );
+    value
+        .reasons
+        .push("static status does not execute platform probes; use --live".to_string());
+    value
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fact(
     id: &str,
@@ -272,4 +664,45 @@ fn render_human(snapshot: &CapabilitySnapshot) -> String {
         }
     }
     lines.join("\n")
+}
+
+fn render_tools_human(snapshot: &ToolCapabilitySnapshot) -> String {
+    let mut lines = vec![format!(
+        "{} tools — profile {} — revision {}{}",
+        snapshot.tools.len(),
+        snapshot.readiness_profile.as_str(),
+        &snapshot.revision[..12],
+        if snapshot.live { " — live" } else { "" }
+    )];
+    for tool in &snapshot.tools {
+        lines.push(format!(
+            "{}: origin={}, compiled={:?}, configured={:?}, registered={:?}, dependency={:?}, exposed={:?}, approval={}, health={:?}",
+            tool.name,
+            tool.origin,
+            tool.compiled,
+            tool.configured,
+            tool.registered,
+            tool.dependency,
+            tool.exposed,
+            tool.approval,
+            tool.health
+        ));
+        for reason in &tool.reasons {
+            lines.push(format!("  - {reason}"));
+        }
+    }
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_wildcards_are_literal_except_star_and_question_mark() {
+        assert!(wildcard_matches("git*", "github"));
+        assert!(wildcard_matches("g?t", "git"));
+        assert!(!wildcard_matches("git", "github"));
+        assert!(validate_pattern(Some("tool-[x]")).is_err());
+    }
 }
