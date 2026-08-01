@@ -52,6 +52,20 @@ pub(super) async fn run_terminal_command(
         return Ok(thinclaw::cli::CliDispatch::Handled(outcome));
     }
 
+    if let Some(Command::Extensions(thinclaw::cli::ExtensionsCommand::Channels(command))) =
+        &cli.command
+    {
+        init_cli_tracing(cli.debug);
+        let outcome = run_channels_command(command.clone(), context).await?;
+        return Ok(thinclaw::cli::CliDispatch::Handled(outcome));
+    }
+
+    if let Some(Command::Channels(command)) = &cli.command {
+        init_cli_tracing(cli.debug);
+        let outcome = run_channels_command(command.clone(), context).await?;
+        return Ok(thinclaw::cli::CliDispatch::Handled(outcome));
+    }
+
     let result = match &cli.command {
         Some(Command::Tool(tool_cmd)) => {
             init_cli_tracing(cli.debug);
@@ -154,9 +168,7 @@ pub(super) async fn run_terminal_command(
                         .await
                         .map_err(anyhow::Error::from)
                 }
-                thinclaw::cli::ExtensionsCommand::Channels(command) => {
-                    run_channels_command(command.clone()).await
-                }
+                thinclaw::cli::ExtensionsCommand::Channels(_) => unreachable!(),
                 thinclaw::cli::ExtensionsCommand::Tools(command) => {
                     run_tool_command(command.clone()).await
                 }
@@ -247,10 +259,7 @@ pub(super) async fn run_terminal_command(
             init_cli_tracing(cli.debug);
             run_identity_command(identity_cmd.clone()).await
         }
-        Some(Command::Channels(ch_cmd)) => {
-            init_cli_tracing(cli.debug);
-            run_channels_command(ch_cmd.clone()).await
-        }
+        Some(Command::Channels(_)) => unreachable!(),
         Some(Command::Comfy(comfy_cmd)) => {
             init_cli_tracing(cli.debug);
             thinclaw::cli::run_comfy_command(comfy_cmd.clone()).await

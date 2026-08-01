@@ -48,6 +48,7 @@ pub mod acp;
 mod apple_mail;
 mod bluebubbles;
 pub mod canvas_gateway;
+pub mod catalog;
 mod channel;
 mod discord;
 pub mod first_party_push;
