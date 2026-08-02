@@ -1,5 +1,5 @@
 {
-  "launch_count": 212,
+  "launch_count": 211,
   "launches": [
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
@@ -148,7 +148,7 @@
       "proof_id": "process-launch-35c4e4dbb5513a65a0372163",
       "rust_module": "tauri_app_lib::engine::engine_mlx",
       "source": "apps/desktop/backend/src/engine/engine_mlx.rs",
-      "source_line": 224,
+      "source_line": 223,
       "temp_policy": "reviewed_system_temp"
     },
     {
@@ -184,7 +184,7 @@
       "proof_id": "process-launch-600c0df7d39e088aa29e0fce",
       "rust_module": "tauri_app_lib::engine::engine_mlx",
       "source": "apps/desktop/backend/src/engine/engine_mlx.rs",
-      "source_line": 322,
+      "source_line": 321,
       "temp_policy": "reviewed_system_temp"
     },
     {
@@ -232,13 +232,13 @@
       "proof_id": "process-launch-4bd89509236cc6b340129397",
       "rust_module": "tauri_app_lib::engine::engine_mlx",
       "source": "apps/desktop/backend/src/engine/engine_mlx.rs",
-      "source_line": 379,
+      "source_line": 378,
       "temp_policy": "reviewed_system_temp"
     },
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "818807725cfbeb319b93a8dd144835db26b4f02d45c92717e0604fea4144c08a",
+      "callsite_digest": "c7bde0782d0b9988adab70765bdbec901544760ccf0198fc7e582da13b74afae",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "tokio",
@@ -280,13 +280,13 @@
       "proof_id": "process-launch-b47422b181a6ca59b1a33af3",
       "rust_module": "tauri_app_lib::engine::engine_mlx",
       "source": "apps/desktop/backend/src/engine/engine_mlx.rs",
-      "source_line": 421,
+      "source_line": 420,
       "temp_policy": "reviewed_system_temp"
     },
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "4c52a318a5e09c431070ffe6ad07ffd9fa7580206cbbd1fcfeb7a404f308769c",
+      "callsite_digest": "0b89013382f28cd71c0d01ba656e2013321298dea0ce8067e194e4fc1af8c675",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "tokio",
@@ -333,7 +333,7 @@
       "proof_id": "process-launch-11c0653abaa07480639b3de3",
       "rust_module": "tauri_app_lib::engine::engine_mlx",
       "source": "apps/desktop/backend/src/engine/engine_mlx.rs",
-      "source_line": 782,
+      "source_line": 775,
       "temp_policy": "reviewed_system_temp"
     },
     {
@@ -375,7 +375,7 @@
       "proof_id": "process-launch-8bfd4141cec18eeee5d50b78",
       "rust_module": "tauri_app_lib::engine::engine_vllm",
       "source": "apps/desktop/backend/src/engine/engine_vllm.rs",
-      "source_line": 176,
+      "source_line": 175,
       "temp_policy": "reviewed_system_temp"
     },
     {
@@ -411,7 +411,7 @@
       "proof_id": "process-launch-f1fad5787e926d02b7abec9d",
       "rust_module": "tauri_app_lib::engine::engine_vllm",
       "source": "apps/desktop/backend/src/engine/engine_vllm.rs",
-      "source_line": 289,
+      "source_line": 288,
       "temp_policy": "reviewed_system_temp"
     },
     {
@@ -447,7 +447,7 @@
       "proof_id": "process-launch-be8a7fe89c9832549c35c3cf",
       "rust_module": "tauri_app_lib::engine::engine_vllm",
       "source": "apps/desktop/backend/src/engine/engine_vllm.rs",
-      "source_line": 327,
+      "source_line": 326,
       "temp_policy": "reviewed_system_temp"
     },
     {
@@ -486,13 +486,13 @@
       "proof_id": "process-launch-b4d10ad410f2fce9390b1edd",
       "rust_module": "tauri_app_lib::engine::engine_vllm",
       "source": "apps/desktop/backend/src/engine/engine_vllm.rs",
-      "source_line": 373,
+      "source_line": 372,
       "temp_policy": "reviewed_system_temp"
     },
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "4fbcbc87d1403da8b8c95569f900879267c2498964d8a05514f13fd3e5eb2074",
+      "callsite_digest": "48fe7236f00877b39c509a4a92529cb1fdc81e9867e0b5abdb3f57e9950ea340",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "tokio",
@@ -525,13 +525,13 @@
       "proof_id": "process-launch-36be9ca323facde91d71e831",
       "rust_module": "tauri_app_lib::engine::engine_vllm",
       "source": "apps/desktop/backend/src/engine/engine_vllm.rs",
-      "source_line": 404,
+      "source_line": 403,
       "temp_policy": "reviewed_system_temp"
     },
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "2d896f3ff4e0ba2c66e8b05eb8065b234fa9e58971066f93dfe0a840ed43fc1f",
+      "callsite_digest": "6c0078ab8f8cdc9094550ab1fcde235a05466e000c6507d52676caffe85cb758",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "tokio",
@@ -570,7 +570,7 @@
       "proof_id": "process-launch-bf81dbd133333d62bd2df254",
       "rust_module": "tauri_app_lib::engine::engine_vllm",
       "source": "apps/desktop/backend/src/engine/engine_vllm.rs",
-      "source_line": 700,
+      "source_line": 693,
       "temp_policy": "reviewed_system_temp"
     },
     {
@@ -3038,42 +3038,6 @@
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "e409dabb5e294b55b990c79c87fb824967ea247e38b8aa093e21c9fbb05b24e4",
-      "child_environment": "exact_reviewed",
-      "classification": "production",
-      "constructor": "std",
-      "credential_slots": [],
-      "cwd_filesystem": "typed_call_site_review",
-      "environment_schema": "literal_keys_only",
-      "exact_environment": [],
-      "executable_policy": "validated_search_path_or_absolute_pinned",
-      "execution_policy": "caller_mediated",
-      "home_policy": "reviewed_operator_home",
-      "id": "crates.thinclaw-tools.src.execution.std.1",
-      "io_policy": {
-        "bounded": false,
-        "stderr_limit": 0,
-        "stdout_limit": 0
-      },
-      "isolation_policy": "reviewed_direct_host",
-      "lifetime_policy": {
-        "owns_process_tree": false,
-        "reap_on_drop": false,
-        "timeout_ms": 0
-      },
-      "network_policy": "inherited_sandbox",
-      "owner": "crates::thinclaw-tools::src::execution",
-      "process_class": "tool_executor",
-      "program": "/usr/bin/sandbox-exec",
-      "proof_id": "process-launch-7896a78f4b22d79dbfbb875b",
-      "rust_module": "thinclaw_tools::execution",
-      "source": "crates/thinclaw-tools/src/execution.rs",
-      "source_line": 1575,
-      "temp_policy": "reviewed_system_temp"
-    },
-    {
-      "argument_schema": "argv_reviewed_at_typed_call_site",
-      "availability": [],
       "callsite_digest": "4cde9cededd61219003cddefd83aea1108aa465545e6386a6d42dbc9afffa7b2",
       "child_environment": "exact_reviewed",
       "classification": "production",
@@ -3362,7 +3326,7 @@
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "b779398639da170d3aaede0d741c6ddf348f3775e0cf5470a65601c38e6c8aca",
+      "callsite_digest": "3842d3f8fafd9c66e545a5c61036c1ba5e92687ef90f4306f30ab20d6d3cf56a",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "tokio",

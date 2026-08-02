@@ -1572,17 +1572,14 @@ mod macos_sandbox_tests {
     }
 
     fn run_sandboxed_write(profile: &str, target: &Path) -> bool {
-        thinclaw_platform::std_process_command!(
-            "crates.thinclaw-tools.src.execution.std.1",
-            "/usr/bin/sandbox-exec"
-        )
-        .arg("-p")
-        .arg(profile)
-        .arg("/bin/sh")
-        .arg("-c")
-        .arg(format!("printf hi > '{}'", target.display()))
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        std::process::Command::new("/usr/bin/sandbox-exec")
+            .arg("-p")
+            .arg(profile)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(format!("printf hi > '{}'", target.display()))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }

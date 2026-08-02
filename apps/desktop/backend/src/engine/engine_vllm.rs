@@ -5,7 +5,6 @@
 //! runs in a descendant-owned boundary and exposes an authenticated loopback API.
 
 use async_trait::async_trait;
-use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -608,12 +607,6 @@ print("thinclaw-vllm-runtime-ok")
             .map_err(|error| format!("Could not resolve model directory: {error}"))
     }
 
-    fn generate_api_token() -> String {
-        let mut bytes = [0_u8; 32];
-        OsRng.fill_bytes(&mut bytes);
-        hex::encode(bytes)
-    }
-
     fn local_client() -> Result<reqwest::Client, String> {
         reqwest::Client::builder()
             .no_proxy()
@@ -912,16 +905,6 @@ mod tests {
         std::fs::write(venv.join(BOOTSTRAP_MARKER), VllmEngine::expected_marker()).unwrap();
         assert!(engine.is_bootstrapped());
     }
-
-    #[test]
-    fn generated_api_tokens_are_high_entropy_and_unique() {
-        let first = VllmEngine::generate_api_token();
-        let second = VllmEngine::generate_api_token();
-        assert_eq!(first.len(), 64);
-        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_ne!(first, second);
-    }
-
     #[test]
     fn host_version_comparison_enforces_reviewed_minimums() {
         assert!(VllmEngine::version_at_least("2.31", "2.31"));

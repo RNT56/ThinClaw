@@ -1239,7 +1239,11 @@ mod bounded_line_tests {
         let manifest: CheckedProcessManifest =
             serde_json::from_str(include_str!("process_launch_manifest.json"))
                 .expect("checked manifest");
-        assert_eq!(manifest.launch_count, 212);
+        assert_eq!(manifest.launch_count, manifest.launches.len());
+        assert!(
+            !manifest.launches.is_empty(),
+            "the checked production launch manifest cannot be empty"
+        );
         let unique = manifest
             .launches
             .iter()

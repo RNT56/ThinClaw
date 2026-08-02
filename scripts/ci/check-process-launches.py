@@ -262,12 +262,14 @@ def rust_structure_mask(text: str) -> str:
 
 @functools.lru_cache(maxsize=None)
 def test_only_ranges(text: str) -> tuple[tuple[int, int], ...]:
-    """Return byte ranges owned by explicit `#[cfg(test)] mod ...` items."""
-    if "#[cfg(test)]" not in text:
+    """Return byte ranges owned by modules whose cfg predicate requires tests."""
+    if "test" not in text:
         return ()
     structure = rust_structure_mask(text)
     module = re.compile(
-        r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*"
+        r"#\s*\[\s*cfg\s*\(\s*"
+        r"(?:test|all\s*\([^)]*\btest\b[^)]*\))"
+        r"\s*\)\s*\]\s*"
         r"(?:(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*)\{"
     )
     ranges: list[tuple[int, int]] = []

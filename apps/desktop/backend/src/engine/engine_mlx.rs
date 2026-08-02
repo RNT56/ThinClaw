@@ -7,7 +7,6 @@
 //! auth file consumed by a validated `sitecustomize` shim.
 
 use async_trait::async_trait;
-use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -672,12 +671,6 @@ print("thinclaw-mlx-runtime-ok")
             .map_err(|error| format!("Failed to inspect MLX loopback port: {error}"))
     }
 
-    fn generate_api_token() -> String {
-        let mut bytes = [0_u8; 32];
-        OsRng.fill_bytes(&mut bytes);
-        hex::encode(bytes)
-    }
-
     fn local_client() -> Result<reqwest::Client, String> {
         reqwest::Client::builder()
             .no_proxy()
@@ -1053,20 +1046,18 @@ mod tests {
             r#"{"architectures":["LlavaForConditionalGeneration"],"vision_config":{}}"#,
             Some(r#"{"weight_map":{"vision_tower.layer.weight":"model.safetensors"}}"#),
         );
-        assert_eq!(
+        assert!(
             crate::model_manager::classify_mlx_vision_directory(vision.path())
-                .expect("valid vision directory"),
-            true
+                .expect("valid vision directory")
         );
 
         let text_only = model_dir(
             r#"{"architectures":["LlamaForCausalLM"],"max_position_embeddings":4096}"#,
             None,
         );
-        assert_eq!(
-            crate::model_manager::classify_mlx_vision_directory(text_only.path())
-                .expect("valid text-only directory"),
-            false
+        assert!(
+            !crate::model_manager::classify_mlx_vision_directory(text_only.path())
+                .expect("valid text-only directory")
         );
 
         let misleading = model_dir(
@@ -1092,10 +1083,9 @@ mod tests {
         file.extend_from_slice(&[0, 0]);
         let path = directory.path().join("model.safetensors");
         std::fs::write(&path, file).unwrap();
-        assert_eq!(
+        assert!(
             crate::model_manager::classify_mlx_vision_directory(directory.path())
-                .expect("valid single-file vision directory"),
-            true
+                .expect("valid single-file vision directory")
         );
     }
 
@@ -1137,14 +1127,5 @@ mod tests {
         assert!(!engine.is_bootstrapped());
         std::fs::write(venv.join(BOOTSTRAP_MARKER), MlxEngine::expected_marker()).unwrap();
         assert!(engine.is_bootstrapped());
-    }
-
-    #[test]
-    fn generated_api_tokens_are_high_entropy_and_unique() {
-        let first = MlxEngine::generate_api_token();
-        let second = MlxEngine::generate_api_token();
-        assert_eq!(first.len(), 64);
-        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_ne!(first, second);
     }
 }

@@ -43,6 +43,23 @@ crate::std_process_command!("platform.launch.std.1", "git");
             ],
         )
 
+    def test_test_module_range_understands_compound_cfg_without_hiding_any_cfg(self):
+        source = '''
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    fn helper() { std::process::Command::new("sandbox-exec"); }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+mod production_on_macos {
+    fn helper() { std::process::Command::new("open"); }
+}
+'''
+        ranges = SCANNER.test_only_ranges(source)
+        self.assertEqual(len(ranges), 1)
+        self.assertTrue(SCANNER.in_ranges(source.index("sandbox-exec"), ranges))
+        self.assertFalse(SCANNER.in_ranges(source.index("open"), ranges))
+
 
 if __name__ == "__main__":
     unittest.main()

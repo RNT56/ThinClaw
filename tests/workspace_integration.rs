@@ -368,7 +368,7 @@ async fn test_workspace_list_all() {
 }
 
 #[tokio::test]
-async fn test_workspace_system_prompt() {
+async fn test_workspace_system_prompt_separates_user_profile_from_trusted_instructions() {
     let pool = get_pool();
     if try_connect(&pool).await.is_none() {
         return;
@@ -415,8 +415,17 @@ async fn test_workspace_system_prompt() {
         "Should include SOUL.md content, got: {prompt}"
     );
     assert!(
-        prompt.contains("Alice"),
-        "Should include USER.md content, got: {prompt}"
+        !prompt.contains("Alice"),
+        "Trusted system prompt must not elevate actor-authored USER.md content: {prompt}"
+    );
+    let actor_overlay = workspace
+        .actor_overlay_section(user_id)
+        .await
+        .expect("actor overlay lookup failed")
+        .expect("USER.md should produce an actor overlay");
+    assert!(
+        actor_overlay.contains("Alice"),
+        "Actor USER.md should remain available as untrusted overlay evidence: {actor_overlay}"
     );
 
     cleanup_user(&pool, user_id).await;

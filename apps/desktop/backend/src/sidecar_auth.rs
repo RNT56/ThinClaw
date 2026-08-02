@@ -111,6 +111,10 @@ mod tests {
     fn auth_is_redacted_private_and_removed() {
         let directory = tempfile::tempdir().unwrap();
         let auth = EphemeralSidecarAuth::generate();
+        let distinct_auth = EphemeralSidecarAuth::generate();
+        assert_eq!(auth.expose().len(), 64);
+        assert!(auth.expose().bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(auth.expose(), distinct_auth.expose());
         assert!(!format!("{auth:?}").contains(auth.expose()));
         let file = PrivateSidecarAuthFile::create(directory.path(), &auth).unwrap();
         let path = file.path_buf();
