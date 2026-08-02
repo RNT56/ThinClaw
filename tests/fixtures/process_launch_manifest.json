@@ -2888,7 +2888,7 @@
       "proof_id": "process-launch-9027abdbbd63d1268ef8ba63",
       "rust_module": "thinclaw_tools::builtin::location",
       "source": "crates/thinclaw-tools/src/builtin/location.rs",
-      "source_line": 107,
+      "source_line": 106,
       "temp_policy": "reviewed_system_temp"
     },
     {

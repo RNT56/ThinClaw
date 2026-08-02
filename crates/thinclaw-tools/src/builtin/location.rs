@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Serialize;
-#[cfg(target_os = "macos")]
 use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use thinclaw_tools_core::{OutboundUrlGuardOptions, validate_outbound_url_pinned_async};
