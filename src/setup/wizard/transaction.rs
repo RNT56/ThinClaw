@@ -6,7 +6,6 @@
 //! order, and compensates every setup-owned write it can make.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-#[cfg(feature = "libsql")]
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,6 +21,8 @@ use crate::setup::prompts::{confirm, print_info, print_success, print_warning};
 use super::{PendingSetupAction, SETUP_MASTER_KEY_SLOT, SetupError, SetupWizard};
 
 const MAX_ENV_BYTES: u64 = 1024 * 1024;
+#[cfg(feature = "libsql")]
+const MAX_DATABASE_ROLLBACK_BYTES: u64 = 512 * 1024 * 1024;
 const USER_ID: &str = "default";
 
 #[derive(Default)]
@@ -33,7 +34,11 @@ struct ApplyRollback {
     os_keys_before: Vec<(String, Option<String>)>,
     created_files: Vec<PathBuf>,
     created_dirs: Vec<PathBuf>,
+    extension_dirs_before: Vec<(PathBuf, HashMap<PathBuf, Vec<u8>>)>,
     images_before: Vec<(String, Option<String>)>,
+    non_compensable_outcomes: Vec<String>,
+    #[cfg(feature = "libsql")]
+    libsql_files_before: Vec<(PathBuf, Option<Vec<u8>>)>,
 }
 
 impl SetupWizard {
@@ -152,19 +157,45 @@ impl SetupWizard {
         if !changed_keys.is_empty() {
             actions.push(SetupAction::WriteSettings { keys: changed_keys });
         }
+        let extension_catalog = self
+            .pending_actions
+            .iter()
+            .any(|action| {
+                matches!(
+                    action,
+                    PendingSetupAction::InstallTool { .. }
+                        | PendingSetupAction::InstallChannel { .. }
+                )
+            })
+            .then(super::helpers::load_registry_catalog)
+            .flatten();
         for pending in &self.pending_actions {
             match pending {
                 PendingSetupAction::InstallTool { name }
                 | PendingSetupAction::InstallChannel { name } => {
+                    let catalog = extension_catalog.as_ref().ok_or_else(|| {
+                        SetupError::Config(
+                            "extension registry is unavailable while sealing the setup plan"
+                                .to_string(),
+                        )
+                    })?;
+                    let manifest = catalog.get(name).ok_or_else(|| {
+                        SetupError::Config(format!(
+                            "extension '{name}' is no longer in the catalog"
+                        ))
+                    })?;
+                    let repo_root = catalog.root().parent().unwrap_or(catalog.root());
                     actions.push(SetupAction::InstallExtension {
                         source_id: name.clone(),
-                        digest: blake3::hash(name.as_bytes()).to_hex().to_string(),
+                        digest: extension_apply_digest(manifest, repo_root)?,
                     });
                 }
                 PendingSetupAction::BuildWorkerImage { image } => {
+                    let build_context = std::env::current_dir().map_err(SetupError::Io)?;
                     actions.push(SetupAction::ExternalRequest {
                         host: "local-docker-daemon".to_string(),
                         purpose: format!("build reviewed worker image {image}"),
+                        digest: worker_build_context_digest(&build_context)?,
                         billable: false,
                     });
                 }
@@ -284,7 +315,7 @@ impl SetupWizard {
         }
 
         let mut rollback = ApplyRollback::default();
-        let result = self.apply_inner(&mut rollback).await;
+        let result = self.apply_inner(plan, &mut rollback).await;
         if let Err(error) = result {
             let rollback_errors = self.rollback_setup(&mut rollback).await;
             if rollback_errors.is_empty() {
@@ -298,7 +329,11 @@ impl SetupWizard {
         Ok(())
     }
 
-    async fn apply_inner(&mut self, rollback: &mut ApplyRollback) -> Result<(), SetupError> {
+    async fn apply_inner(
+        &mut self,
+        plan: &SetupPlan,
+        rollback: &mut ApplyRollback,
+    ) -> Result<(), SetupError> {
         let env_path = crate::bootstrap::thinclaw_env_path();
         rollback.env_before = Some(
             match thinclaw_platform::read_regular_file_bounded(&env_path, MAX_ENV_BYTES) {
@@ -329,10 +364,26 @@ impl SetupWizard {
                 if let Some(parent) = path.parent() {
                     record_missing_directories(rollback, parent);
                 }
+            } else {
+                for path in [
+                    path.clone(),
+                    PathBuf::from(format!("{}-wal", path.display())),
+                    PathBuf::from(format!("{}-shm", path.display())),
+                ] {
+                    let before = match thinclaw_platform::read_regular_file_bounded(
+                        &path,
+                        MAX_DATABASE_ROLLBACK_BYTES,
+                    ) {
+                        Ok(bytes) => Some(bytes),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => return Err(SetupError::Io(error)),
+                    };
+                    rollback.libsql_files_before.push((path, before));
+                }
             }
         }
 
-        self.prepare_apply_database().await?;
+        self.prepare_apply_database(rollback).await?;
         rollback.settings_before = Some(self.read_settings_snapshot().await?);
         if let Some(settings_before) = rollback.settings_before.as_ref() {
             self.capture_plaintext_credentials_from_map(settings_before);
@@ -356,7 +407,7 @@ impl SetupWizard {
         }
         self.purge_plaintext_credential_settings().await?;
 
-        self.apply_pending_extensions(rollback).await?;
+        self.apply_pending_extensions(plan, rollback).await?;
 
         self.settings.onboard_completed = false;
         self.persist_settings().await.and_then(|saved| {
@@ -385,7 +436,10 @@ impl SetupWizard {
         Ok(())
     }
 
-    async fn prepare_apply_database(&mut self) -> Result<(), SetupError> {
+    async fn prepare_apply_database(
+        &mut self,
+        _rollback: &mut ApplyRollback,
+    ) -> Result<(), SetupError> {
         match self.settings.database_backend.as_deref() {
             #[cfg(feature = "postgres")]
             Some("postgres") | Some("postgresql") => {
@@ -395,7 +449,18 @@ impl SetupWizard {
                     })?;
                     self.test_database_connection_postgres(&url).await?;
                 }
-                self.run_migrations_postgres().await
+                let schema_changed = self.run_migrations_postgres().await?;
+                // PostgreSQL migrations are committed by the migration runner.
+                // Data, secrets, files, and external tags are compensated below,
+                // but a later failure cannot honestly claim that the database
+                // schema was restored. Preserve that fact in the rollback report.
+                if schema_changed {
+                    _rollback.non_compensable_outcomes.push(
+                        "PostgreSQL schema migrations committed; inspect the refinery schema history before retrying"
+                            .to_string(),
+                    );
+                }
+                Ok(())
             }
             #[cfg(feature = "libsql")]
             Some("libsql") | Some("sqlite") | Some("turso") => {
@@ -626,6 +691,7 @@ impl SetupWizard {
 
     async fn apply_pending_extensions(
         &self,
+        plan: &SetupPlan,
         rollback: &mut ApplyRollback,
     ) -> Result<(), SetupError> {
         if self.pending_actions.is_empty() {
@@ -635,17 +701,14 @@ impl SetupWizard {
         let channels_dir = crate::platform::state_paths().channels_dir;
         for dir in [&tools_dir, &channels_dir] {
             record_missing_directories(rollback, dir);
+            rollback
+                .extension_dirs_before
+                .push((dir.clone(), snapshot_regular_directory(dir)?));
         }
         for action in &self.pending_actions {
             match action {
                 PendingSetupAction::InstallTool { name }
                 | PendingSetupAction::InstallChannel { name } => {
-                    let target_dir = if matches!(action, PendingSetupAction::InstallTool { .. }) {
-                        &tools_dir
-                    } else {
-                        &channels_dir
-                    };
-                    let before = directory_files(target_dir)?;
                     let catalog = super::helpers::load_registry_catalog().ok_or_else(|| {
                         SetupError::Config("extension registry is unavailable at Apply".to_string())
                     })?;
@@ -655,6 +718,28 @@ impl SetupWizard {
                         ))
                     })?;
                     let repo_root = catalog.root().parent().unwrap_or(catalog.root());
+                    let expected_digest = plan
+                        .actions
+                        .iter()
+                        .find_map(|action| match action {
+                            SetupAction::InstallExtension { source_id, digest }
+                                if source_id == name =>
+                            {
+                                Some(digest.as_str())
+                            }
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            SetupError::Config(format!(
+                                "reviewed extension action for '{name}' is missing"
+                            ))
+                        })?;
+                    let actual_digest = extension_apply_digest(manifest, repo_root)?;
+                    if actual_digest != expected_digest {
+                        return Err(SetupError::Config(format!(
+                            "extension '{name}' changed after Review; build a fresh setup plan"
+                        )));
+                    }
                     let installer = crate::registry::installer::RegistryInstaller::new(
                         repo_root.to_path_buf(),
                         tools_dir.clone(),
@@ -666,12 +751,36 @@ impl SetupWizard {
                         .map_err(|error| {
                             SetupError::Config(format!("failed to install '{name}': {error}"))
                         })?;
-                    let after = directory_files(target_dir)?;
-                    rollback
-                        .created_files
-                        .extend(after.difference(&before).cloned());
                 }
                 PendingSetupAction::BuildWorkerImage { image } => {
+                    let build_context = std::env::current_dir().map_err(SetupError::Io)?;
+                    let expected_digest = plan
+                        .actions
+                        .iter()
+                        .find_map(|action| match action {
+                            SetupAction::ExternalRequest {
+                                host,
+                                purpose,
+                                digest,
+                                ..
+                            } if host == "local-docker-daemon"
+                                && purpose == &format!("build reviewed worker image {image}") =>
+                            {
+                                Some(digest.as_str())
+                            }
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            SetupError::Config(format!(
+                                "reviewed worker-image action for '{image}' is missing"
+                            ))
+                        })?;
+                    let actual_digest = worker_build_context_digest(&build_context)?;
+                    if actual_digest != expected_digest {
+                        return Err(SetupError::Config(format!(
+                            "worker build context changed after Review; review image '{image}' again"
+                        )));
+                    }
                     let mut inspect = thinclaw_platform::tokio_process_command!(
                         "src.setup.wizard.transaction.docker_inspect",
                         "docker"
@@ -696,13 +805,18 @@ impl SetupWizard {
                             )));
                         }
                     };
+                    // Journal the tag before Docker can alter it. A failed
+                    // build may still publish intermediate/tag state.
+                    rollback
+                        .images_before
+                        .push((image.clone(), previous_image_id));
                     let mut command = thinclaw_platform::tokio_process_command!(
                         "src.setup.wizard.transaction.docker_build",
                         "docker"
                     );
                     command
                         .args(["build", "-f", "Dockerfile.worker", "-t", image, "."])
-                        .current_dir(std::env::current_dir().map_err(SetupError::Io)?)
+                        .current_dir(build_context)
                         .stdin(std::process::Stdio::inherit())
                         .stdout(std::process::Stdio::inherit())
                         .stderr(std::process::Stdio::inherit());
@@ -719,9 +833,6 @@ impl SetupWizard {
                             "worker image build failed with status {status}"
                         )));
                     }
-                    rollback
-                        .images_before
-                        .push((image.clone(), previous_image_id));
                 }
             }
         }
@@ -797,6 +908,8 @@ impl SetupWizard {
     async fn rollback_setup(&mut self, rollback: &mut ApplyRollback) -> Vec<String> {
         let mut errors = Vec::new();
 
+        errors.append(&mut rollback.non_compensable_outcomes);
+
         if let Some(crypto) = self.secrets_crypto.clone() {
             match self.persistent_secrets_store(crypto).await {
                 Ok(Some(store)) => {
@@ -865,6 +978,15 @@ impl SetupWizard {
             }
         }
 
+        for (path, before) in rollback.extension_dirs_before.iter().rev() {
+            if let Err(error) = restore_regular_directory(path, before) {
+                errors.push(format!(
+                    "could not restore extension directory {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+
         // Logical state is restored while its backend still exists. Only then
         // remove artifacts created by this Apply attempt.
         for (image, previous_image_id) in rollback.images_before.iter().rev() {
@@ -882,6 +1004,10 @@ impl SetupWizard {
             .await
             {
                 Ok(output) if output.status.success() => {}
+                Ok(output)
+                    if String::from_utf8_lossy(&output.stderr)
+                        .to_ascii_lowercase()
+                        .contains("no such image") => {}
                 Ok(_) => errors.push(format!("could not remove worker image '{image}'")),
                 Err(error) => {
                     errors.push(format!("could not remove worker image '{image}': {error}"))
@@ -908,6 +1034,28 @@ impl SetupWizard {
                     Err(error) => errors.push(format!(
                         "could not restore previous worker image tag '{image}': {error}"
                     )),
+                }
+            }
+        }
+        #[cfg(feature = "libsql")]
+        if !rollback.libsql_files_before.is_empty() {
+            // Release database/WAL handles before restoring the byte-exact
+            // pre-Apply snapshot.
+            self.db_backend = None;
+            for (path, before) in rollback.libsql_files_before.iter().rev() {
+                let result = match before {
+                    Some(bytes) => thinclaw_platform::write_private_file_atomic(path, bytes, true),
+                    None => match std::fs::remove_file(path) {
+                        Ok(()) => Ok(()),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(error) => Err(error),
+                    },
+                };
+                if let Err(error) = result {
+                    errors.push(format!(
+                        "could not restore database artifact {}: {error}",
+                        path.display()
+                    ));
                 }
             }
         }
@@ -1011,19 +1159,248 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, SetupError> {
         .collect()
 }
 
-fn directory_files(path: &Path) -> Result<HashSet<PathBuf>, SetupError> {
-    if !path.exists() {
-        return Ok(HashSet::new());
-    }
-    let mut files = HashSet::new();
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        if metadata.is_file() {
-            files.insert(entry.path());
+fn extension_apply_digest(
+    manifest: &crate::registry::manifest::ExtensionManifest,
+    repo_root: &Path,
+) -> Result<String, SetupError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"thinclaw-extension-apply-v1\0");
+    let value = serde_json::to_value(manifest).map_err(|error| {
+        SetupError::Config(format!("failed to seal extension manifest: {error}"))
+    })?;
+    hash_canonical_json(&mut hasher, &value)?;
+
+    let source_dir = repo_root.join(&manifest.source.dir);
+    hash_regular_tree(&mut hasher, &source_dir, |_| false, false)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn worker_build_context_digest(root: &Path) -> Result<String, SetupError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"thinclaw-worker-build-context-v1\0");
+    hash_regular_tree(&mut hasher, root, docker_context_ignored, true)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn hash_canonical_json(
+    hasher: &mut blake3::Hasher,
+    value: &serde_json::Value,
+) -> Result<(), SetupError> {
+    match value {
+        serde_json::Value::Null => {
+            hasher.update(b"n");
+        }
+        serde_json::Value::Bool(value) => {
+            hasher.update(if *value { b"t" } else { b"f" });
+        }
+        serde_json::Value::Number(value) => {
+            hasher.update(b"#");
+            hasher.update(value.to_string().as_bytes());
+        }
+        serde_json::Value::String(value) => {
+            hasher.update(b"s");
+            hash_length_prefixed(hasher, value.as_bytes());
+        }
+        serde_json::Value::Array(values) => {
+            hasher.update(b"[");
+            for value in values {
+                hash_canonical_json(hasher, value)?;
+            }
+            hasher.update(b"]");
+        }
+        serde_json::Value::Object(values) => {
+            hasher.update(b"{");
+            let ordered: BTreeMap<_, _> = values.iter().collect();
+            for (key, value) in ordered {
+                hash_length_prefixed(hasher, key.as_bytes());
+                hash_canonical_json(hasher, value)?;
+            }
+            hasher.update(b"}");
         }
     }
+    Ok(())
+}
+
+fn hash_regular_tree(
+    hasher: &mut blake3::Hasher,
+    root: &Path,
+    ignored: impl Fn(&Path) -> bool + Copy,
+    allow_symlinks: bool,
+) -> Result<(), SetupError> {
+    let metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            hasher.update(b"tree:absent\0");
+            return Ok(());
+        }
+        Err(error) => return Err(SetupError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(SetupError::Config(format!(
+            "reviewed content root is not a real directory: {}",
+            root.display()
+        )));
+    }
+
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path.strip_prefix(root).map_err(|error| {
+                SetupError::Config(format!("failed to normalize reviewed path: {error}"))
+            })?;
+            if ignored(relative) {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                if allow_symlinks {
+                    files.push((relative.to_path_buf(), path, true));
+                    continue;
+                }
+                return Err(SetupError::Config(format!(
+                    "reviewed content contains a symbolic link: {}",
+                    path.display()
+                )));
+            }
+            if !file_type.is_file() && !file_type.is_dir() {
+                return Err(SetupError::Config(format!(
+                    "reviewed content contains unsupported entry: {}",
+                    path.display()
+                )));
+            }
+            if file_type.is_dir() {
+                pending.push(path);
+            } else {
+                files.push((relative.to_path_buf(), path, false));
+            }
+        }
+        if files.len() + pending.len() > 100_000 {
+            return Err(SetupError::Config(
+                "reviewed content exceeds the 100000-entry safety limit".to_string(),
+            ));
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    hasher.update(b"tree:present\0");
+    for (relative, path, symlink) in files {
+        let relative = relative.to_str().ok_or_else(|| {
+            SetupError::Config(format!("reviewed path is not UTF-8: {}", path.display()))
+        })?;
+        hash_length_prefixed(hasher, relative.as_bytes());
+        if symlink {
+            hasher.update(b"symlink\0");
+            let target = std::fs::read_link(&path)?;
+            hash_length_prefixed(hasher, target.to_string_lossy().as_bytes());
+            continue;
+        }
+        hasher.update(b"file\0");
+        let mut file = std::fs::File::open(&path)?;
+        let metadata = file.metadata()?;
+        hash_length_prefixed(hasher, &metadata.len().to_le_bytes());
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+    }
+    Ok(())
+}
+
+fn hash_length_prefixed(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn docker_context_ignored(relative: &Path) -> bool {
+    let components = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>();
+    let Some(first) = components.first() else {
+        return false;
+    };
+    if components.iter().any(|component| {
+        component == ".git"
+            || component == "node_modules"
+            || component == ".cargo-codex-home"
+            || component == "target"
+            || component.starts_with("target")
+    }) {
+        return true;
+    }
+    let file_name = relative
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    if file_name == ".env" || file_name.starts_with(".env.") {
+        return true;
+    }
+    let explicitly_included = first == "assets" || first == "desktop-sidecars";
+    file_name.ends_with(".md") && file_name != "CLAUDE.md" && !explicitly_included
+}
+
+fn snapshot_regular_directory(path: &Path) -> Result<HashMap<PathBuf, Vec<u8>>, SetupError> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(SetupError::Config(format!(
+            "extension target is not a real directory: {}",
+            path.display()
+        )));
+    }
+    let mut files = HashMap::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.file_type()?;
+        if metadata.is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
+            return Err(SetupError::Config(format!(
+                "unsupported extension artifact in {}",
+                entry.path().display()
+            )));
+        }
+        if metadata.is_dir() {
+            return Err(SetupError::Config(format!(
+                "nested extension directory is not setup-owned: {}",
+                entry.path().display()
+            )));
+        }
+        let bytes = thinclaw_platform::read_regular_file_bounded(&entry.path(), 64 * 1024 * 1024)?;
+        files.insert(entry.file_name().into(), bytes);
+    }
     Ok(files)
+}
+
+fn restore_regular_directory(
+    path: &Path,
+    before: &HashMap<PathBuf, Vec<u8>>,
+) -> Result<(), SetupError> {
+    std::fs::create_dir_all(path)?;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let relative = PathBuf::from(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() || !file_type.is_file() {
+            return Err(SetupError::Config(format!(
+                "refusing to alter unexpected extension artifact {}",
+                entry.path().display()
+            )));
+        }
+        if !before.contains_key(&relative) {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    for (relative, bytes) in before {
+        thinclaw_platform::write_private_file_atomic(&path.join(relative), bytes, true)?;
+    }
+    Ok(())
 }
 
 fn record_missing_directories(rollback: &mut ApplyRollback, leaf: &Path) {
@@ -1077,6 +1454,89 @@ fn action_label(action: &SetupAction) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_manifest(source_dir: &str) -> crate::registry::manifest::ExtensionManifest {
+        crate::registry::manifest::ExtensionManifest {
+            name: "fixture".to_string(),
+            display_name: "Fixture".to_string(),
+            kind: crate::registry::manifest::ManifestKind::Tool,
+            version: "1.0.0".to_string(),
+            description: "fixture extension".to_string(),
+            keywords: vec!["fixture".to_string()],
+            source: crate::registry::manifest::SourceSpec {
+                dir: source_dir.to_string(),
+                capabilities: "fixture.capabilities.json".to_string(),
+                crate_name: "fixture-extension".to_string(),
+            },
+            artifacts: HashMap::new(),
+            auth_summary: None,
+            tags: vec!["test".to_string()],
+        }
+    }
+
+    #[test]
+    fn extension_apply_digest_binds_manifest_and_source_content() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let source = root.path().join("extensions").join("fixture");
+        std::fs::create_dir_all(&source).expect("create extension source");
+        std::fs::write(source.join("lib.rs"), b"one").expect("write source");
+        let manifest = test_manifest("extensions/fixture");
+
+        let first = extension_apply_digest(&manifest, root.path()).expect("first digest");
+        let repeated = extension_apply_digest(&manifest, root.path()).expect("stable digest");
+        assert_eq!(first, repeated);
+
+        std::fs::write(source.join("lib.rs"), b"two").expect("change source");
+        let changed_source =
+            extension_apply_digest(&manifest, root.path()).expect("changed source digest");
+        assert_ne!(first, changed_source);
+
+        let mut changed_manifest = manifest;
+        changed_manifest.version = "1.0.1".to_string();
+        let changed_manifest = extension_apply_digest(&changed_manifest, root.path())
+            .expect("changed manifest digest");
+        assert_ne!(changed_source, changed_manifest);
+    }
+
+    #[test]
+    fn worker_context_digest_implements_checked_dockerignore_contract() {
+        let root = tempfile::tempdir().expect("temporary root");
+        std::fs::create_dir_all(root.path().join("src")).expect("create source");
+        std::fs::write(root.path().join("src/main.rs"), b"one").expect("write source");
+        let first = worker_build_context_digest(root.path()).expect("first digest");
+
+        std::fs::create_dir_all(root.path().join("target/debug")).expect("create target");
+        std::fs::write(root.path().join("target/debug/ignored"), b"ignored")
+            .expect("write ignored target");
+        std::fs::write(root.path().join(".env.local"), b"SECRET=ignored")
+            .expect("write ignored environment");
+        assert_eq!(
+            first,
+            worker_build_context_digest(root.path()).expect("ignored digest")
+        );
+
+        std::fs::write(root.path().join("src/main.rs"), b"two").expect("change source");
+        assert_ne!(
+            first,
+            worker_build_context_digest(root.path()).expect("changed digest")
+        );
+    }
+
+    #[test]
+    fn extension_directory_snapshot_restores_overwrites_and_removes_new_files() {
+        let root = tempfile::tempdir().expect("temporary root");
+        std::fs::write(root.path().join("existing.wasm"), b"before").expect("seed file");
+        let before = snapshot_regular_directory(root.path()).expect("snapshot");
+        std::fs::write(root.path().join("existing.wasm"), b"after").expect("overwrite file");
+        std::fs::write(root.path().join("new.capabilities.json"), b"new").expect("new file");
+
+        restore_regular_directory(root.path(), &before).expect("restore");
+        assert_eq!(
+            std::fs::read(root.path().join("existing.wasm")).expect("restored file"),
+            b"before"
+        );
+        assert!(!root.path().join("new.capabilities.json").exists());
+    }
 
     #[test]
     fn missing_directory_rollback_tracks_ancestors_parent_first_without_duplicates() {

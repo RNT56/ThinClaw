@@ -403,7 +403,7 @@ impl SetupWizard {
 
     /// Run PostgreSQL migrations.
     #[cfg(feature = "postgres")]
-    pub(super) async fn run_migrations_postgres(&self) -> Result<(), SetupError> {
+    pub(super) async fn run_migrations_postgres(&self) -> Result<bool, SetupError> {
         if let Some(ref pool) = self.db_pool {
             use refinery::embed_migrations;
             embed_migrations!("migrations");
@@ -415,14 +415,15 @@ impl SetupWizard {
                 .await
                 .map_err(|e| SetupError::Database(format!("Pool error: {}", e)))?;
 
-            migrations::runner()
+            let report = migrations::runner()
                 .run_async(&mut **client)
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 
             print_success("Migrations applied");
+            return Ok(!report.applied_migrations().is_empty());
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Run libSQL migrations.

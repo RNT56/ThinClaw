@@ -18,7 +18,8 @@ pub use agent::AgentWorkspaceRecord;
 pub use job::{ActionRecord, JobContext, JobState, StateTransition};
 pub use media::{MediaContent, MediaType};
 pub use mutation::{
-    MutationApplication, MutationExecutionPolicy, MutationReceipt, MutationRequest,
+    CliLeafEffect, MutationApplication, MutationExecutionPolicy, MutationReceipt, MutationRequest,
+    canonical_cli_leaf_effect,
 };
 pub use repair::{BrokenTool, StuckJob};
 pub use sandbox::{

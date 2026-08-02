@@ -7,7 +7,6 @@ use crate::setup::prompts::{
     print_info, print_phase_banner, print_step, print_success, print_warning, push_prompt_ui_mode,
     select_one, set_tui_prompt_context,
 };
-use crate::terminal_branding::set_runtime_cli_skin_override;
 use std::io::IsTerminal;
 
 use super::tui_shell;
@@ -104,24 +103,20 @@ impl SetupWizard {
 
     async fn run_cli_flow(&mut self) -> Result<(), SetupError> {
         let _prompt_mode = push_prompt_ui_mode(PromptRenderMode::Cli);
-        set_runtime_cli_skin_override(self.settings.agent.cli_skin.clone());
         let mode_label = match current_prompt_ui_mode() {
             PromptRenderMode::Cli => "cli",
             PromptRenderMode::Tui => "tui",
         };
-        print_header("ThinClaw Humanist Cockpit");
-        print_info(
-            "You will move through focused phases with calm recommendations and inline readiness checks.",
-        );
+        print_header("ThinClaw Setup");
+        print_info("Review each applicable section and its consequences before Apply.");
         print_info("Nothing is written until you explicitly choose Apply on the final review.");
-        print_info(&format!("Cockpit mode: {mode_label}"));
+        print_info(&format!("Renderer: {mode_label}"));
         crate::setup::prompts::print_blank_line();
         self.run_planned_flow(None).await
     }
 
     async fn run_tui_flow(&mut self) -> Result<(), SetupError> {
         let _prompt_mode = push_prompt_ui_mode(PromptRenderMode::Tui);
-        set_runtime_cli_skin_override(self.settings.agent.cli_skin.clone());
         clear_tui_prompt_messages();
         clear_tui_prompt_context();
         let plan = self

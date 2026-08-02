@@ -1369,6 +1369,8 @@ mod tests {
 
     fn test_bootstrap() -> thinclaw_channels::tui::TuiBootstrap {
         thinclaw_channels::tui::TuiBootstrap {
+            principal_id: "default".to_string(),
+            actor_id: "default".to_string(),
             agent_id: "main".to_string(),
             agent_name: "Test Agent".to_string(),
             model: "test-model".to_string(),

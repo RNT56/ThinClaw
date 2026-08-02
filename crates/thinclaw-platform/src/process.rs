@@ -126,9 +126,17 @@ pub struct CredentialSlot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessLaunchDescriptor {
     pub id: ProcessLaunchId,
+    /// Stable source owner recorded by the checked manifest.
     pub owner: String,
+    /// Exact compiled module allowed to construct this launch identity.
+    pub rust_module: String,
     pub process_class: ProcessClass,
+    pub execution_policy: String,
+    /// Literal executable or a reviewed typed-dynamic marker.
+    pub program: String,
     pub child_environment: ChildEnvironmentPolicy,
+    /// Closed schema governing literal and any typed-dynamic environment keys.
+    pub environment_schema: String,
     pub executable: ExecutablePolicy,
     pub argument_schema: String,
     pub filesystem: FilesystemPolicy,
@@ -145,42 +153,160 @@ pub struct ProcessLaunchDescriptor {
 }
 
 impl ProcessLaunchDescriptor {
-    /// Baseline for a reviewed argv-constructed utility. Individual launch
-    /// classes may replace fields before handing the descriptor to the
-    /// launcher; the checked manifest records the final policy.
-    pub fn reviewed_utility(id: &str, owner: &str) -> Self {
-        Self {
-            id: ProcessLaunchId::new(id),
-            owner: owner.to_string(),
-            process_class: ProcessClass::PlatformUtility,
-            child_environment: ChildEnvironmentPolicy::ExactReviewed,
-            executable: ExecutablePolicy::ValidatedSearchPath,
-            argument_schema: "argv_reviewed_at_typed_call_site".to_string(),
+    /// Resolve one production launch from the same checked manifest enforced
+    /// by CI. Unknown identities fail closed instead of inheriting optimistic
+    /// placeholder policies.
+    pub fn checked(id: &str, caller_module: &str) -> Self {
+        let records = CHECKED_PROCESS_LAUNCHES.get_or_init(|| {
+            let manifest: CheckedProcessManifest =
+                serde_json::from_str(include_str!("process_launch_manifest.json"))
+                    .expect("checked process launch manifest must parse");
+            assert_eq!(
+                manifest.launch_count,
+                manifest.launches.len(),
+                "checked process launch count must match its records"
+            );
+            manifest
+                .launches
+                .into_iter()
+                .map(|record| {
+                    assert_eq!(record.classification, "production");
+                    let id = ProcessLaunchId::new(record.id.clone());
+                    let descriptor = record.into_descriptor();
+                    (id, descriptor)
+                })
+                .collect()
+        });
+        let descriptor = records
+            .get(&ProcessLaunchId::new(id))
+            .unwrap_or_else(|| panic!("unclassified production process launch id: {id}"))
+            .clone();
+        assert_eq!(
+            descriptor.rust_module, caller_module,
+            "process launch id {id} is not owned by caller module {caller_module}"
+        );
+        descriptor
+    }
+}
+
+#[derive(Deserialize)]
+struct CheckedProcessManifest {
+    launch_count: usize,
+    launches: Vec<CheckedProcessLaunch>,
+}
+
+#[derive(Deserialize)]
+struct CheckedProcessLaunch {
+    id: String,
+    classification: String,
+    owner: String,
+    rust_module: String,
+    process_class: String,
+    execution_policy: String,
+    program: String,
+    child_environment: String,
+    environment_schema: String,
+    executable_policy: String,
+    argument_schema: String,
+    cwd_filesystem: String,
+    home_policy: String,
+    temp_policy: String,
+    exact_environment: Vec<String>,
+    credential_slots: Vec<CredentialSlot>,
+    network_policy: String,
+    isolation_policy: String,
+    io_policy: CheckedIoPolicy,
+    lifetime_policy: ProcessLifetimePolicy,
+    availability: Vec<String>,
+    proof_id: String,
+}
+
+#[derive(Deserialize)]
+struct CheckedIoPolicy {
+    bounded: bool,
+    stdout_limit: usize,
+    stderr_limit: usize,
+}
+
+impl CheckedProcessLaunch {
+    fn into_descriptor(self) -> ProcessLaunchDescriptor {
+        ProcessLaunchDescriptor {
+            id: ProcessLaunchId::new(self.id),
+            owner: self.owner,
+            rust_module: self.rust_module,
+            process_class: match self.process_class.as_str() {
+                "tool_executor" => ProcessClass::ToolExecutor,
+                "runtime_reexec" => ProcessClass::RuntimeReexec,
+                "channel_adapter" => ProcessClass::ChannelAdapter,
+                "database_utility" => ProcessClass::DatabaseUtility,
+                "local_sidecar" => ProcessClass::LocalSidecar,
+                "desktop_adapter" => ProcessClass::DesktopAdapter,
+                "platform_utility" => ProcessClass::PlatformUtility,
+                other => panic!("invalid checked process class: {other}"),
+            },
+            execution_policy: self.execution_policy,
+            program: self.program,
+            child_environment: match self.child_environment.as_str() {
+                "exact_reviewed" => ChildEnvironmentPolicy::ExactReviewed,
+                "empty" => ChildEnvironmentPolicy::Empty,
+                other => panic!("invalid checked child environment policy: {other}"),
+            },
+            environment_schema: self.environment_schema,
+            executable: match self.executable_policy.as_str() {
+                "validated_search_path_or_absolute_pinned" => ExecutablePolicy::ValidatedSearchPath,
+                other => panic!("invalid checked executable policy: {other}"),
+            },
+            argument_schema: self.argument_schema,
             filesystem: FilesystemPolicy {
-                cwd_required: false,
+                cwd_required: self.cwd_filesystem != "typed_call_site_review",
                 reviewed_roots: Vec::new(),
             },
-            home: HomePolicy::ReviewedOperatorHome,
-            temp: TempPolicy::ReviewedSystemTemp,
-            exact_environment: Vec::new(),
-            credential_slots: Vec::new(),
-            network: NetworkPolicy::Denied,
-            isolation: IsolationPolicy::ReviewedDirectHost,
+            home: match self.home_policy.as_str() {
+                "reviewed_operator_home" => HomePolicy::ReviewedOperatorHome,
+                "launcher_private" => HomePolicy::LauncherPrivate,
+                "workspace_scoped" => HomePolicy::WorkspaceScoped,
+                other => panic!("invalid checked home policy: {other}"),
+            },
+            temp: match self.temp_policy.as_str() {
+                "reviewed_system_temp" => TempPolicy::ReviewedSystemTemp,
+                "launcher_private" => TempPolicy::LauncherPrivate,
+                other => panic!("invalid checked temp policy: {other}"),
+            },
+            exact_environment: self.exact_environment,
+            credential_slots: self.credential_slots,
+            network: match self.network_policy.as_str() {
+                "denied" => NetworkPolicy::Denied,
+                "loopback_only" => NetworkPolicy::LoopbackOnly,
+                "reviewed_external" => NetworkPolicy::ReviewedExternal,
+                "inherited_sandbox" => NetworkPolicy::InheritedSandbox,
+                other => panic!("invalid checked network policy: {other}"),
+            },
+            isolation: match self.isolation_policy.as_str() {
+                "reviewed_direct_host" => IsolationPolicy::ReviewedDirectHost,
+                "host_unconfined" => IsolationPolicy::HostUnconfined,
+                "workspace_sandbox" => IsolationPolicy::WorkspaceSandbox,
+                "container" => IsolationPolicy::Container,
+                "dedicated_user" => IsolationPolicy::DedicatedUser,
+                other => panic!("invalid checked isolation policy: {other}"),
+            },
             io: ProcessIoPolicy {
-                stdin: "null_or_typed_input".to_string(),
-                stdout_limit: 8 * 1024 * 1024,
-                stderr_limit: 8 * 1024 * 1024,
+                stdin: if self.io_policy.bounded {
+                    "bounded_typed_input".to_string()
+                } else {
+                    "caller_mediated".to_string()
+                },
+                stdout_limit: self.io_policy.stdout_limit,
+                stderr_limit: self.io_policy.stderr_limit,
             },
-            lifetime: ProcessLifetimePolicy {
-                timeout_ms: 30 * 60 * 1000,
-                owns_process_tree: true,
-                reap_on_drop: true,
-            },
-            availability: Vec::new(),
-            proof_id: format!("process-launch:{}.ambient-isolation", id),
+            lifetime: self.lifetime_policy,
+            availability: self.availability,
+            proof_id: self.proof_id,
         }
     }
 }
+
+static CHECKED_PROCESS_LAUNCHES: OnceLock<BTreeMap<ProcessLaunchId, ProcessLaunchDescriptor>> =
+    OnceLock::new();
 
 static OBSERVED_PROCESS_LAUNCHES: OnceLock<
     Mutex<BTreeMap<ProcessLaunchId, ProcessLaunchDescriptor>>,
@@ -206,6 +332,7 @@ pub struct ProcessLauncher;
 
 impl ProcessLauncher {
     pub fn tokio(descriptor: ProcessLaunchDescriptor, program: impl AsRef<OsStr>) -> Command {
+        validate_checked_program(&descriptor, program.as_ref());
         observe_descriptor(descriptor);
         let mut command = Command::new(program);
         apply_child_environment_policy(command.as_std_mut())
@@ -217,6 +344,7 @@ impl ProcessLauncher {
         descriptor: ProcessLaunchDescriptor,
         program: impl AsRef<OsStr>,
     ) -> std::process::Command {
+        validate_checked_program(&descriptor, program.as_ref());
         observe_descriptor(descriptor);
         let mut command = std::process::Command::new(program);
         apply_child_environment_policy(&mut command)
@@ -239,11 +367,22 @@ impl ProcessLauncher {
     }
 }
 
+fn validate_checked_program(descriptor: &ProcessLaunchDescriptor, program: &OsStr) {
+    if descriptor.program != "typed_dynamic_expression" {
+        assert_eq!(
+            program,
+            OsStr::new(&descriptor.program),
+            "process launch id {} changed its reviewed executable",
+            descriptor.id.as_str()
+        );
+    }
+}
+
 #[macro_export]
 macro_rules! tokio_process_command {
     ($id:literal, $program:expr) => {
         $crate::process::ProcessLauncher::tokio(
-            $crate::process::ProcessLaunchDescriptor::reviewed_utility($id, module_path!()),
+            $crate::process::ProcessLaunchDescriptor::checked($id, module_path!()),
             $program,
         )
     };
@@ -253,7 +392,7 @@ macro_rules! tokio_process_command {
 macro_rules! std_process_command {
     ($id:literal, $program:expr) => {
         $crate::process::ProcessLauncher::std(
-            $crate::process::ProcessLaunchDescriptor::reviewed_utility($id, module_path!()),
+            $crate::process::ProcessLaunchDescriptor::checked($id, module_path!()),
             $program,
         )
     };
@@ -1093,5 +1232,62 @@ mod bounded_line_tests {
         assert!(!second.truncated);
         assert!(read_bounded_line(&mut reader, 4).await.unwrap().is_none());
         writer_task.await.unwrap();
+    }
+
+    #[test]
+    fn checked_process_manifest_is_exhaustive_unique_and_policy_bearing() {
+        let manifest: CheckedProcessManifest =
+            serde_json::from_str(include_str!("process_launch_manifest.json"))
+                .expect("checked manifest");
+        assert_eq!(manifest.launch_count, 212);
+        let unique = manifest
+            .launches
+            .iter()
+            .map(|launch| launch.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), manifest.launch_count);
+        for launch in manifest.launches {
+            assert_eq!(launch.classification, "production");
+            assert!(!launch.execution_policy.is_empty());
+            assert!(!launch.environment_schema.is_empty());
+            assert!(!launch.proof_id.is_empty());
+            let descriptor = ProcessLaunchDescriptor::checked(&launch.id, &launch.rust_module);
+            assert_eq!(descriptor.id.as_str(), launch.id);
+            assert_eq!(descriptor.owner, launch.owner);
+            assert_eq!(descriptor.rust_module, launch.rust_module);
+            assert_eq!(descriptor.program, launch.program);
+            assert_eq!(descriptor.environment_schema, launch.environment_schema);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "unclassified production process launch id")]
+    fn unknown_process_launch_identity_fails_closed() {
+        let _ = ProcessLaunchDescriptor::checked("test.unknown.process", "test::owner");
+    }
+
+    #[test]
+    #[should_panic(expected = "is not owned by caller module")]
+    fn process_launch_identity_cannot_be_rebound_to_another_module() {
+        let manifest: CheckedProcessManifest =
+            serde_json::from_str(include_str!("process_launch_manifest.json"))
+                .expect("checked manifest");
+        let launch = manifest.launches.first().expect("non-empty manifest");
+        let _ = ProcessLaunchDescriptor::checked(&launch.id, "unreviewed::module");
+    }
+
+    #[test]
+    #[should_panic(expected = "changed its reviewed executable")]
+    fn literal_process_launch_identity_cannot_change_executable() {
+        let manifest: CheckedProcessManifest =
+            serde_json::from_str(include_str!("process_launch_manifest.json"))
+                .expect("checked manifest");
+        let launch = manifest
+            .launches
+            .iter()
+            .find(|launch| launch.program != "typed_dynamic_expression")
+            .expect("literal program launch");
+        let descriptor = ProcessLaunchDescriptor::checked(&launch.id, &launch.rust_module);
+        let _ = ProcessLauncher::std(descriptor, "definitely-not-the-reviewed-program");
     }
 }

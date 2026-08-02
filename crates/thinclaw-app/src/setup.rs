@@ -134,6 +134,8 @@ pub enum SetupAction {
     ExternalRequest {
         host: String,
         purpose: String,
+        /// Digest of the exact local inputs approved during Review.
+        digest: String,
         billable: bool,
     },
     MarkSetupCompleted,
@@ -344,49 +346,62 @@ impl SetupOnboardingProfile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SetupWizardPhaseId {
-    WelcomeProfile,
-    CoreRuntime,
-    AiStack,
-    IdentityPresence,
-    ChannelsContinuity,
-    CapabilitiesAutomation,
-    ExperienceOperations,
-    Finish,
+    Profile,
+    RuntimeFoundation,
+    AiMemory,
+    IdentityLocale,
+    Channels,
+    ToolsSafety,
+    AutomationDelivery,
+    AppearanceAccess,
+    Verify,
+    ReviewApply,
 }
 
 impl SetupWizardPhaseId {
     pub const fn title(self) -> &'static str {
         match self {
-            Self::WelcomeProfile => "Skin & Profile",
-            Self::CoreRuntime => "Core Runtime",
-            Self::AiStack => "AI Stack",
-            Self::IdentityPresence => "Identity & Presence",
-            Self::ChannelsContinuity => "Channels & Continuity",
-            Self::CapabilitiesAutomation => "Capabilities & Automation",
-            Self::ExperienceOperations => "Experience & Operations",
-            Self::Finish => "Finish",
+            Self::Profile => "Profile",
+            Self::RuntimeFoundation => "Runtime Foundation",
+            Self::AiMemory => "AI & Memory",
+            Self::IdentityLocale => "Identity & Locale",
+            Self::Channels => "Channels",
+            Self::ToolsSafety => "Tools & Safety",
+            Self::AutomationDelivery => "Automation & Delivery",
+            Self::AppearanceAccess => "Appearance & Access",
+            Self::Verify => "Verify",
+            Self::ReviewApply => "Review & Apply",
         }
     }
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::WelcomeProfile => {
-                "Choose the cockpit look first, then pick the onboarding lane that fits your setup."
-            }
-            Self::CoreRuntime => "Establish storage, secrets, and the base operating posture.",
-            Self::AiStack => "Configure providers, models, routing, fallback, and memory search.",
-            Self::IdentityPresence => "Confirm how the agent presents itself and keeps time.",
-            Self::ChannelsContinuity => {
-                "Enable channels, explain continuity, and verify what is truly launch-ready."
-            }
-            Self::CapabilitiesAutomation => {
-                "Choose tools, trust boundaries, and background behavior with intention."
-            }
-            Self::ExperienceOperations => "Tune the operator cockpit and the visibility you want.",
-            Self::Finish => "Review readiness, capture follow-ups, and hand off to runtime.",
+            Self::Profile => "Choose a starting profile and review the defaults it proposes.",
+            Self::RuntimeFoundation => "Choose storage and secret protection before credentials.",
+            Self::AiMemory => "Configure providers, routing, fallbacks, and semantic memory.",
+            Self::IdentityLocale => "Confirm agent identity and timezone.",
+            Self::Channels => "Choose message services and their exact drivers.",
+            Self::ToolsSafety => "Choose tools, workers, approvals, and execution boundaries.",
+            Self::AutomationDelivery => "Configure routines, skills, notifications, and heartbeat.",
+            Self::AppearanceAccess => "Choose appearance separately from listener exposure.",
+            Self::Verify => "Review static facts and optional bounded probes without mutation.",
+            Self::ReviewApply => "Review the sealed plan before the exclusive Apply transaction.",
         }
     }
 }
+
+pub const ALL_SETUP_WIZARD_PHASE_IDS: &[SetupWizardPhaseId] = &[
+    SetupWizardPhaseId::Profile,
+    SetupWizardPhaseId::RuntimeFoundation,
+    SetupWizardPhaseId::AiMemory,
+    SetupWizardPhaseId::IdentityLocale,
+    SetupWizardPhaseId::Channels,
+    SetupWizardPhaseId::ToolsSafety,
+    SetupWizardPhaseId::AutomationDelivery,
+    SetupWizardPhaseId::AppearanceAccess,
+    SetupWizardPhaseId::Verify,
+    SetupWizardPhaseId::ReviewApply,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SetupWizardStepId {
@@ -417,6 +432,70 @@ pub enum SetupWizardStepId {
     WebUi,
     Observability,
     Summary,
+}
+
+pub const ALL_SETUP_WIZARD_STEP_IDS: &[SetupWizardStepId] = &[
+    SetupWizardStepId::CliSkin,
+    SetupWizardStepId::Profile,
+    SetupWizardStepId::Database,
+    SetupWizardStepId::Security,
+    SetupWizardStepId::InferenceProvider,
+    SetupWizardStepId::ModelSelection,
+    SetupWizardStepId::SmartRouting,
+    SetupWizardStepId::FallbackProviders,
+    SetupWizardStepId::Embeddings,
+    SetupWizardStepId::AgentIdentity,
+    SetupWizardStepId::Timezone,
+    SetupWizardStepId::Channels,
+    SetupWizardStepId::ChannelContinuity,
+    SetupWizardStepId::ChannelVerification,
+    SetupWizardStepId::Notifications,
+    SetupWizardStepId::Extensions,
+    SetupWizardStepId::DockerSandbox,
+    SetupWizardStepId::CodingWorkers,
+    SetupWizardStepId::ClaudeCode,
+    SetupWizardStepId::CodexCode,
+    SetupWizardStepId::ToolApproval,
+    SetupWizardStepId::Routines,
+    SetupWizardStepId::Skills,
+    SetupWizardStepId::Heartbeat,
+    SetupWizardStepId::WebUi,
+    SetupWizardStepId::Observability,
+    SetupWizardStepId::Summary,
+];
+
+impl SetupWizardStepId {
+    pub const fn target_phase(self) -> SetupWizardPhaseId {
+        match self {
+            Self::Profile => SetupWizardPhaseId::Profile,
+            Self::Database | Self::Security | Self::Observability => {
+                SetupWizardPhaseId::RuntimeFoundation
+            }
+            Self::InferenceProvider
+            | Self::ModelSelection
+            | Self::SmartRouting
+            | Self::FallbackProviders
+            | Self::Embeddings => SetupWizardPhaseId::AiMemory,
+            Self::AgentIdentity | Self::Timezone => SetupWizardPhaseId::IdentityLocale,
+            Self::Channels => SetupWizardPhaseId::Channels,
+            Self::Extensions
+            | Self::DockerSandbox
+            | Self::CodingWorkers
+            | Self::ClaudeCode
+            | Self::CodexCode
+            | Self::ToolApproval => SetupWizardPhaseId::ToolsSafety,
+            Self::Notifications | Self::Routines | Self::Skills | Self::Heartbeat => {
+                SetupWizardPhaseId::AutomationDelivery
+            }
+            Self::CliSkin | Self::WebUi => SetupWizardPhaseId::AppearanceAccess,
+            Self::ChannelContinuity | Self::ChannelVerification => SetupWizardPhaseId::Verify,
+            Self::Summary => SetupWizardPhaseId::ReviewApply,
+        }
+    }
+
+    pub const fn executable(self) -> bool {
+        !matches!(self, Self::ChannelContinuity)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -685,10 +764,15 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     let mut phases = Vec::new();
     let mut steps = Vec::new();
 
-    let mut push_step = |id, phase_id, title, description, why_this_matters, recommended| {
+    let mut push_step = |id: SetupWizardStepId,
+                         _legacy_phase_id,
+                         title,
+                         description,
+                         why_this_matters,
+                         recommended| {
         steps.push(SetupStepDescriptor {
             id,
-            phase_id,
+            phase_id: id.target_phase(),
             title,
             description,
             why_this_matters,
@@ -698,17 +782,21 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
 
     if input.channels_only {
         phases.push(SetupWizardPhase {
-            id: Phase::ChannelsContinuity,
-            step_ids: vec![Step::Channels, Step::ChannelVerification],
+            id: Phase::Channels,
+            step_ids: vec![Step::Channels],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::Finish,
+            id: Phase::Verify,
+            step_ids: vec![Step::ChannelVerification],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::ReviewApply,
             step_ids: vec![Step::Summary],
         });
 
         push_step(
             Step::Channels,
-            Phase::ChannelsContinuity,
+            Phase::Channels,
             "Channel Configuration",
             "Choose where ThinClaw should receive and send messages.",
             "A working channel is what turns configuration into a usable agent.",
@@ -716,7 +804,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
         );
         push_step(
             Step::ChannelVerification,
-            Phase::ChannelsContinuity,
+            Phase::Verify,
             "Channel Verification",
             "Run safe checks against every enabled channel and capture any gaps.",
             "It is better to leave with one confirmed route than several unverified ones.",
@@ -724,10 +812,10 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
         );
         push_step(
             Step::Summary,
-            Phase::Finish,
-            "Finish",
-            "Review readiness, deferred tasks, and what happens next.",
-            "The goal is a confident handoff into normal startup, not more guesswork.",
+            Phase::ReviewApply,
+            "Review & Apply",
+            "Review the sealed plan, then explicitly apply or cancel.",
+            "No durable state changes until the reviewed Apply transaction begins.",
             None,
         );
 
@@ -736,7 +824,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
 
     if let Some(topic) = input.guide_topic {
         let step_ids = match topic {
-            SetupGuideTopic::Menu => vec![Step::Summary],
+            SetupGuideTopic::Menu => Vec::new(),
             SetupGuideTopic::Ai => vec![
                 Step::InferenceProvider,
                 Step::ModelSelection,
@@ -744,12 +832,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
                 Step::FallbackProviders,
                 Step::Embeddings,
             ],
-            SetupGuideTopic::Channels => vec![
-                Step::Channels,
-                Step::ChannelContinuity,
-                Step::ChannelVerification,
-                Step::Notifications,
-            ],
+            SetupGuideTopic::Channels => vec![Step::Channels, Step::Notifications],
             SetupGuideTopic::Agent => {
                 vec![
                     Step::CliSkin,
@@ -769,34 +852,38 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
             SetupGuideTopic::Runtime => vec![Step::Database, Step::Security, Step::Observability],
         };
 
-        let phase_id = match topic {
-            SetupGuideTopic::Menu => Phase::Finish,
-            SetupGuideTopic::Ai => Phase::AiStack,
-            SetupGuideTopic::Channels => Phase::ChannelsContinuity,
-            SetupGuideTopic::Agent => Phase::WelcomeProfile,
-            SetupGuideTopic::Tools => Phase::CapabilitiesAutomation,
-            SetupGuideTopic::Automation => Phase::CapabilitiesAutomation,
-            SetupGuideTopic::Runtime => Phase::CoreRuntime,
-        };
+        for phase_id in ALL_SETUP_WIZARD_PHASE_IDS {
+            let matching = step_ids
+                .iter()
+                .copied()
+                .filter(|step| step.target_phase() == *phase_id && step.executable())
+                .collect::<Vec<_>>();
+            if !matching.is_empty() {
+                phases.push(SetupWizardPhase {
+                    id: *phase_id,
+                    step_ids: matching,
+                });
+            }
+        }
         phases.push(SetupWizardPhase {
-            id: phase_id,
-            step_ids,
+            id: Phase::Verify,
+            step_ids: vec![Step::ChannelVerification],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::Finish,
+            id: Phase::ReviewApply,
             step_ids: vec![Step::Summary],
         });
     } else if input.mode == SetupMode::Advanced {
         phases.push(SetupWizardPhase {
-            id: Phase::WelcomeProfile,
-            step_ids: vec![Step::CliSkin, Step::Profile],
+            id: Phase::Profile,
+            step_ids: vec![Step::Profile],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::CoreRuntime,
-            step_ids: vec![Step::Database, Step::Security],
+            id: Phase::RuntimeFoundation,
+            step_ids: vec![Step::Database, Step::Security, Step::Observability],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::AiStack,
+            id: Phase::AiMemory,
             step_ids: vec![
                 Step::InferenceProvider,
                 Step::ModelSelection,
@@ -806,20 +893,15 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
             ],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::IdentityPresence,
+            id: Phase::IdentityLocale,
             step_ids: vec![Step::AgentIdentity, Step::Timezone],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::ChannelsContinuity,
-            step_ids: vec![
-                Step::Channels,
-                Step::ChannelContinuity,
-                Step::ChannelVerification,
-                Step::Notifications,
-            ],
+            id: Phase::Channels,
+            step_ids: vec![Step::Channels],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::CapabilitiesAutomation,
+            id: Phase::ToolsSafety,
             step_ids: vec![
                 Step::Extensions,
                 Step::DockerSandbox,
@@ -827,65 +909,96 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
                 Step::ClaudeCode,
                 Step::CodexCode,
                 Step::ToolApproval,
+            ],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::AutomationDelivery,
+            step_ids: vec![
+                Step::Notifications,
                 Step::Routines,
                 Step::Skills,
                 Step::Heartbeat,
             ],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::ExperienceOperations,
-            step_ids: vec![Step::WebUi, Step::Observability],
+            id: Phase::AppearanceAccess,
+            step_ids: vec![Step::CliSkin, Step::WebUi],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::Finish,
+            id: Phase::Verify,
+            step_ids: vec![Step::ChannelVerification],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::ReviewApply,
             step_ids: vec![Step::Summary],
         });
     } else {
         phases.push(SetupWizardPhase {
-            id: Phase::WelcomeProfile,
-            step_ids: vec![Step::CliSkin, Step::Profile, Step::AgentIdentity],
+            id: Phase::Profile,
+            step_ids: vec![Step::Profile],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::AiStack,
+            id: Phase::RuntimeFoundation,
+            step_ids: vec![Step::Database, Step::Security],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::AiMemory,
             step_ids: vec![Step::InferenceProvider, Step::ModelSelection],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::ChannelsContinuity,
-            step_ids: vec![Step::Channels, Step::ChannelVerification],
+            id: Phase::IdentityLocale,
+            step_ids: vec![Step::AgentIdentity, Step::Timezone],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::CapabilitiesAutomation,
+            id: Phase::Channels,
+            step_ids: vec![Step::Channels],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::ToolsSafety,
             step_ids: vec![Step::ToolApproval, Step::DockerSandbox, Step::CodingWorkers],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::ExperienceOperations,
-            step_ids: vec![Step::WebUi],
+            id: Phase::AutomationDelivery,
+            step_ids: vec![
+                Step::Notifications,
+                Step::Routines,
+                Step::Skills,
+                Step::Heartbeat,
+            ],
         });
         phases.push(SetupWizardPhase {
-            id: Phase::Finish,
+            id: Phase::AppearanceAccess,
+            step_ids: vec![Step::CliSkin, Step::WebUi],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::Verify,
+            step_ids: vec![Step::ChannelVerification],
+        });
+        phases.push(SetupWizardPhase {
+            id: Phase::ReviewApply,
             step_ids: vec![Step::Summary],
         });
     }
 
     push_step(
         Step::CliSkin,
-        Phase::WelcomeProfile,
-        "Choose Your Cockpit Skin",
-        "Pick the skin you want onboarding, the CLI, and the default web experience to use.",
-        "The first visual choice sets the tone for the whole operator experience.",
-        Some("Pick the one that feels easiest to read for a long session."),
+        Phase::AppearanceAccess,
+        "Appearance",
+        "Choose the local terminal appearance without changing listener exposure.",
+        "Appearance is optional and remains a draft until Apply.",
+        Some("Use the most readable option for your terminal."),
     );
     push_step(
         Step::Profile,
-        Phase::WelcomeProfile,
-        "Choose Your Setup Lane",
+        Phase::Profile,
+        "Profile",
         "Pick a profile to prefill practical defaults for your environment.",
         "Profiles speed up setup without taking away your ability to review each section.",
         Some("Balanced is the best default for most operators."),
     );
     push_step(
         Step::Database,
-        Phase::CoreRuntime,
+        Phase::RuntimeFoundation,
         "Storage Foundation",
         "Review where ThinClaw stores settings, history, and runtime state.",
         "This storage path underpins everything else in onboarding.",
@@ -893,7 +1006,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::Security,
-        Phase::CoreRuntime,
+        Phase::RuntimeFoundation,
         "Secret Protection",
         "Review how API keys and sensitive values are protected.",
         "Trust boundaries should be explicit before provider credentials are stored.",
@@ -901,7 +1014,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::InferenceProvider,
-        Phase::AiStack,
+        Phase::AiMemory,
         "Primary Model Provider",
         "Choose the provider ThinClaw should rely on for its primary advisor model.",
         "This choice impacts quality, latency, auth, and operating cost.",
@@ -909,7 +1022,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::ModelSelection,
-        Phase::AiStack,
+        Phase::AiMemory,
         "Advisor Model (Primary)",
         "Choose the stronger primary model used for strategic guidance and high-quality reasoning.",
         "This model defines the quality ceiling for everyday operation.",
@@ -917,7 +1030,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::SmartRouting,
-        Phase::AiStack,
+        Phase::AiMemory,
         "Executor Model (Fast)",
         "Choose the fast execution model used in advisor/executor routing.",
         "A strong executor keeps everyday work responsive while the advisor stays available for escalation.",
@@ -925,7 +1038,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::FallbackProviders,
-        Phase::AiStack,
+        Phase::AiMemory,
         "Resilience Fallbacks",
         "Add secondary providers so routing can recover when the primary path is unavailable.",
         "Fallbacks improve uptime and reduce single-provider risk.",
@@ -933,7 +1046,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::Embeddings,
-        Phase::AiStack,
+        Phase::AiMemory,
         "Memory & Semantic Search",
         "Configure embeddings so ThinClaw can search memory semantically.",
         "Good embeddings improve recall quality and reduce repetitive prompting.",
@@ -941,7 +1054,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::AgentIdentity,
-        Phase::IdentityPresence,
+        Phase::IdentityLocale,
         "Agent Name & Personality",
         "Set the agent name and the personality pack that seeds the canonical home soul.",
         "Identity details shape trust and consistency across channels.",
@@ -949,7 +1062,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::Timezone,
-        Phase::IdentityPresence,
+        Phase::IdentityLocale,
         "Timezone",
         "Confirm the local timezone for schedules and time-aware logic.",
         "Timezone errors cause confusing routine timing and alert windows.",
@@ -957,15 +1070,15 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::Channels,
-        Phase::ChannelsContinuity,
-        "Primary Channel",
-        "Choose the main channel users should use to reach ThinClaw and configure only what is needed for that path.",
+        Phase::Channels,
+        "Channels",
+        "Choose message services and the exact driver used for each service.",
         "Channels are the interface where users will actually meet the agent.",
         Some("Pick only channels you can verify today."),
     );
     push_step(
         Step::ChannelContinuity,
-        Phase::ChannelsContinuity,
+        Phase::Verify,
         "Cross-Channel Session Continuity",
         "Review how direct sessions synchronize across channels and devices.",
         "Understanding continuity prevents confusion when conversations move channels.",
@@ -973,7 +1086,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::ChannelVerification,
-        Phase::ChannelsContinuity,
+        Phase::Verify,
         "Channel Verification",
         "Run non-destructive checks for the selected channel and capture any follow-ups.",
         "Known gaps are manageable; hidden gaps break trust in production.",
@@ -981,7 +1094,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::Notifications,
-        Phase::ChannelsContinuity,
+        Phase::AutomationDelivery,
         "Notification Preferences",
         "Choose where proactive alerts and routine results should be delivered.",
         "Useful automation depends on a destination users actually watch.",
@@ -989,7 +1102,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::Extensions,
-        Phase::CapabilitiesAutomation,
+        Phase::ToolsSafety,
         "Tools & Extensions",
         "Select capability bundles and optional tools from the registry.",
         "Tooling determines what ThinClaw can do beyond chat responses.",
@@ -997,7 +1110,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::ToolApproval,
-        Phase::CapabilitiesAutomation,
+        Phase::ToolsSafety,
         "Autonomy Level",
         "Choose how much local autonomy ThinClaw has when running tools on your machine.",
         "Autonomy level defines the default operator trust posture on day one.",
@@ -1005,7 +1118,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::DockerSandbox,
-        Phase::CapabilitiesAutomation,
+        Phase::ToolsSafety,
         "Worker Sandbox",
         "Decide whether ThinClaw should isolate worker processes such as coding delegates in Docker.",
         "Early boundary choices reduce surprise and security drift later.",
@@ -1015,7 +1128,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::CodingWorkers,
-        Phase::CapabilitiesAutomation,
+        Phase::ToolsSafety,
         "Coding Workers",
         "Optionally enable Claude Code and Codex after the sandbox is configured.",
         "Coding workers add power, but only matter if you want delegated coding help right away.",
@@ -1023,7 +1136,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::ClaudeCode,
-        Phase::CapabilitiesAutomation,
+        Phase::ToolsSafety,
         "Claude Code Sandbox",
         "Configure optional Claude Code worker integration.",
         "Only required if your workflow depends on Claude sandbox execution.",
@@ -1031,7 +1144,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::CodexCode,
-        Phase::CapabilitiesAutomation,
+        Phase::ToolsSafety,
         "Codex Sandbox",
         "Configure optional Codex CLI worker integration.",
         "Only required if your workflow depends on Codex sandbox execution.",
@@ -1039,7 +1152,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::Routines,
-        Phase::CapabilitiesAutomation,
+        Phase::AutomationDelivery,
         "Routines",
         "Enable or defer scheduled automation tasks.",
         "Routines are optional at launch but powerful once channels are stable.",
@@ -1047,7 +1160,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::Skills,
-        Phase::CapabilitiesAutomation,
+        Phase::AutomationDelivery,
         "Skills",
         "Enable reusable capability packs for specialized behavior.",
         "Skills increase adaptability without modifying core runtime code.",
@@ -1055,7 +1168,7 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::Heartbeat,
-        Phase::CapabilitiesAutomation,
+        Phase::AutomationDelivery,
         "Background Tasks",
         "Choose whether ThinClaw runs periodic background heartbeat tasks.",
         "Heartbeat adds value after alerts and channels are fully configured.",
@@ -1063,15 +1176,15 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::WebUi,
-        Phase::ExperienceOperations,
+        Phase::AppearanceAccess,
         "Web UI",
-        "Tune the operator-facing dashboard experience.",
+        "Choose local appearance and review bind/access settings separately.",
         "Clear UI defaults reduce operator friction and support load.",
         None,
     );
     push_step(
         Step::Observability,
-        Phase::ExperienceOperations,
+        Phase::RuntimeFoundation,
         "Observability",
         "Decide how much runtime telemetry and diagnostics should be emitted.",
         "Good visibility helps debugging without flooding operators with noise.",
@@ -1079,10 +1192,10 @@ pub fn setup_wizard_plan(input: SetupWizardPlanInput) -> SetupWizardPlan {
     );
     push_step(
         Step::Summary,
-        Phase::Finish,
-        "Finish",
-        "Review readiness, deferred tasks, and the bootstrap handoff into normal startup.",
-        "A strong finish gives operators confidence to launch immediately.",
+        Phase::ReviewApply,
+        "Review & Apply",
+        "Review the exact non-secret diff, action list, blockers, and plan digest.",
+        "Apply defaults to Cancel and is the only durable mutation boundary.",
         None,
     );
 
@@ -1681,10 +1794,11 @@ mod tests {
     }
 
     #[test]
-    fn quick_setup_plan_uses_documented_twelve_steps() {
+    fn quick_setup_plan_uses_all_ten_target_sections() {
         let plan = setup_wizard_plan(SetupWizardPlanInput::default());
 
-        assert_eq!(plan.steps.len(), 12);
+        assert_eq!(plan.phases.len(), 10);
+        assert_eq!(plan.steps.len(), 19);
         assert!(
             !plan
                 .steps
@@ -1697,16 +1811,14 @@ mod tests {
                 .any(|step| step.id == SetupWizardStepId::CodingWorkers)
         );
         assert_eq!(
-            plan.phase(SetupWizardPhaseId::WelcomeProfile)
+            plan.phases.iter().map(|phase| phase.id).collect::<Vec<_>>(),
+            ALL_SETUP_WIZARD_PHASE_IDS
+        );
+        assert!(!plan.steps.iter().any(|step| !step.id.executable()));
+        assert_eq!(
+            plan.phase(SetupWizardPhaseId::Profile)
                 .map(|phase| phase.step_ids.as_slice()),
-            Some(
-                [
-                    SetupWizardStepId::CliSkin,
-                    SetupWizardStepId::Profile,
-                    SetupWizardStepId::AgentIdentity
-                ]
-                .as_slice()
-            )
+            Some([SetupWizardStepId::Profile].as_slice())
         );
     }
 
@@ -1726,6 +1838,7 @@ mod tests {
                 SetupWizardStepId::SmartRouting,
                 SetupWizardStepId::FallbackProviders,
                 SetupWizardStepId::Embeddings,
+                SetupWizardStepId::ChannelVerification,
                 SetupWizardStepId::Summary,
             ]
         );
@@ -1747,7 +1860,7 @@ mod tests {
     }
 
     #[test]
-    fn advanced_plan_traverses_every_legacy_page_once() {
+    fn advanced_plan_traverses_every_executable_legacy_page_once() {
         let plan = setup_wizard_plan(SetupWizardPlanInput {
             mode: SetupMode::Advanced,
             ..SetupWizardPlanInput::default()
@@ -1758,9 +1871,14 @@ mod tests {
             .flat_map(|phase| phase.step_ids.iter().copied())
             .collect::<Vec<_>>();
         let unique = ids.iter().copied().collect::<BTreeSet<_>>();
-        assert_eq!(ids.len(), 27);
-        assert_eq!(unique.len(), 27);
-        assert_eq!(plan.steps.len(), 27);
+        let executable_count = ALL_SETUP_WIZARD_STEP_IDS
+            .iter()
+            .filter(|step| step.executable())
+            .count();
+        assert_eq!(ids.len(), executable_count);
+        assert_eq!(unique.len(), executable_count);
+        assert_eq!(plan.steps.len(), executable_count);
+        assert!(!unique.contains(&SetupWizardStepId::ChannelContinuity));
     }
 
     #[test]

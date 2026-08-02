@@ -175,6 +175,8 @@ pub struct TuiChannel {
 impl TuiChannel {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
+        principal_id: String,
+        actor_id: String,
         agent_id: String,
         agent_name: String,
         model: String,
@@ -190,8 +192,10 @@ impl TuiChannel {
                 store: Arc::clone(store),
             }) as Arc<dyn thinclaw_channels::tui::TuiHistoryPort>
         });
-        let history = load_initial_history(store.as_deref()).await;
+        let history = load_initial_history(store.as_deref(), &principal_id, &actor_id).await;
         let bootstrap = thinclaw_channels::tui::TuiBootstrap {
+            principal_id,
+            actor_id,
             agent_id,
             agent_name,
             model,
@@ -215,12 +219,14 @@ impl TuiChannel {
 
 async fn load_initial_history(
     store: Option<&dyn crate::db::Database>,
+    principal_id: &str,
+    actor_id: &str,
 ) -> thinclaw_channels::tui::TuiHistoryPage {
     let Some(store) = store else {
         return empty_history_page();
     };
     let summaries = match store
-        .list_actor_conversations_for_recall("default", "default", false, 50)
+        .list_actor_conversations_for_recall(principal_id, actor_id, false, 50)
         .await
     {
         Ok(summaries) => summaries,

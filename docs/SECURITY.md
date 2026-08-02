@@ -47,10 +47,23 @@ Do not treat all integrations as if they had the same isolation guarantees.
 - Treats ComfyUI as a trusted media sidecar: lifecycle actions are explicit and approval-gated, untrusted workflow paths are disabled by default, cloud API keys stay in the secrets store, and generated output paths are sanitized before being returned
 - Makes the gateway, channels, tools, and extension surfaces part of the security model
 - Keeps reckless desktop autonomy explicit instead of implying it has the same trust profile as a normal local run
+- Makes setup Review & Apply the only mutation boundary: pages keep secrets in
+  a non-serializable draft, Apply holds the stopped-runtime exclusive lease,
+  pins extension/build inputs by digest, and reports any non-compensable
+  PostgreSQL migration outcome instead of claiming a full rollback
+- Clears ambient child environments at the typed process constructor, rejects
+  unclassified production launch identities, and checks every launch against a
+  committed descriptor manifest covering owner, executable, environment,
+  credentials, I/O, lifetime, network, and isolation policy
+- Seals a non-empty final tool registry and refuses startup when any ignored
+  registration collision occurred; hot mutations publish whole monotonic
+  capability revisions and extension retries are request-ID/fingerprint bound
 
 ## Local Secrets
 
 The default secrets backend is `local_encrypted`. Secret values live in the database only as encrypted blobs, while the master key is created and retrieved from the platform secure store:
+
+CI maintains an exhaustive checked ledger for public secret-shaped Rust fields. Each candidate has exactly one lifecycle disposition: `source_bound`, `bootstrap_direct`, `ephemeral_internal`, `protocol_sensitive`, `deliberate_reveal`, or `non_secret_semantic`, including explicit persistence, presentation, and resolution rules. New or changed candidates fail the ledger check until reviewed.
 
 - macOS: Keychain
 - Windows: Credential Manager

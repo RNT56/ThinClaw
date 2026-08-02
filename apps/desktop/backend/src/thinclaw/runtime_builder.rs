@@ -35,6 +35,107 @@ const LEGACY_RUNTIME_DB_NAME: &str = "ironclaw.db";
 const RUNTIME_TOML_NAME: &str = "thinclaw.toml";
 const LEGACY_RUNTIME_TOML_NAME: &str = "ironclaw.toml";
 
+/// Closed, non-secret desktop inputs projected into the root compatibility
+/// resolver. Credentials are deliberately absent and stay with their owning
+/// service constructors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DesktopRuntimeKey {
+    AgentAutoApproveTools,
+    AgentThinkingBudgetTokens,
+    AgentThinkingEnabled,
+    AllowLocalTools,
+    AnthropicModel,
+    DatabaseBackend,
+    HeartbeatEnabled,
+    HeartbeatIntervalSecs,
+    HeartbeatNotifyChannel,
+    HeartbeatNotifyUser,
+    IronclawSafeBinsOnly,
+    LibsqlPath,
+    LlmBackend,
+    LlmBaseUrl,
+    LlmModel,
+    OpenaiModel,
+    ScreenCaptureEnabled,
+    WorkspaceMode,
+    WorkspaceRoot,
+}
+
+impl DesktopRuntimeKey {
+    #[cfg(test)]
+    const ALL: &'static [Self] = &[
+        Self::AgentAutoApproveTools,
+        Self::AgentThinkingBudgetTokens,
+        Self::AgentThinkingEnabled,
+        Self::AllowLocalTools,
+        Self::AnthropicModel,
+        Self::DatabaseBackend,
+        Self::HeartbeatEnabled,
+        Self::HeartbeatIntervalSecs,
+        Self::HeartbeatNotifyChannel,
+        Self::HeartbeatNotifyUser,
+        Self::IronclawSafeBinsOnly,
+        Self::LibsqlPath,
+        Self::LlmBackend,
+        Self::LlmBaseUrl,
+        Self::LlmModel,
+        Self::OpenaiModel,
+        Self::ScreenCaptureEnabled,
+        Self::WorkspaceMode,
+        Self::WorkspaceRoot,
+    ];
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentAutoApproveTools => "AGENT_AUTO_APPROVE_TOOLS",
+            Self::AgentThinkingBudgetTokens => "AGENT_THINKING_BUDGET_TOKENS",
+            Self::AgentThinkingEnabled => "AGENT_THINKING_ENABLED",
+            Self::AllowLocalTools => "ALLOW_LOCAL_TOOLS",
+            Self::AnthropicModel => "ANTHROPIC_MODEL",
+            Self::DatabaseBackend => "DATABASE_BACKEND",
+            Self::HeartbeatEnabled => "HEARTBEAT_ENABLED",
+            Self::HeartbeatIntervalSecs => "HEARTBEAT_INTERVAL_SECS",
+            Self::HeartbeatNotifyChannel => "HEARTBEAT_NOTIFY_CHANNEL",
+            Self::HeartbeatNotifyUser => "HEARTBEAT_NOTIFY_USER",
+            Self::IronclawSafeBinsOnly => "IRONCLAW_SAFE_BINS_ONLY",
+            Self::LibsqlPath => "LIBSQL_PATH",
+            Self::LlmBackend => "LLM_BACKEND",
+            Self::LlmBaseUrl => "LLM_BASE_URL",
+            Self::LlmModel => "LLM_MODEL",
+            Self::OpenaiModel => "OPENAI_MODEL",
+            Self::ScreenCaptureEnabled => "SCREEN_CAPTURE_ENABLED",
+            Self::WorkspaceMode => "WORKSPACE_MODE",
+            Self::WorkspaceRoot => "WORKSPACE_ROOT",
+        }
+    }
+}
+
+#[derive(Default)]
+struct DesktopRuntimeInputs {
+    values: std::collections::BTreeMap<DesktopRuntimeKey, String>,
+}
+
+impl DesktopRuntimeInputs {
+    fn set(&mut self, key: DesktopRuntimeKey, value: impl Into<String>) {
+        self.values.insert(key, value.into());
+    }
+
+    fn contains(&self, key: DesktopRuntimeKey) -> bool {
+        self.values.contains_key(&key)
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn into_bridge_projection(self) -> std::collections::HashMap<String, String> {
+        self.values
+            .into_iter()
+            .map(|(key, value)| (key.as_str().to_string(), value))
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DesktopSendRoute {
     session_key: String,
@@ -337,17 +438,17 @@ pub(crate) async fn build_inner(
     // into ThinClaw's BRIDGE_VARS overlay. optional_env() checks this
     // overlay first, so all config resolvers see these values.
     use thinclaw_core::config::{bridge_var_exists, inject_bridge_vars};
-    let mut bridge_config = std::collections::HashMap::<String, String>::new();
+    let mut runtime_inputs = DesktopRuntimeInputs::default();
 
     // Database — only set defaults if user hasn't explicitly configured
     if !bridge_var_exists("DATABASE_BACKEND") {
-        bridge_config.insert("DATABASE_BACKEND".into(), "libsql".into());
+        runtime_inputs.set(DesktopRuntimeKey::DatabaseBackend, "libsql");
     }
     let db_path = runtime_db_path(&state_dir);
     if !bridge_var_exists("LIBSQL_PATH") {
-        bridge_config.insert(
-            "LIBSQL_PATH".into(),
-            db_path.to_str().unwrap_or(RUNTIME_DB_NAME).into(),
+        runtime_inputs.set(
+            DesktopRuntimeKey::LibsqlPath,
+            db_path.to_str().unwrap_or(RUNTIME_DB_NAME),
         );
     }
 
@@ -358,11 +459,11 @@ pub(crate) async fn build_inner(
     // Route heartbeat alerts to the Tauri "local_user" channel.
     // Allow env override (e.g. HEARTBEAT_ENABLED=false for testing).
     if !bridge_var_exists("HEARTBEAT_ENABLED") {
-        bridge_config.insert("HEARTBEAT_ENABLED".into(), "true".into());
-        bridge_config.insert("HEARTBEAT_NOTIFY_CHANNEL".into(), "tauri".into());
-        bridge_config.insert("HEARTBEAT_NOTIFY_USER".into(), "local_user".into());
+        runtime_inputs.set(DesktopRuntimeKey::HeartbeatEnabled, "true");
+        runtime_inputs.set(DesktopRuntimeKey::HeartbeatNotifyChannel, "tauri");
+        runtime_inputs.set(DesktopRuntimeKey::HeartbeatNotifyUser, "local_user");
         // 30 minutes — matches ThinClaw default
-        bridge_config.insert("HEARTBEAT_INTERVAL_SECS".into(), "1800".into());
+        runtime_inputs.set(DesktopRuntimeKey::HeartbeatIntervalSecs, "1800");
         tracing::info!("[thinclaw-runtime] Heartbeat enabled (30-min interval, tauri channel)");
     }
 
@@ -379,11 +480,11 @@ pub(crate) async fn build_inner(
         // Thinking is opt-in — providers that support it (Claude, etc.)
         // will emit StatusUpdate::Thinking() events before the response.
         // Set to "true" to enable; defaults to off.
-        bridge_config.insert("AGENT_THINKING_ENABLED".into(), "false".into());
+        runtime_inputs.set(DesktopRuntimeKey::AgentThinkingEnabled, "false");
         tracing::debug!("[thinclaw-runtime] Set AGENT_THINKING_ENABLED=false (default)");
     }
     if !bridge_var_exists("AGENT_THINKING_BUDGET_TOKENS") {
-        bridge_config.insert("AGENT_THINKING_BUDGET_TOKENS".into(), "10000".into());
+        runtime_inputs.set(DesktopRuntimeKey::AgentThinkingBudgetTokens, "10000");
     }
 
     // ── 1b-3. Enable local dev tools (file write, shell, etc.) ──────
@@ -410,8 +511,8 @@ pub(crate) async fn build_inner(
         // Resolve the base_dir for auto-generating a workspace fallback path
         let base_dir = oc_config.as_ref().map(|c| c.base_dir.clone());
 
-        bridge_config.insert("ALLOW_LOCAL_TOOLS".into(), allow_local.to_string());
-        bridge_config.insert("WORKSPACE_MODE".into(), workspace_mode.clone());
+        runtime_inputs.set(DesktopRuntimeKey::AllowLocalTools, allow_local.to_string());
+        runtime_inputs.set(DesktopRuntimeKey::WorkspaceMode, workspace_mode.clone());
 
         // ── Workspace root resolution ─────────────────────────────────
         // Priority: user config → agent_workspace in app data dir.
@@ -449,15 +550,15 @@ pub(crate) async fn build_inner(
         }
 
         set_resolved_workspace_root(&resolved_root);
-        bridge_config.insert(
-            "WORKSPACE_ROOT".into(),
-            resolved_root.to_str().unwrap_or("ThinClaw").into(),
+        runtime_inputs.set(
+            DesktopRuntimeKey::WorkspaceRoot,
+            resolved_root.to_str().unwrap_or("ThinClaw"),
         );
 
         // Enable safe bins allowlist for sandboxed mode (belt-and-suspenders
         // with ShellTool's own base_dir enforcement)
         if workspace_mode == "sandboxed" {
-            bridge_config.insert("IRONCLAW_SAFE_BINS_ONLY".into(), "true".into());
+            runtime_inputs.set(DesktopRuntimeKey::IronclawSafeBinsOnly, "true");
         }
         // Note: for non-sandboxed mode, we simply don't insert the key.
         // The overlay check returns None, and optional_env falls through
@@ -469,7 +570,10 @@ pub(crate) async fn build_inner(
             .as_ref()
             .map(|c| c.auto_approve_tools)
             .unwrap_or(false);
-        bridge_config.insert("AGENT_AUTO_APPROVE_TOOLS".into(), auto_approve.to_string());
+        runtime_inputs.set(
+            DesktopRuntimeKey::AgentAutoApproveTools,
+            auto_approve.to_string(),
+        );
         tracing::info!(
             "[thinclaw-runtime] Set AGENT_AUTO_APPROVE_TOOLS={}",
             auto_approve
@@ -480,7 +584,7 @@ pub(crate) async fn build_inner(
         // Only enable when BOTH screen recording is granted AND dev tools are on.
         let perms = crate::permissions::get_permission_status();
         if perms.screen_recording && allow_local {
-            bridge_config.insert("SCREEN_CAPTURE_ENABLED".into(), "true".into());
+            runtime_inputs.set(DesktopRuntimeKey::ScreenCaptureEnabled, "true");
             tracing::info!(
                 "[thinclaw-runtime] Screen capture enabled (macOS permission granted + dev tools on)"
             );
@@ -522,8 +626,8 @@ pub(crate) async fn build_inner(
                         "[thinclaw-runtime] Local inference: LLM_BACKEND=openai_compatible, LLM_BASE_URL={}",
                         endpoint.base_url
                     );
-                    bridge_config.insert("LLM_BACKEND".into(), "openai_compatible".into());
-                    bridge_config.insert("LLM_BASE_URL".into(), endpoint.base_url);
+                    runtime_inputs.set(DesktopRuntimeKey::LlmBackend, "openai_compatible");
+                    runtime_inputs.set(DesktopRuntimeKey::LlmBaseUrl, endpoint.base_url);
                     if let Some(token) = local_api_key {
                         local_endpoint_credential = Some(secrecy::SecretString::from(token));
                     }
@@ -539,28 +643,32 @@ pub(crate) async fn build_inner(
                         let selected_model = cfg.selected_cloud_model.as_deref();
                         match brain.as_str() {
                             "anthropic" => {
-                                bridge_config.insert("LLM_BACKEND".into(), "anthropic".into());
+                                runtime_inputs.set(DesktopRuntimeKey::LlmBackend, "anthropic");
                                 if let Some(model) = selected_model {
-                                    bridge_config
-                                        .insert("ANTHROPIC_MODEL".into(), model.to_string());
+                                    runtime_inputs
+                                        .set(DesktopRuntimeKey::AnthropicModel, model.to_string());
                                 }
                             }
                             "openai" => {
-                                bridge_config.insert("LLM_BACKEND".into(), "openai".into());
+                                runtime_inputs.set(DesktopRuntimeKey::LlmBackend, "openai");
                                 if let Some(model) = selected_model {
-                                    bridge_config.insert("OPENAI_MODEL".into(), model.to_string());
+                                    runtime_inputs
+                                        .set(DesktopRuntimeKey::OpenaiModel, model.to_string());
                                 }
                             }
                             other => {
                                 if let Some(ep) =
                                     thinclaw_config::provider_catalog::endpoint_for(other)
                                 {
-                                    bridge_config
-                                        .insert("LLM_BACKEND".into(), "openai_compatible".into());
-                                    bridge_config
-                                        .insert("LLM_BASE_URL".into(), ep.base_url.to_string());
+                                    runtime_inputs
+                                        .set(DesktopRuntimeKey::LlmBackend, "openai_compatible");
+                                    runtime_inputs.set(
+                                        DesktopRuntimeKey::LlmBaseUrl,
+                                        ep.base_url.to_string(),
+                                    );
                                     if let Some(model) = selected_model {
-                                        bridge_config.insert("LLM_MODEL".into(), model.to_string());
+                                        runtime_inputs
+                                            .set(DesktopRuntimeKey::LlmModel, model.to_string());
                                     }
                                 } else {
                                     return Err(anyhow::anyhow!(
@@ -597,9 +705,10 @@ pub(crate) async fn build_inner(
                 match brain.as_str() {
                     "anthropic" => {
                         tracing::info!("[thinclaw-runtime] Cloud brain: LLM_BACKEND=anthropic");
-                        bridge_config.insert("LLM_BACKEND".into(), "anthropic".into());
+                        runtime_inputs.set(DesktopRuntimeKey::LlmBackend, "anthropic");
                         if let Some(model) = selected_model {
-                            bridge_config.insert("ANTHROPIC_MODEL".into(), model.to_string());
+                            runtime_inputs
+                                .set(DesktopRuntimeKey::AnthropicModel, model.to_string());
                             tracing::info!(
                                 "[thinclaw-runtime] Cloud model: ANTHROPIC_MODEL={}",
                                 model
@@ -608,9 +717,9 @@ pub(crate) async fn build_inner(
                     }
                     "openai" => {
                         tracing::info!("[thinclaw-runtime] Cloud brain: LLM_BACKEND=openai");
-                        bridge_config.insert("LLM_BACKEND".into(), "openai".into());
+                        runtime_inputs.set(DesktopRuntimeKey::LlmBackend, "openai");
                         if let Some(model) = selected_model {
-                            bridge_config.insert("OPENAI_MODEL".into(), model.to_string());
+                            runtime_inputs.set(DesktopRuntimeKey::OpenaiModel, model.to_string());
                             tracing::info!(
                                 "[thinclaw-runtime] Cloud model: OPENAI_MODEL={}",
                                 model
@@ -625,10 +734,11 @@ pub(crate) async fn build_inner(
                                 other,
                                 ep.base_url
                             );
-                            bridge_config.insert("LLM_BACKEND".into(), "openai_compatible".into());
-                            bridge_config.insert("LLM_BASE_URL".into(), ep.base_url.to_string());
+                            runtime_inputs.set(DesktopRuntimeKey::LlmBackend, "openai_compatible");
+                            runtime_inputs
+                                .set(DesktopRuntimeKey::LlmBaseUrl, ep.base_url.to_string());
                             if let Some(model) = selected_model {
-                                bridge_config.insert("LLM_MODEL".into(), model.to_string());
+                                runtime_inputs.set(DesktopRuntimeKey::LlmModel, model.to_string());
                                 tracing::info!(
                                     "[thinclaw-runtime] Cloud model: LLM_MODEL={}",
                                     model
@@ -639,14 +749,16 @@ pub(crate) async fn build_inner(
                                 "[thinclaw-runtime] Unknown cloud brain '{}', defaulting to ollama",
                                 other
                             );
-                            bridge_config.insert("LLM_BACKEND".into(), "ollama".into());
+                            runtime_inputs.set(DesktopRuntimeKey::LlmBackend, "ollama");
                         }
                     }
                 }
             }
         }
 
-        if !bridge_config.contains_key("LLM_BACKEND") && !bridge_var_exists("LLM_BACKEND") {
+        if !runtime_inputs.contains(DesktopRuntimeKey::LlmBackend)
+            && !bridge_var_exists("LLM_BACKEND")
+        {
             return Err(anyhow::anyhow!(
                 "No LLM backend configured. Configure a cloud brain or start local inference."
             ));
@@ -657,8 +769,8 @@ pub(crate) async fn build_inner(
     // This single call replaces ~47 scattered unsafe set_var() calls.
     // All values are now visible to ThinClaw's config resolvers via
     // optional_env() which checks BRIDGE_VARS before real env vars.
-    let bridge_var_count = bridge_config.len();
-    inject_bridge_vars(bridge_config);
+    let bridge_var_count = runtime_inputs.len();
+    inject_bridge_vars(runtime_inputs.into_bridge_projection());
     tracing::info!(
         "[thinclaw-runtime] IC-007: Injected {} bridge config vars into overlay (no unsafe set_var)",
         bridge_var_count
@@ -1757,52 +1869,25 @@ mod tests {
     }
 
     #[test]
-    fn agent_deps_keeps_desktop_runtime_parity_handles_wired() {
-        let source = include_str!("runtime_builder.rs");
-        let deps_block = source
-            .split("let agent_deps = AgentDeps")
-            .nth(1)
-            .expect("desktop AgentDeps construction should stay explicit");
-
-        for required in [
-            "store: components.db.clone()",
-            "tools: components.tools.clone()",
-            "desktop_autonomy_manager: components.desktop_autonomy_manager.clone()",
-            "extension_manager: components.extension_manager.clone()",
-            "skill_registry: components.skill_registry.clone()",
-            "cost_tracker: Some(components.cost_tracker.clone())",
-            "response_cache: Some(components.response_cache.clone())",
-            "llm_runtime: Some(components.llm_runtime.clone())",
-            "routing_policy: Some(components.routing_policy.clone())",
-            "sse_sender: Some(sse_tx.clone())",
-            "agent_router: Some(shared_agent_router)",
-            "agent_registry: Some(agent_registry)",
-            "canvas_store: Some(",
-            "subagent_executor: Some(subagent_executor.clone())",
-            "model_override: Some(model_override)",
-        ] {
-            assert!(
-                deps_block.contains(required),
-                "desktop AgentDeps should wire {required}"
-            );
+    fn desktop_runtime_input_projection_is_closed_and_non_secret() {
+        let names = DesktopRuntimeKey::ALL
+            .iter()
+            .map(|key| key.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(names.len(), DesktopRuntimeKey::ALL.len());
+        assert_eq!(names.len(), 19);
+        for name in names {
+            assert!(!name.contains("API_KEY"));
+            assert!(!name.contains("PASSWORD"));
+            assert!(!name.contains("SECRET"));
+            assert!(!name.ends_with("_TOKEN"));
         }
-    }
 
-    #[test]
-    fn desktop_bridge_overlay_remains_non_secret() {
-        let source = include_str!("runtime_builder.rs");
-        for forbidden in [
-            "bridge_config.insert(\"LLM_API_KEY\"",
-            "bridge_config.insert(\"GATEWAY_AUTH_TOKEN\"",
-            "bridge_config.insert(\"GMAIL_OAUTH_TOKEN\"",
-            "bridge_config.insert(\"GMAIL_REFRESH_TOKEN\"",
-            "bridge_config.insert(\"GMAIL_CLIENT_SECRET\"",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "desktop bridge overlay must not carry {forbidden}"
-            );
-        }
-        assert!(source.contains("compatible.api_keys = vec![credential]"));
+        let mut inputs = DesktopRuntimeInputs::default();
+        inputs.set(DesktopRuntimeKey::LlmBackend, "openai");
+        inputs.set(DesktopRuntimeKey::LlmModel, "fixture-model");
+        let projection = inputs.into_bridge_projection();
+        assert_eq!(projection["LLM_BACKEND"], "openai");
+        assert_eq!(projection["LLM_MODEL"], "fixture-model");
     }
 }

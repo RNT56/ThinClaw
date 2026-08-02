@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{RwLock, oneshot};
 use tokio::task::JoinHandle;
@@ -34,6 +35,65 @@ pub(super) type McpWatcherHandle = (JoinHandle<()>, oneshot::Sender<()>);
 use thinclaw_types::SetupAuthMode;
 
 const MAX_EXTENSION_CAPABILITIES_BYTES: usize = 2 * 1024 * 1024;
+const ACTIVATION_RECEIPT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_ACTIVATION_RECEIPTS: usize = 10_000;
+
+struct CachedActivationReceipt {
+    fingerprint: String,
+    response: serde_json::Value,
+    recorded_at: Instant,
+}
+
+#[derive(Default)]
+struct ActivationReceiptJournal {
+    receipts: std::sync::Mutex<HashMap<uuid::Uuid, CachedActivationReceipt>>,
+}
+
+impl ActivationReceiptJournal {
+    fn get(
+        &self,
+        request_id: uuid::Uuid,
+        fingerprint: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let mut receipts = self
+            .receipts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let now = Instant::now();
+        receipts
+            .retain(|_, receipt| now.duration_since(receipt.recorded_at) < ACTIVATION_RECEIPT_TTL);
+        let Some(receipt) = receipts.get(&request_id) else {
+            return Ok(None);
+        };
+        if receipt.fingerprint != fingerprint {
+            return Err("request_id was already used for a different activation".to_string());
+        }
+        Ok(Some(receipt.response.clone()))
+    }
+
+    fn record(&self, request_id: uuid::Uuid, fingerprint: String, response: serde_json::Value) {
+        let mut receipts = self
+            .receipts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if receipts.len() >= MAX_ACTIVATION_RECEIPTS
+            && let Some(oldest) = receipts
+                .iter()
+                .min_by_key(|(_, receipt)| receipt.recorded_at)
+                .map(|(request_id, _)| *request_id)
+        {
+            receipts.remove(&oldest);
+        }
+        receipts.insert(
+            request_id,
+            CachedActivationReceipt {
+                fingerprint,
+                response,
+                recorded_at: Instant::now(),
+            },
+        );
+    }
+}
 
 /// A package snapshot protected against concurrent replacement.
 ///
@@ -244,6 +304,11 @@ pub struct ExtensionManager {
     /// Serializes in-process WASM activation/removal so an extension cannot be
     /// resurrected in the runtime while its package is being uninstalled.
     pub(super) wasm_operation_lock: tokio::sync::Mutex<()>,
+    /// Serializes the public activation CAS boundary across every extension
+    /// kind. The expected runtime revision is checked while this guard is held.
+    activation_mutation_lock: tokio::sync::Mutex<()>,
+    /// Bounded replay journal for idempotent activation request IDs.
+    activation_receipts: ActivationReceiptJournal,
 
     // WASM channel hot-activation infrastructure (set post-construction)
     pub(super) channel_runtime: RwLock<Option<ChannelRuntimeState>>,
@@ -309,6 +374,8 @@ impl ExtensionManager {
             wasm_tools_dir,
             wasm_channels_dir,
             wasm_operation_lock: tokio::sync::Mutex::new(()),
+            activation_mutation_lock: tokio::sync::Mutex::new(()),
+            activation_receipts: ActivationReceiptJournal::default(),
             channel_runtime: RwLock::new(None),
             secrets,
             tool_registry,
@@ -324,6 +391,32 @@ impl ExtensionManager {
             lifecycle_audit_hook: RwLock::new(None),
             native_plugins: RwLock::new(NativePluginState::new()),
         }
+    }
+
+    /// Enter the exact compare-and-activate boundary used by remote mutation
+    /// handlers. Keep the guard until the terminal receipt has been journaled.
+    pub async fn activation_mutation_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.activation_mutation_lock.lock().await
+    }
+
+    /// Return a terminal response for an idempotent replay. Reusing the same
+    /// request ID for a different operation is rejected rather than aliased.
+    pub fn activation_receipt(
+        &self,
+        request_id: uuid::Uuid,
+        fingerprint: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        self.activation_receipts.get(request_id, fingerprint)
+    }
+
+    pub fn record_activation_receipt(
+        &self,
+        request_id: uuid::Uuid,
+        fingerprint: String,
+        response: serde_json::Value,
+    ) {
+        self.activation_receipts
+            .record(request_id, fingerprint, response);
     }
 
     /// Get a clone of the shared catalog cache Arc — for background prefetch by `app.rs`.
@@ -754,5 +847,25 @@ pub(super) fn install_error_kind(error: &ExtensionError) -> ExtensionInstallErro
     match error {
         ExtensionError::AlreadyInstalled(_) => ExtensionInstallErrorKind::AlreadyInstalled,
         _ => ExtensionInstallErrorKind::Other,
+    }
+}
+
+#[cfg(test)]
+mod mutation_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn activation_receipts_replay_exact_requests_and_reject_aliasing() {
+        let journal = ActivationReceiptJournal::default();
+        let request_id = uuid::Uuid::new_v4();
+        let response = serde_json::json!({"success": true, "capability_revision": 42});
+        assert_eq!(journal.get(request_id, "fingerprint-a").unwrap(), None);
+
+        journal.record(request_id, "fingerprint-a".to_string(), response.clone());
+        assert_eq!(
+            journal.get(request_id, "fingerprint-a").unwrap(),
+            Some(response)
+        );
+        assert!(journal.get(request_id, "fingerprint-b").is_err());
     }
 }

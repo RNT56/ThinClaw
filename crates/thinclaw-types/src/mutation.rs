@@ -16,6 +16,178 @@ pub enum MutationExecutionPolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "effect", content = "policy", rename_all = "snake_case")]
+pub enum CliLeafEffect {
+    ReadOnly,
+    Mutating(MutationExecutionPolicy),
+}
+
+/// Classify one generated, canonical Clap leaf under the shared mutation
+/// ownership vocabulary. The final verb lists are deliberately closed: adding
+/// a command with a new verb makes surface generation and coverage fail until
+/// its ownership contract is reviewed.
+pub fn canonical_cli_leaf_effect(path: &str) -> Result<CliLeafEffect, String> {
+    let verb = path
+        .split_whitespace()
+        .last()
+        .ok_or_else(|| "canonical CLI path is empty".to_string())?;
+    const READ_ONLY: &[&str] = &[
+        "access",
+        "audit",
+        "blocked",
+        "check",
+        "check-config",
+        "check-deps",
+        "completion",
+        "doctor",
+        "events",
+        "get",
+        "hardware-check",
+        "health",
+        "history",
+        "info",
+        "inspect",
+        "levels",
+        "links",
+        "lint",
+        "list",
+        "list-workflows",
+        "path",
+        "probe",
+        "read",
+        "repos",
+        "runs",
+        "search",
+        "show",
+        "stats",
+        "status",
+        "summary",
+        "tail",
+        "templates",
+        "test",
+        "tools",
+        "tree",
+        "validate",
+        "verify",
+    ];
+    if READ_ONLY.contains(&verb) {
+        return Ok(CliLeafEffect::ReadOnly);
+    }
+    const MUTATING: &[&str] = &[
+        "activate",
+        "add",
+        "approve",
+        "ask",
+        "auth",
+        "block",
+        "cancel",
+        "connect",
+        "create",
+        "delete",
+        "disable",
+        "edit",
+        "enable",
+        "enroll",
+        "evaluate-now",
+        "export",
+        "generate",
+        "grant",
+        "import",
+        "init",
+        "install",
+        "install-defaults",
+        "launch",
+        "launch-test",
+        "link",
+        "open",
+        "pair",
+        "pause",
+        "promote",
+        "prompt",
+        "prune",
+        "publish",
+        "record",
+        "refresh",
+        "reissue-lease",
+        "reload",
+        "remove",
+        "rename",
+        "reset",
+        "restart",
+        "resume",
+        "review",
+        "revoke",
+        "rollback",
+        "rotate-master",
+        "run",
+        "screenshot",
+        "send",
+        "set",
+        "set-credential",
+        "set-default",
+        "set-preferred-channel",
+        "setup",
+        "snapshot",
+        "start",
+        "stop",
+        "submit",
+        "sync",
+        "toggle",
+        "trigger",
+        "trust",
+        "tui",
+        "unblock",
+        "uninstall",
+        "unlink",
+        "update",
+        "write",
+    ];
+    if !MUTATING.contains(&verb) {
+        return Err(format!(
+            "canonical CLI leaf '{path}' uses unreviewed final verb '{verb}'"
+        ));
+    }
+
+    let policy = if matches!(path, "run" | "tui" | "ask")
+        || path.starts_with("runtime service ")
+        || matches!(
+            path,
+            "runtime web start" | "runtime web stop" | "runtime web reload"
+        )
+        || matches!(path, "media comfy launch" | "media comfy stop")
+        || matches!(path, "runtime update install" | "runtime update rollback")
+    {
+        MutationExecutionPolicy::OwnedProcessLifecycle
+    } else if path.starts_with("setup")
+        || matches!(path, "data backup import" | "config secrets rotate-master")
+    {
+        MutationExecutionPolicy::StoppedExclusive
+    } else if path == "send"
+        || path.starts_with("automation jobs ")
+        || path == "automation routines trigger"
+        || path == "extensions activate"
+        || (path.starts_with("labs experiments campaigns ")
+            && matches!(
+                verb,
+                "start" | "cancel" | "pause" | "resume" | "promote" | "reissue-lease"
+            ))
+    {
+        MutationExecutionPolicy::RuntimeRequired
+    } else if path.starts_with("extensions ") || path.starts_with("automation projects ") {
+        MutationExecutionPolicy::ActiveCoordinated
+    } else if path.starts_with("dev ")
+        || path.starts_with("media ")
+        || path.ends_with(" export")
+        || matches!(verb, "screenshot" | "launch-test" | "sync")
+    {
+        MutationExecutionPolicy::ExternalDirect
+    } else {
+        MutationExecutionPolicy::DurableImmediate
+    };
+    Ok(CliLeafEffect::Mutating(policy))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationApplication {
     DurableApplied,
@@ -116,5 +288,20 @@ mod tests {
         let mut broken = receipt;
         broken.runtime_revision = None;
         assert!(!broken.revision_coherent());
+    }
+
+    #[test]
+    fn canonical_cli_effect_vocabulary_is_closed() {
+        assert_eq!(
+            canonical_cli_leaf_effect("status tools"),
+            Ok(CliLeafEffect::ReadOnly)
+        );
+        assert_eq!(
+            canonical_cli_leaf_effect("setup reset"),
+            Ok(CliLeafEffect::Mutating(
+                MutationExecutionPolicy::StoppedExclusive
+            ))
+        );
+        assert!(canonical_cli_leaf_effect("config frobnicate").is_err());
     }
 }

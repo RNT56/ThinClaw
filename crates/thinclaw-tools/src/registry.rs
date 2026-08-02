@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[cfg(feature = "document-extraction")]
 use crate::builtin::ExtractDocumentTool;
@@ -260,6 +260,10 @@ fn registry_identity(
         thinclaw_tools_core::ToolApprovalClass::Always => "always",
     };
     let exposed = !HIDDEN_BY_DEFAULT_TOOL_NAMES.contains(&name.as_str());
+    let dynamic = matches!(
+        origin,
+        ToolOrigin::Wasm | ToolOrigin::Mcp | ToolOrigin::UserTool | ToolOrigin::NativePlugin
+    );
     RegistryIdentity {
         name,
         origin,
@@ -268,17 +272,20 @@ fn registry_identity(
         revision,
         registered_at: chrono::Utc::now(),
         compiled: true,
-        configured: matches!(
-            origin,
-            ToolOrigin::Wasm | ToolOrigin::Mcp | ToolOrigin::UserTool | ToolOrigin::NativePlugin
-        )
-        .then_some(true),
+        // A tool only reaches the registry after its constructor/loader has
+        // accepted the concrete runtime configuration.
+        configured: Some(true),
         registered: true,
-        dependency: "unknown".to_string(),
+        dependency: if dynamic { "loaded" } else { "satisfied" }.to_string(),
         exposed,
-        ready: "unknown".to_string(),
+        ready: if exposed { "ready" } else { "hidden_by_policy" }.to_string(),
         approval: approval.to_string(),
-        health: "not_probed".to_string(),
+        health: if dynamic {
+            "not_probed"
+        } else {
+            "not_required"
+        }
+        .to_string(),
         reasons: if exposed {
             Vec::new()
         } else {
@@ -289,6 +296,10 @@ fn registry_identity(
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RegistrySealError {
+    #[error("startup tool registrations were rejected: {identities:?}")]
+    RegistrationFailures { identities: Vec<String> },
+    #[error("cannot seal an empty runtime tool registry")]
+    EmptyRegistry,
     #[error(
         "tool descriptor identities differ from the live registry: registry={registry:?}, descriptors={descriptors:?}"
     )]
@@ -329,6 +340,7 @@ pub struct ToolRegistry {
     entries: RwLock<HashMap<String, RegistryEntry>>,
     revision: std::sync::atomic::AtomicU64,
     sealed: std::sync::atomic::AtomicBool,
+    startup_registration_failures: Mutex<Vec<String>>,
     snapshot_tx: tokio::sync::watch::Sender<RegistrySnapshot>,
     rate_limiter: RateLimiter,
 }
@@ -346,6 +358,7 @@ impl ToolRegistry {
             entries: RwLock::new(HashMap::new()),
             revision: std::sync::atomic::AtomicU64::new(0),
             sealed: std::sync::atomic::AtomicBool::new(false),
+            startup_registration_failures: Mutex::new(Vec::new()),
             snapshot_tx,
             rate_limiter: RateLimiter::new(),
         }
@@ -382,14 +395,40 @@ impl ToolRegistry {
         let origin = static_tool_descriptor(&name)
             .map(|descriptor| descriptor.origin)
             .unwrap_or(ToolOrigin::Core);
-        self.register_request_inner(
+        let outcome = self.register_request_inner(
             RegistrationRequest::new(tool, origin, format!("builtin/{name}")),
             true,
-        )
+        );
+        self.record_startup_rejection(&outcome);
+        outcome
     }
 
     pub fn register_request(&self, request: RegistrationRequest) -> RegistrationOutcome {
-        self.register_request_inner(request, false)
+        let outcome = self.register_request_inner(request, false);
+        self.record_startup_rejection(&outcome);
+        outcome
+    }
+
+    fn record_startup_rejection(&self, outcome: &RegistrationOutcome) {
+        if self.sealed.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        if let RegistrationOutcome::Rejected { conflict } = outcome {
+            let identity = format!(
+                "{} [{}:{}] {}",
+                conflict.name,
+                conflict.requested_origin,
+                conflict.requested_source_id,
+                conflict.reason
+            );
+            let mut failures = self
+                .startup_registration_failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !failures.contains(&identity) {
+                failures.push(identity);
+            }
+        }
     }
 
     fn register_request_inner(
@@ -731,10 +770,24 @@ impl ToolRegistry {
     /// Seal the fully assembled startup population after verifying exact name
     /// parity with the descriptors exposed to the agent.
     pub fn seal_startup(&self) -> Result<RegistrySnapshot, RegistrySealError> {
+        let mut failures = self
+            .startup_registration_failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if !failures.is_empty() {
+            failures.sort();
+            return Err(RegistrySealError::RegistrationFailures {
+                identities: failures,
+            });
+        }
         let entries = self
             .entries
             .read()
             .unwrap_or_else(|error| error.into_inner());
+        if entries.is_empty() {
+            return Err(RegistrySealError::EmptyRegistry);
+        }
         let mut registry = entries.keys().cloned().collect::<Vec<_>>();
         let mut descriptors = entries
             .values()
@@ -1989,7 +2042,8 @@ mod registration_tests {
     #[test]
     fn concurrent_capability_mutations_receive_distinct_revisions() {
         let registry = Arc::new(ToolRegistry::new());
-        registry.seal_startup().expect("seal empty registry");
+        registry.register_sync(Arc::new(EchoTool));
+        registry.seal_startup().expect("seal populated registry");
 
         let workers = (0..32)
             .map(|_| {
@@ -2003,7 +2057,26 @@ mod registration_tests {
             .collect::<Vec<_>>();
         revisions.sort_unstable();
 
-        assert_eq!(revisions, (1..=32).collect::<Vec<_>>());
-        assert_eq!(registry.snapshot().revision, 32);
+        assert_eq!(revisions, (2..=33).collect::<Vec<_>>());
+        assert_eq!(registry.snapshot().revision, 33);
+    }
+
+    #[test]
+    fn empty_registry_cannot_be_sealed() {
+        assert_eq!(
+            ToolRegistry::new().seal_startup(),
+            Err(RegistrySealError::EmptyRegistry)
+        );
+    }
+
+    #[test]
+    fn ignored_startup_collision_prevents_seal() {
+        let registry = ToolRegistry::new();
+        assert!(registry.register_sync(Arc::new(EchoTool)).changed());
+        assert!(!registry.register_sync(Arc::new(EchoTool)).accepted());
+        assert!(matches!(
+            registry.seal_startup(),
+            Err(RegistrySealError::RegistrationFailures { .. })
+        ));
     }
 }

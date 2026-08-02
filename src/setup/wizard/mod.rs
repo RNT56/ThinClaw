@@ -333,11 +333,11 @@ mod tests {
     }
 
     #[test]
-    fn test_quick_setup_plan_uses_documented_twelve_steps() {
+    fn test_quick_setup_plan_uses_documented_nineteen_steps() {
         let wizard = SetupWizard::new();
         let plan = wizard.build_plan();
 
-        assert_eq!(plan.steps.len(), 12);
+        assert_eq!(plan.steps.len(), 19);
         assert!(
             !plan
                 .steps

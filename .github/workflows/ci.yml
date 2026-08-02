@@ -43,6 +43,14 @@ jobs:
         run: python3 scripts/ci/check-release-automation.py
       - name: Check CLI command migration drift
         run: python3 scripts/ci/check-cli-command-drift.py
+      - name: Check exhaustive CLI proof manifest and test discovery
+        run: python3 scripts/ci/check-cli-contract-manifest.py
+      - name: Check credential consumer disposition ledger
+        run: python3 scripts/ci/check-credential-consumers.py
+      - name: Check process launch descriptor ledger
+        run: python3 scripts/ci/check-process-launches.py
+      - name: Check desktop runtime-builder topology and secret boundary
+        run: python3 scripts/ci/check-desktop-runtime-builder.py
       - name: Check coverage gate accounting
         run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
       - name: Check desktop bridge command boundaries
@@ -179,9 +187,13 @@ jobs:
       - name: cargo check
         run: cargo check --locked --workspace ${{ matrix.cargo-args }}
       - name: Parser, help, slash, and static-capability contract
-        run: cargo test --locked --test cli_surface_contract ${{ matrix.cargo-args }}
+        run: |
+          cargo test --locked --test cli_surface_contract ${{ matrix.cargo-args }}
+          cargo test --locked --test cli_coverage_manifest ${{ matrix.cargo-args }}
       - name: Process descriptor manifest and raw-launch scan
         run: python3 scripts/ci/check-process-launches.py
+      - name: Credential consumer manifest and sensitive-field scan
+        run: python3 scripts/ci/check-credential-consumers.py
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-targets ${{ matrix.cargo-args }} -- -D warnings
       - name: Compile tests (no run)
@@ -229,6 +241,8 @@ jobs:
           key: cli-adversarial-contracts
       - name: Raw process boundary and manifest
         run: python3 scripts/ci/check-process-launches.py
+      - name: Sensitive consumer boundary and manifest
+        run: python3 scripts/ci/check-credential-consumers.py
       - name: Process environment, path shadowing, timeout, and cleanup fixtures
         run: cargo test --locked -p thinclaw-platform process -- --nocapture
       - name: Transactional setup cancel, lease, drift, and rollback fixtures
@@ -236,9 +250,19 @@ jobs:
       - name: Registry collision, batch atomicity, seal, and revision fixtures
         run: "cargo test --locked -p thinclaw-tools registration_tests -- --nocapture"
       - name: TUI approval, history, navigation, and slash fixtures
-        run: "cargo test --locked --lib tui::tests -- --nocapture"
+        run: |
+          cargo test --locked --lib tui::tests -- --nocapture
+          cargo test --locked -p thinclaw-channels tui::tests -- --nocapture
       - name: Generated CLI and slash surface contract
-        run: cargo test --locked --test cli_surface_contract
+        run: |
+          cargo test --locked --test cli_surface_contract
+          cargo test --locked --test cli_contract
+          cargo test --locked --test cli_setup_contract
+          cargo test --locked --test tool_registry_contract
+          cargo test --locked --test process_launch_contract
+          cargo test --locked --test cli_safety_contract
+          cargo test --locked --test cli_docs_contract
+          cargo test --locked --test cli_coverage_manifest
 
   desktop-companion:
     name: Desktop Companion
@@ -299,6 +323,8 @@ jobs:
       - name: Contract drift check
         working-directory: apps/desktop
         run: npm run contracts:check
+      - name: Runtime-builder topology and secret boundary
+        run: python3 scripts/ci/check-desktop-runtime-builder.py
       - name: Naming boundary check
         working-directory: apps/desktop
         run: npm run validate:naming

@@ -11,7 +11,6 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 EXCLUDED_PREFIXES = (
-    "docs/cli-refinement/",
     "docs/remediation/",
 )
 EXCLUDED_FILES = {"CHANGELOG.md"}

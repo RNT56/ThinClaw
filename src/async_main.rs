@@ -1741,7 +1741,14 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         entrypoint_plan.local_channel,
         Some(LocalRuntimeChannel::Tui)
     ) {
+        let principal_id = components
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.user_id().to_string())
+            .unwrap_or_else(|| "default".to_string());
         Some((
+            principal_id.clone(),
+            principal_id,
             components
                 .workspace
                 .as_ref()
@@ -1839,6 +1846,8 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     );
 
     if let Some((
+        principal_id,
+        actor_id,
         agent_id,
         agent_name,
         model,
@@ -1854,6 +1863,8 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             .channels()
             .add(Box::new(
                 TuiChannel::new(
+                    principal_id,
+                    actor_id,
                     agent_id,
                     agent_name,
                     model,

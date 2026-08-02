@@ -1,0 +1,3602 @@
+{
+  "entities": {
+    "build_profiles": [
+      "build-profile:light-default",
+      "build-profile:edge",
+      "build-profile:full",
+      "build-profile:all-features",
+      "build-profile:desktop",
+      "build-profile:minimal-libsql",
+      "build-profile:minimal-postgres",
+      "build-profile:compat-repl",
+      "build-profile:compat-web-gateway",
+      "build-profile:compat-timezones",
+      "build-profile:compat-all-empty",
+      "build-profile:delta-browser",
+      "build-profile:delta-nostr",
+      "build-profile:delta-bundled-wasm"
+    ],
+    "canonical_leaves": [
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:access devices list",
+        "path": "access devices list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:access devices pair",
+        "path": "access devices pair"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:access devices rename",
+        "path": "access devices rename"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:access devices revoke",
+        "path": "access devices revoke"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:access identities create",
+        "path": "access identities create"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:access identities link",
+        "path": "access identities link"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:access identities list",
+        "path": "access identities list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:access identities rename",
+        "path": "access identities rename"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:access identities set-preferred-channel",
+        "path": "access identities set-preferred-channel"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:access identities show",
+        "path": "access identities show"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:access identities unlink",
+        "path": "access identities unlink"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:access senders approve",
+        "path": "access senders approve"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:access senders block",
+        "path": "access senders block"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:access senders blocked",
+        "path": "access senders blocked"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:access senders list",
+        "path": "access senders list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:access senders unblock",
+        "path": "access senders unblock"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:agents add",
+        "path": "agents add"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:agents list",
+        "path": "agents list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:agents remove",
+        "path": "agents remove"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:agents set-default",
+        "path": "agents set-default"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:agents show",
+        "path": "agents show"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:agents update",
+        "path": "agents update"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:ask",
+        "path": "ask"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:automation jobs cancel",
+        "path": "automation jobs cancel"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation jobs events",
+        "path": "automation jobs events"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation jobs files list",
+        "path": "automation jobs files list"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation jobs files read",
+        "path": "automation jobs files read"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation jobs list",
+        "path": "automation jobs list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:automation jobs prompt",
+        "path": "automation jobs prompt"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:automation jobs restart",
+        "path": "automation jobs restart"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation jobs show",
+        "path": "automation jobs show"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation jobs summary",
+        "path": "automation jobs summary"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:automation projects cancel",
+        "path": "automation projects cancel"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:automation projects connect",
+        "path": "automation projects connect"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:automation projects create",
+        "path": "automation projects create"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:automation projects enroll",
+        "path": "automation projects enroll"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation projects events",
+        "path": "automation projects events"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation projects list",
+        "path": "automation projects list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:automation projects pause",
+        "path": "automation projects pause"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation projects repos",
+        "path": "automation projects repos"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:automation projects resume",
+        "path": "automation projects resume"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:automation projects set-credential",
+        "path": "automation projects set-credential"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:automation projects setup",
+        "path": "automation projects setup"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation projects show",
+        "path": "automation projects show"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:automation projects start",
+        "path": "automation projects start"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation projects status",
+        "path": "automation projects status"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:automation routines add",
+        "path": "automation routines add"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:automation routines edit",
+        "path": "automation routines edit"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation routines lint",
+        "path": "automation routines lint"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation routines list",
+        "path": "automation routines list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:automation routines remove",
+        "path": "automation routines remove"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:automation routines runs",
+        "path": "automation routines runs"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:automation routines trigger",
+        "path": "automation routines trigger"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:completion",
+        "path": "completion"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:config get",
+        "path": "config get"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:config init",
+        "path": "config init"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:config list",
+        "path": "config list"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:config models info",
+        "path": "config models info"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:config models list",
+        "path": "config models list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "external_direct"
+        },
+        "id": "leaf:config models sync",
+        "path": "config models sync"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:config models test",
+        "path": "config models test"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:config models verify",
+        "path": "config models verify"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:config path",
+        "path": "config path"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:config reset",
+        "path": "config reset"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:config secrets delete",
+        "path": "config secrets delete"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:config secrets list",
+        "path": "config secrets list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "stopped_exclusive"
+        },
+        "id": "leaf:config secrets rotate-master",
+        "path": "config secrets rotate-master"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:config secrets set",
+        "path": "config secrets set"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:config secrets status",
+        "path": "config secrets status"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:config set",
+        "path": "config set"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "external_direct"
+        },
+        "id": "leaf:data backup export",
+        "path": "data backup export"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "stopped_exclusive"
+        },
+        "id": "leaf:data backup import",
+        "path": "data backup import"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data backup inspect",
+        "path": "data backup inspect"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:data conversations delete",
+        "path": "data conversations delete"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "external_direct"
+        },
+        "id": "leaf:data conversations export",
+        "path": "data conversations export"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data conversations list",
+        "path": "data conversations list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:data conversations prune",
+        "path": "data conversations prune"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data conversations search",
+        "path": "data conversations search"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data conversations show",
+        "path": "data conversations show"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data learning external-memory status",
+        "path": "data learning external-memory status"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:data learning feedback submit",
+        "path": "data learning feedback submit"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data learning history",
+        "path": "data learning history"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:data learning outcomes evaluate-now",
+        "path": "data learning outcomes evaluate-now"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data learning outcomes list",
+        "path": "data learning outcomes list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:data learning outcomes review",
+        "path": "data learning outcomes review"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data learning outcomes show",
+        "path": "data learning outcomes show"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data learning proposals list",
+        "path": "data learning proposals list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:data learning proposals review",
+        "path": "data learning proposals review"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data learning proposals show",
+        "path": "data learning proposals show"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:data learning rollbacks record",
+        "path": "data learning rollbacks record"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data learning status",
+        "path": "data learning status"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:data memory delete",
+        "path": "data memory delete"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data memory read",
+        "path": "data memory read"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data memory search",
+        "path": "data memory search"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data memory status",
+        "path": "data memory status"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data memory tree",
+        "path": "data memory tree"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:data memory write",
+        "path": "data memory write"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "external_direct"
+        },
+        "id": "leaf:data trajectories export",
+        "path": "data trajectories export"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:data trajectories stats",
+        "path": "data trajectories stats"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:dev browser check",
+        "path": "dev browser check"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:dev browser links",
+        "path": "dev browser links"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "external_direct"
+        },
+        "id": "leaf:dev browser open",
+        "path": "dev browser open"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "external_direct"
+        },
+        "id": "leaf:dev browser screenshot",
+        "path": "dev browser screenshot"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:doctor",
+        "path": "doctor"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:extensions activate",
+        "path": "extensions activate"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions channels check-config",
+        "path": "extensions channels check-config"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions channels info",
+        "path": "extensions channels info"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions channels list",
+        "path": "extensions channels list"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions channels probe",
+        "path": "extensions channels probe"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions mcp log set",
+        "path": "extensions mcp log set"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions mcp log show",
+        "path": "extensions mcp log show"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions mcp prompt get",
+        "path": "extensions mcp prompt get"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions mcp prompt list",
+        "path": "extensions mcp prompt list"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions mcp resource list",
+        "path": "extensions mcp resource list"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions mcp resource read",
+        "path": "extensions mcp resource read"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions mcp resource templates",
+        "path": "extensions mcp resource templates"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions mcp root grant",
+        "path": "extensions mcp root grant"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions mcp root list",
+        "path": "extensions mcp root list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions mcp root revoke",
+        "path": "extensions mcp root revoke"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions mcp server add",
+        "path": "extensions mcp server add"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions mcp server auth",
+        "path": "extensions mcp server auth"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions mcp server list",
+        "path": "extensions mcp server list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions mcp server remove",
+        "path": "extensions mcp server remove"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions mcp server show",
+        "path": "extensions mcp server show"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions mcp server test",
+        "path": "extensions mcp server test"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions mcp server toggle",
+        "path": "extensions mcp server toggle"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions registry check",
+        "path": "extensions registry check"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions registry info",
+        "path": "extensions registry info"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions registry install",
+        "path": "extensions registry install"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions registry install-defaults",
+        "path": "extensions registry install-defaults"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions registry list",
+        "path": "extensions registry list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions registry remove",
+        "path": "extensions registry remove"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions registry search",
+        "path": "extensions registry search"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions skills audit",
+        "path": "extensions skills audit"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions skills check",
+        "path": "extensions skills check"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions skills inspect",
+        "path": "extensions skills inspect"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions skills install",
+        "path": "extensions skills install"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions skills list",
+        "path": "extensions skills list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions skills publish",
+        "path": "extensions skills publish"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions skills read",
+        "path": "extensions skills read"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions skills reload",
+        "path": "extensions skills reload"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions skills remove",
+        "path": "extensions skills remove"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions skills search",
+        "path": "extensions skills search"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions skills snapshot",
+        "path": "extensions skills snapshot"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions skills taps add",
+        "path": "extensions skills taps add"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions skills taps list",
+        "path": "extensions skills taps list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions skills taps refresh",
+        "path": "extensions skills taps refresh"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions skills taps remove",
+        "path": "extensions skills taps remove"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions skills trust",
+        "path": "extensions skills trust"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions skills update",
+        "path": "extensions skills update"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions tools auth",
+        "path": "extensions tools auth"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions tools info",
+        "path": "extensions tools info"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions tools install",
+        "path": "extensions tools install"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:extensions tools list",
+        "path": "extensions tools list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "active_coordinated"
+        },
+        "id": "leaf:extensions tools remove",
+        "path": "extensions tools remove"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:labs experiments campaigns cancel",
+        "path": "labs experiments campaigns cancel"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:labs experiments campaigns list",
+        "path": "labs experiments campaigns list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:labs experiments campaigns pause",
+        "path": "labs experiments campaigns pause"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:labs experiments campaigns promote",
+        "path": "labs experiments campaigns promote"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:labs experiments campaigns reissue-lease",
+        "path": "labs experiments campaigns reissue-lease"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:labs experiments campaigns resume",
+        "path": "labs experiments campaigns resume"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:labs experiments campaigns show",
+        "path": "labs experiments campaigns show"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:labs experiments campaigns start",
+        "path": "labs experiments campaigns start"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:labs experiments disable",
+        "path": "labs experiments disable"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:labs experiments enable",
+        "path": "labs experiments enable"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:labs experiments opportunities list",
+        "path": "labs experiments opportunities list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:labs experiments projects create",
+        "path": "labs experiments projects create"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:labs experiments projects delete",
+        "path": "labs experiments projects delete"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:labs experiments projects list",
+        "path": "labs experiments projects list"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:labs experiments projects show",
+        "path": "labs experiments projects show"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:labs experiments projects update",
+        "path": "labs experiments projects update"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:labs experiments providers connect",
+        "path": "labs experiments providers connect"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "external_direct"
+        },
+        "id": "leaf:labs experiments providers launch-test",
+        "path": "labs experiments providers launch-test"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:labs experiments providers list",
+        "path": "labs experiments providers list"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:labs experiments providers validate",
+        "path": "labs experiments providers validate"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:labs experiments runners create",
+        "path": "labs experiments runners create"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:labs experiments runners delete",
+        "path": "labs experiments runners delete"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:labs experiments runners list",
+        "path": "labs experiments runners list"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:labs experiments runners show",
+        "path": "labs experiments runners show"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:labs experiments runners update",
+        "path": "labs experiments runners update"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:labs experiments runners validate",
+        "path": "labs experiments runners validate"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:labs experiments targets delete",
+        "path": "labs experiments targets delete"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:labs experiments targets link",
+        "path": "labs experiments targets link"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:labs experiments targets list",
+        "path": "labs experiments targets list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "durable_immediate"
+        },
+        "id": "leaf:labs experiments targets update",
+        "path": "labs experiments targets update"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:media comfy check-deps",
+        "path": "media comfy check-deps"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "external_direct"
+        },
+        "id": "leaf:media comfy generate",
+        "path": "media comfy generate"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:media comfy hardware-check",
+        "path": "media comfy hardware-check"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:media comfy health",
+        "path": "media comfy health"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:media comfy launch",
+        "path": "media comfy launch"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:media comfy list-workflows",
+        "path": "media comfy list-workflows"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "external_direct"
+        },
+        "id": "leaf:media comfy setup",
+        "path": "media comfy setup"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:media comfy stop",
+        "path": "media comfy stop"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:run",
+        "path": "run"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:runtime logs levels",
+        "path": "runtime logs levels"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:runtime logs search",
+        "path": "runtime logs search"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:runtime logs show",
+        "path": "runtime logs show"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:runtime logs tail",
+        "path": "runtime logs tail"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:runtime service install",
+        "path": "runtime service install"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:runtime service start",
+        "path": "runtime service start"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:runtime service status",
+        "path": "runtime service status"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:runtime service stop",
+        "path": "runtime service stop"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:runtime service uninstall",
+        "path": "runtime service uninstall"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:runtime update check",
+        "path": "runtime update check"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:runtime update info",
+        "path": "runtime update info"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:runtime update install",
+        "path": "runtime update install"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:runtime update rollback",
+        "path": "runtime update rollback"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:runtime web access",
+        "path": "runtime web access"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:runtime web reload",
+        "path": "runtime web reload"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:runtime web start",
+        "path": "runtime web start"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:runtime web status",
+        "path": "runtime web status"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:runtime web stop",
+        "path": "runtime web stop"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:send",
+        "path": "send"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "stopped_exclusive"
+        },
+        "id": "leaf:setup edit",
+        "path": "setup edit"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "stopped_exclusive"
+        },
+        "id": "leaf:setup reset",
+        "path": "setup reset"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:status tools",
+        "path": "status tools"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "owned_process_lifecycle"
+        },
+        "id": "leaf:tui",
+        "path": "tui"
+      }
+    ],
+    "channels": [
+      "channel:apns:native",
+      "channel:apple_mail:native",
+      "channel:bluebubbles:native",
+      "channel:browser-push:native",
+      "channel:dingtalk:wasm",
+      "channel:discord:native",
+      "channel:discord:wasm",
+      "channel:feishu_lark:wasm",
+      "channel:gateway:native",
+      "channel:gmail:native",
+      "channel:google_chat:wasm",
+      "channel:http:native",
+      "channel:imessage:native",
+      "channel:line:wasm",
+      "channel:matrix:native",
+      "channel:matrix:wasm",
+      "channel:mattermost:wasm",
+      "channel:ms_teams:wasm",
+      "channel:nostr:native",
+      "channel:qq:wasm",
+      "channel:repl:local_surface",
+      "channel:signal:native",
+      "channel:slack:wasm",
+      "channel:telegram:wasm",
+      "channel:tui:local_surface",
+      "channel:twilio_sms:wasm",
+      "channel:twitch:wasm",
+      "channel:voice-call:native",
+      "channel:wecom:wasm",
+      "channel:weixin:wasm",
+      "channel:whatsapp:wasm"
+    ],
+    "credential_consumers": [
+      "credential:apps/desktop/backend/src/cloud/commands.rs:key_or_password:1",
+      "credential:apps/desktop/backend/src/cloud/oauth.rs:access_token:1",
+      "credential:apps/desktop/backend/src/cloud/oauth.rs:refresh_token:1",
+      "credential:apps/desktop/backend/src/rig_lib/orchestrator.rs:mcp_auth_token:1",
+      "credential:apps/desktop/backend/src/rig_lib/sandbox_factory.rs:mcp_auth_token:1",
+      "credential:apps/desktop/backend/src/sidecar/core.rs:cancellation_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/rpc_experiments_learning.rs:embedding_api_key_env:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:app_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:auth_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:awaiting_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:bot_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:bot_token:2",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:budget_tokens:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:custom_secrets:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:has_huggingface_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:remote_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:rotated_secrets:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:stored_secrets:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:total_input_tokens:1",
+      "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:total_output_tokens:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:anthropic_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:bedrock_secret_access_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:brave_search_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:gemini_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:groq_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:huggingface_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:minimax_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:mistral_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:moonshot_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:nvidia_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:openai_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:openrouter_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:qianfan_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:remote_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:together_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:venice_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:xai_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:xiaomi_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:anthropic_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:app_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:auth_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:auth_token:2",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:bedrock_secret_access_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:bot_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:bot_token:2",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:brave_search_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:cohere_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:custom_secrets:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:custom_secrets:2",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:deepgram_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:elevenlabs_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:fal_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:gemini_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:groq_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:huggingface_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:minimax_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:mistral_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:moonshot_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:nvidia_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:openai_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:openrouter_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:qianfan_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:remote_token:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:stability_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:together_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:venice_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:voyage_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:xai_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/config/types.rs:xiaomi_api_key:1",
+      "credential:apps/desktop/backend/src/thinclaw/runtime_bridge.rs:oauth_credential_sync:1",
+      "credential:apps/desktop/backend/src/thinclaw/ui_types.rs:input_tokens:1",
+      "credential:apps/desktop/backend/src/thinclaw/ui_types.rs:output_tokens:1",
+      "credential:apps/desktop/backend/src/thinclaw/ui_types.rs:total_tokens:1",
+      "credential:crates/thinclaw-agent/src/context_monitor.rs:assistant_tokens:1",
+      "credential:crates/thinclaw-agent/src/context_monitor.rs:estimated_input_tokens:1",
+      "credential:crates/thinclaw-agent/src/context_monitor.rs:input_token_limit:1",
+      "credential:crates/thinclaw-agent/src/context_monitor.rs:system_tokens:1",
+      "credential:crates/thinclaw-agent/src/context_monitor.rs:tool_tokens:1",
+      "credential:crates/thinclaw-agent/src/context_monitor.rs:total_tokens:1",
+      "credential:crates/thinclaw-agent/src/context_monitor.rs:user_tokens:1",
+      "credential:crates/thinclaw-agent/src/cost_guard.rs:input_tokens:1",
+      "credential:crates/thinclaw-agent/src/cost_guard.rs:output_tokens:1",
+      "credential:crates/thinclaw-agent/src/env.rs:exact_tokens_supported:1",
+      "credential:crates/thinclaw-agent/src/ports_context.rs:budget_token:1",
+      "credential:crates/thinclaw-agent/src/ports_context.rs:budget_token:2",
+      "credential:crates/thinclaw-agent/src/ports_context.rs:max_tokens:1",
+      "credential:crates/thinclaw-agent/src/ports_context.rs:max_tokens:2",
+      "credential:crates/thinclaw-agent/src/ports_context.rs:total_tokens_used:1",
+      "credential:crates/thinclaw-agent/src/ports_llm.rs:input_tokens:1",
+      "credential:crates/thinclaw-agent/src/ports_llm.rs:input_tokens:2",
+      "credential:crates/thinclaw-agent/src/ports_llm.rs:max_tokens:1",
+      "credential:crates/thinclaw-agent/src/ports_llm.rs:max_tokens:2",
+      "credential:crates/thinclaw-agent/src/ports_llm.rs:output_tokens:1",
+      "credential:crates/thinclaw-agent/src/ports_llm.rs:output_tokens:2",
+      "credential:crates/thinclaw-agent/src/prompt_assembly.rs:estimated_tokens:1",
+      "credential:crates/thinclaw-agent/src/runtime_behavior.rs:estimated_tokens:1",
+      "credential:crates/thinclaw-app/src/setup.rs:bluebubbles_password:1",
+      "credential:crates/thinclaw-app/src/setup.rs:discord_bot_token:1",
+      "credential:crates/thinclaw-app/src/setup.rs:gateway_auth_token:1",
+      "credential:crates/thinclaw-app/src/setup.rs:slack_app_token:1",
+      "credential:crates/thinclaw-app/src/setup.rs:slack_bot_token:1",
+      "credential:crates/thinclaw-channels/src/discord.rs:bot_token:1",
+      "credential:crates/thinclaw-channels/src/gmail_wiring.rs:client_secret:1",
+      "credential:crates/thinclaw-channels/src/gmail_wiring.rs:oauth_token:1",
+      "credential:crates/thinclaw-channels/src/gmail_wiring.rs:refresh_token:1",
+      "credential:crates/thinclaw-channels/src/http.rs:webhook_secret:1",
+      "credential:crates/thinclaw-channels/src/native_lifecycle.rs:apns_registration_secret:1",
+      "credential:crates/thinclaw-channels/src/native_lifecycle.rs:browser_push_secret:1",
+      "credential:crates/thinclaw-channels/src/native_lifecycle.rs:matrix_secret:1",
+      "credential:crates/thinclaw-channels/src/native_lifecycle.rs:voice_call_secret:1",
+      "credential:crates/thinclaw-channels/src/native_lifecycle_clients.rs:access_token:1",
+      "credential:crates/thinclaw-channels/src/native_lifecycle_clients.rs:vapid_private_key_pem:1",
+      "credential:crates/thinclaw-channels/src/native_lifecycle_clients.rs:webhook_secret:1",
+      "credential:crates/thinclaw-channels/src/wasm/capabilities.rs:require_secret:1",
+      "credential:crates/thinclaw-channels/src/wasm/router.rs:require_secret:1",
+      "credential:crates/thinclaw-channels/src/wasm/router.rs:signature_secret:1",
+      "credential:crates/thinclaw-channels/src/wasm/router.rs:verify_token_param:1",
+      "credential:crates/thinclaw-channels/src/wasm/router.rs:verify_token_secret:1",
+      "credential:crates/thinclaw-channels/src/wasm/schema.rs:require_secret:1",
+      "credential:crates/thinclaw-channels/src/wasm/schema.rs:required_secrets:1",
+      "credential:crates/thinclaw-channels/src/wasm/schema.rs:verify_token_param:1",
+      "credential:crates/thinclaw-channels/src/wasm/schema.rs:verify_token_secret_name:1",
+      "credential:crates/thinclaw-config/src/agent.rs:budget_tokens:1",
+      "credential:crates/thinclaw-config/src/agent.rs:thinking_budget_tokens:1",
+      "credential:crates/thinclaw-config/src/channel_config.rs:app_token:1",
+      "credential:crates/thinclaw-config/src/channel_config.rs:auth_token:1",
+      "credential:crates/thinclaw-config/src/channel_config.rs:bot_token:1",
+      "credential:crates/thinclaw-config/src/channel_config.rs:bot_token:2",
+      "credential:crates/thinclaw-config/src/channel_config.rs:bot_token:3",
+      "credential:crates/thinclaw-config/src/channel_config.rs:client_secret:1",
+      "credential:crates/thinclaw-config/src/channel_config.rs:oauth_token:1",
+      "credential:crates/thinclaw-config/src/channel_config.rs:refresh_token:1",
+      "credential:crates/thinclaw-config/src/channel_config.rs:webhook_secret:1",
+      "credential:crates/thinclaw-config/src/comfyui.rs:cloud_api_key_secret:1",
+      "credential:crates/thinclaw-config/src/database.rs:libsql_auth_token:1",
+      "credential:crates/thinclaw-config/src/embeddings.rs:openai_api_key:1",
+      "credential:crates/thinclaw-config/src/llm.rs:max_tokens:1",
+      "credential:crates/thinclaw-config/src/llm.rs:proxy_api_key:1",
+      "credential:crates/thinclaw-config/src/model_compat.rs:max_output_tokens:1",
+      "credential:crates/thinclaw-config/src/repo_projects.rs:private_key_secret:1",
+      "credential:crates/thinclaw-config/src/repo_projects.rs:webhook_secret_secret:1",
+      "credential:crates/thinclaw-config/src/routines.rs:max_lightweight_tokens:1",
+      "credential:crates/thinclaw-config/src/skills.rs:max_context_tokens:1",
+      "credential:crates/thinclaw-config/src/tunnel.rs:auth_token:1",
+      "credential:crates/thinclaw-context/src/read_audit.rs:estimated_tokens:1",
+      "credential:crates/thinclaw-context/src/read_audit.rs:max_rule_tokens:1",
+      "credential:crates/thinclaw-gateway/src/web/chat.rs:awaiting_token:1",
+      "credential:crates/thinclaw-gateway/src/web/devices/types.rs:apns_token:1",
+      "credential:crates/thinclaw-gateway/src/web/devices/types.rs:device_token:1",
+      "credential:crates/thinclaw-gateway/src/web/devices/types.rs:live_activity_start_token:1",
+      "credential:crates/thinclaw-gateway/src/web/devices/types.rs:push_token:1",
+      "credential:crates/thinclaw-gateway/src/web/devices/types.rs:push_token:2",
+      "credential:crates/thinclaw-gateway/src/web/devices/types.rs:push_token:3",
+      "credential:crates/thinclaw-gateway/src/web/extensions.rs:awaiting_token:1",
+      "credential:crates/thinclaw-gateway/src/web/openai_compat.rs:completion_tokens:1",
+      "credential:crates/thinclaw-gateway/src/web/openai_compat.rs:max_tokens:1",
+      "credential:crates/thinclaw-gateway/src/web/openai_compat.rs:prompt_tokens:1",
+      "credential:crates/thinclaw-gateway/src/web/openai_compat.rs:total_tokens:1",
+      "credential:crates/thinclaw-gateway/src/web/ports.rs:input_tokens:1",
+      "credential:crates/thinclaw-gateway/src/web/ports.rs:output_tokens:1",
+      "credential:crates/thinclaw-gateway/src/web/status.rs:invalid_private_key:1",
+      "credential:crates/thinclaw-gateway/src/web/status.rs:oauth_token:1",
+      "credential:crates/thinclaw-gateway/src/web/types/common.rs:awaiting_token:1",
+      "credential:crates/thinclaw-gateway/src/web/types/status.rs:input_tokens:1",
+      "credential:crates/thinclaw-gateway/src/web/types/status.rs:invalid_private_key:1",
+      "credential:crates/thinclaw-gateway/src/web/types/status.rs:needs_private_key:1",
+      "credential:crates/thinclaw-gateway/src/web/types/status.rs:output_tokens:1",
+      "credential:crates/thinclaw-history/src/records.rs:input_tokens:1",
+      "credential:crates/thinclaw-history/src/records.rs:output_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:compiled_estimated_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:context_window_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:estimated_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:history_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:original_estimated_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:output_reserve_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:prompt_cap_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:tool_schema_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/provider.rs:exact_tokens_supported:1",
+      "credential:crates/thinclaw-llm-core/src/provider.rs:exact_tokens_supported:2",
+      "credential:crates/thinclaw-llm-core/src/provider.rs:input_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/provider.rs:input_tokens:2",
+      "credential:crates/thinclaw-llm-core/src/provider.rs:max_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/provider.rs:max_tokens:2",
+      "credential:crates/thinclaw-llm-core/src/provider.rs:output_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/provider.rs:output_tokens:2",
+      "credential:crates/thinclaw-llm-core/src/routing_policy.rs:estimated_input_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/routing_policy.rs:max_context_tokens:1",
+      "credential:crates/thinclaw-llm-core/src/turn_analysis.rs:estimated_tokens:1",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_output_tokens:1",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_output_tokens:2",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_output_tokens:3",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_output_tokens:4",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_token_ids:1",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_token_ids:2",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_token_ids:3",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_token_ids:4",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:exact_tokens_supported:1",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:input_tokens:1",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:input_tokens:2",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:input_tokens:3",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:output_tokens:1",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:output_tokens:2",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:output_tokens:3",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:total_input_tokens:1",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:total_input_tokens:2",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:total_output_tokens:1",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:total_output_tokens:2",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:unknown_token_count_requests:1",
+      "credential:crates/thinclaw-llm/src/cost_tracker.rs:unknown_token_count_requests:2",
+      "credential:crates/thinclaw-llm/src/gemini.rs:candidates_token_count:1",
+      "credential:crates/thinclaw-llm/src/gemini.rs:max_output_tokens:1",
+      "credential:crates/thinclaw-llm/src/gemini.rs:max_output_tokens:2",
+      "credential:crates/thinclaw-llm/src/gemini.rs:prompt_token_count:1",
+      "credential:crates/thinclaw-llm/src/route_planner.rs:max_context_tokens:1",
+      "credential:crates/thinclaw-runtime-contracts/src/direct.rs:completion_tokens:1",
+      "credential:crates/thinclaw-runtime-contracts/src/direct.rs:prompt_tokens:1",
+      "credential:crates/thinclaw-runtime-contracts/src/direct.rs:total_tokens:1",
+      "credential:crates/thinclaw-runtime-contracts/src/model.rs:max_output_tokens:1",
+      "credential:crates/thinclaw-secrets/src/types.rs:rotated_secrets:1",
+      "credential:crates/thinclaw-settings/src/agent.rs:thinking_budget_tokens:1",
+      "credential:crates/thinclaw-settings/src/channels.rs:bluebubbles_password:1",
+      "credential:crates/thinclaw-settings/src/channels.rs:discord_bot_token:1",
+      "credential:crates/thinclaw-settings/src/channels.rs:gateway_auth_token:1",
+      "credential:crates/thinclaw-settings/src/channels.rs:slack_app_token:1",
+      "credential:crates/thinclaw-settings/src/channels.rs:slack_bot_token:1",
+      "credential:crates/thinclaw-settings/src/comfyui.rs:cloud_api_key_secret:1",
+      "credential:crates/thinclaw-settings/src/prompt.rs:context_window_tokens:1",
+      "credential:crates/thinclaw-settings/src/prompt.rs:max_total_tokens:1",
+      "credential:crates/thinclaw-settings/src/prompt.rs:output_reserve_tokens:1",
+      "credential:crates/thinclaw-settings/src/prompt.rs:project_context_max_tokens:1",
+      "credential:crates/thinclaw-settings/src/providers.rs:provider_credential_modes:1",
+      "credential:crates/thinclaw-settings/src/providers.rs:resolved_provider_api_keys:1",
+      "credential:crates/thinclaw-settings/src/repo_projects.rs:private_key_secret:1",
+      "credential:crates/thinclaw-settings/src/repo_projects.rs:webhook_secret_secret:1",
+      "credential:crates/thinclaw-settings/src/tunnel.rs:cf_token:1",
+      "credential:crates/thinclaw-settings/src/tunnel.rs:ngrok_token:1",
+      "credential:crates/thinclaw-tools-core/src/mcp.rs:max_tokens:1",
+      "credential:crates/thinclaw-tools-core/src/mcp.rs:progress_token:1",
+      "credential:crates/thinclaw-tools/src/builtin/skill/list.rs:max_context_tokens:1",
+      "credential:crates/thinclaw-tools/src/mcp/auth.rs:access_token:1",
+      "credential:crates/thinclaw-tools/src/mcp/auth.rs:client_secret:1",
+      "credential:crates/thinclaw-tools/src/mcp/auth.rs:client_secret_expires_at:1",
+      "credential:crates/thinclaw-tools/src/mcp/auth.rs:refresh_token:1",
+      "credential:crates/thinclaw-tools/src/mcp/auth.rs:registration_access_token:1",
+      "credential:crates/thinclaw-tools/src/wasm/capabilities_schema.rs:access_token_field:1",
+      "credential:crates/thinclaw-tools/src/wasm/capabilities_schema.rs:client_secret:1",
+      "credential:crates/thinclaw-tools/src/wasm/capabilities_schema.rs:client_secret_env:1",
+      "credential:crates/thinclaw-tools/src/wasm/oauth.rs:access_token:1",
+      "credential:crates/thinclaw-tools/src/wasm/oauth.rs:client_secret:1",
+      "credential:crates/thinclaw-tools/src/wasm/oauth.rs:client_secret:2",
+      "credential:crates/thinclaw-tools/src/wasm/oauth.rs:client_secret:3",
+      "credential:crates/thinclaw-tools/src/wasm/oauth.rs:refresh_token:1",
+      "credential:crates/thinclaw-tools/src/wasm/storage.rs:allowed_secrets:1",
+      "credential:crates/thinclaw-types/src/job.rs:budget_token:1",
+      "credential:crates/thinclaw-types/src/job.rs:max_tokens:1",
+      "credential:crates/thinclaw-types/src/job.rs:total_tokens_used:1",
+      "credential:crates/thinclaw-types/src/setup.rs:required_secrets:1",
+      "credential:src/agent/agent_loop/mod.rs:latest_token_captures:1",
+      "credential:src/agent/dispatcher/test_support.rs:max_tokens:1",
+      "credential:src/agent/dispatcher/types.rs:max_output_tokens:1",
+      "credential:src/api/repo_projects/mod.rs:github_fork_token_secret_present:1",
+      "credential:src/api/repo_projects/mod.rs:github_token_secret_present:1",
+      "credential:src/api/repo_projects/mod.rs:private_key_secret:1",
+      "credential:src/api/repo_projects/mod.rs:private_key_secret:2",
+      "credential:src/api/repo_projects/mod.rs:private_key_secret_present:1",
+      "credential:src/api/repo_projects/mod.rs:webhook_secret_present:1",
+      "credential:src/api/repo_projects/mod.rs:webhook_secret_secret:1",
+      "credential:src/api/repo_projects/mod.rs:webhook_secret_secret:2",
+      "credential:src/app.rs:oauth_credential_sync:1",
+      "credential:src/channels/wasm/mod.rs:require_secret:1",
+      "credential:src/channels/wasm/mod.rs:signature_secret:1",
+      "credential:src/channels/wasm/mod.rs:verify_token_param:1",
+      "credential:src/channels/wasm/mod.rs:verify_token_secret:1",
+      "credential:src/cli/oauth_defaults.rs:client_secret:1",
+      "credential:src/context/post_compaction.rs:estimated_tokens:1",
+      "credential:src/context/post_compaction.rs:max_tokens:1",
+      "credential:src/desktop_autonomy/types.rs:one_time_login_secret:1",
+      "credential:src/desktop_autonomy/types.rs:one_time_login_secret:2",
+      "credential:src/extensions/mod.rs:awaiting_token:1",
+      "credential:src/llm/bedrock.rs:input_tokens:1",
+      "credential:src/llm/bedrock.rs:max_tokens:1",
+      "credential:src/llm/bedrock.rs:max_tokens:2",
+      "credential:src/llm/bedrock.rs:output_tokens:1",
+      "credential:src/llm/embeddings.rs:max_tokens:1",
+      "credential:src/llm/llama_cpp.rs:max_tokens:1",
+      "credential:src/llm/llm_hooks.rs:input_tokens:1",
+      "credential:src/llm/llm_hooks.rs:output_tokens:1",
+      "credential:src/llm/reasoning.rs:estimated_tokens:1",
+      "credential:src/llm/reasoning.rs:input_tokens:1",
+      "credential:src/llm/reasoning.rs:max_output_tokens:1",
+      "credential:src/llm/reasoning.rs:output_tokens:1",
+      "credential:src/orchestrator/job_manager.rs:claude_code_api_key:1",
+      "credential:src/orchestrator/job_manager.rs:claude_code_oauth_token:1",
+      "credential:src/orchestrator/job_manager.rs:codex_code_api_key:1",
+      "credential:src/platform/gateway_access.rs:auth_token:1",
+      "credential:src/setup/channels/telegram.rs:webhook_secret:1",
+      "credential:src/skills/mod.rs:max_context_tokens:1",
+      "credential:src/worker/api.rs:input_tokens:1",
+      "credential:src/worker/api.rs:input_tokens:2",
+      "credential:src/worker/api.rs:max_tokens:1",
+      "credential:src/worker/api.rs:max_tokens:2",
+      "credential:src/worker/api.rs:output_tokens:1",
+      "credential:src/worker/api.rs:output_tokens:2"
+    ],
+    "dynamic_origins": [
+      "dynamic-origin:mcp",
+      "dynamic-origin:native-plugin",
+      "dynamic-origin:user-tool",
+      "dynamic-origin:wasm"
+    ],
+    "inventory": [
+      "INV-01",
+      "INV-02",
+      "INV-03",
+      "INV-04",
+      "INV-05",
+      "INV-06",
+      "INV-07",
+      "INV-08",
+      "INV-09",
+      "INV-10",
+      "INV-11",
+      "INV-12",
+      "INV-13",
+      "INV-14",
+      "INV-15",
+      "INV-16",
+      "INV-17",
+      "INV-18",
+      "INV-19",
+      "INV-20",
+      "INV-21",
+      "INV-22",
+      "INV-23",
+      "INV-24",
+      "INV-25",
+      "INV-26",
+      "INV-27",
+      "INV-28",
+      "INV-29",
+      "INV-30",
+      "INV-31",
+      "INV-32",
+      "INV-33",
+      "INV-34",
+      "INV-35",
+      "INV-36",
+      "INV-37",
+      "INV-38",
+      "INV-39",
+      "INV-40",
+      "INV-41",
+      "INV-42",
+      "INV-43",
+      "INV-44",
+      "INV-45",
+      "INV-46",
+      "INV-47",
+      "INV-48",
+      "INV-49",
+      "INV-50",
+      "INV-51",
+      "INV-52",
+      "INV-53",
+      "INV-54",
+      "INV-55",
+      "INV-56",
+      "INV-57",
+      "INV-58",
+      "INV-59",
+      "INV-60",
+      "INV-61",
+      "INV-62",
+      "INV-63",
+      "INV-64",
+      "INV-65",
+      "INV-66",
+      "INV-67",
+      "INV-68",
+      "INV-69",
+      "INV-70",
+      "INV-71",
+      "INV-72",
+      "INV-73",
+      "INV-74",
+      "INV-75",
+      "INV-76",
+      "INV-77",
+      "INV-78",
+      "INV-79",
+      "INV-80",
+      "INV-81",
+      "INV-82",
+      "INV-83",
+      "INV-84",
+      "INV-85",
+      "INV-86",
+      "INV-87",
+      "INV-88",
+      "INV-89",
+      "INV-90",
+      "INV-91",
+      "INV-92",
+      "INV-93",
+      "INV-94",
+      "INV-95"
+    ],
+    "process_launches": [
+      "process:apps.desktop.backend.src.config.std.1",
+      "process:apps.desktop.backend.src.config.std.2",
+      "process:apps.desktop.backend.src.config.std.3",
+      "process:apps.desktop.backend.src.engine.engine_mlx.tokio.101",
+      "process:apps.desktop.backend.src.engine.engine_mlx.tokio.102",
+      "process:apps.desktop.backend.src.engine.engine_mlx.tokio.103",
+      "process:apps.desktop.backend.src.engine.engine_mlx.tokio.104",
+      "process:apps.desktop.backend.src.engine.engine_mlx.tokio.105",
+      "process:apps.desktop.backend.src.engine.engine_vllm.tokio.101",
+      "process:apps.desktop.backend.src.engine.engine_vllm.tokio.102",
+      "process:apps.desktop.backend.src.engine.engine_vllm.tokio.103",
+      "process:apps.desktop.backend.src.engine.engine_vllm.tokio.104",
+      "process:apps.desktop.backend.src.engine.engine_vllm.tokio.105",
+      "process:apps.desktop.backend.src.engine.engine_vllm.tokio.106",
+      "process:apps.desktop.backend.src.images.std.1",
+      "process:apps.desktop.backend.src.images.std.2",
+      "process:apps.desktop.backend.src.images.std.3",
+      "process:apps.desktop.backend.src.model_manager.inventory.std.1",
+      "process:apps.desktop.backend.src.model_manager.inventory.std.2",
+      "process:apps.desktop.backend.src.model_manager.inventory.std.3",
+      "process:apps.desktop.backend.src.model_manager.inventory.std.4",
+      "process:apps.desktop.backend.src.model_manager.inventory.std.5",
+      "process:apps.desktop.backend.src.model_manager.inventory.std.6",
+      "process:apps.desktop.backend.src.permissions.std.101",
+      "process:apps.desktop.backend.src.sidecar.lifecycle.tokio.1",
+      "process:apps.desktop.backend.src.thinclaw.commands.gateway.tokio.1",
+      "process:apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.1",
+      "process:apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.2",
+      "process:apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.3",
+      "process:apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.4",
+      "process:apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.5",
+      "process:apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.6",
+      "process:apps.desktop.backend.src.thinclaw.commands.skill_repo.tokio.101",
+      "process:apps.desktop.backend.src.thinclaw.deploy.tokio.1",
+      "process:apps.desktop.backend.src.thinclaw.remote_access.tokio.101",
+      "process:crates.thinclaw-agent.src.checkpoint.tokio.101",
+      "process:crates.thinclaw-app.src.runtime.std.1",
+      "process:crates.thinclaw-channels.src.apple_mail.tokio.1",
+      "process:crates.thinclaw-channels.src.apple_mail.tokio.10",
+      "process:crates.thinclaw-channels.src.apple_mail.tokio.11",
+      "process:crates.thinclaw-channels.src.apple_mail.tokio.2",
+      "process:crates.thinclaw-channels.src.apple_mail.tokio.3",
+      "process:crates.thinclaw-channels.src.apple_mail.tokio.4",
+      "process:crates.thinclaw-channels.src.apple_mail.tokio.5",
+      "process:crates.thinclaw-channels.src.apple_mail.tokio.6",
+      "process:crates.thinclaw-channels.src.apple_mail.tokio.7",
+      "process:crates.thinclaw-channels.src.apple_mail.tokio.8",
+      "process:crates.thinclaw-channels.src.apple_mail.tokio.9",
+      "process:crates.thinclaw-channels.src.imessage.tokio.1",
+      "process:crates.thinclaw-channels.src.imessage.tokio.10",
+      "process:crates.thinclaw-channels.src.imessage.tokio.2",
+      "process:crates.thinclaw-channels.src.imessage.tokio.3",
+      "process:crates.thinclaw-channels.src.imessage.tokio.4",
+      "process:crates.thinclaw-channels.src.imessage.tokio.5",
+      "process:crates.thinclaw-channels.src.imessage.tokio.6",
+      "process:crates.thinclaw-channels.src.imessage.tokio.7",
+      "process:crates.thinclaw-channels.src.imessage.tokio.8",
+      "process:crates.thinclaw-channels.src.imessage.tokio.9",
+      "process:crates.thinclaw-channels.src.wasm.bundled.tokio.1",
+      "process:crates.thinclaw-config.src.sandbox.std.1",
+      "process:crates.thinclaw-media.src.sticker.tokio.101",
+      "process:crates.thinclaw-media.src.video.tokio.101",
+      "process:crates.thinclaw-media.src.video.tokio.102",
+      "process:crates.thinclaw-media.src.video.tokio.103",
+      "process:crates.thinclaw-platform.src.shell.std.1",
+      "process:crates.thinclaw-platform.src.shell.tokio.2",
+      "process:crates.thinclaw-tools.src.builtin.apple_mail.tokio.1",
+      "process:crates.thinclaw-tools.src.builtin.apple_mail.tokio.2",
+      "process:crates.thinclaw-tools.src.builtin.browser_a11y.tokio.101",
+      "process:crates.thinclaw-tools.src.builtin.browser_a11y.tokio.102",
+      "process:crates.thinclaw-tools.src.builtin.camera_capture.tokio.101",
+      "process:crates.thinclaw-tools.src.builtin.camera_capture.tokio.102",
+      "process:crates.thinclaw-tools.src.builtin.camera_capture.tokio.103",
+      "process:crates.thinclaw-tools.src.builtin.camera_capture.tokio.104",
+      "process:crates.thinclaw-tools.src.builtin.camera_capture.tokio.105",
+      "process:crates.thinclaw-tools.src.builtin.camera_capture.tokio.106",
+      "process:crates.thinclaw-tools.src.builtin.location.tokio.101",
+      "process:crates.thinclaw-tools.src.builtin.screen_capture.tokio.101",
+      "process:crates.thinclaw-tools.src.builtin.screen_capture.tokio.102",
+      "process:crates.thinclaw-tools.src.builtin.screen_capture.tokio.103",
+      "process:crates.thinclaw-tools.src.builtin.shell_security.tokio.101",
+      "process:crates.thinclaw-tools.src.execution.std.1",
+      "process:crates.thinclaw-tools.src.execution.tokio.101",
+      "process:crates.thinclaw-tools.src.execution.tokio.102",
+      "process:crates.thinclaw-tools.src.execution.tokio.103",
+      "process:crates.thinclaw-tools.src.execution.tokio.104",
+      "process:crates.thinclaw-tools.src.execution.tokio.105",
+      "process:crates.thinclaw-tools.src.execution.tokio.106",
+      "process:crates.thinclaw-tools.src.execution.tokio.107",
+      "process:crates.thinclaw-tools.src.execution.tokio.108",
+      "process:crates.thinclaw-tools.src.execution.tokio.109",
+      "process:crates.thinclaw-tools.src.mcp.stdio.tokio.101",
+      "process:src.agent.learning.orchestrator.code_proposals.tokio.101",
+      "process:src.agent.learning.orchestrator.code_proposals.tokio.102",
+      "process:src.agent.learning.orchestrator.code_proposals.tokio.103",
+      "process:src.agent.learning.orchestrator.code_proposals.tokio.104",
+      "process:src.agent.learning.orchestrator.code_proposals.tokio.105",
+      "process:src.agent.learning.orchestrator.code_proposals.tokio.106",
+      "process:src.agent.learning.orchestrator.code_proposals.tokio.107",
+      "process:src.agent.learning.orchestrator.code_proposals.tokio.108",
+      "process:src.agent.learning.orchestrator.code_proposals.tokio.109",
+      "process:src.agent.learning.orchestrator.code_proposals.tokio.110",
+      "process:src.agent.learning.orchestrator.code_proposals.tokio.111",
+      "process:src.agent.learning.orchestrator.code_proposals.tokio.112",
+      "process:src.cli.backup.tokio.1",
+      "process:src.cli.browser.tokio.1",
+      "process:src.cli.browser.tokio.2",
+      "process:src.cli.browser.tokio.3",
+      "process:src.cli.comfy.tokio.101",
+      "process:src.cli.doctor.std.1",
+      "process:src.cli.gateway.std.1",
+      "process:src.cli.gateway.std.2",
+      "process:src.cli.update.tokio.1",
+      "process:src.desktop_autonomy.bridge.tokio.101",
+      "process:src.desktop_autonomy.bridge.tokio.102",
+      "process:src.desktop_autonomy.bridge.tokio.103",
+      "process:src.desktop_autonomy.dedicated_user.tokio.101",
+      "process:src.desktop_autonomy.dedicated_user.tokio.102",
+      "process:src.desktop_autonomy.dedicated_user.tokio.103",
+      "process:src.desktop_autonomy.dedicated_user.tokio.104",
+      "process:src.desktop_autonomy.dedicated_user.tokio.105",
+      "process:src.desktop_autonomy.dedicated_user.tokio.106",
+      "process:src.desktop_autonomy.dedicated_user.tokio.107",
+      "process:src.desktop_autonomy.dedicated_user.tokio.108",
+      "process:src.desktop_autonomy.dedicated_user.tokio.109",
+      "process:src.desktop_autonomy.dedicated_user.tokio.110",
+      "process:src.desktop_autonomy.dedicated_user.tokio.111",
+      "process:src.desktop_autonomy.dedicated_user.tokio.112",
+      "process:src.desktop_autonomy.fixtures.tokio.101",
+      "process:src.desktop_autonomy.helpers.tokio.101",
+      "process:src.desktop_autonomy.launchers.tokio.101",
+      "process:src.desktop_autonomy.launchers.tokio.102",
+      "process:src.desktop_autonomy.launchers.tokio.103",
+      "process:src.desktop_autonomy.launchers.tokio.104",
+      "process:src.desktop_autonomy.launchers.tokio.105",
+      "process:src.desktop_autonomy.launchers.tokio.106",
+      "process:src.desktop_autonomy.launchers.tokio.107",
+      "process:src.desktop_autonomy.launchers.tokio.108",
+      "process:src.desktop_autonomy.prerequisites.tokio.101",
+      "process:src.desktop_autonomy.prerequisites.tokio.102",
+      "process:src.desktop_autonomy.prerequisites.tokio.103",
+      "process:src.desktop_autonomy.prerequisites.tokio.104",
+      "process:src.desktop_autonomy.prerequisites.tokio.105",
+      "process:src.desktop_autonomy.prerequisites.tokio.106",
+      "process:src.desktop_autonomy.rollout.tokio.101",
+      "process:src.desktop_autonomy.rollout.tokio.102",
+      "process:src.desktop_autonomy.rollout.tokio.103",
+      "process:src.desktop_autonomy.rollout.tokio.104",
+      "process:src.desktop_autonomy.rollout.tokio.105",
+      "process:src.desktop_autonomy.rollout.tokio.106",
+      "process:src.desktop_autonomy.rollout_helpers.tokio.101",
+      "process:src.desktop_autonomy.rollout_helpers.tokio.102",
+      "process:src.desktop_autonomy.source_sync.tokio.101",
+      "process:src.desktop_autonomy.source_sync.tokio.102",
+      "process:src.desktop_autonomy.source_sync.tokio.103",
+      "process:src.desktop_autonomy.source_sync.tokio.104",
+      "process:src.desktop_autonomy.source_sync.tokio.105",
+      "process:src.desktop_autonomy.source_sync.tokio.106",
+      "process:src.desktop_autonomy.source_sync.tokio.107",
+      "process:src.desktop_autonomy.source_sync.tokio.108",
+      "process:src.platform.linux_readiness.std.101",
+      "process:src.platform.linux_readiness.std.102",
+      "process:src.platform.linux_readiness.std.103",
+      "process:src.registry.artifacts.tokio.101",
+      "process:src.registry.artifacts.tokio.102",
+      "process:src.repo_projects.workspace.tokio.101",
+      "process:src.sandbox.detect.tokio.1",
+      "process:src.sandbox.docker_chromium.std.101",
+      "process:src.sandbox.docker_chromium.std.102",
+      "process:src.sandbox.docker_chromium.std.103",
+      "process:src.sandbox.host_process.tokio.101",
+      "process:src.sandbox.host_process.tokio.102",
+      "process:src.service.std.101",
+      "process:src.service.std.102",
+      "process:src.service.std.103",
+      "process:src.service.std.104",
+      "process:src.service.std.105",
+      "process:src.service.std.106",
+      "process:src.service.std.107",
+      "process:src.service.std.108",
+      "process:src.service.std.109",
+      "process:src.service.std.110",
+      "process:src.service.std.111",
+      "process:src.service.std.112",
+      "process:src.service.std.113",
+      "process:src.setup.channels.tunnel.tokio.1",
+      "process:src.setup.wizard.sandbox.tokio.1",
+      "process:src.setup.wizard.transaction.docker_build",
+      "process:src.setup.wizard.transaction.docker_inspect",
+      "process:src.setup.wizard.transaction.docker_restore_tag",
+      "process:src.setup.wizard.transaction.docker_rollback",
+      "process:src.talk_mode.tokio.101",
+      "process:src.tools.builtin.comfyui.tokio.101",
+      "process:src.tools.builtin.skill_tools.publish.tokio.101",
+      "process:src.tools.builtin.skill_tools.publish.tokio.102",
+      "process:src.tools.builtin.skill_tools.publish.tokio.103",
+      "process:src.tools.builtin.skill_tools.publish.tokio.104",
+      "process:src.tools.builtin.skill_tools.publish.tokio.105",
+      "process:src.tools.builtin.skill_tools.publish.tokio.106",
+      "process:src.tools.builtin.skill_tools.publish.tokio.107",
+      "process:src.tools.builtin.skill_tools.publish.tokio.108",
+      "process:src.tools.builtin.skill_tools.publish.tokio.109",
+      "process:src.tunnel.cloudflare.tokio.101",
+      "process:src.tunnel.custom.tokio.101",
+      "process:src.tunnel.ngrok.tokio.101",
+      "process:src.tunnel.tailscale.tokio.101",
+      "process:src.tunnel.tailscale.tokio.102",
+      "process:src.tunnel.tailscale.tokio.103",
+      "process:src.tunnel.tailscale.tokio.104",
+      "process:src.voice_wake.std.101",
+      "process:src.worker.claude_bridge.tokio.101",
+      "process:src.worker.codex_bridge.tokio.101"
+    ],
+    "readiness_profiles": [
+      "readiness-profile:server",
+      "readiness-profile:remote",
+      "readiness-profile:desktop",
+      "readiness-profile:pi-os-lite-64",
+      "readiness-profile:all-features"
+    ],
+    "setup_phases": [
+      "setup-phase:Profile",
+      "setup-phase:RuntimeFoundation",
+      "setup-phase:AiMemory",
+      "setup-phase:IdentityLocale",
+      "setup-phase:Channels",
+      "setup-phase:ToolsSafety",
+      "setup-phase:AutomationDelivery",
+      "setup-phase:AppearanceAccess",
+      "setup-phase:Verify",
+      "setup-phase:ReviewApply"
+    ],
+    "setup_profiles": [
+      "setup-profile:balanced",
+      "setup-profile:local-private",
+      "setup-profile:builder-coding",
+      "setup-profile:channel-first",
+      "setup-profile:remote",
+      "setup-profile:pi-os-lite-64",
+      "setup-profile:custom"
+    ],
+    "setup_steps": [
+      "setup-step:AgentIdentity",
+      "setup-step:ChannelContinuity",
+      "setup-step:ChannelVerification",
+      "setup-step:Channels",
+      "setup-step:ClaudeCode",
+      "setup-step:CliSkin",
+      "setup-step:CodexCode",
+      "setup-step:CodingWorkers",
+      "setup-step:Database",
+      "setup-step:DockerSandbox",
+      "setup-step:Embeddings",
+      "setup-step:Extensions",
+      "setup-step:FallbackProviders",
+      "setup-step:Heartbeat",
+      "setup-step:InferenceProvider",
+      "setup-step:ModelSelection",
+      "setup-step:Notifications",
+      "setup-step:Observability",
+      "setup-step:Profile",
+      "setup-step:Routines",
+      "setup-step:Security",
+      "setup-step:Skills",
+      "setup-step:SmartRouting",
+      "setup-step:Summary",
+      "setup-step:Timezone",
+      "setup-step:ToolApproval",
+      "setup-step:WebUi"
+    ],
+    "static_tools": [
+      "tool:agent_think",
+      "tool:apple_mail",
+      "tool:apply_patch",
+      "tool:autonomy_control",
+      "tool:browser",
+      "tool:build_software",
+      "tool:camera_capture",
+      "tool:cancel_job",
+      "tool:cancel_subagent",
+      "tool:canvas",
+      "tool:capture_camera_frame",
+      "tool:capture_screenshot",
+      "tool:clarify",
+      "tool:comfy_check_deps",
+      "tool:comfy_health",
+      "tool:comfy_manage",
+      "tool:comfy_run_workflow",
+      "tool:consult_advisor",
+      "tool:create_agent",
+      "tool:create_job",
+      "tool:desktop_apps",
+      "tool:desktop_calendar_native",
+      "tool:desktop_numbers_native",
+      "tool:desktop_pages_native",
+      "tool:desktop_screen",
+      "tool:desktop_ui",
+      "tool:device_info",
+      "tool:echo",
+      "tool:emit_user_message",
+      "tool:execute_code",
+      "tool:external_memory_export",
+      "tool:external_memory_off",
+      "tool:external_memory_recall",
+      "tool:external_memory_setup",
+      "tool:external_memory_status",
+      "tool:extract_document",
+      "tool:grep",
+      "tool:homeassistant",
+      "tool:http",
+      "tool:image_generate",
+      "tool:job_events",
+      "tool:job_prompt",
+      "tool:job_status",
+      "tool:json",
+      "tool:learning_feedback",
+      "tool:learning_history",
+      "tool:learning_outcomes",
+      "tool:learning_proposal_review",
+      "tool:learning_status",
+      "tool:list_agents",
+      "tool:list_dir",
+      "tool:list_jobs",
+      "tool:list_subagents",
+      "tool:llm_list_models",
+      "tool:llm_select",
+      "tool:location",
+      "tool:memory_delete",
+      "tool:memory_read",
+      "tool:memory_search",
+      "tool:memory_tree",
+      "tool:memory_write",
+      "tool:message_agent",
+      "tool:mixture_of_agents",
+      "tool:nostr_actions",
+      "tool:process",
+      "tool:prompt_manage",
+      "tool:read_file",
+      "tool:record_audio_clip",
+      "tool:remove_agent",
+      "tool:repo_project_approve",
+      "tool:repo_project_connect",
+      "tool:repo_project_create",
+      "tool:repo_project_enroll",
+      "tool:repo_project_list_repos",
+      "tool:repo_project_pause",
+      "tool:repo_project_plan",
+      "tool:repo_project_request_credential",
+      "tool:repo_project_resume",
+      "tool:repo_project_set_credential",
+      "tool:repo_project_setup",
+      "tool:repo_project_status",
+      "tool:routine_create",
+      "tool:routine_delete",
+      "tool:routine_history",
+      "tool:routine_list",
+      "tool:routine_update",
+      "tool:screen_capture",
+      "tool:search_files",
+      "tool:send_message",
+      "tool:session_search",
+      "tool:shell",
+      "tool:skill_audit",
+      "tool:skill_check",
+      "tool:skill_inspect",
+      "tool:skill_install",
+      "tool:skill_list",
+      "tool:skill_manage",
+      "tool:skill_publish",
+      "tool:skill_read",
+      "tool:skill_reload",
+      "tool:skill_remove",
+      "tool:skill_search",
+      "tool:skill_snapshot",
+      "tool:skill_tap_add",
+      "tool:skill_tap_list",
+      "tool:skill_tap_refresh",
+      "tool:skill_tap_remove",
+      "tool:skill_trust_promote",
+      "tool:skill_update",
+      "tool:spawn_subagent",
+      "tool:talk_mode",
+      "tool:time",
+      "tool:todo",
+      "tool:tool_activate",
+      "tool:tool_auth",
+      "tool:tool_install",
+      "tool:tool_list",
+      "tool:tool_remove",
+      "tool:tool_search",
+      "tool:tts",
+      "tool:update_agent",
+      "tool:vision_analyze",
+      "tool:web_search",
+      "tool:write_file"
+    ]
+  },
+  "proofs": [
+    {
+      "entities": [
+        "INV-01",
+        "INV-02",
+        "INV-03",
+        "INV-04",
+        "INV-05",
+        "INV-06",
+        "INV-07",
+        "INV-08",
+        "INV-09",
+        "INV-10",
+        "INV-11",
+        "INV-12",
+        "INV-13",
+        "INV-14",
+        "INV-15",
+        "INV-16",
+        "INV-17",
+        "INV-18",
+        "INV-19",
+        "INV-20",
+        "INV-21",
+        "INV-22",
+        "INV-23",
+        "INV-24",
+        "INV-25",
+        "INV-26",
+        "INV-27",
+        "INV-28",
+        "INV-29",
+        "INV-30",
+        "INV-31",
+        "INV-32",
+        "INV-33",
+        "INV-34",
+        "INV-35",
+        "INV-36",
+        "INV-37",
+        "INV-38",
+        "INV-39",
+        "INV-40",
+        "INV-41",
+        "INV-42",
+        "INV-43",
+        "INV-44",
+        "INV-45",
+        "INV-46",
+        "INV-47",
+        "INV-48",
+        "INV-49",
+        "INV-50",
+        "INV-51",
+        "INV-52",
+        "INV-53",
+        "INV-54",
+        "INV-55",
+        "INV-56",
+        "INV-57",
+        "INV-58",
+        "INV-59",
+        "INV-60",
+        "INV-61",
+        "INV-62",
+        "INV-63",
+        "INV-64",
+        "INV-65",
+        "INV-66",
+        "INV-67",
+        "INV-68",
+        "INV-69",
+        "INV-70",
+        "INV-71",
+        "INV-72",
+        "INV-73",
+        "INV-74",
+        "INV-75",
+        "INV-76",
+        "INV-77",
+        "INV-78",
+        "INV-79",
+        "INV-80",
+        "INV-81",
+        "INV-82",
+        "INV-83",
+        "INV-84",
+        "INV-85",
+        "INV-86",
+        "INV-87",
+        "INV-88",
+        "INV-89",
+        "INV-90",
+        "INV-91",
+        "INV-92",
+        "INV-93",
+        "INV-94",
+        "INV-95"
+      ],
+      "proof_id": "CLI-inventory-contract",
+      "target": "cli_contract",
+      "test": "inventory_contract_is_exact"
+    },
+    {
+      "entities": [
+        "leaf:access devices list",
+        "leaf:access devices pair",
+        "leaf:access devices rename",
+        "leaf:access devices revoke",
+        "leaf:access identities create",
+        "leaf:access identities link",
+        "leaf:access identities list",
+        "leaf:access identities rename",
+        "leaf:access identities set-preferred-channel",
+        "leaf:access identities show",
+        "leaf:access identities unlink",
+        "leaf:access senders approve",
+        "leaf:access senders block",
+        "leaf:access senders blocked",
+        "leaf:access senders list",
+        "leaf:access senders unblock",
+        "leaf:agents add",
+        "leaf:agents list",
+        "leaf:agents remove",
+        "leaf:agents set-default",
+        "leaf:agents show",
+        "leaf:agents update",
+        "leaf:ask",
+        "leaf:automation jobs cancel",
+        "leaf:automation jobs events",
+        "leaf:automation jobs files list",
+        "leaf:automation jobs files read",
+        "leaf:automation jobs list",
+        "leaf:automation jobs prompt",
+        "leaf:automation jobs restart",
+        "leaf:automation jobs show",
+        "leaf:automation jobs summary",
+        "leaf:automation projects cancel",
+        "leaf:automation projects connect",
+        "leaf:automation projects create",
+        "leaf:automation projects enroll",
+        "leaf:automation projects events",
+        "leaf:automation projects list",
+        "leaf:automation projects pause",
+        "leaf:automation projects repos",
+        "leaf:automation projects resume",
+        "leaf:automation projects set-credential",
+        "leaf:automation projects setup",
+        "leaf:automation projects show",
+        "leaf:automation projects start",
+        "leaf:automation projects status",
+        "leaf:automation routines add",
+        "leaf:automation routines edit",
+        "leaf:automation routines lint",
+        "leaf:automation routines list",
+        "leaf:automation routines remove",
+        "leaf:automation routines runs",
+        "leaf:automation routines trigger",
+        "leaf:completion",
+        "leaf:config get",
+        "leaf:config init",
+        "leaf:config list",
+        "leaf:config models info",
+        "leaf:config models list",
+        "leaf:config models sync",
+        "leaf:config models test",
+        "leaf:config models verify",
+        "leaf:config path",
+        "leaf:config reset",
+        "leaf:config secrets delete",
+        "leaf:config secrets list",
+        "leaf:config secrets rotate-master",
+        "leaf:config secrets set",
+        "leaf:config secrets status",
+        "leaf:config set",
+        "leaf:data backup export",
+        "leaf:data backup import",
+        "leaf:data backup inspect",
+        "leaf:data conversations delete",
+        "leaf:data conversations export",
+        "leaf:data conversations list",
+        "leaf:data conversations prune",
+        "leaf:data conversations search",
+        "leaf:data conversations show",
+        "leaf:data learning external-memory status",
+        "leaf:data learning feedback submit",
+        "leaf:data learning history",
+        "leaf:data learning outcomes evaluate-now",
+        "leaf:data learning outcomes list",
+        "leaf:data learning outcomes review",
+        "leaf:data learning outcomes show",
+        "leaf:data learning proposals list",
+        "leaf:data learning proposals review",
+        "leaf:data learning proposals show",
+        "leaf:data learning rollbacks record",
+        "leaf:data learning status",
+        "leaf:data memory delete",
+        "leaf:data memory read",
+        "leaf:data memory search",
+        "leaf:data memory status",
+        "leaf:data memory tree",
+        "leaf:data memory write",
+        "leaf:data trajectories export",
+        "leaf:data trajectories stats",
+        "leaf:dev browser check",
+        "leaf:dev browser links",
+        "leaf:dev browser open",
+        "leaf:dev browser screenshot",
+        "leaf:doctor",
+        "leaf:extensions activate",
+        "leaf:extensions channels check-config",
+        "leaf:extensions channels info",
+        "leaf:extensions channels list",
+        "leaf:extensions channels probe",
+        "leaf:extensions mcp log set",
+        "leaf:extensions mcp log show",
+        "leaf:extensions mcp prompt get",
+        "leaf:extensions mcp prompt list",
+        "leaf:extensions mcp resource list",
+        "leaf:extensions mcp resource read",
+        "leaf:extensions mcp resource templates",
+        "leaf:extensions mcp root grant",
+        "leaf:extensions mcp root list",
+        "leaf:extensions mcp root revoke",
+        "leaf:extensions mcp server add",
+        "leaf:extensions mcp server auth",
+        "leaf:extensions mcp server list",
+        "leaf:extensions mcp server remove",
+        "leaf:extensions mcp server show",
+        "leaf:extensions mcp server test",
+        "leaf:extensions mcp server toggle",
+        "leaf:extensions registry check",
+        "leaf:extensions registry info",
+        "leaf:extensions registry install",
+        "leaf:extensions registry install-defaults",
+        "leaf:extensions registry list",
+        "leaf:extensions registry remove",
+        "leaf:extensions registry search",
+        "leaf:extensions skills audit",
+        "leaf:extensions skills check",
+        "leaf:extensions skills inspect",
+        "leaf:extensions skills install",
+        "leaf:extensions skills list",
+        "leaf:extensions skills publish",
+        "leaf:extensions skills read",
+        "leaf:extensions skills reload",
+        "leaf:extensions skills remove",
+        "leaf:extensions skills search",
+        "leaf:extensions skills snapshot",
+        "leaf:extensions skills taps add",
+        "leaf:extensions skills taps list",
+        "leaf:extensions skills taps refresh",
+        "leaf:extensions skills taps remove",
+        "leaf:extensions skills trust",
+        "leaf:extensions skills update",
+        "leaf:extensions tools auth",
+        "leaf:extensions tools info",
+        "leaf:extensions tools install",
+        "leaf:extensions tools list",
+        "leaf:extensions tools remove",
+        "leaf:labs experiments campaigns cancel",
+        "leaf:labs experiments campaigns list",
+        "leaf:labs experiments campaigns pause",
+        "leaf:labs experiments campaigns promote",
+        "leaf:labs experiments campaigns reissue-lease",
+        "leaf:labs experiments campaigns resume",
+        "leaf:labs experiments campaigns show",
+        "leaf:labs experiments campaigns start",
+        "leaf:labs experiments disable",
+        "leaf:labs experiments enable",
+        "leaf:labs experiments opportunities list",
+        "leaf:labs experiments projects create",
+        "leaf:labs experiments projects delete",
+        "leaf:labs experiments projects list",
+        "leaf:labs experiments projects show",
+        "leaf:labs experiments projects update",
+        "leaf:labs experiments providers connect",
+        "leaf:labs experiments providers launch-test",
+        "leaf:labs experiments providers list",
+        "leaf:labs experiments providers validate",
+        "leaf:labs experiments runners create",
+        "leaf:labs experiments runners delete",
+        "leaf:labs experiments runners list",
+        "leaf:labs experiments runners show",
+        "leaf:labs experiments runners update",
+        "leaf:labs experiments runners validate",
+        "leaf:labs experiments targets delete",
+        "leaf:labs experiments targets link",
+        "leaf:labs experiments targets list",
+        "leaf:labs experiments targets update",
+        "leaf:media comfy check-deps",
+        "leaf:media comfy generate",
+        "leaf:media comfy hardware-check",
+        "leaf:media comfy health",
+        "leaf:media comfy launch",
+        "leaf:media comfy list-workflows",
+        "leaf:media comfy setup",
+        "leaf:media comfy stop",
+        "leaf:run",
+        "leaf:runtime logs levels",
+        "leaf:runtime logs search",
+        "leaf:runtime logs show",
+        "leaf:runtime logs tail",
+        "leaf:runtime service install",
+        "leaf:runtime service start",
+        "leaf:runtime service status",
+        "leaf:runtime service stop",
+        "leaf:runtime service uninstall",
+        "leaf:runtime update check",
+        "leaf:runtime update info",
+        "leaf:runtime update install",
+        "leaf:runtime update rollback",
+        "leaf:runtime web access",
+        "leaf:runtime web reload",
+        "leaf:runtime web start",
+        "leaf:runtime web status",
+        "leaf:runtime web stop",
+        "leaf:send",
+        "leaf:setup edit",
+        "leaf:setup reset",
+        "leaf:status tools",
+        "leaf:tui",
+        "setup-profile:balanced",
+        "setup-profile:local-private",
+        "setup-profile:builder-coding",
+        "setup-profile:channel-first",
+        "setup-profile:remote",
+        "setup-profile:pi-os-lite-64",
+        "setup-profile:custom",
+        "readiness-profile:server",
+        "readiness-profile:remote",
+        "readiness-profile:desktop",
+        "readiness-profile:pi-os-lite-64",
+        "readiness-profile:all-features",
+        "build-profile:light-default",
+        "build-profile:edge",
+        "build-profile:full",
+        "build-profile:all-features",
+        "build-profile:desktop",
+        "build-profile:minimal-libsql",
+        "build-profile:minimal-postgres",
+        "build-profile:compat-repl",
+        "build-profile:compat-web-gateway",
+        "build-profile:compat-timezones",
+        "build-profile:compat-all-empty",
+        "build-profile:delta-browser",
+        "build-profile:delta-nostr",
+        "build-profile:delta-bundled-wasm"
+      ],
+      "proof_id": "CLI-canonical-leaf-contract",
+      "target": "cli_contract",
+      "test": "canonical_leaf_inventory_is_unique_and_complete"
+    },
+    {
+      "entities": [
+        "tool:agent_think",
+        "tool:apple_mail",
+        "tool:apply_patch",
+        "tool:autonomy_control",
+        "tool:browser",
+        "tool:build_software",
+        "tool:camera_capture",
+        "tool:cancel_job",
+        "tool:cancel_subagent",
+        "tool:canvas",
+        "tool:capture_camera_frame",
+        "tool:capture_screenshot",
+        "tool:clarify",
+        "tool:comfy_check_deps",
+        "tool:comfy_health",
+        "tool:comfy_manage",
+        "tool:comfy_run_workflow",
+        "tool:consult_advisor",
+        "tool:create_agent",
+        "tool:create_job",
+        "tool:desktop_apps",
+        "tool:desktop_calendar_native",
+        "tool:desktop_numbers_native",
+        "tool:desktop_pages_native",
+        "tool:desktop_screen",
+        "tool:desktop_ui",
+        "tool:device_info",
+        "tool:echo",
+        "tool:emit_user_message",
+        "tool:execute_code",
+        "tool:external_memory_export",
+        "tool:external_memory_off",
+        "tool:external_memory_recall",
+        "tool:external_memory_setup",
+        "tool:external_memory_status",
+        "tool:extract_document",
+        "tool:grep",
+        "tool:homeassistant",
+        "tool:http",
+        "tool:image_generate",
+        "tool:job_events",
+        "tool:job_prompt",
+        "tool:job_status",
+        "tool:json",
+        "tool:learning_feedback",
+        "tool:learning_history",
+        "tool:learning_outcomes",
+        "tool:learning_proposal_review",
+        "tool:learning_status",
+        "tool:list_agents",
+        "tool:list_dir",
+        "tool:list_jobs",
+        "tool:list_subagents",
+        "tool:llm_list_models",
+        "tool:llm_select",
+        "tool:location",
+        "tool:memory_delete",
+        "tool:memory_read",
+        "tool:memory_search",
+        "tool:memory_tree",
+        "tool:memory_write",
+        "tool:message_agent",
+        "tool:mixture_of_agents",
+        "tool:nostr_actions",
+        "tool:process",
+        "tool:prompt_manage",
+        "tool:read_file",
+        "tool:record_audio_clip",
+        "tool:remove_agent",
+        "tool:repo_project_approve",
+        "tool:repo_project_connect",
+        "tool:repo_project_create",
+        "tool:repo_project_enroll",
+        "tool:repo_project_list_repos",
+        "tool:repo_project_pause",
+        "tool:repo_project_plan",
+        "tool:repo_project_request_credential",
+        "tool:repo_project_resume",
+        "tool:repo_project_set_credential",
+        "tool:repo_project_setup",
+        "tool:repo_project_status",
+        "tool:routine_create",
+        "tool:routine_delete",
+        "tool:routine_history",
+        "tool:routine_list",
+        "tool:routine_update",
+        "tool:screen_capture",
+        "tool:search_files",
+        "tool:send_message",
+        "tool:session_search",
+        "tool:shell",
+        "tool:skill_audit",
+        "tool:skill_check",
+        "tool:skill_inspect",
+        "tool:skill_install",
+        "tool:skill_list",
+        "tool:skill_manage",
+        "tool:skill_publish",
+        "tool:skill_read",
+        "tool:skill_reload",
+        "tool:skill_remove",
+        "tool:skill_search",
+        "tool:skill_snapshot",
+        "tool:skill_tap_add",
+        "tool:skill_tap_list",
+        "tool:skill_tap_refresh",
+        "tool:skill_tap_remove",
+        "tool:skill_trust_promote",
+        "tool:skill_update",
+        "tool:spawn_subagent",
+        "tool:talk_mode",
+        "tool:time",
+        "tool:todo",
+        "tool:tool_activate",
+        "tool:tool_auth",
+        "tool:tool_install",
+        "tool:tool_list",
+        "tool:tool_remove",
+        "tool:tool_search",
+        "tool:tts",
+        "tool:update_agent",
+        "tool:vision_analyze",
+        "tool:web_search",
+        "tool:write_file"
+      ],
+      "proof_id": "CLI-tool-registry-contract",
+      "target": "tool_registry_contract",
+      "test": "static_catalog_identity_and_seal_contract"
+    },
+    {
+      "entities": [
+        "dynamic-origin:mcp",
+        "dynamic-origin:native-plugin",
+        "dynamic-origin:user-tool",
+        "dynamic-origin:wasm"
+      ],
+      "proof_id": "CLI-dynamic-origin-contract",
+      "target": "tool_registry_contract",
+      "test": "dynamic_origin_vocabulary_is_closed"
+    },
+    {
+      "entities": [
+        "channel:apns:native",
+        "channel:apple_mail:native",
+        "channel:bluebubbles:native",
+        "channel:browser-push:native",
+        "channel:dingtalk:wasm",
+        "channel:discord:native",
+        "channel:discord:wasm",
+        "channel:feishu_lark:wasm",
+        "channel:gateway:native",
+        "channel:gmail:native",
+        "channel:google_chat:wasm",
+        "channel:http:native",
+        "channel:imessage:native",
+        "channel:line:wasm",
+        "channel:matrix:native",
+        "channel:matrix:wasm",
+        "channel:mattermost:wasm",
+        "channel:ms_teams:wasm",
+        "channel:nostr:native",
+        "channel:qq:wasm",
+        "channel:repl:local_surface",
+        "channel:signal:native",
+        "channel:slack:wasm",
+        "channel:telegram:wasm",
+        "channel:tui:local_surface",
+        "channel:twilio_sms:wasm",
+        "channel:twitch:wasm",
+        "channel:voice-call:native",
+        "channel:wecom:wasm",
+        "channel:weixin:wasm",
+        "channel:whatsapp:wasm"
+      ],
+      "proof_id": "CLI-channel-catalog-contract",
+      "target": "cli_coverage_manifest",
+      "test": "manifest_entities_match_generated_runtime_metadata"
+    },
+    {
+      "entities": [
+        "setup-step:AgentIdentity",
+        "setup-step:ChannelContinuity",
+        "setup-step:ChannelVerification",
+        "setup-step:Channels",
+        "setup-step:ClaudeCode",
+        "setup-step:CliSkin",
+        "setup-step:CodexCode",
+        "setup-step:CodingWorkers",
+        "setup-step:Database",
+        "setup-step:DockerSandbox",
+        "setup-step:Embeddings",
+        "setup-step:Extensions",
+        "setup-step:FallbackProviders",
+        "setup-step:Heartbeat",
+        "setup-step:InferenceProvider",
+        "setup-step:ModelSelection",
+        "setup-step:Notifications",
+        "setup-step:Observability",
+        "setup-step:Profile",
+        "setup-step:Routines",
+        "setup-step:Security",
+        "setup-step:Skills",
+        "setup-step:SmartRouting",
+        "setup-step:Summary",
+        "setup-step:Timezone",
+        "setup-step:ToolApproval",
+        "setup-step:WebUi",
+        "setup-phase:Profile",
+        "setup-phase:RuntimeFoundation",
+        "setup-phase:AiMemory",
+        "setup-phase:IdentityLocale",
+        "setup-phase:Channels",
+        "setup-phase:ToolsSafety",
+        "setup-phase:AutomationDelivery",
+        "setup-phase:AppearanceAccess",
+        "setup-phase:Verify",
+        "setup-phase:ReviewApply"
+      ],
+      "proof_id": "CLI-setup-navigation-contract",
+      "target": "cli_setup_contract",
+      "test": "legacy_steps_have_exact_target_sections"
+    },
+    {
+      "entities": [
+        "process:apps.desktop.backend.src.config.std.1",
+        "process:apps.desktop.backend.src.config.std.2",
+        "process:apps.desktop.backend.src.config.std.3",
+        "process:apps.desktop.backend.src.engine.engine_mlx.tokio.101",
+        "process:apps.desktop.backend.src.engine.engine_mlx.tokio.102",
+        "process:apps.desktop.backend.src.engine.engine_mlx.tokio.103",
+        "process:apps.desktop.backend.src.engine.engine_mlx.tokio.104",
+        "process:apps.desktop.backend.src.engine.engine_mlx.tokio.105",
+        "process:apps.desktop.backend.src.engine.engine_vllm.tokio.101",
+        "process:apps.desktop.backend.src.engine.engine_vllm.tokio.102",
+        "process:apps.desktop.backend.src.engine.engine_vllm.tokio.103",
+        "process:apps.desktop.backend.src.engine.engine_vllm.tokio.104",
+        "process:apps.desktop.backend.src.engine.engine_vllm.tokio.105",
+        "process:apps.desktop.backend.src.engine.engine_vllm.tokio.106",
+        "process:apps.desktop.backend.src.images.std.1",
+        "process:apps.desktop.backend.src.images.std.2",
+        "process:apps.desktop.backend.src.images.std.3",
+        "process:apps.desktop.backend.src.model_manager.inventory.std.1",
+        "process:apps.desktop.backend.src.model_manager.inventory.std.2",
+        "process:apps.desktop.backend.src.model_manager.inventory.std.3",
+        "process:apps.desktop.backend.src.model_manager.inventory.std.4",
+        "process:apps.desktop.backend.src.model_manager.inventory.std.5",
+        "process:apps.desktop.backend.src.model_manager.inventory.std.6",
+        "process:apps.desktop.backend.src.permissions.std.101",
+        "process:apps.desktop.backend.src.sidecar.lifecycle.tokio.1",
+        "process:apps.desktop.backend.src.thinclaw.commands.gateway.tokio.1",
+        "process:apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.1",
+        "process:apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.2",
+        "process:apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.3",
+        "process:apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.4",
+        "process:apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.5",
+        "process:apps.desktop.backend.src.thinclaw.commands.rpc_dashboard.workspace_files.std.6",
+        "process:apps.desktop.backend.src.thinclaw.commands.skill_repo.tokio.101",
+        "process:apps.desktop.backend.src.thinclaw.deploy.tokio.1",
+        "process:apps.desktop.backend.src.thinclaw.remote_access.tokio.101",
+        "process:crates.thinclaw-agent.src.checkpoint.tokio.101",
+        "process:crates.thinclaw-app.src.runtime.std.1",
+        "process:crates.thinclaw-channels.src.apple_mail.tokio.1",
+        "process:crates.thinclaw-channels.src.apple_mail.tokio.10",
+        "process:crates.thinclaw-channels.src.apple_mail.tokio.11",
+        "process:crates.thinclaw-channels.src.apple_mail.tokio.2",
+        "process:crates.thinclaw-channels.src.apple_mail.tokio.3",
+        "process:crates.thinclaw-channels.src.apple_mail.tokio.4",
+        "process:crates.thinclaw-channels.src.apple_mail.tokio.5",
+        "process:crates.thinclaw-channels.src.apple_mail.tokio.6",
+        "process:crates.thinclaw-channels.src.apple_mail.tokio.7",
+        "process:crates.thinclaw-channels.src.apple_mail.tokio.8",
+        "process:crates.thinclaw-channels.src.apple_mail.tokio.9",
+        "process:crates.thinclaw-channels.src.imessage.tokio.1",
+        "process:crates.thinclaw-channels.src.imessage.tokio.10",
+        "process:crates.thinclaw-channels.src.imessage.tokio.2",
+        "process:crates.thinclaw-channels.src.imessage.tokio.3",
+        "process:crates.thinclaw-channels.src.imessage.tokio.4",
+        "process:crates.thinclaw-channels.src.imessage.tokio.5",
+        "process:crates.thinclaw-channels.src.imessage.tokio.6",
+        "process:crates.thinclaw-channels.src.imessage.tokio.7",
+        "process:crates.thinclaw-channels.src.imessage.tokio.8",
+        "process:crates.thinclaw-channels.src.imessage.tokio.9",
+        "process:crates.thinclaw-channels.src.wasm.bundled.tokio.1",
+        "process:crates.thinclaw-config.src.sandbox.std.1",
+        "process:crates.thinclaw-media.src.sticker.tokio.101",
+        "process:crates.thinclaw-media.src.video.tokio.101",
+        "process:crates.thinclaw-media.src.video.tokio.102",
+        "process:crates.thinclaw-media.src.video.tokio.103",
+        "process:crates.thinclaw-platform.src.shell.std.1",
+        "process:crates.thinclaw-platform.src.shell.tokio.2",
+        "process:crates.thinclaw-tools.src.builtin.apple_mail.tokio.1",
+        "process:crates.thinclaw-tools.src.builtin.apple_mail.tokio.2",
+        "process:crates.thinclaw-tools.src.builtin.browser_a11y.tokio.101",
+        "process:crates.thinclaw-tools.src.builtin.browser_a11y.tokio.102",
+        "process:crates.thinclaw-tools.src.builtin.camera_capture.tokio.101",
+        "process:crates.thinclaw-tools.src.builtin.camera_capture.tokio.102",
+        "process:crates.thinclaw-tools.src.builtin.camera_capture.tokio.103",
+        "process:crates.thinclaw-tools.src.builtin.camera_capture.tokio.104",
+        "process:crates.thinclaw-tools.src.builtin.camera_capture.tokio.105",
+        "process:crates.thinclaw-tools.src.builtin.camera_capture.tokio.106",
+        "process:crates.thinclaw-tools.src.builtin.location.tokio.101",
+        "process:crates.thinclaw-tools.src.builtin.screen_capture.tokio.101",
+        "process:crates.thinclaw-tools.src.builtin.screen_capture.tokio.102",
+        "process:crates.thinclaw-tools.src.builtin.screen_capture.tokio.103",
+        "process:crates.thinclaw-tools.src.builtin.shell_security.tokio.101",
+        "process:crates.thinclaw-tools.src.execution.std.1",
+        "process:crates.thinclaw-tools.src.execution.tokio.101",
+        "process:crates.thinclaw-tools.src.execution.tokio.102",
+        "process:crates.thinclaw-tools.src.execution.tokio.103",
+        "process:crates.thinclaw-tools.src.execution.tokio.104",
+        "process:crates.thinclaw-tools.src.execution.tokio.105",
+        "process:crates.thinclaw-tools.src.execution.tokio.106",
+        "process:crates.thinclaw-tools.src.execution.tokio.107",
+        "process:crates.thinclaw-tools.src.execution.tokio.108",
+        "process:crates.thinclaw-tools.src.execution.tokio.109",
+        "process:crates.thinclaw-tools.src.mcp.stdio.tokio.101",
+        "process:src.agent.learning.orchestrator.code_proposals.tokio.101",
+        "process:src.agent.learning.orchestrator.code_proposals.tokio.102",
+        "process:src.agent.learning.orchestrator.code_proposals.tokio.103",
+        "process:src.agent.learning.orchestrator.code_proposals.tokio.104",
+        "process:src.agent.learning.orchestrator.code_proposals.tokio.105",
+        "process:src.agent.learning.orchestrator.code_proposals.tokio.106",
+        "process:src.agent.learning.orchestrator.code_proposals.tokio.107",
+        "process:src.agent.learning.orchestrator.code_proposals.tokio.108",
+        "process:src.agent.learning.orchestrator.code_proposals.tokio.109",
+        "process:src.agent.learning.orchestrator.code_proposals.tokio.110",
+        "process:src.agent.learning.orchestrator.code_proposals.tokio.111",
+        "process:src.agent.learning.orchestrator.code_proposals.tokio.112",
+        "process:src.cli.backup.tokio.1",
+        "process:src.cli.browser.tokio.1",
+        "process:src.cli.browser.tokio.2",
+        "process:src.cli.browser.tokio.3",
+        "process:src.cli.comfy.tokio.101",
+        "process:src.cli.doctor.std.1",
+        "process:src.cli.gateway.std.1",
+        "process:src.cli.gateway.std.2",
+        "process:src.cli.update.tokio.1",
+        "process:src.desktop_autonomy.bridge.tokio.101",
+        "process:src.desktop_autonomy.bridge.tokio.102",
+        "process:src.desktop_autonomy.bridge.tokio.103",
+        "process:src.desktop_autonomy.dedicated_user.tokio.101",
+        "process:src.desktop_autonomy.dedicated_user.tokio.102",
+        "process:src.desktop_autonomy.dedicated_user.tokio.103",
+        "process:src.desktop_autonomy.dedicated_user.tokio.104",
+        "process:src.desktop_autonomy.dedicated_user.tokio.105",
+        "process:src.desktop_autonomy.dedicated_user.tokio.106",
+        "process:src.desktop_autonomy.dedicated_user.tokio.107",
+        "process:src.desktop_autonomy.dedicated_user.tokio.108",
+        "process:src.desktop_autonomy.dedicated_user.tokio.109",
+        "process:src.desktop_autonomy.dedicated_user.tokio.110",
+        "process:src.desktop_autonomy.dedicated_user.tokio.111",
+        "process:src.desktop_autonomy.dedicated_user.tokio.112",
+        "process:src.desktop_autonomy.fixtures.tokio.101",
+        "process:src.desktop_autonomy.helpers.tokio.101",
+        "process:src.desktop_autonomy.launchers.tokio.101",
+        "process:src.desktop_autonomy.launchers.tokio.102",
+        "process:src.desktop_autonomy.launchers.tokio.103",
+        "process:src.desktop_autonomy.launchers.tokio.104",
+        "process:src.desktop_autonomy.launchers.tokio.105",
+        "process:src.desktop_autonomy.launchers.tokio.106",
+        "process:src.desktop_autonomy.launchers.tokio.107",
+        "process:src.desktop_autonomy.launchers.tokio.108",
+        "process:src.desktop_autonomy.prerequisites.tokio.101",
+        "process:src.desktop_autonomy.prerequisites.tokio.102",
+        "process:src.desktop_autonomy.prerequisites.tokio.103",
+        "process:src.desktop_autonomy.prerequisites.tokio.104",
+        "process:src.desktop_autonomy.prerequisites.tokio.105",
+        "process:src.desktop_autonomy.prerequisites.tokio.106",
+        "process:src.desktop_autonomy.rollout.tokio.101",
+        "process:src.desktop_autonomy.rollout.tokio.102",
+        "process:src.desktop_autonomy.rollout.tokio.103",
+        "process:src.desktop_autonomy.rollout.tokio.104",
+        "process:src.desktop_autonomy.rollout.tokio.105",
+        "process:src.desktop_autonomy.rollout.tokio.106",
+        "process:src.desktop_autonomy.rollout_helpers.tokio.101",
+        "process:src.desktop_autonomy.rollout_helpers.tokio.102",
+        "process:src.desktop_autonomy.source_sync.tokio.101",
+        "process:src.desktop_autonomy.source_sync.tokio.102",
+        "process:src.desktop_autonomy.source_sync.tokio.103",
+        "process:src.desktop_autonomy.source_sync.tokio.104",
+        "process:src.desktop_autonomy.source_sync.tokio.105",
+        "process:src.desktop_autonomy.source_sync.tokio.106",
+        "process:src.desktop_autonomy.source_sync.tokio.107",
+        "process:src.desktop_autonomy.source_sync.tokio.108",
+        "process:src.platform.linux_readiness.std.101",
+        "process:src.platform.linux_readiness.std.102",
+        "process:src.platform.linux_readiness.std.103",
+        "process:src.registry.artifacts.tokio.101",
+        "process:src.registry.artifacts.tokio.102",
+        "process:src.repo_projects.workspace.tokio.101",
+        "process:src.sandbox.detect.tokio.1",
+        "process:src.sandbox.docker_chromium.std.101",
+        "process:src.sandbox.docker_chromium.std.102",
+        "process:src.sandbox.docker_chromium.std.103",
+        "process:src.sandbox.host_process.tokio.101",
+        "process:src.sandbox.host_process.tokio.102",
+        "process:src.service.std.101",
+        "process:src.service.std.102",
+        "process:src.service.std.103",
+        "process:src.service.std.104",
+        "process:src.service.std.105",
+        "process:src.service.std.106",
+        "process:src.service.std.107",
+        "process:src.service.std.108",
+        "process:src.service.std.109",
+        "process:src.service.std.110",
+        "process:src.service.std.111",
+        "process:src.service.std.112",
+        "process:src.service.std.113",
+        "process:src.setup.channels.tunnel.tokio.1",
+        "process:src.setup.wizard.sandbox.tokio.1",
+        "process:src.setup.wizard.transaction.docker_build",
+        "process:src.setup.wizard.transaction.docker_inspect",
+        "process:src.setup.wizard.transaction.docker_restore_tag",
+        "process:src.setup.wizard.transaction.docker_rollback",
+        "process:src.talk_mode.tokio.101",
+        "process:src.tools.builtin.comfyui.tokio.101",
+        "process:src.tools.builtin.skill_tools.publish.tokio.101",
+        "process:src.tools.builtin.skill_tools.publish.tokio.102",
+        "process:src.tools.builtin.skill_tools.publish.tokio.103",
+        "process:src.tools.builtin.skill_tools.publish.tokio.104",
+        "process:src.tools.builtin.skill_tools.publish.tokio.105",
+        "process:src.tools.builtin.skill_tools.publish.tokio.106",
+        "process:src.tools.builtin.skill_tools.publish.tokio.107",
+        "process:src.tools.builtin.skill_tools.publish.tokio.108",
+        "process:src.tools.builtin.skill_tools.publish.tokio.109",
+        "process:src.tunnel.cloudflare.tokio.101",
+        "process:src.tunnel.custom.tokio.101",
+        "process:src.tunnel.ngrok.tokio.101",
+        "process:src.tunnel.tailscale.tokio.101",
+        "process:src.tunnel.tailscale.tokio.102",
+        "process:src.tunnel.tailscale.tokio.103",
+        "process:src.tunnel.tailscale.tokio.104",
+        "process:src.voice_wake.std.101",
+        "process:src.worker.claude_bridge.tokio.101",
+        "process:src.worker.codex_bridge.tokio.101"
+      ],
+      "proof_id": "CLI-process-launch-contract",
+      "target": "process_launch_contract",
+      "test": "all_manifest_entries_have_enforceable_descriptor_contract"
+    },
+    {
+      "entities": [
+        "credential:apps/desktop/backend/src/cloud/commands.rs:key_or_password:1",
+        "credential:apps/desktop/backend/src/cloud/oauth.rs:access_token:1",
+        "credential:apps/desktop/backend/src/cloud/oauth.rs:refresh_token:1",
+        "credential:apps/desktop/backend/src/rig_lib/orchestrator.rs:mcp_auth_token:1",
+        "credential:apps/desktop/backend/src/rig_lib/sandbox_factory.rs:mcp_auth_token:1",
+        "credential:apps/desktop/backend/src/sidecar/core.rs:cancellation_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/rpc_experiments_learning.rs:embedding_api_key_env:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:app_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:auth_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:awaiting_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:bot_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:bot_token:2",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:budget_tokens:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:custom_secrets:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:has_huggingface_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:remote_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:rotated_secrets:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:stored_secrets:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:total_input_tokens:1",
+        "credential:apps/desktop/backend/src/thinclaw/commands/types.rs:total_output_tokens:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:anthropic_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:bedrock_secret_access_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:brave_search_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:gemini_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:groq_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:huggingface_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:minimax_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:mistral_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:moonshot_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:nvidia_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:openai_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:openrouter_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:qianfan_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:remote_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:together_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:venice_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:xai_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/keychain.rs:xiaomi_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:anthropic_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:app_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:auth_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:auth_token:2",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:bedrock_secret_access_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:bot_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:bot_token:2",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:brave_search_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:cohere_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:custom_secrets:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:custom_secrets:2",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:deepgram_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:elevenlabs_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:fal_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:gemini_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:groq_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:huggingface_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:minimax_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:mistral_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:moonshot_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:nvidia_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:openai_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:openrouter_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:qianfan_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:remote_token:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:stability_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:together_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:venice_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:voyage_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:xai_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/config/types.rs:xiaomi_api_key:1",
+        "credential:apps/desktop/backend/src/thinclaw/runtime_bridge.rs:oauth_credential_sync:1",
+        "credential:apps/desktop/backend/src/thinclaw/ui_types.rs:input_tokens:1",
+        "credential:apps/desktop/backend/src/thinclaw/ui_types.rs:output_tokens:1",
+        "credential:apps/desktop/backend/src/thinclaw/ui_types.rs:total_tokens:1",
+        "credential:crates/thinclaw-agent/src/context_monitor.rs:assistant_tokens:1",
+        "credential:crates/thinclaw-agent/src/context_monitor.rs:estimated_input_tokens:1",
+        "credential:crates/thinclaw-agent/src/context_monitor.rs:input_token_limit:1",
+        "credential:crates/thinclaw-agent/src/context_monitor.rs:system_tokens:1",
+        "credential:crates/thinclaw-agent/src/context_monitor.rs:tool_tokens:1",
+        "credential:crates/thinclaw-agent/src/context_monitor.rs:total_tokens:1",
+        "credential:crates/thinclaw-agent/src/context_monitor.rs:user_tokens:1",
+        "credential:crates/thinclaw-agent/src/cost_guard.rs:input_tokens:1",
+        "credential:crates/thinclaw-agent/src/cost_guard.rs:output_tokens:1",
+        "credential:crates/thinclaw-agent/src/env.rs:exact_tokens_supported:1",
+        "credential:crates/thinclaw-agent/src/ports_context.rs:budget_token:1",
+        "credential:crates/thinclaw-agent/src/ports_context.rs:budget_token:2",
+        "credential:crates/thinclaw-agent/src/ports_context.rs:max_tokens:1",
+        "credential:crates/thinclaw-agent/src/ports_context.rs:max_tokens:2",
+        "credential:crates/thinclaw-agent/src/ports_context.rs:total_tokens_used:1",
+        "credential:crates/thinclaw-agent/src/ports_llm.rs:input_tokens:1",
+        "credential:crates/thinclaw-agent/src/ports_llm.rs:input_tokens:2",
+        "credential:crates/thinclaw-agent/src/ports_llm.rs:max_tokens:1",
+        "credential:crates/thinclaw-agent/src/ports_llm.rs:max_tokens:2",
+        "credential:crates/thinclaw-agent/src/ports_llm.rs:output_tokens:1",
+        "credential:crates/thinclaw-agent/src/ports_llm.rs:output_tokens:2",
+        "credential:crates/thinclaw-agent/src/prompt_assembly.rs:estimated_tokens:1",
+        "credential:crates/thinclaw-agent/src/runtime_behavior.rs:estimated_tokens:1",
+        "credential:crates/thinclaw-app/src/setup.rs:bluebubbles_password:1",
+        "credential:crates/thinclaw-app/src/setup.rs:discord_bot_token:1",
+        "credential:crates/thinclaw-app/src/setup.rs:gateway_auth_token:1",
+        "credential:crates/thinclaw-app/src/setup.rs:slack_app_token:1",
+        "credential:crates/thinclaw-app/src/setup.rs:slack_bot_token:1",
+        "credential:crates/thinclaw-channels/src/discord.rs:bot_token:1",
+        "credential:crates/thinclaw-channels/src/gmail_wiring.rs:client_secret:1",
+        "credential:crates/thinclaw-channels/src/gmail_wiring.rs:oauth_token:1",
+        "credential:crates/thinclaw-channels/src/gmail_wiring.rs:refresh_token:1",
+        "credential:crates/thinclaw-channels/src/http.rs:webhook_secret:1",
+        "credential:crates/thinclaw-channels/src/native_lifecycle.rs:apns_registration_secret:1",
+        "credential:crates/thinclaw-channels/src/native_lifecycle.rs:browser_push_secret:1",
+        "credential:crates/thinclaw-channels/src/native_lifecycle.rs:matrix_secret:1",
+        "credential:crates/thinclaw-channels/src/native_lifecycle.rs:voice_call_secret:1",
+        "credential:crates/thinclaw-channels/src/native_lifecycle_clients.rs:access_token:1",
+        "credential:crates/thinclaw-channels/src/native_lifecycle_clients.rs:vapid_private_key_pem:1",
+        "credential:crates/thinclaw-channels/src/native_lifecycle_clients.rs:webhook_secret:1",
+        "credential:crates/thinclaw-channels/src/wasm/capabilities.rs:require_secret:1",
+        "credential:crates/thinclaw-channels/src/wasm/router.rs:require_secret:1",
+        "credential:crates/thinclaw-channels/src/wasm/router.rs:signature_secret:1",
+        "credential:crates/thinclaw-channels/src/wasm/router.rs:verify_token_param:1",
+        "credential:crates/thinclaw-channels/src/wasm/router.rs:verify_token_secret:1",
+        "credential:crates/thinclaw-channels/src/wasm/schema.rs:require_secret:1",
+        "credential:crates/thinclaw-channels/src/wasm/schema.rs:required_secrets:1",
+        "credential:crates/thinclaw-channels/src/wasm/schema.rs:verify_token_param:1",
+        "credential:crates/thinclaw-channels/src/wasm/schema.rs:verify_token_secret_name:1",
+        "credential:crates/thinclaw-config/src/agent.rs:budget_tokens:1",
+        "credential:crates/thinclaw-config/src/agent.rs:thinking_budget_tokens:1",
+        "credential:crates/thinclaw-config/src/channel_config.rs:app_token:1",
+        "credential:crates/thinclaw-config/src/channel_config.rs:auth_token:1",
+        "credential:crates/thinclaw-config/src/channel_config.rs:bot_token:1",
+        "credential:crates/thinclaw-config/src/channel_config.rs:bot_token:2",
+        "credential:crates/thinclaw-config/src/channel_config.rs:bot_token:3",
+        "credential:crates/thinclaw-config/src/channel_config.rs:client_secret:1",
+        "credential:crates/thinclaw-config/src/channel_config.rs:oauth_token:1",
+        "credential:crates/thinclaw-config/src/channel_config.rs:refresh_token:1",
+        "credential:crates/thinclaw-config/src/channel_config.rs:webhook_secret:1",
+        "credential:crates/thinclaw-config/src/comfyui.rs:cloud_api_key_secret:1",
+        "credential:crates/thinclaw-config/src/database.rs:libsql_auth_token:1",
+        "credential:crates/thinclaw-config/src/embeddings.rs:openai_api_key:1",
+        "credential:crates/thinclaw-config/src/llm.rs:max_tokens:1",
+        "credential:crates/thinclaw-config/src/llm.rs:proxy_api_key:1",
+        "credential:crates/thinclaw-config/src/model_compat.rs:max_output_tokens:1",
+        "credential:crates/thinclaw-config/src/repo_projects.rs:private_key_secret:1",
+        "credential:crates/thinclaw-config/src/repo_projects.rs:webhook_secret_secret:1",
+        "credential:crates/thinclaw-config/src/routines.rs:max_lightweight_tokens:1",
+        "credential:crates/thinclaw-config/src/skills.rs:max_context_tokens:1",
+        "credential:crates/thinclaw-config/src/tunnel.rs:auth_token:1",
+        "credential:crates/thinclaw-context/src/read_audit.rs:estimated_tokens:1",
+        "credential:crates/thinclaw-context/src/read_audit.rs:max_rule_tokens:1",
+        "credential:crates/thinclaw-gateway/src/web/chat.rs:awaiting_token:1",
+        "credential:crates/thinclaw-gateway/src/web/devices/types.rs:apns_token:1",
+        "credential:crates/thinclaw-gateway/src/web/devices/types.rs:device_token:1",
+        "credential:crates/thinclaw-gateway/src/web/devices/types.rs:live_activity_start_token:1",
+        "credential:crates/thinclaw-gateway/src/web/devices/types.rs:push_token:1",
+        "credential:crates/thinclaw-gateway/src/web/devices/types.rs:push_token:2",
+        "credential:crates/thinclaw-gateway/src/web/devices/types.rs:push_token:3",
+        "credential:crates/thinclaw-gateway/src/web/extensions.rs:awaiting_token:1",
+        "credential:crates/thinclaw-gateway/src/web/openai_compat.rs:completion_tokens:1",
+        "credential:crates/thinclaw-gateway/src/web/openai_compat.rs:max_tokens:1",
+        "credential:crates/thinclaw-gateway/src/web/openai_compat.rs:prompt_tokens:1",
+        "credential:crates/thinclaw-gateway/src/web/openai_compat.rs:total_tokens:1",
+        "credential:crates/thinclaw-gateway/src/web/ports.rs:input_tokens:1",
+        "credential:crates/thinclaw-gateway/src/web/ports.rs:output_tokens:1",
+        "credential:crates/thinclaw-gateway/src/web/status.rs:invalid_private_key:1",
+        "credential:crates/thinclaw-gateway/src/web/status.rs:oauth_token:1",
+        "credential:crates/thinclaw-gateway/src/web/types/common.rs:awaiting_token:1",
+        "credential:crates/thinclaw-gateway/src/web/types/status.rs:input_tokens:1",
+        "credential:crates/thinclaw-gateway/src/web/types/status.rs:invalid_private_key:1",
+        "credential:crates/thinclaw-gateway/src/web/types/status.rs:needs_private_key:1",
+        "credential:crates/thinclaw-gateway/src/web/types/status.rs:output_tokens:1",
+        "credential:crates/thinclaw-history/src/records.rs:input_tokens:1",
+        "credential:crates/thinclaw-history/src/records.rs:output_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:compiled_estimated_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:context_window_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:estimated_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:history_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:original_estimated_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:output_reserve_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:prompt_cap_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/prompt_contract.rs:tool_schema_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/provider.rs:exact_tokens_supported:1",
+        "credential:crates/thinclaw-llm-core/src/provider.rs:exact_tokens_supported:2",
+        "credential:crates/thinclaw-llm-core/src/provider.rs:input_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/provider.rs:input_tokens:2",
+        "credential:crates/thinclaw-llm-core/src/provider.rs:max_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/provider.rs:max_tokens:2",
+        "credential:crates/thinclaw-llm-core/src/provider.rs:output_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/provider.rs:output_tokens:2",
+        "credential:crates/thinclaw-llm-core/src/routing_policy.rs:estimated_input_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/routing_policy.rs:max_context_tokens:1",
+        "credential:crates/thinclaw-llm-core/src/turn_analysis.rs:estimated_tokens:1",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_output_tokens:1",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_output_tokens:2",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_output_tokens:3",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_output_tokens:4",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_token_ids:1",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_token_ids:2",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_token_ids:3",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:captured_token_ids:4",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:exact_tokens_supported:1",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:input_tokens:1",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:input_tokens:2",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:input_tokens:3",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:output_tokens:1",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:output_tokens:2",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:output_tokens:3",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:total_input_tokens:1",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:total_input_tokens:2",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:total_output_tokens:1",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:total_output_tokens:2",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:unknown_token_count_requests:1",
+        "credential:crates/thinclaw-llm/src/cost_tracker.rs:unknown_token_count_requests:2",
+        "credential:crates/thinclaw-llm/src/gemini.rs:candidates_token_count:1",
+        "credential:crates/thinclaw-llm/src/gemini.rs:max_output_tokens:1",
+        "credential:crates/thinclaw-llm/src/gemini.rs:max_output_tokens:2",
+        "credential:crates/thinclaw-llm/src/gemini.rs:prompt_token_count:1",
+        "credential:crates/thinclaw-llm/src/route_planner.rs:max_context_tokens:1",
+        "credential:crates/thinclaw-runtime-contracts/src/direct.rs:completion_tokens:1",
+        "credential:crates/thinclaw-runtime-contracts/src/direct.rs:prompt_tokens:1",
+        "credential:crates/thinclaw-runtime-contracts/src/direct.rs:total_tokens:1",
+        "credential:crates/thinclaw-runtime-contracts/src/model.rs:max_output_tokens:1",
+        "credential:crates/thinclaw-secrets/src/types.rs:rotated_secrets:1",
+        "credential:crates/thinclaw-settings/src/agent.rs:thinking_budget_tokens:1",
+        "credential:crates/thinclaw-settings/src/channels.rs:bluebubbles_password:1",
+        "credential:crates/thinclaw-settings/src/channels.rs:discord_bot_token:1",
+        "credential:crates/thinclaw-settings/src/channels.rs:gateway_auth_token:1",
+        "credential:crates/thinclaw-settings/src/channels.rs:slack_app_token:1",
+        "credential:crates/thinclaw-settings/src/channels.rs:slack_bot_token:1",
+        "credential:crates/thinclaw-settings/src/comfyui.rs:cloud_api_key_secret:1",
+        "credential:crates/thinclaw-settings/src/prompt.rs:context_window_tokens:1",
+        "credential:crates/thinclaw-settings/src/prompt.rs:max_total_tokens:1",
+        "credential:crates/thinclaw-settings/src/prompt.rs:output_reserve_tokens:1",
+        "credential:crates/thinclaw-settings/src/prompt.rs:project_context_max_tokens:1",
+        "credential:crates/thinclaw-settings/src/providers.rs:provider_credential_modes:1",
+        "credential:crates/thinclaw-settings/src/providers.rs:resolved_provider_api_keys:1",
+        "credential:crates/thinclaw-settings/src/repo_projects.rs:private_key_secret:1",
+        "credential:crates/thinclaw-settings/src/repo_projects.rs:webhook_secret_secret:1",
+        "credential:crates/thinclaw-settings/src/tunnel.rs:cf_token:1",
+        "credential:crates/thinclaw-settings/src/tunnel.rs:ngrok_token:1",
+        "credential:crates/thinclaw-tools-core/src/mcp.rs:max_tokens:1",
+        "credential:crates/thinclaw-tools-core/src/mcp.rs:progress_token:1",
+        "credential:crates/thinclaw-tools/src/builtin/skill/list.rs:max_context_tokens:1",
+        "credential:crates/thinclaw-tools/src/mcp/auth.rs:access_token:1",
+        "credential:crates/thinclaw-tools/src/mcp/auth.rs:client_secret:1",
+        "credential:crates/thinclaw-tools/src/mcp/auth.rs:client_secret_expires_at:1",
+        "credential:crates/thinclaw-tools/src/mcp/auth.rs:refresh_token:1",
+        "credential:crates/thinclaw-tools/src/mcp/auth.rs:registration_access_token:1",
+        "credential:crates/thinclaw-tools/src/wasm/capabilities_schema.rs:access_token_field:1",
+        "credential:crates/thinclaw-tools/src/wasm/capabilities_schema.rs:client_secret:1",
+        "credential:crates/thinclaw-tools/src/wasm/capabilities_schema.rs:client_secret_env:1",
+        "credential:crates/thinclaw-tools/src/wasm/oauth.rs:access_token:1",
+        "credential:crates/thinclaw-tools/src/wasm/oauth.rs:client_secret:1",
+        "credential:crates/thinclaw-tools/src/wasm/oauth.rs:client_secret:2",
+        "credential:crates/thinclaw-tools/src/wasm/oauth.rs:client_secret:3",
+        "credential:crates/thinclaw-tools/src/wasm/oauth.rs:refresh_token:1",
+        "credential:crates/thinclaw-tools/src/wasm/storage.rs:allowed_secrets:1",
+        "credential:crates/thinclaw-types/src/job.rs:budget_token:1",
+        "credential:crates/thinclaw-types/src/job.rs:max_tokens:1",
+        "credential:crates/thinclaw-types/src/job.rs:total_tokens_used:1",
+        "credential:crates/thinclaw-types/src/setup.rs:required_secrets:1",
+        "credential:src/agent/agent_loop/mod.rs:latest_token_captures:1",
+        "credential:src/agent/dispatcher/test_support.rs:max_tokens:1",
+        "credential:src/agent/dispatcher/types.rs:max_output_tokens:1",
+        "credential:src/api/repo_projects/mod.rs:github_fork_token_secret_present:1",
+        "credential:src/api/repo_projects/mod.rs:github_token_secret_present:1",
+        "credential:src/api/repo_projects/mod.rs:private_key_secret:1",
+        "credential:src/api/repo_projects/mod.rs:private_key_secret:2",
+        "credential:src/api/repo_projects/mod.rs:private_key_secret_present:1",
+        "credential:src/api/repo_projects/mod.rs:webhook_secret_present:1",
+        "credential:src/api/repo_projects/mod.rs:webhook_secret_secret:1",
+        "credential:src/api/repo_projects/mod.rs:webhook_secret_secret:2",
+        "credential:src/app.rs:oauth_credential_sync:1",
+        "credential:src/channels/wasm/mod.rs:require_secret:1",
+        "credential:src/channels/wasm/mod.rs:signature_secret:1",
+        "credential:src/channels/wasm/mod.rs:verify_token_param:1",
+        "credential:src/channels/wasm/mod.rs:verify_token_secret:1",
+        "credential:src/cli/oauth_defaults.rs:client_secret:1",
+        "credential:src/context/post_compaction.rs:estimated_tokens:1",
+        "credential:src/context/post_compaction.rs:max_tokens:1",
+        "credential:src/desktop_autonomy/types.rs:one_time_login_secret:1",
+        "credential:src/desktop_autonomy/types.rs:one_time_login_secret:2",
+        "credential:src/extensions/mod.rs:awaiting_token:1",
+        "credential:src/llm/bedrock.rs:input_tokens:1",
+        "credential:src/llm/bedrock.rs:max_tokens:1",
+        "credential:src/llm/bedrock.rs:max_tokens:2",
+        "credential:src/llm/bedrock.rs:output_tokens:1",
+        "credential:src/llm/embeddings.rs:max_tokens:1",
+        "credential:src/llm/llama_cpp.rs:max_tokens:1",
+        "credential:src/llm/llm_hooks.rs:input_tokens:1",
+        "credential:src/llm/llm_hooks.rs:output_tokens:1",
+        "credential:src/llm/reasoning.rs:estimated_tokens:1",
+        "credential:src/llm/reasoning.rs:input_tokens:1",
+        "credential:src/llm/reasoning.rs:max_output_tokens:1",
+        "credential:src/llm/reasoning.rs:output_tokens:1",
+        "credential:src/orchestrator/job_manager.rs:claude_code_api_key:1",
+        "credential:src/orchestrator/job_manager.rs:claude_code_oauth_token:1",
+        "credential:src/orchestrator/job_manager.rs:codex_code_api_key:1",
+        "credential:src/platform/gateway_access.rs:auth_token:1",
+        "credential:src/setup/channels/telegram.rs:webhook_secret:1",
+        "credential:src/skills/mod.rs:max_context_tokens:1",
+        "credential:src/worker/api.rs:input_tokens:1",
+        "credential:src/worker/api.rs:input_tokens:2",
+        "credential:src/worker/api.rs:max_tokens:1",
+        "credential:src/worker/api.rs:max_tokens:2",
+        "credential:src/worker/api.rs:output_tokens:1",
+        "credential:src/worker/api.rs:output_tokens:2"
+      ],
+      "proof_id": "CLI-credential-lifecycle-contract",
+      "target": "cli_safety_contract",
+      "test": "credential_consumer_lifecycles_are_complete_and_secret_safe"
+    }
+  ],
+  "schema_version": 1
+}

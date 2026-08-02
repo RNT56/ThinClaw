@@ -335,8 +335,7 @@ mod tests {
     async fn kill_shared_terminates_child() {
         let proc = new_shared_process();
 
-        let mut command =
-            thinclaw_platform::tokio_process_command!("src.tunnel.mod.tokio.101", "sleep");
+        let mut command = tokio::process::Command::new("sleep");
         command
             .arg("30")
             .stdout(std::process::Stdio::null())

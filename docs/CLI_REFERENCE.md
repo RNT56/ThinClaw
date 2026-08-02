@@ -157,8 +157,11 @@ for configuration, local/cloud mode, and workflow security details.
 
 For build-time auditing, `cargo run --locked --example export-cli-surface`
 emits deterministic JSON containing generated root help, shell completions, the
-executable slash registry, and the exact 124-entry static tool catalog for the
-selected feature profile. Dynamic MCP/WASM/user/native capability state is runtime-owned and is
+executable slash registry, all canonical leaf mutation policies, the 10-section
+setup/27-step migration map, the channel catalog, and the exact 124-entry static
+tool catalog for the selected feature profile. The checked CLI proof manifest
+maps those entities plus all process launches and credential consumers to exact
+discoverable tests without wildcard claims. Dynamic MCP/WASM/user/native capability state is runtime-owned and is
 therefore reported only by `status --live` or `/tools` at a sealed numeric
 revision.
 

@@ -57,6 +57,8 @@ pub struct TuiCapabilitySnapshot {
 
 #[derive(Debug, Clone)]
 pub struct TuiBootstrap {
+    pub principal_id: String,
+    pub actor_id: String,
     pub agent_id: String,
     pub agent_name: String,
     pub model: String,
@@ -450,6 +452,8 @@ impl Channel for TuiChannel {
         let shutdown_notify = Arc::clone(&self.shutdown_notify);
         let history = self.history.clone();
         let update_tx = self.update_tx.clone();
+        let principal_id = self.bootstrap.principal_id.clone();
+        let actor_id = self.bootstrap.actor_id.clone();
         let handle = tokio::spawn(async move {
             let mut sent_shutdown = false;
             loop {
@@ -518,9 +522,9 @@ impl Channel for TuiChannel {
 
                 if msg_tx
                     .send(
-                        IncomingMessage::new("tui", "default", content)
+                        IncomingMessage::new("tui", &principal_id, content)
                             .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
-                            .with_actor_identity("default", "default"),
+                            .with_actor_identity(&principal_id, &actor_id),
                     )
                     .await
                     .is_err()
@@ -532,9 +536,9 @@ impl Channel for TuiChannel {
             if !sent_shutdown {
                 let _ = msg_tx
                     .send(
-                        IncomingMessage::new("tui", "default", "/quit")
+                        IncomingMessage::new("tui", &principal_id, "/quit")
                             .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
-                            .with_actor_identity("default", "default"),
+                            .with_actor_identity(&principal_id, &actor_id),
                     )
                     .await;
             }
@@ -628,4 +632,69 @@ fn format_response_with_attachments(response: &OutgoingResponse) -> String {
         ));
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_stream::StreamExt as _;
+
+    struct MessageRuntime;
+
+    impl TuiRuntime for MessageRuntime {
+        fn start(
+            &self,
+            _bootstrap: TuiBootstrap,
+            outgoing_tx: mpsc::Sender<TuiEvent>,
+            _incoming_rx: mpsc::Receiver<TuiUpdate>,
+        ) -> JoinHandle<()> {
+            tokio::spawn(async move {
+                outgoing_tx
+                    .send(TuiEvent::UserMessage("hello".to_string()))
+                    .await
+                    .expect("send user message");
+            })
+        }
+    }
+
+    fn bootstrap() -> TuiBootstrap {
+        TuiBootstrap {
+            principal_id: "principal-a".to_string(),
+            actor_id: "actor-a".to_string(),
+            agent_id: "agent-a".to_string(),
+            agent_name: "Agent".to_string(),
+            model: "model".to_string(),
+            provider: "provider".to_string(),
+            workspace: None,
+            profile: "test".to_string(),
+            gateway_origin: None,
+            history: TuiHistoryPage {
+                conversation_id: String::new(),
+                messages: Vec::new(),
+                before_cursor: None,
+                has_more: false,
+            },
+            capabilities: TuiCapabilitySnapshot {
+                revision: 1,
+                sealed: true,
+                identities: Vec::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn outgoing_messages_preserve_bootstrap_principal_and_actor() {
+        let channel = TuiChannel::new(Arc::new(MessageRuntime), bootstrap(), None);
+        let mut stream = channel.start().await.expect("start TUI channel");
+        let message = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("message timeout")
+            .expect("message");
+        let identity = message.resolved_identity();
+        assert_eq!(message.user_id, "principal-a");
+        assert_eq!(identity.principal_id, "principal-a");
+        assert_eq!(identity.actor_id, "actor-a");
+        assert_eq!(message.content, "hello");
+        channel.shutdown().await.expect("shutdown TUI channel");
+    }
 }

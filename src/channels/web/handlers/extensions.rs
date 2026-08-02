@@ -192,13 +192,43 @@ pub(crate) async fn extensions_activate_handler(
         .and_then(|request| request.kind)
         .map(|kind| parse_activation_kind(&kind))
         .transpose()?;
+    let fingerprint = blake3::hash(
+        format!(
+            "activation-v1\0{name}\0{}\0{}",
+            kind.map(|kind| kind.to_string()).unwrap_or_default(),
+            expected_runtime_revision
+                .map(|revision| revision.to_string())
+                .unwrap_or_default()
+        )
+        .as_bytes(),
+    )
+    .to_hex()
+    .to_string();
     let registry = state
         .tool_registry
         .as_ref()
         .ok_or_else(tool_registry_unavailable_error)?;
+    let _mutation_guard = ext_mgr.activation_mutation_guard().await;
+    match ext_mgr.activation_receipt(request_id, &fingerprint) {
+        Ok(Some(response)) => return Ok(Json(response)),
+        Err(message) => {
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "error": "request_id_conflict",
+                "message": message,
+                "request_id": request_id,
+                "name": name,
+                "kind": kind,
+                "capability_revision": registry.registry_snapshot().revision,
+                "activated_identities": [],
+                "readiness": "unchanged"
+            })));
+        }
+        Ok(None) => {}
+    }
     let before = registry.registry_snapshot();
     if expected_runtime_revision.is_some_and(|expected| expected != before.revision) {
-        return Ok(Json(serde_json::json!({
+        let response = serde_json::json!({
             "success": false,
             "error": "runtime_revision_conflict",
             "message": format!(
@@ -208,13 +238,16 @@ pub(crate) async fn extensions_activate_handler(
             ),
             "name": name,
             "kind": kind,
+            "request_id": request_id,
             "capability_revision": before.revision,
             "activated_identities": [],
             "readiness": "unchanged"
-        })));
+        });
+        ext_mgr.record_activation_receipt(request_id, fingerprint, response.clone());
+        return Ok(Json(response));
     }
 
-    match ext_mgr.activate_kind(&name, kind).await {
+    let response = match ext_mgr.activate_kind(&name, kind).await {
         Ok(result) => {
             let mut snapshot = registry.registry_snapshot();
             if result.tools_loaded.is_empty() {
@@ -246,7 +279,7 @@ pub(crate) async fn extensions_activate_handler(
                     "restart the owned runtime and verify /api/capabilities/tools".to_string(),
                 );
             }
-            Ok(Json(serde_json::json!({
+            serde_json::json!({
                 "success": coherent,
                 "message": result.message,
                 "name": result.name,
@@ -255,9 +288,9 @@ pub(crate) async fn extensions_activate_handler(
                 "capability_revision": snapshot.revision,
                 "readiness": if coherent { "active" } else { "restart_required" },
                 "mutation_receipt": receipt,
-            })))
+            })
         }
-        Err(error) => Ok(Json(serde_json::json!({
+        Err(error) => serde_json::json!({
             "success": false,
             "message": error.to_string(),
             "name": name,
@@ -266,8 +299,10 @@ pub(crate) async fn extensions_activate_handler(
             "readiness": "inactive",
             "capability_revision": before.revision,
             "request_id": request_id,
-        }))),
-    }
+        }),
+    };
+    ext_mgr.record_activation_receipt(request_id, fingerprint, response.clone());
+    Ok(Json(response))
 }
 
 fn parse_activation_kind(
