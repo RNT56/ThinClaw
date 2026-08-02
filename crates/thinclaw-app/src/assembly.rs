@@ -634,7 +634,7 @@ mod tests {
         });
 
         assert!(!plan.signal);
-        assert!(plan.gateway);
-        assert!(plan.wasm_channels);
+        assert!(!plan.gateway);
+        assert!(!plan.wasm_channels);
     }
 }

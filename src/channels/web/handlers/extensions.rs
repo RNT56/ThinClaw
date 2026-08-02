@@ -119,6 +119,19 @@ pub(crate) async fn extensions_tools_handler(
     Ok(Json(tool_list_response_from_inputs(tools)))
 }
 
+/// Return the exact atomically published registry population. This endpoint is
+/// the shared source for terminal status, slash surfaces, and remote desktop
+/// clients; consumers must replace snapshots by revision, never merge them.
+pub(crate) async fn capability_tools_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<crate::tools::RegistrySnapshot>, (StatusCode, String)> {
+    let registry = state
+        .tool_registry
+        .as_ref()
+        .ok_or_else(tool_registry_unavailable_error)?;
+    Ok(Json(registry.registry_snapshot()))
+}
+
 pub(crate) async fn extensions_install_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<InstallExtensionRequest>,
@@ -166,27 +179,93 @@ pub(crate) async fn extensions_activate_handler(
         .extension_manager
         .as_ref()
         .ok_or_else(extension_manager_unavailable_error)?;
+    let request = request.map(|Json(request)| request);
+    let request_id = request
+        .as_ref()
+        .map(|request| request.request_id)
+        .filter(|request_id| !request_id.is_nil())
+        .unwrap_or_else(uuid::Uuid::new_v4);
+    let expected_runtime_revision = request
+        .as_ref()
+        .and_then(|request| request.expected_runtime_revision);
     let kind = request
-        .and_then(|Json(request)| request.kind)
+        .and_then(|request| request.kind)
         .map(|kind| parse_activation_kind(&kind))
         .transpose()?;
+    let registry = state
+        .tool_registry
+        .as_ref()
+        .ok_or_else(tool_registry_unavailable_error)?;
+    let before = registry.registry_snapshot();
+    if expected_runtime_revision.is_some_and(|expected| expected != before.revision) {
+        return Ok(Json(serde_json::json!({
+            "success": false,
+            "error": "runtime_revision_conflict",
+            "message": format!(
+                "expected runtime capability revision {}, current revision is {}",
+                expected_runtime_revision.unwrap_or_default(),
+                before.revision
+            ),
+            "name": name,
+            "kind": kind,
+            "capability_revision": before.revision,
+            "activated_identities": [],
+            "readiness": "unchanged"
+        })));
+    }
 
     match ext_mgr.activate_kind(&name, kind).await {
-        Ok(result) => Ok(Json(serde_json::json!({
-            "success": true,
-            "message": result.message,
-            "name": result.name,
-            "kind": result.kind,
-            "activated_identities": result.tools_loaded,
-            "readiness": "active"
-        }))),
+        Ok(result) => {
+            let mut snapshot = registry.registry_snapshot();
+            if result.tools_loaded.is_empty() {
+                snapshot = registry.advance_capability_revision();
+            }
+            let identities_match = result.tools_loaded.iter().all(|name| {
+                snapshot
+                    .identities
+                    .iter()
+                    .any(|identity| &identity.name == name)
+            });
+            let coherent = snapshot.sealed && identities_match;
+            let mut receipt = thinclaw_types::MutationReceipt::applied_live(
+                request_id,
+                "extensions",
+                result.name.clone(),
+                snapshot.revision,
+            );
+            if !coherent {
+                receipt.application = thinclaw_types::MutationApplication::RestartRequired;
+                receipt.partial = true;
+                receipt.restart_reasons = vec![if !snapshot.sealed {
+                    "runtime registry is not sealed".to_string()
+                } else {
+                    "activated identities are absent from the published registry revision"
+                        .to_string()
+                }];
+                receipt.recovery = Some(
+                    "restart the owned runtime and verify /api/capabilities/tools".to_string(),
+                );
+            }
+            Ok(Json(serde_json::json!({
+                "success": coherent,
+                "message": result.message,
+                "name": result.name,
+                "kind": result.kind,
+                "activated_identities": result.tools_loaded,
+                "capability_revision": snapshot.revision,
+                "readiness": if coherent { "active" } else { "restart_required" },
+                "mutation_receipt": receipt,
+            })))
+        }
         Err(error) => Ok(Json(serde_json::json!({
             "success": false,
             "message": error.to_string(),
             "name": name,
             "kind": kind,
             "activated_identities": [],
-            "readiness": "inactive"
+            "readiness": "inactive",
+            "capability_revision": before.revision,
+            "request_id": request_id,
         }))),
     }
 }

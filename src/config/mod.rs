@@ -230,7 +230,12 @@ impl Config {
     /// Build config from explicit settings in tests without mutating process env.
     #[cfg(test)]
     pub(crate) async fn from_test_settings(settings: &Settings) -> Result<Self, ConfigError> {
-        Self::build(settings, false).await
+        let mut settings = settings.clone();
+        // Unit tests must not probe or unlock the host OS credential store.
+        // SecretsConfig has focused tests for each source; general config
+        // fixtures use an explicitly disabled source for determinism.
+        settings.secrets.master_key_source = crate::settings::SecretsMasterKeySource::None;
+        Self::build(&settings, false).await
     }
 
     /// Load from env with an optional TOML config file overlay.

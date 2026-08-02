@@ -129,6 +129,10 @@ pub struct RegistrySearchQuery {
 #[derive(Debug, Default, Deserialize)]
 pub struct ExtensionActivateRequest {
     pub kind: Option<String>,
+    #[serde(default = "Uuid::new_v4")]
+    pub request_id: Uuid,
+    /// Compare-and-swap guard over the complete runtime tool registry.
+    pub expected_runtime_revision: Option<u64>,
 }
 
 /// ID-only request for binding an encrypted secret source to the Nostr key slot.

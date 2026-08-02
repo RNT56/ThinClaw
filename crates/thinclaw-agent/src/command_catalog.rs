@@ -26,8 +26,8 @@ fn help_section_for(name: &str) -> HelpSection {
     match name {
         "/help" | "/status" | "/context" | "/model" | "/rollback" | "/rewind" | "/version"
         | "/tools" | "/debug" | "/ping" => HelpSection::System,
-        "/undo" | "/redo" | "/compress" | "/clear" | "/interrupt" | "/new" | "/thread new"
-        | "/thread <id>" | "/resume <id>" | "/plan" => HelpSection::Session,
+        "/undo" | "/redo" | "/compress" | "/clear" | "/interrupt" | "/new" | "/thread"
+        | "/resume" | "/plan" | "/job" => HelpSection::Session,
         "/identity" | "/personality" | "/skin" => HelpSection::Identity,
         "/memory" | "/heartbeat" | "/summarize" | "/suggest" => HelpSection::Memory,
         "/skills" => HelpSection::Skills,
@@ -50,14 +50,18 @@ fn help_label(spec: &CommandSpec) -> &'static str {
         "/plan" => "/plan [on|off]",
         "/personality" => "/personality [name]",
         "/skin" => "/skin [name]",
+        "/tools" => "/tools [NAME] [--all]",
+        "/thread" => "/thread new|<id>",
+        "/resume" => "/resume <id>",
+        "/job" => "/job create|list|status|cancel|help ...",
         other => other,
     }
 }
 
 fn help_entries_for(section: HelpSection) -> Vec<(&'static str, &'static str)> {
     let mut out: Vec<(&'static str, &'static str)> = command_registry::help_entries()
-        .filter(|spec| help_section_for(spec.name) == section)
-        .map(|spec| (help_label(spec), spec.help_text))
+        .filter(|spec| help_section_for(spec.name) == section && spec.agent_message.is_supported())
+        .map(|spec| (help_label(spec), spec.help))
         .collect();
 
     // `/context detail` is a usage variant of `/context`, not its own
@@ -583,68 +587,45 @@ pub fn context_sources_text(sections: &[ContextSourceSection], detail: bool) -> 
 }
 
 pub fn tui_help_text() -> String {
-    format!(
-        "━━━ Agent cockpit controls ━━━\n\n\
-{}\n\n\
-{}\n\n\
-{}\n\n\
-{}\n\n\
-Local TUI:\n\
-  /back, /close          Close the active drawer or modal\n\
-  /top, /bottom          Jump to oldest/newest activity\n\
-  /cls                   Clear the visible log\n\
-  /exit, /quit           Leave the TUI\n\n\
-━━━ Movement ━━━\n\n\
-  Enter                  Send a message\n\
-  Ctrl+C                 Abort active run, press twice to exit\n\
-  Ctrl+L                 Clear the screen\n\
-  Up/Down                Browse input history\n\
-  PageUp/Down            Scroll the conversation\n\
-  Tab                    Autocomplete commands\n\
-  Home/End               Jump to start/end of input",
-        render_section("Shared system", &help_entries_for(HelpSection::System)),
-        render_section("Shared session", &help_entries_for(HelpSection::Session)),
-        render_section(
-            "Shared memory & growth",
-            &help_entries_for(HelpSection::Memory)
-        ),
-        render_section("Shared identity, skills, and agent", &{
-            let mut combined = help_entries_for(HelpSection::Identity);
-            combined.extend(help_entries_for(HelpSection::Skills));
-            combined.extend(help_entries_for(HelpSection::Agent));
-            combined
-        }),
-    )
+    let mut lines = vec!["━━━ Agent cockpit controls ━━━".to_string(), String::new()];
+    for spec in command_registry::COMMAND_REGISTRY.iter().filter(|spec| {
+        matches!(
+            spec.visibility,
+            command_registry::CommandVisibility::Common
+                | command_registry::CommandVisibility::Expert
+        ) && spec.tui.is_supported()
+    }) {
+        lines.push(format!("  {:<31} {}", help_label(spec), spec.help));
+    }
+    lines.extend([
+        String::new(),
+        "━━━ Movement ━━━".to_string(),
+        String::new(),
+        "  Enter                          Send a message".to_string(),
+        "  Ctrl+C                         Abort active run, press twice to exit".to_string(),
+        "  Ctrl+L                         Clear the screen".to_string(),
+        "  Up/Down                        Browse durable input history".to_string(),
+        "  PageUp/Down                    Load/scroll durable conversation history".to_string(),
+        "  Tab                            Autocomplete supported commands".to_string(),
+        "  Home/End                       Jump to start/end of input".to_string(),
+    ]);
+    lines.join("\n")
 }
-
-/// TUI-local commands that never appear in the shared submission-parser
-/// vocabulary (they are handled entirely inside the TUI, e.g. job shortcuts
-/// or view controls), plus the `/thread` and `/resume` prefix tokens which
-/// the registry only tracks as usage-hint help labels
-/// (`/thread new`, `/thread <id>`, `/resume <id>`).
-const TUI_ONLY_FORWARDED: &[&str] = &["/job", "/cancel", "/list", "/thread", "/resume"];
-
-const TUI_ONLY_AUTOCOMPLETE: &[&str] = &[
-    "/back", "/close", "/dismiss", "/top", "/bottom", "/reset", "/job", "/cancel", "/list",
-    "/thread", "/resume", "/cls",
-];
 
 pub fn tui_forwarded_commands() -> &'static [&'static str] {
     static COMMANDS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
     COMMANDS.get_or_init(|| {
-        let mut names: Vec<&'static str> = command_registry::forwarded_names().collect();
-        names.extend_from_slice(TUI_ONLY_FORWARDED);
-        names
+        command_registry::COMMAND_REGISTRY
+            .iter()
+            .filter(|spec| matches!(spec.tui, command_registry::SurfaceRoute::Forward(_)))
+            .flat_map(command_registry::CommandSpec::all_names)
+            .collect()
     })
 }
 
 pub fn tui_autocomplete_commands() -> &'static [&'static str] {
     static COMMANDS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
-    COMMANDS.get_or_init(|| {
-        let mut names: Vec<&'static str> = command_registry::autocomplete_names().collect();
-        names.extend_from_slice(TUI_ONLY_AUTOCOMPLETE);
-        names
-    })
+    COMMANDS.get_or_init(|| command_registry::autocomplete_names(|spec| spec.tui).collect())
 }
 
 #[cfg(test)]
@@ -670,14 +651,19 @@ mod tests {
         let autocomplete = tui_autocomplete_commands();
 
         for spec in command_registry::COMMAND_REGISTRY {
-            if spec.tui_forwarded {
+            if matches!(spec.tui, command_registry::SurfaceRoute::Forward(_)) {
                 assert!(
                     forwarded.contains(&spec.name),
                     "{:?} is flagged tui_forwarded but missing from tui_forwarded_commands()",
                     spec.name
                 );
             }
-            if spec.tui_autocomplete {
+            if !matches!(
+                spec.visibility,
+                command_registry::CommandVisibility::Hidden
+                    | command_registry::CommandVisibility::Removed
+            ) && spec.tui.is_supported()
+            {
                 assert!(
                     autocomplete.contains(&spec.name),
                     "{:?} is flagged tui_autocomplete but missing from tui_autocomplete_commands()",
@@ -694,8 +680,8 @@ mod tests {
                 .iter()
                 .find(|spec| spec.name == "/skin")
                 .unwrap()
-                .tui_handler_strategy(),
-            command_registry::TuiHandlerStrategy::Local
+                .tui,
+            command_registry::SurfaceRoute::Local(command_registry::LocalCommand::Skin)
         );
     }
 

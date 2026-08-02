@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use secrecy::SecretString;
+
 use crate::config::Config;
 use crate::llm::provider::{CompletionRequest, ToolCompletionRequest};
 use crate::llm::routing_policy::RoutingRule;
@@ -21,9 +23,28 @@ async fn advisor_executor_test_config() -> Config {
     };
     settings.secrets.master_key_source = SecretsMasterKeySource::None;
 
-    Config::from_test_settings(&settings)
+    let mut config = Config::from_test_settings(&settings)
         .await
-        .expect("config should load without touching the OS keychain")
+        .expect("config should load without touching the OS keychain");
+    config.llm = crate::config::LlmConfig {
+        backend: crate::config::LlmBackend::OpenAiCompatible,
+        openai: None,
+        anthropic: None,
+        ollama: None,
+        openai_compatible: Some(crate::config::OpenAiCompatibleConfig {
+            base_url: "http://localhost:12345/v1".to_string(),
+            api_key: Some(SecretString::from("test-openai-compatible-key")),
+            api_keys: Vec::new(),
+            model: "gpt-5.4".to_string(),
+            extra_headers: Vec::new(),
+        }),
+        tinfoil: None,
+        gemini: None,
+        bedrock: None,
+        llama_cpp: None,
+        reliability: crate::config::ReliabilityConfig::default(),
+    };
+    config
 }
 
 #[test]

@@ -1294,6 +1294,7 @@ pub async fn start_server(
         // Extensions
         .route("/api/extensions", get(extensions_list_handler))
         .route("/api/extensions/tools", get(extensions_tools_handler))
+        .route("/api/capabilities/tools", get(capability_tools_handler))
         .route("/api/extensions/registry", get(extensions_registry_handler))
         .route("/api/extensions/install", post(extensions_install_handler))
         .route(

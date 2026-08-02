@@ -1126,7 +1126,9 @@ mod tests {
                     "event_type": "message",
                     "data": {"content": "hello"},
                     "created_at": "2026-06-02T00:00:00+00:00"
-                }]
+                }],
+                "next_after": 7,
+                "has_more": false
             })
         );
     }

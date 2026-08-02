@@ -146,12 +146,6 @@ impl AcpConnectionState {
         self.core.tool_call_started(session_id, name).await
     }
 
-    async fn tool_call_update_id(&self, session_id: &str, name: &str, complete: bool) -> String {
-        self.core
-            .tool_call_update_id(session_id, name, complete)
-            .await
-    }
-
     async fn insert_pending_permission(&self, pending: PendingPermission) {
         self.core.insert_pending_permission(pending).await;
     }
@@ -1762,7 +1756,7 @@ async fn status_to_acp_messages(
         }
         StatusUpdate::ToolCompleted {
             invocation_id,
-            name,
+            name: _,
             success,
             result_preview,
             ..

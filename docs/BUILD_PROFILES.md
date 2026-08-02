@@ -67,7 +67,7 @@ cargo build --release --no-default-features --features edge --bin thinclaw
 ### `light` (default)
 
 **Included:** everything in `edge` plus PostgreSQL, local WASM runtime,
-HTML-to-Markdown, document extraction (PDF/DOCX), timezones, the Docker sandbox
+HTML-to-Markdown, document extraction (PDF/DOCX), the Docker sandbox
 runtime (`docker-sandbox`), the settings-gated mDNS advertiser (`mdns`), and the
 optional gateway TLS listener (`gateway-tls`).
 
@@ -86,10 +86,10 @@ thinclaw
 
 ### `full`
 
-Everything in `light` **plus**: ACP integration, the `web-gateway`
-compatibility flag, REPL/TUI mode (interactive terminal with boot screen),
-tunnel providers (Tailscale/Cloudflare), browser automation (Chromium-based),
-and Nostr protocol integration. (The Docker sandbox — container isolation for
+Everything in `light` **plus**: ACP integration, tunnel providers
+(Tailscale/Cloudflare), browser automation (Chromium-based), and Nostr protocol
+integration. REPL/TUI and the local web gateway are base surfaces in every host
+profile; they are not enabled by compatibility feature flags. (The Docker sandbox — container isolation for
 untrusted code — is already in `light`; `full` lists it explicitly but inherits
 it either way.)
 
@@ -118,7 +118,7 @@ cargo run --features full
 > caveat is about the desktop app surface, not the feature flag.
 
 Minimal footprint for ThinClaw Desktop embedding. Includes libSQL (no
-PostgreSQL), HTML-to-Markdown, document extraction, and REPL mode.
+PostgreSQL), HTML-to-Markdown, and document extraction.
 
 ```bash
 cargo build --release --features desktop --bin thinclaw
@@ -219,13 +219,13 @@ rm -rf "$tmp"
 | `wasm-runtime` | Local WASM extension runtime | wasmtime, wasmtime-wasi, wasmparser |
 | `html-to-markdown` | Web page → markdown conversion | html-to-markdown-rs, readabilityrs |
 | `document-extraction` | PDF/DOCX/PPTX/XLSX text extraction | pdf-extract, zip |
-| `timezones` | Timezone handling via chrono-tz | chrono-tz |
-| `web-gateway` | Compatibility flag for the always-available local HTTP web UI + API server | (uses axum, already a base dep) |
+| `timezones` | Deprecated empty compatibility alias; timezone support is base code | none |
+| `web-gateway` | Deprecated empty compatibility alias; the local HTTP web UI + API server is base code | none |
 | `gateway-tls` | Optional rustls TLS listener for the gateway, self-signed cert pinned via SPKI fingerprint (`docs/MOBILE_SECURITY.md` D-X1); policy via `GATEWAY_TLS=off\|auto\|on` (default `auto`), port via `GATEWAY_TLS_PORT` (default 3443) | axum-server, rcgen, if-addrs |
 | `mdns` | Optional mDNS/Bonjour LAN discovery responder advertising the gateway on `_thinclaw._tcp` (milestone B3, `docs/MOBILE_SECURITY.md` D-X3 — a locator only). Default-off; advertises only when `discovery.enabled = true` in settings **or** `MDNS_ENABLED` is set. TXT record carries non-sensitive hints (`version`, `api`, `name`, and `fp` = base64url(sha256(instance-id))) — never tokens/secrets/paths. Included in `light`/`full`; excluded from `edge`/`desktop`. Pure-Rust, no Avahi/Bonjour daemon | mdns-sd |
 | `openapi` (crate feature of `thinclaw-gateway`) | utoipa schema derives for the gateway's v1 mobile contract; always enabled by the root package, which serves `/api/openapi.json` and ships the `export-openapi` bin (`generate`/`check` against `clients/openapi/thinclaw-gateway.openapi.json`) | utoipa |
 | `acp` | ACP integration surface | (no extra system deps) |
-| `repl` | Interactive REPL mode + boot screen | (no extra deps) |
+| `repl` | Deprecated empty compatibility alias; REPL/TUI are base surfaces | none |
 | `tunnel` | VPN tunnel integration | (uses tailscale binary externally) |
 | `docker-sandbox` | Docker container sandboxing | bollard |
 | `browser` | Chromium-based browser automation | chromiumoxide |
@@ -286,9 +286,10 @@ That onboarding profile writes `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and
 
 ```
 edge     = libsql
-light    = edge + postgres + docker-sandbox + wasm-runtime + html-to-markdown + document-extraction + timezones + gateway-tls + mdns
-desktop  = libsql + html-to-markdown + document-extraction + repl + timezones
-full     = light + acp + web-gateway + repl + tunnel + docker-sandbox + browser + nostr
+light    = edge + postgres + docker-sandbox + wasm-runtime + html-to-markdown + document-extraction + gateway-tls + mdns
+desktop  = libsql + html-to-markdown + document-extraction
+full     = light + acp + tunnel + docker-sandbox + browser + nostr
+compat   = repl | web-gateway | timezones (empty deprecated aliases; not in aggregates)
 voice    = opt-in (headless wake word; also in --all-features) — not in full
 ```
 
@@ -311,7 +312,10 @@ specifically need one of the extras above. On Linux, run
 ## CI/CD
 
 CI runs a **feature-matrix** job that verifies every documented profile compiles,
-passes clippy, and compiles tests:
+passes clippy, compiles tests, and runs the parser/help/slash/static-capability
+contract. Separate mandatory jobs prove byte-identical empty-compatibility
+deltas, adversarial process/setup/registry/TUI behavior, macOS and Windows host
+contracts, and service-backed PostgreSQL parity.
 
 | CI Check | Profiles Tested |
 |----------|----------------|

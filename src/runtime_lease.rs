@@ -47,10 +47,20 @@ impl RuntimeLease {
                 source,
             })?;
         let operation_file = open_operation_lock(&state_dir)?;
-        FileExt::lock_shared(&operation_file).map_err(|source| RuntimeLeaseError::Lock {
-            path: state_dir.clone(),
-            source,
-        })?;
+        match FileExt::try_lock_shared(&operation_file) {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(RuntimeLeaseError::AlreadyRunning {
+                    path: state_dir.clone(),
+                });
+            }
+            Err(TryLockError::Error(source)) => {
+                return Err(RuntimeLeaseError::Lock {
+                    path: state_dir.clone(),
+                    source,
+                });
+            }
+        }
         std::fs::create_dir_all(&state_dir).map_err(|source| RuntimeLeaseError::Prepare {
             path: state_dir.clone(),
             source,

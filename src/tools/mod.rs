@@ -29,7 +29,10 @@ pub use builder::{
     TestCase, TestHarness, TestResult, TestSuite, ValidationError, ValidationResult, WasmValidator,
 };
 pub use rate_limiter::RateLimiter;
-pub use registry::ToolRegistry;
+pub use registry::{
+    RegistrationConflict, RegistrationOutcome, RegistrationRequest, RegistrySealError,
+    RegistrySnapshot, ToolOrigin, ToolRegistry,
+};
 pub use tool::{
     ApprovalRequirement, Tool, ToolApprovalClass, ToolArtifact, ToolDescriptor, ToolDomain,
     ToolError, ToolExecutionLane, ToolMetadata, ToolOutput, ToolProfile, ToolRateLimitConfig,

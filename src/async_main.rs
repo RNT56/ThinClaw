@@ -622,12 +622,11 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             }
         }
         Some(LocalRuntimeChannel::Tui) => {
-            channels.add(Box::new(TuiChannel::new())).await;
             channel_names.push("tui".to_string());
-            tracing::info!("Full-screen TUI mode enabled");
+            tracing::info!("Full-screen TUI mode selected; startup waits for the sealed registry");
         }
         Some(LocalRuntimeChannel::Repl) => {
-            let repl = ReplChannel::new();
+            let repl = ReplChannel::new().with_tool_registry(Arc::clone(&components.tools));
             repl.suppress_banner();
             channels.add(Box::new(repl)).await;
             channel_names.push("repl".to_string());
@@ -1146,33 +1145,6 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         None
     };
 
-    // Register job tools (sandbox deps auto-injected when container_job_manager is available)
-    #[cfg(feature = "docker-sandbox")]
-    components.tools.register_job_tools(
-        Arc::clone(&shared_context_manager),
-        container_job_manager.clone(),
-        shared_db.clone(),
-        None,
-        job_event_tx.clone(),
-        Some(inject_sender.clone()),
-        shared_prompt_queue.clone(),
-        sandbox_children.clone(),
-        shared_secrets_store.clone(),
-    );
-
-    #[cfg(not(feature = "docker-sandbox"))]
-    components.tools.register_job_tools(
-        Arc::clone(&shared_context_manager),
-        None,
-        shared_db.clone(),
-        None,
-        job_event_tx.clone(),
-        Some(inject_sender.clone()),
-        None,
-        None,
-        shared_secrets_store.clone(),
-    );
-
     // ── Gateway channel ────────────────────────────────────────────────
 
     let mut gateway_url: Option<String> = None;
@@ -1280,8 +1252,6 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         }
 
         let gateway_origin = format!("http://{}:{}/", gw_config.host, gw_config.port);
-        thinclaw::tui::set_runtime_gateway_url_override(Some(gateway_origin.clone()));
-
         gateway_url = Some(gateway_origin);
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
@@ -1344,7 +1314,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             },
             db_connected: !runtime_args.no_db,
             tool_count: boot_tool_count,
-            gateway_url,
+            gateway_url: gateway_url.clone(),
             embeddings_enabled: config.embeddings.enabled,
             embeddings_provider: if config.embeddings.enabled {
                 Some(config.embeddings.provider.clone())
@@ -1767,6 +1737,32 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     let shutdown_tools = Arc::clone(&components.tools);
 
     let restart_requested = Arc::new(AtomicBool::new(false));
+    let tui_bootstrap_inputs = if matches!(
+        entrypoint_plan.local_channel,
+        Some(LocalRuntimeChannel::Tui)
+    ) {
+        Some((
+            components
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.agent_id())
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "main".to_string()),
+            config.agent.name.clone(),
+            components.llm.active_model_name(),
+            config.llm.backend.to_string(),
+            components
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.user_id().to_string()),
+            "server".to_string(),
+            gateway_url.clone(),
+            shared_db.clone(),
+            Arc::clone(&components.tools),
+        ))
+    } else {
+        None
+    };
     // Shared cell the agent loop writes the repo project supervisor into, so the
     // gateway's GitHub webhook handlers can wake it once it is built.
     let repo_project_supervisor_slot = gateway_state
@@ -1841,6 +1837,37 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         None,
         shared_secrets_store.clone(),
     );
+
+    if let Some((
+        agent_id,
+        agent_name,
+        model,
+        provider,
+        workspace,
+        profile,
+        gateway_origin,
+        store,
+        tools,
+    )) = tui_bootstrap_inputs
+    {
+        agent
+            .channels()
+            .add(Box::new(
+                TuiChannel::new(
+                    agent_id,
+                    agent_name,
+                    model,
+                    provider,
+                    workspace,
+                    profile,
+                    gateway_origin,
+                    store,
+                    tools,
+                )
+                .await,
+            ))
+            .await;
+    }
 
     if let Some(ref gw_state) = gateway_state {
         *gw_state.scheduler.write().await = Some(Arc::clone(agent.scheduler()));

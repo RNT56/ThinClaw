@@ -102,10 +102,8 @@ impl TuiApp {
 
     fn render_chat(&mut self, frame: &mut Frame, area: Rect) {
         let wrap = Wrap { trim: false };
-        let line_count = {
-            let chat_text = self.build_chat_text();
-            wrapped_text_rows(&chat_text, area.width.saturating_sub(2))
-        };
+        let chat_text = sanitize_terminal_text(self.build_chat_text());
+        let line_count = wrapped_text_rows(&chat_text, area.width.saturating_sub(2));
         self.total_chat_lines = line_count;
 
         let visible_height = area.height.saturating_sub(2);
@@ -113,7 +111,7 @@ impl TuiApp {
             self.scroll_offset = self.total_chat_lines.saturating_sub(visible_height);
         }
 
-        let chat = Paragraph::new(self.build_chat_text())
+        let chat = Paragraph::new(chat_text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -499,6 +497,38 @@ impl TuiApp {
 
         Text::from(lines)
     }
+}
+
+/// Strip every terminal control byte from dynamic transcript content while
+/// preserving ordinary newlines/tabs as harmless layout characters. In
+/// particular this removes ESC, BEL, C1 controls, and therefore ANSI/OSC/DCS
+/// introducers before crossterm ever sees them.
+pub(super) fn sanitize_terminal_text(text: Text<'_>) -> Text<'static> {
+    Text::from(
+        text.lines
+            .into_iter()
+            .map(|line| {
+                Line::from(
+                    line.spans
+                        .into_iter()
+                        .map(|span| {
+                            let safe = span
+                                .content
+                                .chars()
+                                .filter(|character| {
+                                    *character == '\n'
+                                        || *character == '\t'
+                                        || (!character.is_control()
+                                            && !matches!(*character as u32, 0x80..=0x9f))
+                                })
+                                .collect::<String>();
+                            Span::styled(safe, span.style)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn wrapped_text_rows(text: &Text<'_>, width: u16) -> u16 {

@@ -77,6 +77,7 @@ to inject through a running web runtime.
   - `remove <ID>`: Remove a WASM tool.
   - `info <NAME_OR_PATH>`: Inspect an installed tool or WASM artifact.
   - `auth <NAME>`: Start the tool's supported local authentication flow.
+- `thinclaw extensions activate <NAME> [--kind mcp-server|wasm-tool|wasm-channel|native-plugin]`: Ask the running runtime to activate an exact extension identity. The response includes the complete capability revision and mutation receipt; a stopped runtime fails without constructing a temporary manager.
 - `thinclaw extensions registry`: Browse and install extensions from the ThinClaw registry.
 - `thinclaw extensions skills`: Inspect, audit, install, update, publish, remove, reload, and assign trust to runtime skills; manage catalogs with `taps`.
 - `thinclaw extensions mcp`: Manage Model Context Protocol (MCP) servers. Grouped into five subcommand families:
@@ -145,7 +146,7 @@ for configuration, local/cloud mode, and workflow security details.
 - `thinclaw runtime logs`: Query, tail, and filter system logs.
 - `thinclaw doctor --readiness-profile <PROFILE>`: Run the complete bounded diagnostic report. Required failures exit `3`.
 - `thinclaw status [--readiness-profile <PROFILE>] [--live]`: Show the fast static capability snapshot, or opt into bounded live probes.
-- `thinclaw status tools [NAME] [--all] [--match <GLOB>]`: Inspect independently filtered compiled, configured, registered, dependency, exposure, approval, and health facts. Shared status flags parse on either side of `tools`.
+- `thinclaw status tools [NAME] [--all] [--match <GLOB>]`: Inspect independently filtered compiled, configured, registered, dependency, exposure, approval, and health facts. Add `--live` to consume the running runtime's sealed tool-registry revision. Unknown/not-probed facts remain distinct from false or unavailable facts. Shared status flags parse on either side of `tools`.
 - `thinclaw runtime service`: Manage the OS background service through launchd, systemd, or the Windows Service Control Manager.
   - `install`: Install ThinClaw as a system service.
   - `start`: Start the background service.
@@ -153,6 +154,13 @@ for configuration, local/cloud mode, and workflow security details.
   - `status`: Show service-manager status.
   - `uninstall`: Remove the installed service.
 - `thinclaw completion --shell <SHELL>`: Generate shell completion scripts.
+
+For build-time auditing, `cargo run --locked --example export-cli-surface`
+emits deterministic JSON containing generated root help, shell completions, the
+executable slash registry, and the exact 124-entry static tool catalog for the
+selected feature profile. Dynamic MCP/WASM/user/native capability state is runtime-owned and is
+therefore reported only by `status --live` or `/tools` at a sealed numeric
+revision.
 
 ## Browser Automation
 

@@ -143,6 +143,7 @@ impl ExtensionManager {
 
     pub(super) async fn unregister_mcp_tools_unlocked(&self, name: &str) -> Vec<String> {
         let prefix = McpClient::registered_tool_prefix(name);
+        let source_id = format!("mcp/{name}");
         let names = self
             .tool_registry
             .list()
@@ -150,8 +151,17 @@ impl ExtensionManager {
             .into_iter()
             .filter(|tool_name| tool_name.starts_with(&prefix))
             .collect::<Vec<_>>();
-        for tool_name in &names {
-            self.tool_registry.unregister(tool_name).await;
+        if let Err(conflict) = self.tool_registry.reconcile_source(
+            crate::tools::ToolOrigin::Mcp,
+            &source_id,
+            Vec::new(),
+        ) {
+            tracing::warn!(
+                server = name,
+                identity = conflict.name,
+                reason = conflict.reason,
+                "Could not atomically remove MCP registry source"
+            );
         }
         names
     }
@@ -652,33 +662,28 @@ impl ExtensionManager {
             .map(|t| McpClient::registered_tool_name(name, &t.name))
             .collect();
 
-        let prefix = McpClient::registered_tool_prefix(name);
-        let desired = tool_names
-            .iter()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
-        let stale_tools = self
-            .tool_registry
-            .list()
-            .await
+        let source_id = format!("mcp/{name}");
+        let requests = tool_impls
             .into_iter()
-            .filter(|tool_name| tool_name.starts_with(&prefix) && !desired.contains(tool_name))
-            .collect::<Vec<_>>();
-
-        for tool in tool_impls {
-            let tool_name = tool.name().to_string();
-            if !self.tool_registry.register(tool).await {
-                self.discard_mcp_client_unlocked(name).await;
-                self.unregister_mcp_tools_unlocked(name).await;
-                return Err(ExtensionError::ActivationFailed(format!(
-                    "MCP tool '{tool_name}' conflicts with a protected built-in tool name"
-                )));
-            }
+            .map(|tool| {
+                crate::tools::RegistrationRequest::new(
+                    tool,
+                    crate::tools::ToolOrigin::Mcp,
+                    source_id.clone(),
+                )
+                .replacing()
+            })
+            .collect();
+        if let Err(conflict) =
+            self.tool_registry
+                .reconcile_source(crate::tools::ToolOrigin::Mcp, &source_id, requests)
+        {
+            self.discard_mcp_client_unlocked(name).await;
+            return Err(ExtensionError::ActivationFailed(format!(
+                "MCP activation conflicts at '{}': {}",
+                conflict.name, conflict.reason
+            )));
         }
-        for tool_name in stale_tools {
-            self.tool_registry.unregister(&tool_name).await;
-        }
-
         tracing::info!(
             "Activated MCP server '{}' with {} tools",
             name,

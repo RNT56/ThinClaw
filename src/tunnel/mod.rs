@@ -209,7 +209,6 @@ pub fn create_tunnel(config: &TunnelProviderConfig) -> Result<Option<Box<dyn Tun
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::process::Command;
 
     fn assert_tunnel_err(cfg: &TunnelProviderConfig, needle: &str) {
         match create_tunnel(cfg) {

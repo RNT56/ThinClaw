@@ -258,7 +258,7 @@ where
 
         for name in removed {
             tracing::info!(tool = %name, "WASM tool source deleted, unregistering");
-            registry.unregister(&name).await;
+            registry.unregister_wasm(&name).await;
             known_guard.remove(&name);
         }
 

@@ -418,6 +418,10 @@ path = "src/bin/thinclaw-shell-scan.rs"
 name = "export-openapi"
 path = "src/bin/export-openapi.rs"
 
+[[example]]
+name = "export-cli-surface"
+path = "examples/export-cli-surface.rs"
+
 [[bench]]
 name = "safety_sanitize"
 harness = false

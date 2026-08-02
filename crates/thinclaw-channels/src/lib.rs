@@ -68,4 +68,8 @@ pub use nostr::NostrChannel;
 pub use nostr_runtime::{NostrConfig, NostrDmProtocol, NostrInboundDm, NostrRuntime};
 pub use signal::{SignalChannel, SignalConfig};
 pub use thinclaw_channels_core::*;
-pub use tui::{TuiChannel, TuiEvent, TuiRuntime, TuiUpdate};
+pub use tui::{
+    TUI_HISTORY_MAX_PAGE_SIZE, TUI_HISTORY_PAGE_SIZE, TuiBootstrap, TuiCapabilityIdentity,
+    TuiCapabilitySnapshot, TuiChannel, TuiEvent, TuiHistoryMessage, TuiHistoryPage, TuiHistoryPort,
+    TuiRuntime, TuiUpdate,
+};

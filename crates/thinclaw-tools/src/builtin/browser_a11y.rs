@@ -10,8 +10,6 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use regex::Regex;
-use tokio::process::Command;
-
 use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 use thinclaw_types::JobContext;
 

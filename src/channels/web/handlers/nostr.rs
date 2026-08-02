@@ -75,13 +75,13 @@ pub(crate) async fn reconcile_nostr_runtime(
     }
 
     if let Some(tool_registry) = state.tool_registry.as_ref() {
-        let _ = tool_registry.unregister(NOSTR_TOOL_NAME).await;
+        let _ = tool_registry
+            .unregister_static(NOSTR_TOOL_NAME, crate::tools::ToolOrigin::Channel)
+            .await;
         if let Some(runtime) = next_runtime {
-            tool_registry
-                .register(Arc::new(crate::tools::builtin::NostrActionsTool::new(
-                    runtime,
-                )))
-                .await;
+            tool_registry.register_sync(Arc::new(crate::tools::builtin::NostrActionsTool::new(
+                runtime,
+            )));
         }
     }
 

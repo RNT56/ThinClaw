@@ -437,7 +437,8 @@ mod tests {
         assert!(detected.is_some());
         let detected = detected.unwrap();
         assert_eq!(detected.extension_name, "telegram");
-        assert!(detected.instructions.contains("Telegram Bot API"));
+        assert!(detected.instructions.contains("local secure CLI"));
+        assert!(!detected.instructions.contains("Telegram Bot API token"));
         assert_eq!(detected.auth_mode, PendingAuthMode::SecretSource);
     }
 
@@ -482,7 +483,10 @@ mod tests {
         .to_string());
 
         let detected = check_auth_required("tool_auth", &result).unwrap();
-        assert_eq!(detected.instructions, "Please provide your API token/key.");
+        assert_eq!(
+            detected.instructions,
+            "Create or bind a credential source through the local secure CLI; credentials cannot be sent through chat."
+        );
     }
 
     #[test]
@@ -500,7 +504,8 @@ mod tests {
         assert!(detected.is_some());
         let detected = detected.unwrap();
         assert_eq!(detected.extension_name, "slack");
-        assert!(detected.instructions.contains("Slack Bot"));
+        assert!(detected.instructions.contains("local secure CLI"));
+        assert!(!detected.instructions.contains("Slack Bot token"));
     }
 
     #[test]

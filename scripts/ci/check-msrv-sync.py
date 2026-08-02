@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import re
 import subprocess
+from typing import Optional
 
 
 root = Path(__file__).resolve().parents[2]
@@ -67,7 +68,7 @@ for workflow in sorted((root / ".github" / "workflows").glob("*.y*ml")):
             continue
 
         uses_indent = len(line) - len(line.lstrip())
-        with_indent: int | None = None
+        with_indent: Optional[int] = None
         has_toolchain_input = False
         for candidate in workflow_lines[index + 1 :]:
             stripped = candidate.lstrip()

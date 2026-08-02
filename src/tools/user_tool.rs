@@ -21,7 +21,6 @@ pub use thinclaw_tools::user_tool::{
 use crate::config::SafetyConfig;
 use crate::context::JobContext;
 use crate::secrets::SecretsStore;
-use crate::tools::ToolRegistry;
 use crate::tools::builtin::ShellTool;
 use crate::tools::execution::HostMediatedToolInvoker;
 use crate::tools::tool::{
@@ -31,6 +30,7 @@ use crate::tools::tool::{
 use crate::tools::wasm::WasmToolRuntime;
 #[cfg(feature = "wasm-runtime")]
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime};
+use crate::tools::{RegistrationRequest, ToolOrigin, ToolRegistry};
 
 #[derive(Debug)]
 pub struct ShellCommandTool {
@@ -306,18 +306,23 @@ impl UserToolRegistrar for RootUserToolRegistrar {
         definition: UserToolDefinition,
         #[cfg_attr(not(feature = "wasm-runtime"), allow(unused_variables))] source_dir: &Path,
     ) -> Result<(), String> {
+        let source_id = format!("user-tool/{}/{}", source_dir.display(), definition.name);
         match definition.kind {
             UserToolKind::Shell => {
                 let name = definition.name.clone();
                 if !self
                     .registry
-                    .register(Arc::new(ShellCommandTool::new(
-                        definition,
-                        self.base_dir.clone(),
-                        self.working_dir.clone(),
-                        self.safety.as_ref(),
-                    )))
-                    .await
+                    .register_request(RegistrationRequest::new(
+                        Arc::new(ShellCommandTool::new(
+                            definition,
+                            self.base_dir.clone(),
+                            self.working_dir.clone(),
+                            self.safety.as_ref(),
+                        )),
+                        ToolOrigin::UserTool,
+                        source_id,
+                    ))
+                    .accepted()
                 {
                     return Err(format!(
                         "user tool '{name}' conflicts with a protected built-in tool name"
@@ -368,7 +373,15 @@ impl UserToolRegistrar for RootUserToolRegistrar {
                     target.execution_timeout(),
                 )?;
                 let name = proxy.name().to_string();
-                if !self.registry.register(Arc::new(proxy)).await {
+                if !self
+                    .registry
+                    .register_request(RegistrationRequest::new(
+                        Arc::new(proxy),
+                        ToolOrigin::UserTool,
+                        source_id,
+                    ))
+                    .accepted()
+                {
                     return Err(format!(
                         "user tool '{name}' conflicts with a protected built-in tool name"
                     ));

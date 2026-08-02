@@ -6,6 +6,7 @@
 //! order, and compensates every setup-owned write it can make.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(feature = "libsql")]
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,7 +33,7 @@ struct ApplyRollback {
     os_keys_before: Vec<(String, Option<String>)>,
     created_files: Vec<PathBuf>,
     created_dirs: Vec<PathBuf>,
-    created_images: Vec<String>,
+    images_before: Vec<(String, Option<String>)>,
 }
 
 impl SetupWizard {
@@ -254,10 +255,10 @@ impl SetupWizard {
         }
 
         #[cfg(feature = "libsql")]
-        if self.settings.database_backend.as_deref() == Some("libsql") {
-            if let Some(path) = self.settings.libsql_path.as_deref() {
-                hash_file_if_present(&mut hasher, Path::new(path))?;
-            }
+        if self.settings.database_backend.as_deref() == Some("libsql")
+            && let Some(path) = self.settings.libsql_path.as_deref()
+        {
+            hash_file_if_present(&mut hasher, Path::new(path))?;
         }
         Ok(hasher.finalize().to_hex().to_string())
     }
@@ -306,6 +307,11 @@ impl SetupWizard {
                 Err(error) => return Err(SetupError::Io(error)),
             },
         );
+        if rollback.env_before.as_ref().is_some_and(Option::is_none)
+            && let Some(parent) = env_path.parent()
+        {
+            record_missing_directories(rollback, parent);
+        }
 
         #[cfg(feature = "libsql")]
         if self.settings.database_backend.as_deref() == Some("libsql")
@@ -320,10 +326,8 @@ impl SetupWizard {
                 rollback
                     .created_files
                     .push(PathBuf::from(format!("{}-shm", path.display())));
-                if let Some(parent) = path.parent()
-                    && !parent.exists()
-                {
-                    rollback.created_dirs.push(parent.to_path_buf());
+                if let Some(parent) = path.parent() {
+                    record_missing_directories(rollback, parent);
                 }
             }
         }
@@ -630,9 +634,7 @@ impl SetupWizard {
         let tools_dir = crate::platform::state_paths().tools_dir;
         let channels_dir = crate::platform::state_paths().channels_dir;
         for dir in [&tools_dir, &channels_dir] {
-            if !dir.exists() {
-                rollback.created_dirs.push(dir.clone());
-            }
+            record_missing_directories(rollback, dir);
         }
         for action in &self.pending_actions {
             match action {
@@ -670,6 +672,30 @@ impl SetupWizard {
                         .extend(after.difference(&before).cloned());
                 }
                 PendingSetupAction::BuildWorkerImage { image } => {
+                    let mut inspect = thinclaw_platform::tokio_process_command!(
+                        "src.setup.wizard.transaction.docker_inspect",
+                        "docker"
+                    );
+                    inspect.args(["image", "inspect", "--format", "{{.Id}}", image]);
+                    let previous_image_id = match thinclaw_platform::bounded_command_output(
+                        &mut inspect,
+                        Duration::from_secs(30),
+                        16 * 1024,
+                        16 * 1024,
+                    )
+                    .await
+                    {
+                        Ok(output) if output.status.success() => {
+                            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                                .filter(|value| !value.is_empty())
+                        }
+                        Ok(_) => None,
+                        Err(error) => {
+                            return Err(SetupError::Config(format!(
+                                "failed to inspect worker image before build: {error}"
+                            )));
+                        }
+                    };
                     let mut command = thinclaw_platform::tokio_process_command!(
                         "src.setup.wizard.transaction.docker_build",
                         "docker"
@@ -693,7 +719,9 @@ impl SetupWizard {
                             "worker image build failed with status {status}"
                         )));
                     }
-                    rollback.created_images.push(image.clone());
+                    rollback
+                        .images_before
+                        .push((image.clone(), previous_image_id));
                 }
             }
         }
@@ -769,42 +797,6 @@ impl SetupWizard {
     async fn rollback_setup(&mut self, rollback: &mut ApplyRollback) -> Vec<String> {
         let mut errors = Vec::new();
 
-        for image in rollback.created_images.iter().rev() {
-            let mut command = thinclaw_platform::tokio_process_command!(
-                "src.setup.wizard.transaction.docker_rollback",
-                "docker"
-            );
-            command.args(["image", "rm", image]);
-            match thinclaw_platform::bounded_command_output(
-                &mut command,
-                Duration::from_secs(60),
-                64 * 1024,
-                64 * 1024,
-            )
-            .await
-            {
-                Ok(output) if output.status.success() => {}
-                Ok(_) => errors.push(format!("could not remove worker image '{image}'")),
-                Err(error) => {
-                    errors.push(format!("could not remove worker image '{image}': {error}"))
-                }
-            }
-        }
-        for path in rollback.created_files.iter().rev() {
-            if let Err(error) = std::fs::remove_file(path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    errors.push(format!("could not remove {}: {error}", path.display()));
-                }
-            }
-        }
-        for path in rollback.created_dirs.iter().rev() {
-            if let Err(error) = std::fs::remove_dir(path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    errors.push(format!("could not remove {}: {error}", path.display()));
-                }
-            }
-        }
-
         if let Some(crypto) = self.secrets_crypto.clone() {
             match self.persistent_secrets_store(crypto).await {
                 Ok(Some(store)) => {
@@ -872,6 +864,67 @@ impl SetupWizard {
                 errors.push(format!("could not restore {}: {error}", path.display()));
             }
         }
+
+        // Logical state is restored while its backend still exists. Only then
+        // remove artifacts created by this Apply attempt.
+        for (image, previous_image_id) in rollback.images_before.iter().rev() {
+            let mut command = thinclaw_platform::tokio_process_command!(
+                "src.setup.wizard.transaction.docker_rollback",
+                "docker"
+            );
+            command.args(["image", "rm", image]);
+            match thinclaw_platform::bounded_command_output(
+                &mut command,
+                Duration::from_secs(60),
+                64 * 1024,
+                64 * 1024,
+            )
+            .await
+            {
+                Ok(output) if output.status.success() => {}
+                Ok(_) => errors.push(format!("could not remove worker image '{image}'")),
+                Err(error) => {
+                    errors.push(format!("could not remove worker image '{image}': {error}"))
+                }
+            }
+            if let Some(previous_image_id) = previous_image_id {
+                let mut command = thinclaw_platform::tokio_process_command!(
+                    "src.setup.wizard.transaction.docker_restore_tag",
+                    "docker"
+                );
+                command.args(["image", "tag", previous_image_id, image]);
+                match thinclaw_platform::bounded_command_output(
+                    &mut command,
+                    Duration::from_secs(30),
+                    16 * 1024,
+                    16 * 1024,
+                )
+                .await
+                {
+                    Ok(output) if output.status.success() => {}
+                    Ok(_) => errors.push(format!(
+                        "could not restore previous worker image tag '{image}'"
+                    )),
+                    Err(error) => errors.push(format!(
+                        "could not restore previous worker image tag '{image}': {error}"
+                    )),
+                }
+            }
+        }
+        for path in rollback.created_files.iter().rev() {
+            if let Err(error) = std::fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                errors.push(format!("could not remove {}: {error}", path.display()));
+            }
+        }
+        for path in rollback.created_dirs.iter().rev() {
+            if let Err(error) = std::fs::remove_dir(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                errors.push(format!("could not remove {}: {error}", path.display()));
+            }
+        }
         errors
     }
 }
@@ -899,6 +952,7 @@ pub(super) fn credential_shaped_key(key: &str) -> bool {
     .any(|marker| key.contains(marker))
 }
 
+#[cfg(feature = "postgres")]
 fn hash_settings_map(
     hasher: &mut blake3::Hasher,
     map: &HashMap<String, serde_json::Value>,
@@ -912,6 +966,7 @@ fn hash_settings_map(
     Ok(())
 }
 
+#[cfg(feature = "libsql")]
 fn hash_file_if_present(hasher: &mut blake3::Hasher, path: &Path) -> Result<(), SetupError> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -941,7 +996,7 @@ fn hash_file_if_present(hasher: &mut blake3::Hasher, path: &Path) -> Result<(), 
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, SetupError> {
-    if value.len() % 2 != 0 || value.is_empty() {
+    if !value.len().is_multiple_of(2) || value.is_empty() {
         return Err(SetupError::Config("invalid staged master key".to_string()));
     }
     value
@@ -971,6 +1026,24 @@ fn directory_files(path: &Path) -> Result<HashSet<PathBuf>, SetupError> {
     Ok(files)
 }
 
+fn record_missing_directories(rollback: &mut ApplyRollback, leaf: &Path) {
+    let mut missing = Vec::new();
+    let mut current = Some(leaf);
+    while let Some(path) = current {
+        if path.exists() {
+            break;
+        }
+        missing.push(path.to_path_buf());
+        current = path.parent();
+    }
+    missing.reverse();
+    for path in missing {
+        if !rollback.created_dirs.contains(&path) {
+            rollback.created_dirs.push(path);
+        }
+    }
+}
+
 fn default_database_backend() -> String {
     if cfg!(feature = "libsql") {
         "libsql".to_string()
@@ -998,5 +1071,40 @@ fn action_label(action: &SetupAction) -> String {
             format!("external action via {host}: {purpose}")
         }
         SetupAction::MarkSetupCompleted => "mark setup completed".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_directory_rollback_tracks_ancestors_parent_first_without_duplicates() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let first_leaf = root.path().join("setup").join("extensions");
+        let second_leaf = root.path().join("setup").join("database");
+        let mut rollback = ApplyRollback::default();
+
+        record_missing_directories(&mut rollback, &first_leaf);
+        record_missing_directories(&mut rollback, &second_leaf);
+        record_missing_directories(&mut rollback, &first_leaf);
+
+        assert_eq!(
+            rollback.created_dirs,
+            vec![root.path().join("setup"), first_leaf, second_leaf,]
+        );
+    }
+
+    #[test]
+    fn missing_directory_rollback_stops_at_existing_parent() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let existing = root.path().join("existing");
+        std::fs::create_dir(&existing).expect("create existing parent");
+        let leaf = existing.join("nested").join("leaf");
+        let mut rollback = ApplyRollback::default();
+
+        record_missing_directories(&mut rollback, &leaf);
+
+        assert_eq!(rollback.created_dirs, vec![existing.join("nested"), leaf]);
     }
 }

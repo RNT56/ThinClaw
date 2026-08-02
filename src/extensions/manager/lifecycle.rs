@@ -551,7 +551,13 @@ impl ExtensionManager {
                     .map_err(|error| ExtensionError::Other(error.to_string()))?;
 
                 // Unregister from tool registry
-                self.tool_registry.unregister(name).await;
+                self.tool_registry
+                    .unregister_owned(
+                        name,
+                        crate::tools::ToolOrigin::Wasm,
+                        &format!("wasm/{name}"),
+                    )
+                    .await;
 
                 // Unregister hooks registered from this plugin source.
                 let removed_hooks = self

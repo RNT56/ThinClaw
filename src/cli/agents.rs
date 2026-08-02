@@ -228,7 +228,7 @@ async fn execute(
     }
 }
 
-fn optional_clear<'a>(value: Option<&'a str>, clear: bool) -> Option<Option<&'a str>> {
+fn optional_clear(value: Option<&str>, clear: bool) -> Option<Option<&str>> {
     if clear { Some(None) } else { value.map(Some) }
 }
 

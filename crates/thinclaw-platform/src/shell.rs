@@ -45,7 +45,9 @@ impl ShellLauncher {
 
     pub fn prefix_args(self) -> &'static [&'static str] {
         match self.flavor {
-            ShellFlavor::PosixSh => &["-lc"],
+            // Service and diagnostic commands must not execute user login
+            // startup files. They inherit the caller's explicit environment.
+            ShellFlavor::PosixSh => &["-c"],
             ShellFlavor::WindowsCmd => &["/C"],
         }
     }
@@ -79,7 +81,7 @@ mod tests {
     fn launcher_has_expected_prefix_args() {
         let launcher = shell_launcher();
         match launcher.flavor() {
-            ShellFlavor::PosixSh => assert_eq!(launcher.prefix_args(), ["-lc"]),
+            ShellFlavor::PosixSh => assert_eq!(launcher.prefix_args(), ["-c"]),
             ShellFlavor::WindowsCmd => assert_eq!(launcher.prefix_args(), ["/C"]),
         }
     }

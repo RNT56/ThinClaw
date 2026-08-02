@@ -93,19 +93,19 @@ pub fn check_auth_required_json(
             "oauth"
         },
     );
-    let instructions = parsed
-        .get("instructions")
-        .and_then(|v| v.as_str())
-        .unwrap_or(if auth_mode == "oauth" {
-            "Open the browser authentication flow to continue."
-        } else {
-            "Create or bind a credential source through the local secure CLI; credentials cannot be sent through chat."
-        })
-        .to_string();
+    // Tool output is untrusted content. Never let an extension turn its
+    // `instructions` field into a request for credentials in the chat stream.
+    let secret_source = auth_mode == "manual_token" && auth_status == "awaiting_token";
+    let instructions = if secret_source {
+        "Create or bind a credential source through the local secure CLI; credentials cannot be sent through chat."
+    } else {
+        "Complete the external OAuth flow using the local CLI or browser; credentials cannot be sent through chat."
+    }
+    .to_string();
     Some(PendingAuthRequest {
         extension_name: name,
         instructions,
-        auth_mode: if auth_mode == "manual_token" && auth_status == "awaiting_token" {
+        auth_mode: if secret_source {
             PendingAuthMode::SecretSource
         } else {
             PendingAuthMode::ExternalOAuth

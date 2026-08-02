@@ -13,9 +13,8 @@ mod rendering;
 pub mod skin;
 pub mod spinner;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
-use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use crossterm::ExecutableCommand;
@@ -32,19 +31,7 @@ use crate::tui::skin::CliSkin;
 use crate::tui::spinner::KawaiiSpinner;
 pub use thinclaw_channels::tui::{TuiApprovalDecision, TuiEvent, TuiUpdate};
 
-static RUNTIME_GATEWAY_URL_OVERRIDE: RwLock<Option<String>> = RwLock::new(None);
-
-/// Set or clear a runtime-resolved Web UI URL override for the TUI startup card.
-///
-/// Only a credential-free origin is retained. Userinfo, query parameters, and
-/// fragments are discarded before the value can reach terminal-visible output.
-pub fn set_runtime_gateway_url_override(url: Option<String>) {
-    if let Ok(mut guard) = RUNTIME_GATEWAY_URL_OVERRIDE.write() {
-        *guard = url.and_then(|value| credential_free_gateway_url(&value));
-    }
-}
-
-fn credential_free_gateway_url(value: &str) -> Option<String> {
+pub(crate) fn credential_free_gateway_url(value: &str) -> Option<String> {
     let mut parsed = url::Url::parse(value.trim()).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return None;
@@ -55,13 +42,6 @@ fn credential_free_gateway_url(value: &str) -> Option<String> {
     parsed.set_fragment(None);
     parsed.set_path("/");
     Some(parsed.to_string())
-}
-
-fn runtime_gateway_url_override() -> Option<String> {
-    RUNTIME_GATEWAY_URL_OVERRIDE
-        .read()
-        .ok()
-        .and_then(|guard| guard.as_ref().cloned())
 }
 
 /// A message in the chat history for rendering.
@@ -162,6 +142,13 @@ pub struct TuiApp {
     model: String,
     /// Active agent ID.
     agent_id: String,
+    /// Durable direct conversation selected by the runtime.
+    conversation_id: String,
+    history_before_cursor: Option<String>,
+    history_has_more: bool,
+    history_loading: bool,
+    loaded_history_ids: HashSet<String>,
+    capabilities: thinclaw_channels::tui::TuiCapabilitySnapshot,
     /// Active CLI skin.
     skin: CliSkin,
     /// Default skin name captured at startup for reset handling.
@@ -203,6 +190,7 @@ impl TuiApp {
     pub fn new(
         outgoing_tx: mpsc::Sender<TuiEvent>,
         incoming_rx: mpsc::Receiver<TuiUpdate>,
+        bootstrap: thinclaw_channels::tui::TuiBootstrap,
     ) -> Self {
         let settings = Settings::load();
         let default_skin_name = std::env::var("AGENT_CLI_SKIN")
@@ -212,18 +200,34 @@ impl TuiApp {
         let skin = CliSkin::load(&default_skin_name);
         let spinner = KawaiiSpinner::from_skin(&skin, "thinking");
         let textarea = Self::build_textarea(&skin);
+        let loaded_history_ids = bootstrap
+            .history
+            .messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect();
+        let messages = bootstrap
+            .history
+            .messages
+            .iter()
+            .map(history_chat_message)
+            .collect();
+        let startup_message = build_startup_message(&bootstrap);
         Self {
-            messages: Vec::new(),
+            messages,
             textarea,
-            input_history: Vec::new(),
+            input_history: load_input_history(),
             input_history_idx: None,
             pre_history_input: None,
             scroll_offset: 0,
-            model: settings
-                .selected_model
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            agent_id: settings.agent.name.clone(),
+            model: bootstrap.model,
+            agent_id: bootstrap.agent_name,
+            conversation_id: bootstrap.history.conversation_id,
+            history_before_cursor: bootstrap.history.before_cursor,
+            history_has_more: bootstrap.history.has_more,
+            history_loading: false,
+            loaded_history_ids,
+            capabilities: bootstrap.capabilities,
             skin,
             default_skin_name,
             status_text: "Awaiting runtime state".to_string(),
@@ -237,7 +241,7 @@ impl TuiApp {
             outgoing_tx,
             incoming_rx,
             total_chat_lines: 0,
-            startup_message: build_startup_message(&settings),
+            startup_message,
             spinner,
             animation_tick: 0,
             last_activity: Instant::now(),
@@ -260,6 +264,20 @@ impl TuiApp {
     /// Clear the textarea and reset to a single empty line.
     fn clear_textarea(&mut self) {
         self.textarea = Self::build_textarea(&self.skin);
+    }
+
+    fn record_input(&mut self, text: String) {
+        if self.input_history.last() != Some(&text) {
+            self.input_history.push(text);
+        }
+        const MAX_INPUT_HISTORY: usize = 1_000;
+        if self.input_history.len() > MAX_INPUT_HISTORY {
+            self.input_history
+                .drain(..self.input_history.len() - MAX_INPUT_HISTORY);
+        }
+        if let Err(error) = persist_input_history(&self.input_history) {
+            tracing::debug!(%error, "Could not persist TUI input history");
+        }
     }
 
     /// Run the TUI event loop.
@@ -384,7 +402,7 @@ impl TuiApp {
                 if text.trim().is_empty() {
                     return KeyAction::Continue;
                 }
-                self.input_history.push(text.clone());
+                self.record_input(text.clone());
                 self.input_history_idx = None;
                 self.pre_history_input = None;
                 self.clear_textarea();
@@ -403,7 +421,7 @@ impl TuiApp {
                 }
                 // For single-line input or slash commands, Enter submits
                 if self.textarea.lines().len() <= 1 || text.starts_with('/') {
-                    self.input_history.push(text.clone());
+                    self.record_input(text.clone());
                     self.input_history_idx = None;
                     self.pre_history_input = None;
                     self.clear_textarea();
@@ -454,6 +472,24 @@ impl TuiApp {
             // PageUp/PageDown: scroll
             (_, KeyCode::PageUp) => {
                 self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                if self.scroll_offset == 0
+                    && self.history_has_more
+                    && !self.history_loading
+                    && !self.conversation_id.is_empty()
+                {
+                    self.history_loading = true;
+                    let tx = self.outgoing_tx.clone();
+                    let conversation_id = self.conversation_id.clone();
+                    let before_cursor = self.history_before_cursor.clone();
+                    tokio::spawn(async move {
+                        let _ = tx
+                            .send(TuiEvent::LoadOlder {
+                                conversation_id,
+                                before_cursor,
+                            })
+                            .await;
+                    });
+                }
                 KeyAction::Continue
             }
             (_, KeyCode::PageDown) => {
@@ -842,19 +878,83 @@ impl TuiApp {
                     });
                 }
             }
+            TuiUpdate::HistoryPage(page) => {
+                self.history_loading = false;
+                if page.conversation_id != self.conversation_id {
+                    self.push_warning("Ignored history page for a different conversation");
+                    return;
+                }
+                let mut older = Vec::new();
+                for message in &page.messages {
+                    if self.loaded_history_ids.insert(message.id.clone()) {
+                        older.push(history_chat_message(message));
+                    }
+                }
+                let added = older.len() as u16;
+                older.append(&mut self.messages);
+                self.messages = older;
+                self.history_before_cursor = page.before_cursor;
+                self.history_has_more = page.has_more;
+                self.scroll_offset = self.scroll_offset.saturating_add(added);
+            }
+            TuiUpdate::CapabilitySnapshot(snapshot) => {
+                if snapshot.sealed && snapshot.revision > self.capabilities.revision {
+                    self.capabilities = snapshot;
+                    self.runtime_state_seen = true;
+                }
+            }
         }
     }
 
     async fn handle_slash_command(&mut self, cmd: &str) {
-        let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-        let command = parts[0].to_ascii_lowercase();
-        let arg = parts.get(1).copied().unwrap_or("").trim();
+        let trimmed = cmd.trim();
+        if trimmed.eq_ignore_ascii_case("/think") {
+            self.push_warning(
+                "`/think` was removed because it did not control a real reasoning view.",
+            );
+            return;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        let Some(spec) = thinclaw_types::slash_commands::match_surface_command(&lower) else {
+            self.push_warning(format!(
+                "Unknown command: {}. Type /help for available commands.",
+                lower.split_whitespace().next().unwrap_or(&lower)
+            ));
+            return;
+        };
+        let arg = trimmed
+            .split_once(char::is_whitespace)
+            .map(|(_, value)| value.trim())
+            .unwrap_or("");
+        match spec.tui {
+            thinclaw_types::slash_commands::SurfaceRoute::Local(command) => {
+                self.handle_local_command(command, arg).await;
+            }
+            thinclaw_types::slash_commands::SurfaceRoute::Forward(_) => {
+                let _ = self
+                    .outgoing_tx
+                    .send(TuiEvent::UserMessage(trimmed.to_string()))
+                    .await;
+                self.scroll_offset = u16::MAX;
+                self.status_text = format!("Running {}...", spec.name);
+            }
+            thinclaw_types::slash_commands::SurfaceRoute::Unsupported => {
+                self.push_warning(format!("{} is not available in the TUI", spec.name));
+            }
+        }
+    }
 
-        match command.as_str() {
-            "/help" => {
+    async fn handle_local_command(
+        &mut self,
+        command: thinclaw_types::slash_commands::LocalCommand,
+        arg: &str,
+    ) {
+        use thinclaw_types::slash_commands::LocalCommand;
+        match command {
+            LocalCommand::Help => {
                 self.push_system_note(crate::agent::command_catalog::tui_help_text());
             }
-            "/clear" => {
+            LocalCommand::ClearConversation => {
                 self.messages.clear();
                 self.scroll_offset = 0;
                 let _ = self
@@ -862,47 +962,45 @@ impl TuiApp {
                     .send(TuiEvent::UserMessage("/clear".to_string()))
                     .await;
             }
-            "/cls" => {
+            LocalCommand::ClearScreen => {
                 self.messages.clear();
                 self.scroll_offset = 0;
             }
-            "/new" | "/reset" => {
+            LocalCommand::NewConversation => {
                 self.messages.clear();
                 self.scroll_offset = 0;
-                let forwarded = if command == "/reset" {
-                    "/new".to_string()
-                } else {
-                    command.to_string()
-                };
                 let _ = self
                     .outgoing_tx
-                    .send(TuiEvent::UserMessage(forwarded))
+                    .send(TuiEvent::UserMessage("/new".to_string()))
                     .await;
             }
-            "/exit" | "/quit" => {
+            LocalCommand::Quit => {
                 self.pending_exit = true;
             }
-            "/back" | "/close" | "/dismiss" => {
+            LocalCommand::Back => {
                 self.close_last_detail_card();
             }
-            "/bottom" => {
+            LocalCommand::Bottom => {
                 self.scroll_offset = u16::MAX;
                 self.status_text = "Jumped to latest activity".to_string();
             }
-            "/top" => {
+            LocalCommand::Top => {
                 self.scroll_offset = 0;
                 self.status_text = "Jumped to oldest activity".to_string();
             }
-            "/think" => {
-                self.push_warning(
-                    "`/think` was removed because it did not control a real reasoning view.",
-                );
-            }
-            "/status" => {
+            LocalCommand::Status => {
                 if self.runtime_state_seen {
                     self.push_system_note(format!(
-                        "Runtime model: {} | Agent: {} | {}",
-                        self.model, self.agent_id, self.status_text
+                        "Runtime model: {} | Agent: {} | Conversation: {} | capabilities r{} | {}",
+                        self.model,
+                        self.agent_id,
+                        if self.conversation_id.is_empty() {
+                            "new"
+                        } else {
+                            &self.conversation_id
+                        },
+                        self.capabilities.revision,
+                        self.status_text
                     ));
                 } else {
                     self.push_warning(
@@ -910,7 +1008,7 @@ impl TuiApp {
                     );
                 }
             }
-            "/debug" => {
+            LocalCommand::Debug => {
                 self.debug_enabled = !self.debug_enabled;
                 self.push_info(format!(
                     "TUI diagnostics {}",
@@ -921,34 +1019,18 @@ impl TuiApp {
                     }
                 ));
             }
-            "/interrupt" => {
+            LocalCommand::Interrupt => {
                 self.deny_pending_approvals().await;
                 let _ = self.outgoing_tx.send(TuiEvent::Abort).await;
                 self.active_stream = None;
                 self.status_text = "Interrupted".to_string();
                 self.push_warning("Operation interrupted.");
             }
-            "/skin" => {
+            LocalCommand::Skin => {
                 self.handle_skin_command(arg);
             }
-            // Commands forwarded to the agent loop (they need agent-side handling)
-            cmd if crate::agent::command_catalog::tui_forwarded_commands().contains(&cmd) => {
-                let forwarded = if arg.is_empty() {
-                    command.to_string()
-                } else {
-                    format!("{command} {arg}")
-                };
-                let _ = self
-                    .outgoing_tx
-                    .send(TuiEvent::UserMessage(forwarded))
-                    .await;
-                self.scroll_offset = u16::MAX;
-                self.status_text = format!("Running {command}...");
-            }
-            _ => {
-                self.push_warning(format!(
-                    "Unknown command: {command}. Type /help for available commands."
-                ));
+            LocalCommand::Tools => {
+                self.push_system_note(self.render_tools(arg));
             }
         }
     }
@@ -973,10 +1055,10 @@ impl TuiApp {
 
     fn autocomplete_command(&mut self) {
         let content = self.textarea_content();
-        let matches: Vec<&&str> = crate::agent::command_catalog::tui_autocomplete_commands()
-            .iter()
-            .filter(|c| c.starts_with(&content))
-            .collect();
+        let matches: Vec<&str> =
+            thinclaw_types::slash_commands::autocomplete_names(|spec| spec.tui)
+                .filter(|c| c.starts_with(&content))
+                .collect();
 
         if matches.len() == 1 {
             let completed = format!("{} ", matches[0]);
@@ -1019,6 +1101,89 @@ impl TuiApp {
         ));
     }
 
+    fn render_tools(&self, arg: &str) -> String {
+        if arg == "--all" {
+            let live = self
+                .capabilities
+                .identities
+                .iter()
+                .map(|identity| identity.name.as_str())
+                .collect::<HashSet<_>>();
+            let mut lines = vec![format!(
+                "Tool catalog — capability revision {}",
+                self.capabilities.revision
+            )];
+            for descriptor in thinclaw_tools::STATIC_TOOL_CATALOG {
+                lines.push(format!(
+                    "{}  {:<18} {}",
+                    if live.contains(descriptor.name) {
+                        "registered"
+                    } else {
+                        "unavailable"
+                    },
+                    descriptor.origin,
+                    descriptor.name
+                ));
+            }
+            return lines.join("\n");
+        }
+        if !arg.is_empty() {
+            if let Some(identity) = self
+                .capabilities
+                .identities
+                .iter()
+                .find(|identity| identity.name == arg)
+            {
+                return format!(
+                    "{} — revision {}\norigin: {}\nsource: {}\ncompiled: {}\nconfigured: {}\nregistered: {}\ndependency: {}\nexposed: {}\nready: {}\napproval: {}\nhealth: {}{}",
+                    identity.name,
+                    self.capabilities.revision,
+                    identity.origin,
+                    identity.source_id,
+                    identity.compiled,
+                    identity
+                        .configured
+                        .map_or("unknown", |value| if value { "yes" } else { "no" }),
+                    identity.registered,
+                    identity.dependency,
+                    identity.exposed,
+                    identity.ready,
+                    identity.approval,
+                    identity.health,
+                    if identity.reasons.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\nreasons: {}", identity.reasons.join(", "))
+                    }
+                );
+            }
+            if let Some(descriptor) = thinclaw_tools::static_tool_descriptor(arg) {
+                return format!(
+                    "{} — revision {}\norigin: {}\nsource: builtin/{}\nregistered: no\nexposed: no\nready: unknown\napproval: conditional\nreason: catalogued but absent from the live registry",
+                    descriptor.name, self.capabilities.revision, descriptor.origin, descriptor.name
+                );
+            }
+            return format!("Unknown tool identity: {arg}");
+        }
+
+        let mut groups = std::collections::BTreeMap::<&str, usize>::new();
+        for identity in &self.capabilities.identities {
+            *groups.entry(identity.origin.as_str()).or_default() += 1;
+        }
+        let mut lines = vec![format!(
+            "{} registered tools — capability revision {}",
+            self.capabilities.identities.len(),
+            self.capabilities.revision
+        )];
+        lines.extend(
+            groups
+                .into_iter()
+                .map(|(origin, count)| format!("{origin}: {count} registered")),
+        );
+        lines.push("Use /tools NAME for provenance or /tools --all for the catalog.".to_string());
+        lines.join("\n")
+    }
+
     fn push_system_note(&mut self, text: impl Into<String>) {
         self.messages
             .push(ChatMessage::System { text: text.into() });
@@ -1049,7 +1214,7 @@ impl TuiApp {
         }
         // Transcript entries are durable conversation content, not navigation
         // state. Back may close a typed drawer/modal only; none is open here.
-        self.push_system_note("No drawer or modal is open.");
+        self.status_text = "No drawer or modal is open".to_string();
     }
 
     // Rendering methods are in tui/rendering.rs
@@ -1105,66 +1270,125 @@ fn bound_preview(preview: &str) -> String {
     format!("{}… [truncated]", &preview[..boundary])
 }
 
-fn build_startup_message(settings: &Settings) -> String {
+fn history_chat_message(message: &thinclaw_channels::tui::TuiHistoryMessage) -> ChatMessage {
+    match message.role.as_str() {
+        "user" => ChatMessage::User {
+            text: message.content.clone(),
+        },
+        "assistant" => ChatMessage::Assistant {
+            text: message.content.clone(),
+            model: message.model.clone(),
+        },
+        _ => ChatMessage::System {
+            text: message.content.clone(),
+        },
+    }
+}
+
+#[cfg(not(test))]
+fn input_history_path() -> std::path::PathBuf {
+    crate::platform::resolve_data_dir("tui-input-history.json")
+}
+
+fn load_input_history() -> Vec<String> {
+    #[cfg(test)]
+    return Vec::new();
+
+    #[cfg(not(test))]
+    {
+        const MAX_HISTORY_BYTES: u64 = 1024 * 1024;
+        let bytes = match thinclaw_platform::read_regular_file_bounded(
+            &input_history_path(),
+            MAX_HISTORY_BYTES,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => {
+                tracing::debug!(%error, "Could not load TUI input history");
+                return Vec::new();
+            }
+        };
+        serde_json::from_slice::<Vec<String>>(&bytes)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|value| !value.trim().is_empty() && value.len() <= 64 * 1024)
+            .rev()
+            .take(1_000)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+}
+
+fn persist_input_history(history: &[String]) -> std::io::Result<()> {
+    #[cfg(test)]
+    {
+        let _ = history;
+        Ok(())
+    }
+    #[cfg(not(test))]
+    {
+        let path = input_history_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec(history)
+            .map_err(|error| std::io::Error::other(format!("encode input history: {error}")))?;
+        thinclaw_platform::write_private_file_atomic(&path, &bytes, true)
+    }
+}
+
+fn build_startup_message(bootstrap: &thinclaw_channels::tui::TuiBootstrap) -> String {
     let mut lines = vec![
-        "ThinClaw cockpit online. Type /help for controls, or send a message to begin.".to_string(),
+        format!(
+            "{} · {} · {} · capability revision {}",
+            bootstrap.agent_name,
+            bootstrap.model,
+            if bootstrap.history.conversation_id.is_empty() {
+                "new conversation"
+            } else {
+                bootstrap.history.conversation_id.as_str()
+            },
+            bootstrap.capabilities.revision
+        ),
+        "Type /help for controls, or send a message to begin.".to_string(),
     ];
-    let access = runtime_access_lines(settings);
-    if !access.is_empty() {
+    if let Some(origin) = bootstrap.gateway_origin.as_deref() {
         lines.push(String::new());
         lines.push("Access:".to_string());
-        lines.extend(access.into_iter().map(|line| format!("  {line}")));
+        lines.push(format!("  Web UI: {origin}"));
     }
     lines.join("\n")
-}
-
-fn runtime_access_lines(settings: &Settings) -> Vec<String> {
-    let mut lines = Vec::new();
-    if gateway_enabled_from_env() {
-        let host = std::env::var("GATEWAY_HOST")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-        let port = std::env::var("GATEWAY_PORT")
-            .ok()
-            .and_then(|value| value.trim().parse::<u16>().ok())
-            .or(settings.channels.gateway_port)
-            .unwrap_or(3000);
-        let base_url = format!("http://{host}:{port}/");
-        if let Some(url) = runtime_gateway_url_override() {
-            lines.push(format!("Web UI: {url}"));
-        } else {
-            lines.push(format!("Web UI: {base_url}"));
-        }
-    }
-
-    let tunnel_url = std::env::var("TUNNEL_URL")
-        .ok()
-        .or_else(|| settings.tunnel.public_url.clone())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    if let Some(url) = tunnel_url {
-        lines.push(format!("Tunnel: {url}"));
-    }
-
-    lines
-}
-
-fn gateway_enabled_from_env() -> bool {
-    match std::env::var("GATEWAY_ENABLED") {
-        Ok(value) => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => true,
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::lock_env;
     use thinclaw_channels::StatusUpdate;
+
+    fn test_bootstrap() -> thinclaw_channels::tui::TuiBootstrap {
+        thinclaw_channels::tui::TuiBootstrap {
+            agent_id: "main".to_string(),
+            agent_name: "Test Agent".to_string(),
+            model: "test-model".to_string(),
+            provider: "test".to_string(),
+            workspace: Some("default".to_string()),
+            profile: "server".to_string(),
+            gateway_origin: None,
+            history: thinclaw_channels::tui::TuiHistoryPage {
+                conversation_id: "conversation-1".to_string(),
+                messages: Vec::new(),
+                before_cursor: None,
+                has_more: false,
+            },
+            capabilities: thinclaw_channels::tui::TuiCapabilitySnapshot {
+                revision: 7,
+                sealed: true,
+                identities: Vec::new(),
+            },
+        }
+    }
 
     #[test]
     fn test_stream_state_display() {
@@ -1207,7 +1431,7 @@ mod tests {
     async fn test_help_command_scrolls_to_latest() {
         let (tx, _rx) = mpsc::channel(4);
         let (_update_tx, update_rx) = mpsc::channel(4);
-        let mut app = TuiApp::new(tx, update_rx);
+        let mut app = TuiApp::new(tx, update_rx, test_bootstrap());
         app.scroll_offset = 0;
 
         app.handle_slash_command("/help").await;
@@ -1223,7 +1447,7 @@ mod tests {
     async fn test_back_command_never_deletes_transcript_content() {
         let (tx, _rx) = mpsc::channel(4);
         let (_update_tx, update_rx) = mpsc::channel(4);
-        let mut app = TuiApp::new(tx, update_rx);
+        let mut app = TuiApp::new(tx, update_rx, test_bootstrap());
         app.messages.push(ChatMessage::User {
             text: "/context detail".to_string(),
         });
@@ -1234,10 +1458,118 @@ mod tests {
 
         app.handle_slash_command("/back").await;
 
-        assert_eq!(app.messages.len(), 3);
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.status_text, "No drawer or modal is open");
+    }
+
+    #[test]
+    fn bootstrap_hydrates_nondefault_identity_model_and_history() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (_update_tx, update_rx) = mpsc::channel(4);
+        let mut bootstrap = test_bootstrap();
+        bootstrap.agent_name = "Researcher".to_string();
+        bootstrap.model = "custom/model".to_string();
+        bootstrap.history.messages = vec![thinclaw_channels::tui::TuiHistoryMessage {
+            id: "m1".to_string(),
+            role: "assistant".to_string(),
+            content: "persisted".to_string(),
+            model: Some("older/model".to_string()),
+            created_at: "2026-08-01T00:00:00Z".to_string(),
+        }];
+        let app = TuiApp::new(tx, update_rx, bootstrap);
+        assert_eq!(app.agent_id, "Researcher");
+        assert_eq!(app.model, "custom/model");
+        assert!(matches!(
+            app.messages.first(),
+            Some(ChatMessage::Assistant { text, model })
+                if text == "persisted" && model.as_deref() == Some("older/model")
+        ));
+    }
+
+    #[tokio::test]
+    async fn history_pages_prepend_in_order_without_duplicates() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (_update_tx, update_rx) = mpsc::channel(4);
+        let mut bootstrap = test_bootstrap();
+        bootstrap.history.messages = vec![thinclaw_channels::tui::TuiHistoryMessage {
+            id: "m2".to_string(),
+            role: "assistant".to_string(),
+            content: "second".to_string(),
+            model: Some("old".to_string()),
+            created_at: "2026-08-01T00:00:02Z".to_string(),
+        }];
+        let mut app = TuiApp::new(tx, update_rx, bootstrap);
+        app.handle_update(TuiUpdate::HistoryPage(
+            thinclaw_channels::tui::TuiHistoryPage {
+                conversation_id: "conversation-1".to_string(),
+                messages: vec![
+                    thinclaw_channels::tui::TuiHistoryMessage {
+                        id: "m1".to_string(),
+                        role: "user".to_string(),
+                        content: "first".to_string(),
+                        model: None,
+                        created_at: "2026-08-01T00:00:01Z".to_string(),
+                    },
+                    thinclaw_channels::tui::TuiHistoryMessage {
+                        id: "m2".to_string(),
+                        role: "assistant".to_string(),
+                        content: "duplicate".to_string(),
+                        model: Some("wrong".to_string()),
+                        created_at: "2026-08-01T00:00:02Z".to_string(),
+                    },
+                ],
+                before_cursor: Some("row:0".to_string()),
+                has_more: false,
+            },
+        ));
+        assert_eq!(app.messages.len(), 2);
+        assert!(matches!(app.messages[0], ChatMessage::User { ref text } if text == "first"));
+        assert!(
+            matches!(app.messages[1], ChatMessage::Assistant { ref text, .. } if text == "second")
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_updates_replace_atomically_and_ignore_replays() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (_update_tx, update_rx) = mpsc::channel(4);
+        let mut app = TuiApp::new(tx, update_rx, test_bootstrap());
+        let identity = thinclaw_channels::tui::TuiCapabilityIdentity {
+            name: "dynamic".to_string(),
+            origin: "mcp".to_string(),
+            source_id: "mcp/test".to_string(),
+            revision: 8,
+            compiled: true,
+            configured: Some(true),
+            registered: true,
+            dependency: "available".to_string(),
+            exposed: true,
+            ready: "unknown".to_string(),
+            approval: "conditional".to_string(),
+            health: "unknown".to_string(),
+            reasons: Vec::new(),
+        };
+        app.handle_update(TuiUpdate::CapabilitySnapshot(
+            thinclaw_channels::tui::TuiCapabilitySnapshot {
+                revision: 8,
+                sealed: true,
+                identities: vec![identity],
+            },
+        ));
+        app.handle_update(TuiUpdate::CapabilitySnapshot(
+            thinclaw_channels::tui::TuiCapabilitySnapshot {
+                revision: 7,
+                sealed: true,
+                identities: Vec::new(),
+            },
+        ));
+        assert_eq!(app.capabilities.revision, 8);
+        assert_eq!(app.capabilities.identities.len(), 1);
+        app.handle_slash_command("/tools dynamic").await;
+        assert!(rx.try_recv().is_err(), "local /tools must not be forwarded");
         assert!(matches!(
             app.messages.last(),
-            Some(ChatMessage::System { text }) if text == "No drawer or modal is open."
+            Some(ChatMessage::System { text }) if text.contains("mcp/test") && text.contains("revision 8")
         ));
     }
 
@@ -1245,7 +1577,7 @@ mod tests {
     async fn bang_input_is_rejected_without_forwarding() {
         let (tx, mut rx) = mpsc::channel(4);
         let (_update_tx, update_rx) = mpsc::channel(4);
-        let mut app = TuiApp::new(tx, update_rx);
+        let mut app = TuiApp::new(tx, update_rx, test_bootstrap());
 
         app.handle_submit("!whoami").await;
 
@@ -1261,7 +1593,7 @@ mod tests {
     async fn approval_is_id_bound_and_unrelated_text_does_not_dismiss_it() {
         let (tx, mut rx) = mpsc::channel(8);
         let (_update_tx, update_rx) = mpsc::channel(4);
-        let mut app = TuiApp::new(tx, update_rx);
+        let mut app = TuiApp::new(tx, update_rx, test_bootstrap());
         app.handle_update(TuiUpdate::ApprovalNeeded {
             request_id: "request-123".to_string(),
             tool_name: "shell".to_string(),
@@ -1306,7 +1638,7 @@ mod tests {
     fn interleaved_tool_events_update_their_matching_cards() {
         let (tx, _rx) = mpsc::channel(8);
         let (_update_tx, update_rx) = mpsc::channel(4);
-        let mut app = TuiApp::new(tx, update_rx);
+        let mut app = TuiApp::new(tx, update_rx, test_bootstrap());
         let first = thinclaw_types::ToolInvocationId::from_provider("first");
         let second = thinclaw_types::ToolInvocationId::from_provider("second");
 
@@ -1353,89 +1685,33 @@ mod tests {
     }
 
     #[test]
-    fn test_runtime_access_lines_include_webui_and_tunnel() {
-        let _guard = lock_env();
-        set_runtime_gateway_url_override(None);
-        unsafe {
-            std::env::set_var("GATEWAY_ENABLED", "true");
-            std::env::set_var("GATEWAY_HOST", "127.0.0.1");
-            std::env::set_var("GATEWAY_PORT", "3100");
-            std::env::set_var("GATEWAY_AUTH_TOKEN", "abc123");
-            std::env::set_var("TUNNEL_URL", "https://agent.example.com");
-        }
-        let settings = Settings::default();
-        let lines = runtime_access_lines(&settings);
-        assert!(
-            lines
-                .iter()
-                .any(|line| line == "Web UI: http://127.0.0.1:3100/")
+    fn startup_message_uses_only_the_credential_free_bootstrap_origin() {
+        let mut bootstrap = test_bootstrap();
+        bootstrap.gateway_origin = credential_free_gateway_url(
+            "http://operator:secret@127.0.0.1:3100/?token=runtime-token#fragment",
         );
-        assert!(!lines.iter().any(|line| line.contains("abc123")));
-        assert!(
-            lines
-                .iter()
-                .any(|line| line == "Tunnel: https://agent.example.com")
-        );
-        unsafe {
-            std::env::remove_var("GATEWAY_ENABLED");
-            std::env::remove_var("GATEWAY_HOST");
-            std::env::remove_var("GATEWAY_PORT");
-            std::env::remove_var("GATEWAY_AUTH_TOKEN");
-            std::env::remove_var("TUNNEL_URL");
-        }
-        set_runtime_gateway_url_override(None);
+        let rendered = build_startup_message(&bootstrap);
+        assert!(rendered.contains("Web UI: http://127.0.0.1:3100/"));
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("runtime-token"));
     }
 
     #[test]
-    fn test_runtime_access_lines_hide_webui_when_gateway_disabled() {
-        let _guard = lock_env();
-        set_runtime_gateway_url_override(None);
-        unsafe {
-            std::env::set_var("GATEWAY_ENABLED", "false");
-            std::env::set_var("TUNNEL_URL", "https://agent.example.com");
-        }
-        let settings = Settings::default();
-        let lines = runtime_access_lines(&settings);
-        assert!(!lines.iter().any(|line| line.starts_with("Web UI:")));
-        assert!(
-            lines
-                .iter()
-                .any(|line| line == "Tunnel: https://agent.example.com")
-        );
-        unsafe {
-            std::env::remove_var("GATEWAY_ENABLED");
-            std::env::remove_var("TUNNEL_URL");
-        }
-        set_runtime_gateway_url_override(None);
-    }
-
-    #[test]
-    fn test_runtime_access_lines_prefers_runtime_gateway_override() {
-        let _guard = lock_env();
-        unsafe {
-            std::env::set_var("GATEWAY_ENABLED", "true");
-            std::env::set_var("GATEWAY_HOST", "127.0.0.1");
-            std::env::set_var("GATEWAY_PORT", "3100");
-            std::env::set_var("GATEWAY_AUTH_TOKEN", "env-token");
-        }
-        set_runtime_gateway_url_override(Some(
-            "http://127.0.0.1:3100/?token=runtime-token".to_string(),
-        ));
-        let settings = Settings::default();
-        let lines = runtime_access_lines(&settings);
-        assert!(
-            lines
-                .iter()
-                .any(|line| line == "Web UI: http://127.0.0.1:3100/")
-        );
-        assert!(!lines.iter().any(|line| line.contains("runtime-token")));
-        assert!(!lines.iter().any(|line| line.contains("env-token")));
-        unsafe {
-            std::env::remove_var("GATEWAY_ENABLED");
-            std::env::remove_var("GATEWAY_HOST");
-            std::env::remove_var("GATEWAY_PORT");
-            std::env::remove_var("GATEWAY_AUTH_TOKEN");
-        }
-        set_runtime_gateway_url_override(None);
+    fn transcript_rendering_strips_ansi_osc_and_c1_controls() {
+        let input = Text::from(Line::from(Span::raw(
+            "safe\u{1b}]0;owned\u{7}\u{1b}[31mred\u{1b}[0m\u{009b}tail",
+        )));
+        let rendered = rendering::sanitize_terminal_text(input);
+        let plain = rendered
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(!plain.chars().any(|character| character.is_control()));
+        assert!(!plain.contains('\u{1b}'));
+        assert!(plain.contains("safe"));
+        assert!(plain.contains("red"));
+        assert!(plain.contains("tail"));
     }
 }

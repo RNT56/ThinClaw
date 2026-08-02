@@ -214,6 +214,7 @@
       "model_capabilities": "provider-neutral",
       "test_owner": "registry and persistence tests",
       "prompt_paths": [
+        "src/cli/agents.rs",
         "crates/thinclaw-agent/src/agent_registry.rs",
         "crates/thinclaw-agent/src/thread_ops.rs",
         "crates/thinclaw-db/src/postgres/agent_registry_store.rs",

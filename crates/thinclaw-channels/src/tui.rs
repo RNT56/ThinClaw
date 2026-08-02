@@ -11,6 +11,73 @@ use thinclaw_channels_core::{
 };
 use thinclaw_types::error::ChannelError;
 
+pub const TUI_HISTORY_PAGE_SIZE: usize = 100;
+pub const TUI_HISTORY_MAX_PAGE_SIZE: usize = 500;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiHistoryMessage {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub model: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiHistoryPage {
+    pub conversation_id: String,
+    pub messages: Vec<TuiHistoryMessage>,
+    pub before_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TuiCapabilityIdentity {
+    pub name: String,
+    pub origin: String,
+    pub source_id: String,
+    pub revision: u64,
+    pub compiled: bool,
+    pub configured: Option<bool>,
+    pub registered: bool,
+    pub dependency: String,
+    pub exposed: bool,
+    pub ready: String,
+    pub approval: String,
+    pub health: String,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TuiCapabilitySnapshot {
+    pub revision: u64,
+    pub sealed: bool,
+    pub identities: Vec<TuiCapabilityIdentity>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TuiBootstrap {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub model: String,
+    pub provider: String,
+    pub workspace: Option<String>,
+    pub profile: String,
+    pub gateway_origin: Option<String>,
+    pub history: TuiHistoryPage,
+    pub capabilities: TuiCapabilitySnapshot,
+}
+
+#[async_trait]
+pub trait TuiHistoryPort: Send + Sync + 'static {
+    async fn load_before(
+        &self,
+        conversation_id: &str,
+        before_cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<TuiHistoryPage, String>;
+}
+
 #[derive(Debug)]
 pub enum TuiEvent {
     UserMessage(String),
@@ -19,6 +86,10 @@ pub enum TuiEvent {
         decision: TuiApprovalDecision,
     },
     Abort,
+    LoadOlder {
+        conversation_id: String,
+        before_cursor: Option<String>,
+    },
     Exit,
 }
 
@@ -94,6 +165,8 @@ pub enum TuiUpdate {
         success: bool,
         message: String,
     },
+    HistoryPage(TuiHistoryPage),
+    CapabilitySnapshot(TuiCapabilitySnapshot),
 }
 
 impl From<StatusUpdate> for TuiUpdate {
@@ -279,6 +352,7 @@ impl From<StatusUpdate> for TuiUpdate {
 pub trait TuiRuntime: Send + Sync + 'static {
     fn start(
         &self,
+        bootstrap: TuiBootstrap,
         outgoing_tx: mpsc::Sender<TuiEvent>,
         incoming_rx: mpsc::Receiver<TuiUpdate>,
     ) -> JoinHandle<()>;
@@ -286,6 +360,8 @@ pub trait TuiRuntime: Send + Sync + 'static {
 
 pub struct TuiChannel {
     runtime: Arc<dyn TuiRuntime>,
+    bootstrap: TuiBootstrap,
+    history: Option<Arc<dyn TuiHistoryPort>>,
     event_tx: mpsc::Sender<TuiEvent>,
     event_rx: Mutex<Option<mpsc::Receiver<TuiEvent>>>,
     update_tx: mpsc::Sender<TuiUpdate>,
@@ -298,11 +374,19 @@ pub struct TuiChannel {
 const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl TuiChannel {
-    pub fn new(runtime: Arc<dyn TuiRuntime>) -> Self {
+    pub fn new(
+        runtime: Arc<dyn TuiRuntime>,
+        bootstrap: TuiBootstrap,
+        history: Option<Arc<dyn TuiHistoryPort>>,
+    ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(64);
-        let (update_tx, update_rx) = mpsc::channel(256);
+        // Status bursts are bounded generously; terminal tool, approval, and
+        // completion events use awaited sends and therefore cannot be dropped.
+        let (update_tx, update_rx) = mpsc::channel(1_024);
         Self {
             runtime,
+            bootstrap,
+            history,
             event_tx,
             event_rx: Mutex::new(Some(event_rx)),
             update_tx,
@@ -357,11 +441,15 @@ impl Channel for TuiChannel {
         if let Some(handle) = self.runtime_task.lock().await.take() {
             drain_channel_task(handle, "tui-runtime").await;
         }
-        let runtime_handle = self.runtime.start(self.event_tx.clone(), update_rx);
+        let runtime_handle =
+            self.runtime
+                .start(self.bootstrap.clone(), self.event_tx.clone(), update_rx);
         *self.runtime_task.lock().await = Some(runtime_handle);
 
         let (msg_tx, msg_rx) = mpsc::channel(64);
         let shutdown_notify = Arc::clone(&self.shutdown_notify);
+        let history = self.history.clone();
+        let update_tx = self.update_tx.clone();
         let handle = tokio::spawn(async move {
             let mut sent_shutdown = false;
             loop {
@@ -393,6 +481,35 @@ impl Channel for TuiChannel {
                         .to_string()
                     }
                     TuiEvent::Abort => "/interrupt".to_string(),
+                    TuiEvent::LoadOlder {
+                        conversation_id,
+                        before_cursor,
+                    } => {
+                        let Some(history) = history.as_ref() else {
+                            let _ = update_tx
+                                .send(TuiUpdate::Error(
+                                    "Durable conversation history is unavailable".to_string(),
+                                ))
+                                .await;
+                            continue;
+                        };
+                        match history
+                            .load_before(
+                                &conversation_id,
+                                before_cursor.as_deref(),
+                                TUI_HISTORY_PAGE_SIZE,
+                            )
+                            .await
+                        {
+                            Ok(page) => {
+                                let _ = update_tx.send(TuiUpdate::HistoryPage(page)).await;
+                            }
+                            Err(error) => {
+                                let _ = update_tx.send(TuiUpdate::Error(error)).await;
+                            }
+                        }
+                        continue;
+                    }
                     TuiEvent::Exit => {
                         sent_shutdown = true;
                         "/quit".to_string()

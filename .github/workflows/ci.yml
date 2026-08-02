@@ -120,6 +120,20 @@ jobs:
             cargo-args: "--no-default-features --features libsql"
           - name: minimal-postgres
             cargo-args: "--no-default-features --features postgres"
+          - name: compat-repl
+            cargo-args: "--no-default-features --features edge,repl"
+          - name: compat-web-gateway
+            cargo-args: "--no-default-features --features edge,web-gateway"
+          - name: compat-timezones
+            cargo-args: "--no-default-features --features edge,timezones"
+          - name: compat-all-empty
+            cargo-args: "--no-default-features --features edge,repl,web-gateway,timezones"
+          - name: delta-browser
+            cargo-args: "--no-default-features --features edge,browser"
+          - name: delta-nostr
+            cargo-args: "--no-default-features --features edge,nostr"
+          - name: delta-bundled-wasm
+            cargo-args: "--no-default-features --features edge,bundled-wasm"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -164,6 +178,10 @@ jobs:
           cargo install wasm-tools --locked
       - name: cargo check
         run: cargo check --locked --workspace ${{ matrix.cargo-args }}
+      - name: Parser, help, slash, and static-capability contract
+        run: cargo test --locked --test cli_surface_contract ${{ matrix.cargo-args }}
+      - name: Process descriptor manifest and raw-launch scan
+        run: python3 scripts/ci/check-process-launches.py
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-targets ${{ matrix.cargo-args }} -- -D warnings
       - name: Compile tests (no run)
@@ -171,6 +189,56 @@ jobs:
         run: |
           trap 'df -h "$CARGO_TARGET_DIR"' EXIT
           cargo test --locked --workspace --no-run ${{ matrix.cargo-args }}
+
+  empty-compatibility-parity:
+    name: Empty compatibility surface parity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: empty-compatibility-parity
+      - name: Compare generated help/completion/slash/capability surfaces byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet --locked --no-default-features --features edge --example export-cli-surface > base.json
+          for features in edge,repl edge,web-gateway edge,timezones edge,repl,web-gateway,timezones; do
+            safe_name="${features//,/-}"
+            cargo run --quiet --locked --no-default-features --features "$features" --example export-cli-surface > "$safe_name.json"
+            cmp base.json "$safe_name.json"
+          done
+
+  cli-adversarial-contracts:
+    name: CLI adversarial contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: cli-adversarial-contracts
+      - name: Raw process boundary and manifest
+        run: python3 scripts/ci/check-process-launches.py
+      - name: Process environment, path shadowing, timeout, and cleanup fixtures
+        run: cargo test --locked -p thinclaw-platform process -- --nocapture
+      - name: Transactional setup cancel, lease, drift, and rollback fixtures
+        run: "cargo test --locked --lib setup:: -- --nocapture --test-threads=1"
+      - name: Registry collision, batch atomicity, seal, and revision fixtures
+        run: "cargo test --locked -p thinclaw-tools registration_tests -- --nocapture"
+      - name: TUI approval, history, navigation, and slash fixtures
+        run: "cargo test --locked --lib tui::tests -- --nocapture"
+      - name: Generated CLI and slash surface contract
+        run: cargo test --locked --test cli_surface_contract
 
   desktop-companion:
     name: Desktop Companion
@@ -504,6 +572,11 @@ jobs:
         run: cargo check --locked --workspace --features full
       - name: Compile tests (no run)
         run: cargo test --locked --workspace --no-run --features full
+      - name: macOS parser, generated surface, and setup contract
+        run: |
+          cargo test --locked --test cli_surface_contract --features full
+          cargo test --locked --lib --features full setup:: -- --test-threads=1
+          python3 scripts/ci/check-process-launches.py
       - name: Host runtime smoke
         run: cargo test --locked --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
 
@@ -669,6 +742,11 @@ jobs:
         run: cargo check --locked --workspace ${{ matrix.cargo-args }}
       - name: Compile tests (no run)
         run: cargo test --locked --workspace --no-run ${{ matrix.cargo-args }}
+      - name: Windows parser, help, completion, and hidden-dispatch contract
+        run: |
+          cargo test --locked --test cli_surface_contract ${{ matrix.cargo-args }}
+          cargo test --locked -p thinclaw-types slash_commands
+          cargo test --locked -p thinclaw-agent submission::tests
 
   windows-smoke:
     name: Windows Smoke
@@ -766,6 +844,8 @@ jobs:
         run: PGPASSWORD=thinclaw psql -h localhost -U thinclaw -d thinclaw_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
       - name: Run postgres contract tests
         run: cargo test --locked --test db_contract --no-default-features --features postgres -- --nocapture --test-threads=1
+      - name: PostgreSQL parser and static capability contract
+        run: cargo test --locked --test cli_surface_contract --no-default-features --features postgres
 
   schema-divergence:
     name: Schema Divergence

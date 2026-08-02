@@ -53,7 +53,11 @@ pub async fn run_extension_activate(
     let value: serde_json::Value = client
         .post_json(
             &format!("/api/extensions/{}/activate", args.name),
-            &serde_json::json!({"kind": args.kind}),
+            &serde_json::json!({
+                "kind": args.kind,
+                "request_id": uuid::Uuid::new_v4(),
+                "expected_runtime_revision": serde_json::Value::Null,
+            }),
         )
         .await
         .map_err(|error| CliError::operational(error.to_string()))?;

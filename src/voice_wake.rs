@@ -503,7 +503,7 @@ impl VoiceWakeRuntime {
         joiner_filename: String,
     ) {
         use std::io::Write;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         // Verify the Sherpa binary and model are available.
         if !Self::sherpa_available() {

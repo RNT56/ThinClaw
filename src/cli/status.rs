@@ -6,7 +6,7 @@ use thinclaw_app::{
     ReadinessProfile, ReadinessState, ToolCapabilityFact, ToolCapabilitySnapshot,
 };
 
-use crate::cli::{CliContext, CliError, CliOutcome, ReadinessProfileArg};
+use crate::cli::{CliContext, CliError, CliOutcome, GatewayClient, ReadinessProfileArg};
 use crate::registry::{ManifestKind, RegistryCatalog};
 use crate::settings::Settings;
 
@@ -76,22 +76,52 @@ pub struct ToolStatusArgs {
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolOriginArg {
-    Builtin,
+    Core,
+    Memory,
+    Dev,
+    Job,
+    ExtensionAdmin,
+    Skill,
+    Learning,
+    RepoProject,
+    Media,
+    Desktop,
+    HardwareBridge,
+    Channel,
+    Subagent,
+    Llm,
+    Agent,
+    Routine,
     Wasm,
-    Native,
     Mcp,
-    Dynamic,
+    UserTool,
+    NativePlugin,
     Registry,
 }
 
 impl ToolOriginArg {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::Builtin => "builtin",
+            Self::Core => "core",
+            Self::Memory => "memory",
+            Self::Dev => "dev",
+            Self::Job => "job",
+            Self::ExtensionAdmin => "extension-admin",
+            Self::Skill => "skill",
+            Self::Learning => "learning",
+            Self::RepoProject => "repo-project",
+            Self::Media => "media",
+            Self::Desktop => "desktop",
+            Self::HardwareBridge => "hardware-bridge",
+            Self::Channel => "channel",
+            Self::Subagent => "subagent",
+            Self::Llm => "llm",
+            Self::Agent => "agent",
+            Self::Routine => "routine",
             Self::Wasm => "wasm",
-            Self::Native => "native",
             Self::Mcp => "mcp",
-            Self::Dynamic => "dynamic",
+            Self::UserTool => "user-tool",
+            Self::NativePlugin => "native-plugin",
             Self::Registry => "registry",
         }
     }
@@ -178,7 +208,7 @@ pub async fn run_status_command(
     context: &CliContext,
 ) -> Result<CliOutcome, CliError> {
     if let Some(StatusArea::Tools(tool_args)) = &args.area {
-        return run_tool_status(&args.scope, tool_args, context);
+        return run_tool_status(&args.scope, tool_args, context).await;
     }
 
     let settings = Settings::load();
@@ -223,7 +253,7 @@ pub async fn run_status_command(
     })
 }
 
-fn run_tool_status(
+async fn run_tool_status(
     scope: &StatusScopeArgs,
     args: &ToolStatusArgs,
     context: &CliContext,
@@ -231,13 +261,55 @@ fn run_tool_status(
     validate_selector(args.name.as_deref(), "NAME")?;
     validate_pattern(args.match_pattern.as_deref())?;
 
+    let live_snapshot = if scope.live {
+        let config = context.config().await?;
+        let client = GatewayClient::resolve_from_config(None, None, config)
+            .map_err(|error| CliError::operational(error.to_string()))?;
+        Some(
+            client
+                .get_json::<_, crate::tools::RegistrySnapshot>(
+                    "/api/capabilities/tools",
+                    &Vec::<(String, String)>::new(),
+                )
+                .await
+                .map_err(|error| CliError::operational(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+
+    let live_by_name = live_snapshot
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .identities
+                .iter()
+                .map(|identity| (identity.name.as_str(), identity))
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let mut tools = thinclaw_tools::STATIC_TOOL_CATALOG
+        .iter()
+        .map(|descriptor| static_tool_fact(descriptor, live_by_name.get(descriptor.name).copied()))
+        .collect::<Vec<_>>();
+
+    for identity in live_snapshot
+        .as_ref()
+        .into_iter()
+        .flat_map(|snapshot| snapshot.identities.iter())
+        .filter(|identity| thinclaw_tools::static_tool_descriptor(&identity.name).is_none())
+    {
+        tools.push(live_dynamic_tool_fact(identity));
+    }
+
     let catalog = RegistryCatalog::load_or_embedded()
         .map_err(|error| CliError::operational(format!("failed to load tool catalog: {error}")))?;
-    let mut tools = catalog
-        .list(Some(ManifestKind::Tool), None)
-        .into_iter()
-        .map(|manifest| registry_tool_fact(manifest, scope.live))
-        .collect::<Vec<_>>();
+    for manifest in catalog.list(Some(ManifestKind::Tool), None) {
+        if !tools.iter().any(|tool| tool.name == manifest.name) {
+            tools.push(registry_tool_fact(manifest, scope.live));
+        }
+    }
 
     if let Some(name) = args.name.as_deref()
         && !tools.iter().any(|tool| tool.name == name)
@@ -272,11 +344,17 @@ fn run_tool_status(
         ))
     });
 
-    let revision_bytes = serde_json::to_vec(&tools)
-        .map_err(|error| CliError::operational(format!("failed to encode tool status: {error}")))?;
+    let revision = if let Some(snapshot) = live_snapshot {
+        snapshot.revision.to_string()
+    } else {
+        let revision_bytes = serde_json::to_vec(&tools).map_err(|error| {
+            CliError::operational(format!("failed to encode tool status: {error}"))
+        })?;
+        blake3::hash(&revision_bytes).to_hex().to_string()
+    };
     let snapshot = ToolCapabilitySnapshot {
         schema_version: 1,
-        revision: blake3::hash(&revision_bytes).to_hex().to_string(),
+        revision,
         readiness_profile: scope.readiness_profile.into(),
         live: scope.live,
         tools,
@@ -286,6 +364,116 @@ fn run_tool_status(
         .write_record("status_tools", &snapshot, render_tools_human)?;
     Ok(CliOutcome::Success)
 }
+
+fn static_tool_fact(
+    descriptor: &thinclaw_tools::StaticToolDescriptor,
+    live: Option<&thinclaw_tools::RegistryIdentity>,
+) -> ToolCapabilityFact {
+    let compiled = match descriptor.name {
+        "extract_document" if !cfg!(feature = "document-extraction") => FactState::No,
+        "browser" if !cfg!(feature = "browser") => FactState::No,
+        "nostr_actions" if !cfg!(feature = "nostr") => FactState::No,
+        "apple_mail" if !cfg!(target_os = "macos") => FactState::No,
+        _ => FactState::Yes,
+    };
+    let registered = yes_no(live.is_some());
+    ToolCapabilityFact {
+        name: descriptor.name.to_string(),
+        source_id: live
+            .map(|identity| identity.source_id.clone())
+            .unwrap_or_else(|| format!("builtin/{}", descriptor.name)),
+        label: descriptor.name.replace('_', " "),
+        origin: live
+            .map(|identity| identity.origin.to_string())
+            .unwrap_or_else(|| descriptor.origin.to_string()),
+        compiled,
+        configured: live
+            .and_then(|identity| identity.configured)
+            .map_or(FactState::Unknown, yes_no),
+        registered: live.map_or(registered, |identity| yes_no(identity.registered)),
+        dependency: if compiled == FactState::No {
+            DependencyState::Missing
+        } else if let Some(identity) = live {
+            match identity.dependency.as_str() {
+                "available" => DependencyState::Available,
+                "missing" => DependencyState::Missing,
+                "not_applicable" => DependencyState::NotApplicable,
+                _ => DependencyState::Unknown,
+            }
+        } else {
+            DependencyState::Unknown
+        },
+        exposed: live.map_or_else(
+            || {
+                if HIDDEN_TOOL_NAMES.contains(&descriptor.name) {
+                    FactState::No
+                } else {
+                    registered
+                }
+            },
+            |identity| yes_no(identity.exposed),
+        ),
+        approval: live
+            .map(|identity| identity.approval.clone())
+            .unwrap_or_else(|| "conditional".to_string()),
+        health: if let Some(identity) = live {
+            match identity.health.as_str() {
+                "healthy" => HealthState::Healthy,
+                "unhealthy" => HealthState::Unhealthy,
+                "not_probed" => HealthState::NotProbed,
+                "not_supported" => HealthState::NotSupported,
+                _ => HealthState::Unknown,
+            }
+        } else {
+            HealthState::NotProbed
+        },
+        reasons: if let Some(identity) = live {
+            identity.reasons.clone()
+        } else if compiled == FactState::No {
+            vec!["capability is not compiled for this build or platform".to_string()]
+        } else if live.is_none() {
+            vec!["capability is catalogued but absent from the live registry".to_string()]
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn live_dynamic_tool_fact(identity: &thinclaw_tools::RegistryIdentity) -> ToolCapabilityFact {
+    ToolCapabilityFact {
+        name: identity.name.clone(),
+        source_id: identity.source_id.clone(),
+        label: identity.name.replace('_', " "),
+        origin: identity.origin.to_string(),
+        compiled: yes_no(identity.compiled),
+        configured: identity.configured.map_or(FactState::Unknown, yes_no),
+        registered: yes_no(identity.registered),
+        dependency: match identity.dependency.as_str() {
+            "available" => DependencyState::Available,
+            "missing" => DependencyState::Missing,
+            "not_applicable" => DependencyState::NotApplicable,
+            _ => DependencyState::Unknown,
+        },
+        exposed: yes_no(identity.exposed),
+        approval: identity.approval.clone(),
+        health: match identity.health.as_str() {
+            "healthy" => HealthState::Healthy,
+            "unhealthy" => HealthState::Unhealthy,
+            "not_probed" => HealthState::NotProbed,
+            "not_supported" => HealthState::NotSupported,
+            _ => HealthState::Unknown,
+        },
+        reasons: identity.reasons.clone(),
+    }
+}
+
+const HIDDEN_TOOL_NAMES: &[&str] = &[
+    "external_memory_recall",
+    "external_memory_export",
+    "external_memory_setup",
+    "external_memory_off",
+    "external_memory_status",
+];
 
 fn registry_tool_fact(
     manifest: &crate::registry::ExtensionManifest,

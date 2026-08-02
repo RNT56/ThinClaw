@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 #[cfg(feature = "document-extraction")]
 use crate::builtin::ExtractDocumentTool;
@@ -32,110 +32,271 @@ use thinclaw_tools_core::{
     ApprovalRequirement, RateLimiter, Tool, ToolDescriptor, ToolDomain, ToolExecutionLane,
     ToolProfile,
 };
-use tokio::sync::RwLock;
+/// Stable provenance vocabulary for every live tool identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolOrigin {
+    Core,
+    Memory,
+    Dev,
+    Job,
+    ExtensionAdmin,
+    Skill,
+    Learning,
+    RepoProject,
+    Media,
+    Desktop,
+    HardwareBridge,
+    Channel,
+    Subagent,
+    Llm,
+    Agent,
+    Routine,
+    Wasm,
+    Mcp,
+    UserTool,
+    NativePlugin,
+}
 
-/// Names of built-in tools that cannot be shadowed by dynamic registrations.
-pub const PROTECTED_TOOL_NAMES: &[&str] = &[
-    "echo",
-    "device_info",
-    "time",
-    "json",
-    "http",
-    "shell",
-    "read_file",
-    "write_file",
-    "list_dir",
-    "apply_patch",
-    "memory_search",
-    "session_search",
-    "memory_write",
-    "memory_read",
-    "memory_tree",
-    "memory_delete",
-    "create_job",
-    "list_jobs",
-    "job_status",
-    "cancel_job",
-    "build_software",
-    "tool_search",
-    "tool_install",
-    "tool_auth",
-    "tool_activate",
-    "tool_list",
-    "tool_remove",
-    "routine_create",
-    "routine_list",
-    "routine_update",
-    "routine_delete",
-    "routine_history",
-    "skill_list",
-    "skill_read",
-    "skill_inspect",
-    "skill_search",
-    "skill_check",
-    "skill_install",
-    "skill_update",
-    "skill_audit",
-    "skill_snapshot",
-    "skill_publish",
-    "skill_tap_list",
-    "skill_tap_add",
-    "skill_tap_remove",
-    "skill_tap_refresh",
-    "skill_remove",
-    "skill_trust_promote",
-    "tts",
-    "browser",
-    "canvas",
-    "agent_think",
-    "emit_user_message",
-    "spawn_subagent",
-    "list_subagents",
-    "cancel_subagent",
-    "apple_mail",
-    "llm_select",
-    "llm_list_models",
-    "create_agent",
-    "list_agents",
-    "update_agent",
-    "remove_agent",
-    "message_agent",
-    "extract_document",
-    "consult_advisor",
-    "prompt_manage",
-    "skill_manage",
-    "learning_status",
-    "learning_history",
-    "learning_feedback",
-    "learning_proposal_review",
-    "external_memory_recall",
-    "external_memory_export",
-    "external_memory_setup",
-    "external_memory_off",
-    "external_memory_status",
-    "process",
-    "todo",
-    "clarify",
-    "vision_analyze",
-    "image_generate",
-    "comfy_health",
-    "comfy_check_deps",
-    "comfy_run_workflow",
-    "comfy_manage",
-    "send_message",
-    "nostr_actions",
-    "homeassistant",
-    "mixture_of_agents",
-    "execute_code",
-    "search_files",
-    "desktop_apps",
-    "desktop_ui",
-    "desktop_screen",
-    "desktop_calendar_native",
-    "desktop_numbers_native",
-    "desktop_pages_native",
-    "autonomy_control",
+pub const ALL_TOOL_ORIGINS: &[ToolOrigin] = &[
+    ToolOrigin::Core,
+    ToolOrigin::Memory,
+    ToolOrigin::Dev,
+    ToolOrigin::Job,
+    ToolOrigin::ExtensionAdmin,
+    ToolOrigin::Skill,
+    ToolOrigin::Learning,
+    ToolOrigin::RepoProject,
+    ToolOrigin::Media,
+    ToolOrigin::Desktop,
+    ToolOrigin::HardwareBridge,
+    ToolOrigin::Channel,
+    ToolOrigin::Subagent,
+    ToolOrigin::Llm,
+    ToolOrigin::Agent,
+    ToolOrigin::Routine,
+    ToolOrigin::Wasm,
+    ToolOrigin::Mcp,
+    ToolOrigin::UserTool,
+    ToolOrigin::NativePlugin,
 ];
+
+impl std::fmt::Display for ToolOrigin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = serde_json::to_value(self).map_err(|_| std::fmt::Error)?;
+        formatter.write_str(value.as_str().ok_or(std::fmt::Error)?)
+    }
+}
+
+/// One compile-time static capability identity. Runtime predicates decide
+/// whether a catalogued identity is actually inserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaticToolDescriptor {
+    pub name: &'static str,
+    pub origin: ToolOrigin,
+}
+
+macro_rules! static_tools {
+    ($( $origin:ident => [$( $name:literal ),* $(,)?] ),* $(,)?) => {
+        pub const STATIC_TOOL_CATALOG: &[StaticToolDescriptor] = &[
+            $($(StaticToolDescriptor { name: $name, origin: ToolOrigin::$origin },)*)*
+        ];
+        /// Reserved names are generated from the same catalog as descriptors.
+        pub const PROTECTED_TOOL_NAMES: &[&str] = &[$($($name,)*)*];
+    };
+}
+
+static_tools! {
+    Core => ["echo", "time", "json", "device_info", "canvas", "clarify",
+        "agent_think", "emit_user_message", "http", "web_search", "extract_document",
+        "homeassistant", "browser", "vision_analyze", "mixture_of_agents"],
+    Dev => ["shell", "read_file", "write_file", "list_dir", "apply_patch", "grep",
+        "build_software", "todo", "process", "execute_code", "search_files"],
+    Memory => ["memory_search", "session_search", "memory_write", "memory_read",
+        "memory_tree", "memory_delete"],
+    ExtensionAdmin => ["tool_search", "tool_install", "tool_auth", "tool_activate",
+        "tool_list", "tool_remove"],
+    Skill => ["skill_inspect", "skill_read", "skill_list", "skill_search", "skill_check",
+        "skill_install", "skill_update", "skill_audit", "skill_snapshot", "skill_publish",
+        "skill_tap_list", "skill_tap_add", "skill_tap_remove", "skill_tap_refresh",
+        "skill_remove", "skill_reload", "skill_trust_promote"],
+    Learning => ["prompt_manage", "skill_manage", "learning_status", "learning_outcomes",
+        "learning_history", "learning_feedback", "external_memory_recall",
+        "external_memory_export", "external_memory_setup", "external_memory_off",
+        "external_memory_status", "learning_proposal_review"],
+    RepoProject => ["repo_project_create", "repo_project_plan", "repo_project_status",
+        "repo_project_pause", "repo_project_resume", "repo_project_enroll",
+        "repo_project_setup", "repo_project_approve", "repo_project_request_credential",
+        "repo_project_set_credential", "repo_project_list_repos", "repo_project_connect"],
+    Media => ["tts", "image_generate", "comfy_health", "comfy_check_deps",
+        "comfy_run_workflow", "comfy_manage"],
+    Channel => ["apple_mail", "send_message", "nostr_actions"],
+    Desktop => ["screen_capture", "camera_capture", "talk_mode", "location",
+        "desktop_apps", "desktop_ui", "desktop_screen", "desktop_calendar_native",
+        "desktop_numbers_native", "desktop_pages_native", "autonomy_control"],
+    HardwareBridge => ["capture_camera_frame", "record_audio_clip", "capture_screenshot"],
+    Job => ["create_job", "list_jobs", "job_status", "cancel_job", "job_events", "job_prompt"],
+    Subagent => ["spawn_subagent", "list_subagents", "cancel_subagent"],
+    Llm => ["llm_select", "llm_list_models", "consult_advisor"],
+    Agent => ["create_agent", "list_agents", "update_agent", "remove_agent", "message_agent"],
+    Routine => ["routine_create", "routine_list", "routine_update", "routine_delete",
+        "routine_history"],
+}
+
+pub fn static_tool_descriptor(name: &str) -> Option<&'static StaticToolDescriptor> {
+    STATIC_TOOL_CATALOG
+        .iter()
+        .find(|descriptor| descriptor.name == name)
+}
+
+#[derive(Clone)]
+pub struct RegistrationRequest {
+    pub tool: Arc<dyn Tool>,
+    pub origin: ToolOrigin,
+    pub source_id: String,
+    pub source_digest: Option<String>,
+    pub replace: bool,
+}
+
+impl RegistrationRequest {
+    pub fn new(tool: Arc<dyn Tool>, origin: ToolOrigin, source_id: impl Into<String>) -> Self {
+        Self {
+            tool,
+            origin,
+            source_id: source_id.into(),
+            source_digest: None,
+            replace: false,
+        }
+    }
+
+    pub fn with_digest(mut self, digest: impl Into<String>) -> Self {
+        self.source_digest = Some(digest.into());
+        self
+    }
+
+    pub fn replacing(mut self) -> Self {
+        self.replace = true;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegistrationConflict {
+    pub name: String,
+    pub requested_origin: ToolOrigin,
+    pub requested_source_id: String,
+    pub existing_origin: Option<ToolOrigin>,
+    pub existing_source_id: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrationOutcome {
+    Inserted { revision: u64 },
+    Rebound { revision: u64 },
+    Unchanged { revision: u64 },
+    Rejected { conflict: RegistrationConflict },
+}
+
+impl RegistrationOutcome {
+    pub fn accepted(&self) -> bool {
+        !matches!(self, Self::Rejected { .. })
+    }
+
+    pub fn changed(&self) -> bool {
+        matches!(self, Self::Inserted { .. } | Self::Rebound { .. })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegistryIdentity {
+    pub name: String,
+    pub origin: ToolOrigin,
+    pub source_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_digest: Option<String>,
+    pub revision: u64,
+    pub registered_at: chrono::DateTime<chrono::Utc>,
+    pub compiled: bool,
+    /// `None` means configuration is not authoritatively known at the registry
+    /// boundary; registration alone must never imply it.
+    pub configured: Option<bool>,
+    pub registered: bool,
+    pub dependency: String,
+    pub exposed: bool,
+    pub ready: String,
+    pub approval: String,
+    pub health: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegistrySnapshot {
+    pub schema_version: u8,
+    pub revision: u64,
+    pub sealed: bool,
+    pub identities: Vec<RegistryIdentity>,
+}
+
+#[derive(Clone)]
+struct RegistryEntry {
+    tool: Arc<dyn Tool>,
+    identity: RegistryIdentity,
+}
+
+fn registry_identity(
+    name: String,
+    origin: ToolOrigin,
+    source_id: String,
+    source_digest: Option<String>,
+    revision: u64,
+    tool: &dyn Tool,
+) -> RegistryIdentity {
+    let descriptor = tool.descriptor();
+    let approval = match descriptor.metadata.approval_class {
+        thinclaw_tools_core::ToolApprovalClass::Never => "never",
+        thinclaw_tools_core::ToolApprovalClass::Conditional => "conditional",
+        thinclaw_tools_core::ToolApprovalClass::Always => "always",
+    };
+    let exposed = !HIDDEN_BY_DEFAULT_TOOL_NAMES.contains(&name.as_str());
+    RegistryIdentity {
+        name,
+        origin,
+        source_id,
+        source_digest,
+        revision,
+        registered_at: chrono::Utc::now(),
+        compiled: true,
+        configured: matches!(
+            origin,
+            ToolOrigin::Wasm | ToolOrigin::Mcp | ToolOrigin::UserTool | ToolOrigin::NativePlugin
+        )
+        .then_some(true),
+        registered: true,
+        dependency: "unknown".to_string(),
+        exposed,
+        ready: "unknown".to_string(),
+        approval: approval.to_string(),
+        health: "not_probed".to_string(),
+        reasons: if exposed {
+            Vec::new()
+        } else {
+            vec!["hidden from default model exposure by runtime policy".to_string()]
+        },
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RegistrySealError {
+    #[error(
+        "tool descriptor identities differ from the live registry: registry={registry:?}, descriptors={descriptors:?}"
+    )]
+    DescriptorMismatch {
+        registry: Vec<String>,
+        descriptors: Vec<String>,
+    },
+}
 
 const IMPLICIT_CAPABILITY_TOOLS: &[&str] = &["agent_think", "emit_user_message"];
 const HIDDEN_BY_DEFAULT_TOOL_NAMES: &[&str] = &[
@@ -165,17 +326,27 @@ const SKILL_ADMIN_TOOLS: &[&str] = &[
 
 /// Registry of available tools.
 pub struct ToolRegistry {
-    tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
-    builtin_names: RwLock<HashSet<String>>,
+    entries: RwLock<HashMap<String, RegistryEntry>>,
+    revision: std::sync::atomic::AtomicU64,
+    sealed: std::sync::atomic::AtomicBool,
+    snapshot_tx: tokio::sync::watch::Sender<RegistrySnapshot>,
     rate_limiter: RateLimiter,
 }
 
 impl ToolRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
+        let (snapshot_tx, _) = tokio::sync::watch::channel(RegistrySnapshot {
+            schema_version: 2,
+            revision: 0,
+            sealed: false,
+            identities: Vec::new(),
+        });
         Self {
-            tools: RwLock::new(HashMap::new()),
-            builtin_names: RwLock::new(HashSet::new()),
+            entries: RwLock::new(HashMap::new()),
+            revision: std::sync::atomic::AtomicU64::new(0),
+            sealed: std::sync::atomic::AtomicBool::new(false),
+            snapshot_tx,
             rate_limiter: RateLimiter::new(),
         }
     }
@@ -185,48 +356,403 @@ impl ToolRegistry {
         &self.rate_limiter
     }
 
-    /// Register a tool. Every identity is single-assignment.
-    pub async fn register(&self, tool: Arc<dyn Tool>) -> bool {
-        let name = tool.name().to_string();
-        let builtin_names = self.builtin_names.read().await;
-        if builtin_names.contains(&name) || PROTECTED_TOOL_NAMES.contains(&name.as_str()) {
-            return false;
-        }
-        let mut tools = self.tools.write().await;
-        if tools.contains_key(&name) {
-            return false;
-        }
-        tools.insert(name, tool);
-        true
+    /// Register a legacy dynamic tool with deterministic user-tool provenance.
+    pub async fn register(&self, tool: Arc<dyn Tool>) -> RegistrationOutcome {
+        let source_id = format!("legacy/user-tool/{}", tool.name());
+        self.register_request(RegistrationRequest::new(
+            tool,
+            ToolOrigin::UserTool,
+            source_id,
+        ))
     }
 
-    /// Register a tool as built-in using async locks.
-    pub async fn register_builtin(&self, tool: Arc<dyn Tool>) -> bool {
-        let name = tool.name().to_string();
-        let mut builtin_names = self.builtin_names.write().await;
-        let mut tools = self.tools.write().await;
-        if tools.contains_key(&name) || builtin_names.contains(&name) {
-            return false;
-        }
-        tools.insert(name.clone(), tool);
-        builtin_names.insert(name);
-        true
+    /// Register a tool as a static built-in.
+    pub async fn register_builtin(&self, tool: Arc<dyn Tool>) -> RegistrationOutcome {
+        self.register_static(tool)
     }
 
-    /// Register a tool (sync version for startup, marks as built-in).
-    pub fn register_sync(&self, tool: Arc<dyn Tool>) -> bool {
+    /// Register a static tool synchronously. The short metadata lock cannot
+    /// silently fail under async contention.
+    pub fn register_sync(&self, tool: Arc<dyn Tool>) -> RegistrationOutcome {
+        self.register_static(tool)
+    }
+
+    fn register_static(&self, tool: Arc<dyn Tool>) -> RegistrationOutcome {
         let name = tool.name().to_string();
-        if let Ok(mut builtins) = self.builtin_names.try_write()
-            && let Ok(mut tools) = self.tools.try_write()
-        {
-            if tools.contains_key(&name) || builtins.contains(&name) {
-                return false;
+        let origin = static_tool_descriptor(&name)
+            .map(|descriptor| descriptor.origin)
+            .unwrap_or(ToolOrigin::Core);
+        self.register_request_inner(
+            RegistrationRequest::new(tool, origin, format!("builtin/{name}")),
+            true,
+        )
+    }
+
+    pub fn register_request(&self, request: RegistrationRequest) -> RegistrationOutcome {
+        self.register_request_inner(request, false)
+    }
+
+    fn register_request_inner(
+        &self,
+        request: RegistrationRequest,
+        static_registration: bool,
+    ) -> RegistrationOutcome {
+        let name = request.tool.name().to_string();
+        if let Some(descriptor) = static_tool_descriptor(&name) {
+            let exact_source_id = format!("builtin/{name}");
+            if !static_registration
+                || request.origin != descriptor.origin
+                || request.source_id != exact_source_id
+            {
+                return RegistrationOutcome::Rejected {
+                    conflict: RegistrationConflict {
+                        name,
+                        requested_origin: request.origin,
+                        requested_source_id: request.source_id,
+                        existing_origin: None,
+                        existing_source_id: None,
+                        reason: "identity is reserved by the static tool catalog".to_string(),
+                    },
+                };
             }
-            tools.insert(name.clone(), tool);
-            builtins.insert(name);
-            return true;
         }
-        false
+
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(existing) = entries.get(&name) {
+            let same_owner = existing.identity.origin == request.origin
+                && existing.identity.source_id == request.source_id;
+            if !same_owner || !request.replace {
+                return if same_owner && Arc::ptr_eq(&existing.tool, &request.tool) {
+                    RegistrationOutcome::Unchanged {
+                        revision: existing.identity.revision,
+                    }
+                } else {
+                    RegistrationOutcome::Rejected {
+                        conflict: RegistrationConflict {
+                            name,
+                            requested_origin: request.origin,
+                            requested_source_id: request.source_id,
+                            existing_origin: Some(existing.identity.origin),
+                            existing_source_id: Some(existing.identity.source_id.clone()),
+                            reason: if same_owner {
+                                "same-source replacement requires replace=true".to_string()
+                            } else {
+                                "identity is owned by a different source".to_string()
+                            },
+                        },
+                    }
+                };
+            }
+        }
+
+        let rebound = entries.contains_key(&name);
+        let revision = self.next_revision();
+        let identity = registry_identity(
+            name.clone(),
+            request.origin,
+            request.source_id,
+            request.source_digest,
+            revision,
+            request.tool.as_ref(),
+        );
+        entries.insert(
+            name.clone(),
+            RegistryEntry {
+                tool: request.tool,
+                identity,
+            },
+        );
+        self.publish_snapshot_locked(&entries);
+        if rebound {
+            RegistrationOutcome::Rebound { revision }
+        } else {
+            RegistrationOutcome::Inserted { revision }
+        }
+    }
+
+    /// Atomically reserve and insert a complete dynamic source activation.
+    pub fn register_batch(
+        &self,
+        requests: Vec<RegistrationRequest>,
+    ) -> Result<Vec<RegistrationOutcome>, RegistrationConflict> {
+        let mut names = HashSet::new();
+        for request in &requests {
+            let name = request.tool.name().to_string();
+            if !names.insert(name.clone()) {
+                return Err(RegistrationConflict {
+                    name,
+                    requested_origin: request.origin,
+                    requested_source_id: request.source_id.clone(),
+                    existing_origin: None,
+                    existing_source_id: None,
+                    reason: "activation contains the identity more than once".to_string(),
+                });
+            }
+        }
+
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        for request in &requests {
+            let name = request.tool.name().to_string();
+            if static_tool_descriptor(&name).is_some() {
+                return Err(RegistrationConflict {
+                    name,
+                    requested_origin: request.origin,
+                    requested_source_id: request.source_id.clone(),
+                    existing_origin: None,
+                    existing_source_id: None,
+                    reason: "identity is reserved by the static tool catalog".to_string(),
+                });
+            }
+            if let Some(existing) = entries.get(&name) {
+                let same_owner = existing.identity.origin == request.origin
+                    && existing.identity.source_id == request.source_id;
+                if !same_owner || !request.replace {
+                    return Err(RegistrationConflict {
+                        name,
+                        requested_origin: request.origin,
+                        requested_source_id: request.source_id.clone(),
+                        existing_origin: Some(existing.identity.origin),
+                        existing_source_id: Some(existing.identity.source_id.clone()),
+                        reason: "activation identity conflicts with the live registry".to_string(),
+                    });
+                }
+            }
+        }
+
+        let mut outcomes = Vec::with_capacity(requests.len());
+        let revision = if requests.is_empty() {
+            self.revision.load(std::sync::atomic::Ordering::Acquire)
+        } else {
+            self.next_revision()
+        };
+        for request in requests {
+            let name = request.tool.name().to_string();
+            let rebound = entries.contains_key(&name);
+            let identity = registry_identity(
+                name.clone(),
+                request.origin,
+                request.source_id,
+                request.source_digest,
+                revision,
+                request.tool.as_ref(),
+            );
+            entries.insert(
+                name.clone(),
+                RegistryEntry {
+                    tool: request.tool,
+                    identity,
+                },
+            );
+            outcomes.push(if rebound {
+                RegistrationOutcome::Rebound { revision }
+            } else {
+                RegistrationOutcome::Inserted { revision }
+            });
+        }
+        self.publish_snapshot_locked(&entries);
+        Ok(outcomes)
+    }
+
+    /// Atomically replace the complete population owned by one dynamic source.
+    /// Additions, replacements, and stale removals publish exactly one N+1
+    /// revision, so snapshot consumers can never observe a half-reconciled source.
+    pub fn reconcile_source(
+        &self,
+        origin: ToolOrigin,
+        source_id: &str,
+        requests: Vec<RegistrationRequest>,
+    ) -> Result<Vec<RegistrationOutcome>, RegistrationConflict> {
+        let mut names = HashSet::new();
+        for request in &requests {
+            let name = request.tool.name().to_string();
+            if request.origin != origin || request.source_id != source_id {
+                return Err(RegistrationConflict {
+                    name,
+                    requested_origin: request.origin,
+                    requested_source_id: request.source_id.clone(),
+                    existing_origin: None,
+                    existing_source_id: None,
+                    reason: "reconcile batch contains a different source owner".to_string(),
+                });
+            }
+            if static_tool_descriptor(&name).is_some() || !names.insert(name.clone()) {
+                return Err(RegistrationConflict {
+                    name,
+                    requested_origin: request.origin,
+                    requested_source_id: request.source_id.clone(),
+                    existing_origin: None,
+                    existing_source_id: None,
+                    reason: "reconcile identity is reserved or duplicated".to_string(),
+                });
+            }
+        }
+
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        for request in &requests {
+            let name = request.tool.name().to_string();
+            if let Some(existing) = entries.get(&name) {
+                let same_owner =
+                    existing.identity.origin == origin && existing.identity.source_id == source_id;
+                if !same_owner || !request.replace {
+                    return Err(RegistrationConflict {
+                        name,
+                        requested_origin: request.origin,
+                        requested_source_id: request.source_id.clone(),
+                        existing_origin: Some(existing.identity.origin),
+                        existing_source_id: Some(existing.identity.source_id.clone()),
+                        reason: "reconcile identity conflicts with the live registry".to_string(),
+                    });
+                }
+            }
+        }
+
+        let owned_before = entries
+            .values()
+            .filter(|entry| {
+                entry.identity.origin == origin && entry.identity.source_id == source_id
+            })
+            .map(|entry| entry.identity.name.clone())
+            .collect::<HashSet<_>>();
+        if requests.is_empty() && owned_before.is_empty() {
+            return Ok(Vec::new());
+        }
+        let revision = self.next_revision();
+        entries.retain(|_, entry| {
+            entry.identity.origin != origin
+                || entry.identity.source_id != source_id
+                || names.contains(&entry.identity.name)
+        });
+        let mut outcomes = Vec::with_capacity(requests.len());
+        for request in requests {
+            let name = request.tool.name().to_string();
+            let rebound = owned_before.contains(&name);
+            let identity = registry_identity(
+                name.clone(),
+                request.origin,
+                request.source_id,
+                request.source_digest,
+                revision,
+                request.tool.as_ref(),
+            );
+            entries.insert(
+                name,
+                RegistryEntry {
+                    tool: request.tool,
+                    identity,
+                },
+            );
+            outcomes.push(if rebound {
+                RegistrationOutcome::Rebound { revision }
+            } else {
+                RegistrationOutcome::Inserted { revision }
+            });
+        }
+        self.publish_snapshot_locked(&entries);
+        Ok(outcomes)
+    }
+
+    fn next_revision(&self) -> u64 {
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1
+    }
+
+    fn snapshot_from_entries(&self, entries: &HashMap<String, RegistryEntry>) -> RegistrySnapshot {
+        let mut identities = entries
+            .values()
+            .map(|entry| entry.identity.clone())
+            .collect::<Vec<_>>();
+        identities.sort_by(|left, right| {
+            (
+                &left.name,
+                left.origin.to_string(),
+                &left.source_id,
+                left.revision,
+            )
+                .cmp(&(
+                    &right.name,
+                    right.origin.to_string(),
+                    &right.source_id,
+                    right.revision,
+                ))
+        });
+        RegistrySnapshot {
+            schema_version: 2,
+            revision: self.revision.load(std::sync::atomic::Ordering::Acquire),
+            sealed: self.sealed.load(std::sync::atomic::Ordering::Acquire),
+            identities,
+        }
+    }
+
+    fn publish_snapshot_locked(&self, entries: &HashMap<String, RegistryEntry>) {
+        self.snapshot_tx
+            .send_replace(self.snapshot_from_entries(entries));
+    }
+
+    pub fn snapshot(&self) -> RegistrySnapshot {
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        self.snapshot_from_entries(&entries)
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<RegistrySnapshot> {
+        self.snapshot_tx.subscribe()
+    }
+
+    /// Publish a coherent N+1 capability revision for a runtime-owned hot
+    /// mutation that changes a non-tool capability while leaving the tool
+    /// identity population unchanged.
+    pub fn advance_capability_revision(&self) -> RegistrySnapshot {
+        // Capability-only mutations must take the same exclusive boundary as
+        // tool population changes. A read guard would allow two callers to
+        // increment concurrently and both publish the later revision, losing
+        // the one-receipt/one-revision relationship.
+        let entries = self
+            .entries
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        self.next_revision();
+        let snapshot = self.snapshot_from_entries(&entries);
+        self.snapshot_tx.send_replace(snapshot.clone());
+        snapshot
+    }
+
+    /// Seal the fully assembled startup population after verifying exact name
+    /// parity with the descriptors exposed to the agent.
+    pub fn seal_startup(&self) -> Result<RegistrySnapshot, RegistrySealError> {
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut registry = entries.keys().cloned().collect::<Vec<_>>();
+        let mut descriptors = entries
+            .values()
+            .map(|entry| entry.tool.descriptor().name)
+            .collect::<Vec<_>>();
+        registry.sort();
+        descriptors.sort();
+        if registry != descriptors {
+            return Err(RegistrySealError::DescriptorMismatch {
+                registry,
+                descriptors,
+            });
+        }
+        self.sealed
+            .store(true, std::sync::atomic::Ordering::Release);
+        let snapshot = self.snapshot_from_entries(&entries);
+        self.snapshot_tx.send_replace(snapshot.clone());
+        Ok(snapshot)
     }
 
     /// Register the root-independent default built-ins.
@@ -374,7 +900,9 @@ impl ToolRegistry {
         if advisor_ready {
             self.register_advisor_tool(true);
         } else {
-            let _ = self.unregister(ADVISOR_TOOL_NAME).await;
+            let _ = self
+                .unregister_static(ADVISOR_TOOL_NAME, ToolOrigin::Llm)
+                .await;
         }
     }
 
@@ -526,7 +1054,14 @@ impl ToolRegistry {
             wrapper = wrapper.with_tool_invoker(invoker);
         }
 
-        if !self.register(Arc::new(wrapper)).await {
+        let digest = blake3::hash(reg.wasm_bytes).to_hex().to_string();
+        let source_id = format!("wasm/{}", reg.name);
+        let outcome = self.register_request(
+            RegistrationRequest::new(Arc::new(wrapper), ToolOrigin::Wasm, source_id.clone())
+                .with_digest(digest)
+                .replacing(),
+        );
+        if !outcome.accepted() {
             return Err(WasmError::ConfigError(format!(
                 "WASM tool '{}' conflicts with a protected or built-in tool name",
                 reg.name
@@ -536,7 +1071,9 @@ impl ToolRegistry {
         if let Some(registry) = credential_registry {
             let count = credential_mappings.len();
             if let Err(error) = registry.replace_source_mappings(reg.name, credential_mappings) {
-                let _ = self.unregister(reg.name).await;
+                let _ = self
+                    .unregister_owned(reg.name, ToolOrigin::Wasm, &source_id)
+                    .await;
                 return Err(WasmError::ConfigError(format!(
                     "failed to publish WASM credential mappings: {error}"
                 )));
@@ -610,35 +1147,107 @@ impl ToolRegistry {
 
     /// Unregister a tool.
     pub async fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        if self.builtin_names.read().await.contains(name) {
+        if static_tool_descriptor(name).is_some() {
             return None;
         }
-        self.tools.write().await.remove(name)
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let removed = entries.remove(name)?;
+        self.next_revision();
+        self.publish_snapshot_locked(&entries);
+        Some(removed.tool)
+    }
+
+    /// Remove a dynamic identity only when the caller owns its exact source.
+    pub async fn unregister_owned(
+        &self,
+        name: &str,
+        origin: ToolOrigin,
+        source_id: &str,
+    ) -> Option<Arc<dyn Tool>> {
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let entry = entries.get(name)?;
+        if entry.identity.origin != origin || entry.identity.source_id != source_id {
+            return None;
+        }
+        let removed = entries.remove(name)?;
+        self.next_revision();
+        self.publish_snapshot_locked(&entries);
+        Some(removed.tool)
+    }
+
+    /// Reconcile a conditionally present static capability. Only the catalog
+    /// origin may remove it; its name remains reserved for later re-insertion.
+    pub async fn unregister_static(&self, name: &str, origin: ToolOrigin) -> Option<Arc<dyn Tool>> {
+        if static_tool_descriptor(name).map(|item| item.origin) != Some(origin) {
+            return None;
+        }
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let entry = entries.get(name)?;
+        if entry.identity.origin != origin || entry.identity.source_id != format!("builtin/{name}")
+        {
+            return None;
+        }
+        let removed = entries.remove(name)?;
+        self.next_revision();
+        self.publish_snapshot_locked(&entries);
+        Some(removed.tool)
     }
 
     /// Get a tool by name.
     pub async fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.read().await.get(name).cloned()
+        self.entries
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(name)
+            .map(|entry| Arc::clone(&entry.tool))
     }
 
     /// Check if a tool exists.
     pub async fn has(&self, name: &str) -> bool {
-        self.tools.read().await.contains_key(name)
+        self.entries
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(name)
     }
 
     /// List all tool names.
     pub async fn list(&self) -> Vec<String> {
-        self.tools.read().await.keys().cloned().collect()
+        let mut names = self
+            .entries
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        names.sort();
+        names
     }
 
     /// Get the number of registered tools.
     pub fn count(&self) -> usize {
-        self.tools.try_read().map(|t| t.len()).unwrap_or(0)
+        self.entries
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .len()
     }
 
     /// Get all tools.
     pub async fn all(&self) -> Vec<Arc<dyn Tool>> {
-        self.tools.read().await.values().cloned().collect()
+        self.entries
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .map(|entry| Arc::clone(&entry.tool))
+            .collect()
     }
 
     /// Ask every registered tool to release long-lived resources.
@@ -650,11 +1259,11 @@ impl ToolRegistry {
         const TOOL_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
         let mut tools = self
-            .tools
+            .entries
             .read()
-            .await
+            .unwrap_or_else(|error| error.into_inner())
             .iter()
-            .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
+            .map(|(name, entry)| (name.clone(), Arc::clone(&entry.tool)))
             .collect::<Vec<_>>();
         tools.sort_by(|left, right| left.0.cmp(&right.0));
 
@@ -678,11 +1287,11 @@ impl ToolRegistry {
     /// Get tool descriptors for internal routing and policy decisions.
     pub async fn tool_descriptors(&self) -> Vec<ToolDescriptor> {
         let mut descriptors = self
-            .tools
+            .entries
             .read()
-            .await
+            .unwrap_or_else(|error| error.into_inner())
             .values()
-            .map(|tool| tool.descriptor())
+            .map(|entry| entry.tool.descriptor())
             .collect::<Vec<_>>();
         descriptors.sort_by(|left, right| left.name.cmp(&right.name));
         descriptors
@@ -690,11 +1299,11 @@ impl ToolRegistry {
 
     /// Get a single tool descriptor by name.
     pub async fn tool_descriptor(&self, name: &str) -> Option<ToolDescriptor> {
-        self.tools
+        self.entries
             .read()
-            .await
+            .unwrap_or_else(|error| error.into_inner())
             .get(name)
-            .map(|tool| tool.descriptor())
+            .map(|entry| entry.tool.descriptor())
     }
 
     fn descriptor_to_definition(descriptor: ToolDescriptor) -> ToolDefinition {
@@ -876,11 +1485,14 @@ impl ToolRegistry {
 
     /// Get tool definitions for specific tools.
     pub async fn tool_definitions_for(&self, names: &[&str]) -> Vec<ToolDefinition> {
-        let tools = self.tools.read().await;
+        let tools = self
+            .entries
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
         names
             .iter()
             .filter_map(|name| tools.get(*name))
-            .map(|tool| Self::descriptor_to_definition(tool.descriptor()))
+            .map(|entry| Self::descriptor_to_definition(entry.tool.descriptor()))
             .collect()
     }
 
@@ -1081,16 +1693,317 @@ mod registration_tests {
     #[tokio::test]
     async fn built_in_identity_is_single_assignment() {
         let registry = ToolRegistry::new();
-        assert!(registry.register_builtin(Arc::new(EchoTool)).await);
-        assert!(!registry.register_builtin(Arc::new(EchoTool)).await);
+        assert!(
+            registry
+                .register_builtin(Arc::new(EchoTool))
+                .await
+                .changed()
+        );
+        assert!(
+            !registry
+                .register_builtin(Arc::new(EchoTool))
+                .await
+                .accepted()
+        );
         assert_eq!(registry.count(), 1);
     }
 
     #[test]
     fn synchronous_startup_rejects_duplicate_identity() {
         let registry = ToolRegistry::new();
-        assert!(registry.register_sync(Arc::new(EchoTool)));
-        assert!(!registry.register_sync(Arc::new(EchoTool)));
+        assert!(registry.register_sync(Arc::new(EchoTool)).changed());
+        assert!(!registry.register_sync(Arc::new(EchoTool)).accepted());
         assert_eq!(registry.count(), 1);
+    }
+
+    #[test]
+    fn static_catalog_is_complete_unique_and_reserved() {
+        assert_eq!(STATIC_TOOL_CATALOG.len(), 124);
+        assert_eq!(PROTECTED_TOOL_NAMES.len(), 124);
+        let unique = PROTECTED_TOOL_NAMES.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), 124);
+    }
+
+    #[test]
+    fn dynamic_collisions_reject_and_same_source_rebinds_explicitly() {
+        let registry = ToolRegistry::new();
+        let first: Arc<dyn Tool> = Arc::new(crate::builtin::EchoTool);
+        let reserved = registry.register_request(RegistrationRequest::new(
+            first,
+            ToolOrigin::UserTool,
+            "user/a",
+        ));
+        assert!(matches!(reserved, RegistrationOutcome::Rejected { .. }));
+        let spoofed_builtin = registry.register_request(RegistrationRequest::new(
+            Arc::new(crate::builtin::EchoTool),
+            ToolOrigin::Core,
+            "builtin/echo",
+        ));
+        assert!(matches!(
+            spoofed_builtin,
+            RegistrationOutcome::Rejected { .. }
+        ));
+
+        struct DynamicEcho;
+        #[async_trait::async_trait]
+        impl Tool for DynamicEcho {
+            fn name(&self) -> &str {
+                "dynamic_echo"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _arguments: serde_json::Value,
+                _ctx: &thinclaw_types::JobContext,
+            ) -> Result<thinclaw_tools_core::ToolOutput, thinclaw_tools_core::ToolError>
+            {
+                Ok(thinclaw_tools_core::ToolOutput::text(
+                    "ok",
+                    std::time::Duration::ZERO,
+                ))
+            }
+        }
+
+        let inserted = registry.register_request(RegistrationRequest::new(
+            Arc::new(DynamicEcho),
+            ToolOrigin::UserTool,
+            "user/a",
+        ));
+        assert!(matches!(
+            inserted,
+            RegistrationOutcome::Inserted { revision: 1 }
+        ));
+        let conflict = registry.register_request(RegistrationRequest::new(
+            Arc::new(DynamicEcho),
+            ToolOrigin::Mcp,
+            "mcp/a",
+        ));
+        assert!(matches!(conflict, RegistrationOutcome::Rejected { .. }));
+        let rebound = registry.register_request(
+            RegistrationRequest::new(Arc::new(DynamicEcho), ToolOrigin::UserTool, "user/a")
+                .replacing(),
+        );
+        assert!(matches!(
+            rebound,
+            RegistrationOutcome::Rebound { revision: 2 }
+        ));
+    }
+
+    #[test]
+    fn batch_registration_is_all_or_nothing_and_snapshot_is_monotonic() {
+        struct Named(&'static str);
+        #[async_trait::async_trait]
+        impl Tool for Named {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _arguments: serde_json::Value,
+                _ctx: &thinclaw_types::JobContext,
+            ) -> Result<thinclaw_tools_core::ToolOutput, thinclaw_tools_core::ToolError>
+            {
+                Ok(thinclaw_tools_core::ToolOutput::text(
+                    "ok",
+                    std::time::Duration::ZERO,
+                ))
+            }
+        }
+        let registry = ToolRegistry::new();
+        registry.register_request(RegistrationRequest::new(
+            Arc::new(Named("taken")),
+            ToolOrigin::UserTool,
+            "user/a",
+        ));
+        let result = registry.register_batch(vec![
+            RegistrationRequest::new(Arc::new(Named("new")), ToolOrigin::Mcp, "mcp/server"),
+            RegistrationRequest::new(Arc::new(Named("taken")), ToolOrigin::Mcp, "mcp/server"),
+        ]);
+        assert!(result.is_err());
+        assert_eq!(registry.count(), 1);
+        let inserted = registry
+            .register_batch(vec![
+                RegistrationRequest::new(Arc::new(Named("new-one")), ToolOrigin::Mcp, "mcp/server"),
+                RegistrationRequest::new(Arc::new(Named("new-two")), ToolOrigin::Mcp, "mcp/server"),
+            ])
+            .expect("atomic insert");
+        assert!(
+            inserted
+                .iter()
+                .all(|outcome| matches!(outcome, RegistrationOutcome::Inserted { revision: 2 }))
+        );
+        assert_eq!(registry.snapshot().revision, 2);
+        let reconciled = registry
+            .reconcile_source(
+                ToolOrigin::Mcp,
+                "mcp/server",
+                vec![
+                    RegistrationRequest::new(
+                        Arc::new(Named("new-two")),
+                        ToolOrigin::Mcp,
+                        "mcp/server",
+                    )
+                    .replacing(),
+                    RegistrationRequest::new(
+                        Arc::new(Named("new-three")),
+                        ToolOrigin::Mcp,
+                        "mcp/server",
+                    ),
+                ],
+            )
+            .expect("atomic reconcile");
+        assert!(reconciled.iter().all(|outcome| matches!(
+            outcome,
+            RegistrationOutcome::Inserted { revision: 3 }
+                | RegistrationOutcome::Rebound { revision: 3 }
+        )));
+        let reconciled_snapshot = registry.snapshot();
+        assert_eq!(reconciled_snapshot.revision, 3);
+        assert!(
+            !reconciled_snapshot
+                .identities
+                .iter()
+                .any(|identity| identity.name == "new-one")
+        );
+        let before = registry.snapshot();
+        let sealed = registry.seal_startup().expect("descriptor parity");
+        assert!(sealed.sealed);
+        assert_eq!(before.revision, sealed.revision);
+        let advanced = registry.advance_capability_revision();
+        assert_eq!(advanced.revision, sealed.revision + 1);
+        assert_eq!(advanced.identities, sealed.identities);
+        assert!(advanced.sealed);
+    }
+
+    #[test]
+    fn every_origin_collision_pair_requires_exact_owner_and_explicit_rebind() {
+        struct Named(String);
+        #[async_trait::async_trait]
+        impl Tool for Named {
+            fn name(&self) -> &str {
+                &self.0
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _arguments: serde_json::Value,
+                _ctx: &thinclaw_types::JobContext,
+            ) -> Result<thinclaw_tools_core::ToolOutput, thinclaw_tools_core::ToolError>
+            {
+                Ok(thinclaw_tools_core::ToolOutput::text(
+                    "ok",
+                    std::time::Duration::ZERO,
+                ))
+            }
+        }
+
+        assert_eq!(ALL_TOOL_ORIGINS.len(), 20);
+        for (left_index, left) in ALL_TOOL_ORIGINS.iter().copied().enumerate() {
+            for (right_index, right) in ALL_TOOL_ORIGINS.iter().copied().enumerate() {
+                let registry = ToolRegistry::new();
+                let name = format!("collision_{left_index}_{right_index}");
+                assert!(
+                    registry
+                        .register_request(RegistrationRequest::new(
+                            Arc::new(Named(name.clone())),
+                            left,
+                            "source/left",
+                        ))
+                        .changed()
+                );
+                let outcome = registry.register_request(RegistrationRequest::new(
+                    Arc::new(Named(name)),
+                    right,
+                    "source/right",
+                ));
+                assert!(matches!(outcome, RegistrationOutcome::Rejected { .. }));
+                assert_eq!(registry.count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_registration_never_omits_unrelated_tools() {
+        struct Named(String);
+        #[async_trait::async_trait]
+        impl Tool for Named {
+            fn name(&self) -> &str {
+                &self.0
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _arguments: serde_json::Value,
+                _ctx: &thinclaw_types::JobContext,
+            ) -> Result<thinclaw_tools_core::ToolOutput, thinclaw_tools_core::ToolError>
+            {
+                Ok(thinclaw_tools_core::ToolOutput::text(
+                    "ok",
+                    std::time::Duration::ZERO,
+                ))
+            }
+        }
+
+        let registry = Arc::new(ToolRegistry::new());
+        let workers = (0..32)
+            .map(|index| {
+                let registry = Arc::clone(&registry);
+                std::thread::spawn(move || {
+                    let name = format!("contention_{index}");
+                    registry.register_request(RegistrationRequest::new(
+                        Arc::new(Named(name)),
+                        ToolOrigin::UserTool,
+                        format!("user/{index}"),
+                    ))
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            assert!(worker.join().expect("registration thread").changed());
+        }
+        assert_eq!(registry.count(), 32);
+        assert_eq!(registry.snapshot().revision, 32);
+    }
+
+    #[test]
+    fn concurrent_capability_mutations_receive_distinct_revisions() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry.seal_startup().expect("seal empty registry");
+
+        let workers = (0..32)
+            .map(|_| {
+                let registry = Arc::clone(&registry);
+                std::thread::spawn(move || registry.advance_capability_revision().revision)
+            })
+            .collect::<Vec<_>>();
+        let mut revisions = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("capability mutation thread"))
+            .collect::<Vec<_>>();
+        revisions.sort_unstable();
+
+        assert_eq!(revisions, (1..=32).collect::<Vec<_>>());
+        assert_eq!(registry.snapshot().revision, 32);
     }
 }

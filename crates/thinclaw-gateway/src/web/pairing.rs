@@ -99,7 +99,7 @@ mod tests {
             serde_json::to_value(pairing_invalid_request_response()).unwrap(),
             serde_json::json!({
                 "success": false,
-                "message": "Invalid or expired pairing code",
+                "message": "Invalid, expired, or already-consumed pairing request ID",
             })
         );
         assert_eq!(

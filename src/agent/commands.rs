@@ -723,6 +723,9 @@ impl Agent {
             )));
         };
         match route {
+            SystemCommandRoute::Input => Ok(SubmissionResult::error(
+                "Invalid internal command route. Try /help",
+            )),
             SystemCommandRoute::Help => Ok(SubmissionResult::response(
                 command_catalog::agent_help_text(),
             )),

@@ -951,8 +951,27 @@ impl AppBuilder {
                                         let tool_count = mcp_tools.len();
                                         match client.create_tools().await {
                                             Ok(tool_impls) => {
-                                                for tool in tool_impls {
-                                                    tools.register(tool).await;
+                                                let source_id = format!("mcp/{server_name}");
+                                                let requests = tool_impls
+                                                    .into_iter()
+                                                    .map(|tool| {
+                                                        crate::tools::RegistrationRequest::new(
+                                                            tool,
+                                                            crate::tools::ToolOrigin::Mcp,
+                                                            source_id.clone(),
+                                                        )
+                                                    })
+                                                    .collect();
+                                                if let Err(conflict) =
+                                                    tools.register_batch(requests)
+                                                {
+                                                    tracing::warn!(
+                                                        server = %server_name,
+                                                        tool = %conflict.name,
+                                                        reason = %conflict.reason,
+                                                        "Rejected entire MCP startup activation"
+                                                    );
+                                                    return;
                                                 }
                                                 tracing::info!(
                                                     "Loaded {} tools from MCP server '{}'",
@@ -1897,114 +1916,4 @@ impl AppBuilder {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(feature = "libsql")]
-    #[tokio::test]
-    async fn injected_and_configured_databases_initialize() {
-        use crate::db::Database as _;
-
-        let settings = crate::settings::Settings {
-            llm_backend: Some("openai_compatible".to_string()),
-            openai_compatible_base_url: Some("http://localhost:12345/v1".to_string()),
-            ..crate::settings::Settings::default()
-        };
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let backend = crate::db::libsql::LibSqlBackend::new_local(&temp.path().join("shared.db"))
-            .await
-            .expect("open shared database");
-        backend.run_migrations().await.expect("run migrations");
-        let database: Arc<dyn Database> = Arc::new(backend);
-        let mut builder = AppBuilder::new(
-            Config::from_test_settings(&settings)
-                .await
-                .expect("build test config"),
-            AppBuilderFlags::default(),
-            None,
-            Arc::new(LogBroadcaster::new()),
-        )
-        .with_database(Arc::clone(&database));
-
-        builder
-            .init_database()
-            .await
-            .expect("initialize injected database");
-
-        assert!(Arc::ptr_eq(
-            builder.db().expect("database retained"),
-            &database
-        ));
-
-        let mut config = Config::from_test_settings(&settings)
-            .await
-            .expect("build test config");
-        config.database.backend = crate::config::DatabaseBackend::LibSql;
-        config.database.libsql_path = Some(temp.path().join("configured.db"));
-        let mut configured_builder = AppBuilder::new(
-            config,
-            AppBuilderFlags::default(),
-            None,
-            Arc::new(LogBroadcaster::new()),
-        );
-
-        configured_builder
-            .init_database()
-            .await
-            .expect("initialize configured database");
-        assert!(configured_builder.db().is_some());
-    }
-
-    #[test]
-    fn restricted_modes_disable_background_processes() {
-        assert_eq!(
-            process_registration_mode("sandboxed"),
-            RuntimeExecRegistrationMode::Disabled
-        );
-        assert_eq!(
-            process_registration_mode("project"),
-            RuntimeExecRegistrationMode::Disabled
-        );
-        assert_eq!(
-            process_registration_mode("unrestricted"),
-            RuntimeExecRegistrationMode::LocalHost
-        );
-    }
-
-    #[test]
-    fn execute_code_requires_real_isolation_in_restricted_modes() {
-        assert_eq!(
-            execute_code_registration_mode("sandboxed", true),
-            RuntimeExecRegistrationMode::DockerSandbox
-        );
-        assert_eq!(
-            execute_code_registration_mode("sandboxed", false),
-            RuntimeExecRegistrationMode::Disabled
-        );
-        assert_eq!(
-            execute_code_registration_mode("project", true),
-            RuntimeExecRegistrationMode::Disabled
-        );
-        assert_eq!(
-            execute_code_registration_mode("unrestricted", false),
-            RuntimeExecRegistrationMode::LocalHost
-        );
-    }
-
-    #[test]
-    fn pi_os_lite_runtime_blocks_desktop_autonomy_registration() {
-        assert_eq!(
-            desktop_autonomy_headless_blocker_for("pi-os-lite-64", false),
-            Some("pi-os-lite-64")
-        );
-        assert_eq!(
-            desktop_autonomy_headless_blocker_for("raspberry-pi-os-lite", false),
-            Some("pi-os-lite-64")
-        );
-        assert_eq!(
-            desktop_autonomy_headless_blocker_for("remote", true),
-            Some("headless")
-        );
-        assert_eq!(desktop_autonomy_headless_blocker_for("remote", false), None);
-    }
-}
+mod tests;

@@ -45,26 +45,36 @@ impl SubmissionParser {
             return Submission::NewThread;
         }
 
-        // Registry-backed command vocabulary: commands that map to a
-        // `Submission::SystemCommand` (help, version, tools, identity,
-        // memory, skills, ping, debug, status, model, rollback,
-        // personality/vibe, skin) or to a dedicated `Submission` variant
+        // Registry-backed command vocabulary: agent-message commands that map
+        // to `Submission::SystemCommand` (help, version, tools, identity,
+        // memory, skills, ping, status, model, rollback, personality/vibe)
+        // or to a dedicated `Submission` variant
         // (undo, redo, interrupt/stop, compact/compress, clear, heartbeat,
         // summarize/summary, suggest, quit/exit/shutdown, restart).
         if let Some(spec) = command_registry::match_command(&lower) {
-            let args: Vec<String> = match spec.arg_style {
-                command_registry::ArgStyle::ExactOnly => vec![],
-                command_registry::ArgStyle::ExactOrSpaceDelimitedArgs => trimmed
+            let args: Vec<String> = match spec.argument_schema {
+                command_registry::ArgumentSchema::Exact => vec![],
+                _ => trimmed
                     .split_whitespace()
                     .skip(1)
                     .map(|s| s.to_string())
                     .collect(),
             };
 
-            if let Some(system_command) = spec.system_command {
+            if let Some(system_command) = spec.system_command() {
                 return Submission::SystemCommand {
                     command: system_command.as_str().to_string(),
                     args,
+                };
+            }
+
+            if matches!(
+                spec.agent_message,
+                command_registry::SurfaceRoute::Unsupported
+            ) {
+                return Submission::SystemCommand {
+                    command: "local_only".to_string(),
+                    args: vec![spec.name.to_string()],
                 };
             }
 
@@ -74,19 +84,31 @@ impl SubmissionParser {
                 "/interrupt" => Submission::Interrupt,
                 "/compress" => Submission::Compact,
                 "/clear" => Submission::Clear,
+                "/new" => Submission::NewThread,
                 "/heartbeat" => Submission::Heartbeat,
                 "/summarize" => Submission::Summarize,
                 "/suggest" => Submission::Suggest,
                 "/quit" => Submission::Quit,
                 "/restart" => Submission::Restart,
-                // A parser must never panic on user input: a registry entry
-                // without a mapping falls through to plain chat.
+                "/thread" => args
+                    .first()
+                    .filter(|arg| !arg.eq_ignore_ascii_case("new"))
+                    .and_then(|arg| Uuid::parse_str(arg).ok())
+                    .map(|thread_id| Submission::SwitchThread { thread_id })
+                    .unwrap_or_else(|| Submission::UserInput {
+                        content: content.to_string(),
+                    }),
+                "/resume" => args
+                    .first()
+                    .and_then(|arg| Uuid::parse_str(arg).ok())
+                    .map(|checkpoint_id| Submission::Resume { checkpoint_id })
+                    .unwrap_or_else(|| Submission::UserInput {
+                        content: content.to_string(),
+                    }),
+                // Job and compatibility commands intentionally continue to
+                // the message-intent router, which owns their typed grammar.
                 other => {
-                    tracing::warn!(
-                        command = other,
-                        "Registry entry has no system_command and no Submission mapping; \
-                         treating input as chat"
-                    );
+                    tracing::debug!(command = other, "forwarding registry input route");
                     Submission::UserInput {
                         content: content.to_string(),
                     }
@@ -655,12 +677,12 @@ mod tests {
     }
 
     #[test]
-    fn test_parser_skin_system_command() {
+    fn test_parser_rejects_local_only_skin_command() {
         let submission = SubmissionParser::parse("/skin midnight");
         assert!(matches!(
             submission,
             Submission::SystemCommand { command, args }
-                if command == "skin" && args == vec!["midnight"]
+                if command == "local_only" && args == vec!["/skin"]
         ));
     }
 
@@ -912,10 +934,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parser_system_command_debug() {
+    fn test_parser_rejects_local_only_debug_command() {
         let submission = SubmissionParser::parse("/debug");
         assert!(
-            matches!(submission, Submission::SystemCommand { command, args } if command == "debug" && args.is_empty())
+            matches!(submission, Submission::SystemCommand { command, args } if command == "local_only" && args == vec!["/debug"])
         );
     }
 

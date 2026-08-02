@@ -1236,7 +1236,7 @@ pub(crate) async fn build_inner(
     }
 
     // ── 7. Start background tasks ───────────────────────────────────
-    let bg_handle = agent.start_background_tasks().await;
+    let bg_handle = agent.start_background_tasks().await?;
 
     // Extract routine engine Arc for easy access (parity with run() loop's
     // routine_engine_for_loop). The same Arc stays in bg_handle too.
