@@ -16,8 +16,7 @@ use thinclaw::{
     app::{
         AppBuilder, AppBuilderFlags, LocalRuntimeChannel, NativeChannelActivationInput,
         NativeChannelActivationPlan, PeriodicPersistencePlan, QuietStartupSpinner,
-        RuntimeEntrypointPlan, RuntimeEnvBootstrapPlan, RuntimeShutdownAction, RuntimeShutdownPlan,
-        init_cli_tracing, relaunch_current_process, restart_is_managed_by_service,
+        RuntimeEntrypointPlan, RuntimeEnvBootstrapPlan, init_cli_tracing,
         should_show_quiet_startup_spinner,
     },
     channels::{
@@ -51,8 +50,9 @@ mod command_dispatch;
 mod runtime_maintenance;
 
 use runtime_maintenance::{
-    RuntimeHotReloadWatchers, RuntimeMaintenanceTask, shutdown_runtime_maintenance,
-    start_cost_persistence, start_experiment_loops, start_pricing_sync,
+    RuntimeHotReloadWatchers, RuntimeMaintenanceTask, finish_runtime_shutdown,
+    shutdown_runtime_maintenance, start_cost_persistence, start_experiment_loops,
+    start_pricing_sync,
 };
 
 pub(crate) async fn async_main() -> anyhow::Result<()> {
@@ -1988,21 +1988,10 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             .restart_requested
             .load(std::sync::atomic::Ordering::SeqCst)
     });
-    let shutdown_plan = RuntimeShutdownPlan::from_restart_signals(
+    finish_runtime_shutdown(
         restart_requested.load(Ordering::SeqCst),
         gateway_restart_requested,
-        restart_is_managed_by_service(),
-    );
-    match shutdown_plan.action {
-        RuntimeShutdownAction::Complete => {}
-        RuntimeShutdownAction::ExitForSupervisor(code) => {
-            eprintln!("Restarting ThinClaw (exit code 75 for service manager)...");
-            std::process::exit(code);
-        }
-        RuntimeShutdownAction::Relaunch => {
-            relaunch_current_process()?;
-        }
-    }
+    )?;
 
     Ok(())
 }
