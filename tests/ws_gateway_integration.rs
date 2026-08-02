@@ -409,12 +409,16 @@ async fn test_ws_multiple_events_in_sequence() {
         thread_id: None,
     });
     state.sse.broadcast(SseEvent::ToolStarted {
+        invocation_id: thinclaw_types::ToolInvocationId::from_provider("ws-shell"),
         name: "shell".to_string(),
         thread_id: None,
     });
     state.sse.broadcast(SseEvent::ToolCompleted {
+        invocation_id: thinclaw_types::ToolInvocationId::from_provider("ws-shell"),
         name: "shell".to_string(),
         success: true,
+        result_preview: None,
+        duration_ms: Some(1),
         thread_id: None,
     });
     state.sse.broadcast(SseEvent::Response {

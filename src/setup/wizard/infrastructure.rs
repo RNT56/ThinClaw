@@ -15,9 +15,7 @@ use tokio_postgres::NoTls;
 
 use crate::secrets::SecretsCrypto;
 use crate::settings::KeySource;
-use crate::setup::prompts::{
-    confirm, input, print_blank_line, print_error, print_info, print_success, select_one,
-};
+use crate::setup::prompts::{confirm, input, print_error, print_info, print_success, select_one};
 #[cfg(feature = "libsql")]
 use crate::setup::prompts::{optional_input, secret_input};
 
@@ -31,7 +29,7 @@ impl SetupWizard {
         self.selected_profile = self
             .config
             .profile
-            .unwrap_or(super::OnboardingProfile::BuilderAndCoding);
+            .unwrap_or(super::OnboardingProfile::Balanced);
         self.apply_profile_defaults();
         self.settings.user_timezone = Some(crate::timezone::detect_system_timezone().to_string());
         self.settings.webchat_theme = "system".to_string();
@@ -55,8 +53,6 @@ impl SetupWizard {
             .filter(|value| !value.trim().is_empty())
         {
             self.settings.database_backend = Some("postgres".to_string());
-            self.test_database_connection_postgres(&url).await?;
-            self.run_migrations_postgres().await?;
             self.settings.database_url = Some(url);
             return Ok(());
         }
@@ -79,14 +75,6 @@ impl SetupWizard {
                 .libsql_url
                 .clone()
                 .or_else(|| std::env::var("LIBSQL_URL").ok());
-            let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
-            self.test_database_connection_libsql(
-                &path,
-                turso_url.as_deref(),
-                turso_token.as_deref(),
-            )
-            .await?;
-            self.run_migrations_libsql().await?;
             self.settings.libsql_path = Some(path);
             self.settings.libsql_url = turso_url;
             return Ok(());
@@ -102,11 +90,6 @@ impl SetupWizard {
         if let Ok(env_key) = std::env::var("SECRETS_MASTER_KEY")
             && !env_key.trim().is_empty()
         {
-            self.secrets_crypto = Some(Arc::new(
-                SecretsCrypto::new(SecretString::from(env_key.clone()))
-                    .map_err(|e| SetupError::Config(e.to_string()))?,
-            ));
-            self.generated_env_master_key = Some(env_key);
             self.settings.secrets_master_key_source = KeySource::Env;
             self.settings.secrets.master_key_source = crate::settings::SecretsMasterKeySource::Env;
             self.settings.secrets.allow_env_master_key = true;
@@ -114,14 +97,7 @@ impl SetupWizard {
         }
 
         if let Ok(keychain_key_bytes) = crate::platform::secure_store::get_master_key().await {
-            let key_hex: String = keychain_key_bytes
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect();
-            self.secrets_crypto = Some(Arc::new(
-                SecretsCrypto::new(SecretString::from(key_hex))
-                    .map_err(|e| SetupError::Config(e.to_string()))?,
-            ));
+            drop(keychain_key_bytes);
             self.settings.secrets_master_key_source = KeySource::Keychain;
             self.settings.secrets.master_key_source =
                 crate::settings::SecretsMasterKeySource::OsSecureStore;
@@ -130,36 +106,13 @@ impl SetupWizard {
         }
 
         let key = crate::platform::secure_store::generate_master_key();
-        if crate::platform::secure_store::store_master_key(&key)
-            .await
-            .is_ok()
-        {
-            let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
-            self.secrets_crypto = Some(Arc::new(
-                SecretsCrypto::new(SecretString::from(key_hex))
-                    .map_err(|e| SetupError::Config(e.to_string()))?,
-            ));
-            self.settings.secrets_master_key_source = KeySource::Keychain;
-            self.settings.secrets.master_key_source =
-                crate::settings::SecretsMasterKeySource::OsSecureStore;
-            self.settings.secrets.allow_env_master_key = false;
-            return Ok(());
-        }
-
-        let key_hex = crate::platform::secure_store::generate_master_key_hex();
-        // SAFETY: onboarding performs this env mutation during single-threaded bootstrap
-        // before the runtime starts using the generated fallback key elsewhere.
-        unsafe {
-            std::env::set_var("SECRETS_MASTER_KEY", &key_hex);
-        }
-        self.secrets_crypto = Some(Arc::new(
-            SecretsCrypto::new(SecretString::from(key_hex.clone()))
-                .map_err(|e| SetupError::Config(e.to_string()))?,
-        ));
-        self.generated_env_master_key = Some(key_hex);
-        self.settings.secrets_master_key_source = KeySource::Env;
-        self.settings.secrets.master_key_source = crate::settings::SecretsMasterKeySource::Env;
-        self.settings.secrets.allow_env_master_key = true;
+        let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        self.secret_draft
+            .insert(super::SETUP_MASTER_KEY_SLOT, SecretString::from(key_hex));
+        self.settings.secrets_master_key_source = KeySource::Keychain;
+        self.settings.secrets.master_key_source =
+            crate::settings::SecretsMasterKeySource::OsSecureStore;
+        self.settings.secrets.allow_env_master_key = false;
         Ok(())
     }
 
@@ -271,8 +224,6 @@ impl SetupWizard {
                     print_info("Let's set up a new database URL.");
                 } else {
                     print_success("Database connection successful");
-                    // Run migrations to ensure new tables exist on older schemas
-                    self.run_migrations_postgres().await?;
                     self.settings.database_url = Some(url.clone());
                     return Ok(());
                 }
@@ -296,10 +247,6 @@ impl SetupWizard {
             match self.test_database_connection_postgres(&url).await {
                 Ok(()) => {
                     print_success("Database connection successful");
-
-                    if confirm("Run database migrations?", true).map_err(SetupError::Io)? {
-                        self.run_migrations_postgres().await?;
-                    }
 
                     self.settings.database_url = Some(url);
                     return Ok(());
@@ -335,35 +282,14 @@ impl SetupWizard {
                 let turso_url = std::env::var("LIBSQL_URL")
                     .ok()
                     .or_else(|| self.settings.libsql_url.clone());
-                let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
-
-                match self
-                    .test_database_connection_libsql(
-                        path,
-                        turso_url.as_deref(),
-                        turso_token.as_deref(),
-                    )
-                    .await
-                {
-                    Ok(()) => {
-                        print_success("Database connection successful");
-
-                        // Always run migrations — they're idempotent (IF NOT EXISTS)
-                        // and ensure new tables (e.g. secrets, routines) exist on
-                        // databases created with older schema versions.
-                        self.run_migrations_libsql().await?;
-
-                        self.settings.libsql_path = Some(path.clone());
-                        if let Some(url) = turso_url {
-                            self.settings.libsql_url = Some(url);
-                        }
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        print_error(&format!("Connection failed: {}", e));
-                        print_info("Let's configure a new database path.");
-                    }
+                print_success(
+                    "Database target accepted; creation and migrations are deferred to Apply",
+                );
+                self.settings.libsql_path = Some(path.clone());
+                if let Some(url) = turso_url {
+                    self.settings.libsql_url = Some(url);
                 }
+                return Ok(());
             }
         }
 
@@ -385,7 +311,7 @@ impl SetupWizard {
         let use_turso =
             confirm("Add Turso cloud sync (remote replica)?", false).map_err(SetupError::Io)?;
 
-        let (turso_url, turso_token) = if use_turso {
+        let turso_url = if use_turso {
             print_info("Enter your Turso database URL and auth token.");
             print_info("Example: libsql://your-db.turso.io");
             crate::setup::prompts::print_blank_line();
@@ -393,40 +319,33 @@ impl SetupWizard {
             let url = input("Turso URL").map_err(SetupError::Io)?;
             if url.is_empty() {
                 print_error("Turso URL is required for cloud sync.");
-                (None, None)
+                None
             } else {
                 let token_secret = secret_input("Auth token").map_err(SetupError::Io)?;
                 let token = token_secret.expose_secret().to_string();
                 if token.is_empty() {
                     print_error("Auth token is required for cloud sync.");
-                    (None, None)
+                    None
                 } else {
-                    (Some(url), Some(token))
+                    self.secret_draft
+                        .insert("libsql_auth_token", SecretString::from(token));
+                    Some(url)
                 }
             }
         } else {
-            (None, None)
+            None
         };
 
-        print_info("Testing connection...");
-        match self
-            .test_database_connection_libsql(&db_path, turso_url.as_deref(), turso_token.as_deref())
-            .await
-        {
-            Ok(()) => {
-                print_success("Database connection successful");
-
-                // Always run migrations for libsql (they're idempotent)
-                self.run_migrations_libsql().await?;
-
-                self.settings.libsql_path = Some(db_path);
-                if let Some(url) = turso_url {
-                    self.settings.libsql_url = Some(url);
-                }
-                Ok(())
-            }
-            Err(e) => Err(SetupError::Database(format!("Connection failed: {}", e))),
+        let db_path_ref = std::path::Path::new(&db_path);
+        if db_path_ref.as_os_str().is_empty() || db_path_ref.file_name().is_none() {
+            return Err(SetupError::Database(
+                "Invalid libSQL database path".to_string(),
+            ));
         }
+        print_success("Database target accepted; creation and migrations are deferred to Apply");
+        self.settings.libsql_path = Some(db_path);
+        self.settings.libsql_url = turso_url;
+        Ok(())
     }
 
     /// Test PostgreSQL connection and store the pool.
@@ -484,7 +403,7 @@ impl SetupWizard {
 
     /// Run PostgreSQL migrations.
     #[cfg(feature = "postgres")]
-    pub(super) async fn run_migrations_postgres(&self) -> Result<(), SetupError> {
+    pub(super) async fn run_migrations_postgres(&self) -> Result<bool, SetupError> {
         if let Some(ref pool) = self.db_pool {
             use refinery::embed_migrations;
             embed_migrations!("migrations");
@@ -496,14 +415,15 @@ impl SetupWizard {
                 .await
                 .map_err(|e| SetupError::Database(format!("Pool error: {}", e)))?;
 
-            migrations::runner()
+            let report = migrations::runner()
                 .run_async(&mut **client)
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 
             print_success("Migrations applied");
+            return Ok(!report.applied_migrations().is_empty());
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Run libSQL migrations.
@@ -596,54 +516,27 @@ impl SetupWizard {
 
         match choice {
             0 => {
-                // Generate and store in the OS secure store
-                print_info("Generating master key...");
+                // Generate into the volatile controller draft. Apply is the
+                // only boundary allowed to touch the OS secure store.
+                print_info("Preparing a master key for Review & Apply...");
                 let key = crate::platform::secure_store::generate_master_key();
-
-                crate::platform::secure_store::store_master_key(&key)
-                    .await
-                    .map_err(|e| {
-                        SetupError::Config(format!("Failed to store in {secure_store}: {}", e))
-                    })?;
-
-                // Also create crypto instance
-                let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
-                self.secrets_crypto = Some(Arc::new(
-                    SecretsCrypto::new(SecretString::from(key_hex))
-                        .map_err(|e| SetupError::Config(e.to_string()))?,
-                ));
+                let key_hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+                self.secret_draft
+                    .insert(super::SETUP_MASTER_KEY_SLOT, SecretString::from(key_hex));
 
                 self.settings.secrets_master_key_source = KeySource::Keychain;
                 self.settings.secrets.master_key_source =
                     crate::settings::SecretsMasterKeySource::OsSecureStore;
                 self.settings.secrets.allow_env_master_key = false;
                 print_success(&format!(
-                    "Master key generated and saved to the {secure_store}"
+                    "Master key prepared; it will be saved to the {secure_store} only after Apply"
                 ));
             }
             1 => {
-                // Env var mode
-                print_info("Generate a key and add it to your environment:");
-                let key_hex = crate::platform::secure_store::generate_master_key_hex();
-                print_blank_line();
-                if cfg!(target_os = "windows") {
-                    print_info(&format!("setx SECRETS_MASTER_KEY {}", key_hex));
-                    print_info(&format!("$env:SECRETS_MASTER_KEY = \"{}\"", key_hex));
-                } else {
-                    print_info(&format!("export SECRETS_MASTER_KEY={}", key_hex));
-                }
-                print_blank_line();
-                if cfg!(target_os = "windows") {
-                    print_info("Add this to your PowerShell profile or .env file.");
-                } else {
-                    print_info("Add this to your shell profile or .env file.");
-                }
-
-                self.settings.secrets_master_key_source = KeySource::Env;
-                self.settings.secrets.master_key_source =
-                    crate::settings::SecretsMasterKeySource::Env;
-                self.settings.secrets.allow_env_master_key = true;
-                print_success("Configured for environment storage");
+                return Err(SetupError::Config(
+                    "Environment master-key mode requires an operator-supplied SECRETS_MASTER_KEY before setup; ThinClaw will not generate or print one"
+                        .to_string(),
+                ));
             }
             _ => {
                 self.settings.secrets_master_key_source = KeySource::None;

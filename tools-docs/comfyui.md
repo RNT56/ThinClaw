@@ -1,7 +1,7 @@
 # ComfyUI Built-In Tools
 
 ComfyUI media generation is a built-in ThinClaw tool family. It is not a WASM
-tool package and is not installed with `thinclaw tool install`.
+tool package and is not installed with `thinclaw extensions tools install`.
 
 ## Tools
 
@@ -33,16 +33,16 @@ environment fallback is `COMFY_CLOUD_API_KEY`.
 
 ## CLI
 
-Use `thinclaw comfy ...` for operator diagnostics and lifecycle:
+Use `thinclaw media comfy ...` for operator diagnostics and lifecycle:
 
 ```bash
-thinclaw comfy health
-thinclaw comfy hardware-check
-thinclaw comfy setup --gpu cpu
-thinclaw comfy launch
-thinclaw comfy list-workflows
-thinclaw comfy check-deps sdxl_txt2img
-thinclaw comfy generate "a product photo of a matte black espresso machine" --aspect-ratio wide
+thinclaw media comfy health
+thinclaw media comfy hardware-check
+thinclaw media comfy setup --gpu cpu
+thinclaw media comfy launch
+thinclaw media comfy list-workflows
+thinclaw media comfy check-deps sdxl_txt2img
+thinclaw media comfy generate "a product photo of a matte black espresso machine" --aspect-ratio wide
 ```
 
 ## Skill

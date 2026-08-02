@@ -3,7 +3,7 @@
 use crate::config::resolve_personality_pack_from_settings;
 use crate::settings::KeySource;
 use crate::setup::prompts::{
-    PromptUiMode as PromptRenderMode, confirm, current_prompt_ui_mode, print_info, print_success,
+    PromptUiMode as PromptRenderMode, current_prompt_ui_mode, print_info, print_success,
     print_warning,
 };
 
@@ -12,26 +12,12 @@ use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
     pub(super) async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
-        self.persist_followups();
-        self.settings.onboard_completed = true;
-
-        // Final persist (idempotent — earlier incremental saves already wrote
-        // most settings, but this ensures onboard_completed is saved).
-        let saved = self.persist_settings().await?;
-
-        if !saved {
-            return Err(SetupError::Database(
-                "No database connection, cannot save settings".to_string(),
-            ));
-        }
-
-        // Write bootstrap env (also idempotent)
-        self.write_bootstrap_env()?;
+        self.review_and_apply().await?;
 
         if current_prompt_ui_mode() == PromptRenderMode::Tui {
             print_success("Configuration saved to database");
             print_info(&self.runtime_handoff_summary());
-            self.offer_path_setup().await;
+            self.report_path_status();
             return Ok(());
         }
 
@@ -131,9 +117,7 @@ impl SetupWizard {
                 Some(&self.settings),
             );
             println!("    - Web Gateway: enabled ({})", access.bind_display());
-            if let Some(url) = access.token_url(false) {
-                println!("      Token URL: {}", url);
-            }
+            println!("      Web UI: {}", access.local_url());
             if access.is_loopback() {
                 println!("      SSH tunnel: {}", access.ssh_tunnel_command());
             }
@@ -308,7 +292,7 @@ impl SetupWizard {
         // ── PATH check & symlink offer ──────────────────────────
         // If the current binary isn't on PATH, offer to create a symlink so
         // the user can just type `thinclaw` from any terminal.
-        self.offer_path_setup().await;
+        self.report_path_status();
 
         println!("Resume Later");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -321,175 +305,23 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Check if `thinclaw` is accessible on PATH and offer to create a
-    /// symlink if it isn't.
-    pub(super) async fn offer_path_setup(&self) {
-        use std::path::Path;
-
-        // Check if `thinclaw` is already findable on PATH
+    /// Report PATH state without mutating user files or invoking elevation.
+    pub(super) fn report_path_status(&self) {
         if which_thinclaw().is_some() {
-            return; // Already on PATH, nothing to do
-        }
-
-        let current_exe = match std::env::current_exe() {
-            Ok(p) => p,
-            Err(_) => return, // Can't determine our own path
-        };
-
-        if cfg!(target_os = "windows") {
-            let parent = current_exe
-                .parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            print_info(&format!(
-                "Tip: add ThinClaw to your PATH in PowerShell:\n  \
-                 setx PATH \"$env:PATH;{}\"\n  \
-                 $env:PATH = \"$env:PATH;{}\"",
-                parent, parent
-            ));
             return;
         }
 
-        // Choose symlink target based on platform
-        let symlink_dir = if cfg!(target_os = "macos") {
-            Path::new("/usr/local/bin")
-        } else {
-            // Linux: ~/.local/bin is in PATH for most distros
-            let home = match dirs::home_dir() {
-                Some(h) => h,
-                None => return,
-            };
-            // We need a 'static-ish path, so use a leak-safe approach
-            let local_bin = home.join(".local").join("bin");
-            if !local_bin.exists() {
-                let _ = std::fs::create_dir_all(&local_bin);
-            }
-            // Can't return a reference to a local, so handle inline below
-            let target = local_bin.join("thinclaw");
-            if try_symlink(&current_exe, &target) {
-                print_success(&format!(
-                    "Symlinked: {} → {}",
-                    target.display(),
-                    current_exe.display()
-                ));
-                println!("  You can now use 'thinclaw' from any terminal.");
-                if !path_contains(&local_bin) {
-                    println!(
-                        "  Note: add {} to your PATH if it isn't already:",
-                        local_bin.display()
-                    );
-                    println!(
-                        "    echo 'export PATH=\"{}:$PATH\"' >> ~/.bashrc",
-                        local_bin.display()
-                    );
-                }
-            } else {
-                println!();
-                print_info(&format!(
-                    "Tip: add thinclaw to your PATH:\n  \
-                 sudo ln -sf {} /usr/local/bin/thinclaw\n  \
-                 Or export PATH=\"{}:$PATH\"",
-                    current_exe.display(),
-                    current_exe
-                        .parent()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default(),
-                ));
-            }
+        let Ok(current_exe) = std::env::current_exe() else {
             return;
         };
-
-        let target = symlink_dir.join("thinclaw");
-
-        if !symlink_dir.exists() {
-            // /usr/local/bin doesn't exist (rare on macOS), just print a tip
-            print_info(&format!(
-                "Tip: add thinclaw to your PATH:\n  \
-                 export PATH=\"{}:$PATH\"",
-                current_exe
-                    .parent()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default(),
-            ));
-            return;
-        }
-
-        // Try without sudo first (works if user owns /usr/local/bin, e.g. Homebrew)
-        if try_symlink(&current_exe, &target) {
-            print_success(&format!(
-                "Symlinked: {} → {}",
-                target.display(),
-                current_exe.display()
-            ));
-            println!("  You can now use 'thinclaw' from any terminal.");
-            return;
-        }
-
-        // Need elevated permissions — ask
-        println!();
-        print_info(
-            "thinclaw is not on your PATH. Create a symlink so you can run it from anywhere?",
-        );
-        match confirm(
-            "Create /usr/local/bin/thinclaw symlink (requires sudo)?",
-            true,
-        ) {
-            Ok(true) => {
-                let mut command = tokio::process::Command::new("sudo");
-                command
-                    .args(["ln", "-sf"])
-                    .arg(&current_exe)
-                    .arg(&target)
-                    .stdin(std::process::Stdio::inherit())
-                    .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit());
-                let status = match thinclaw_platform::OwnedChild::spawn(&mut command) {
-                    Ok(mut child) => match tokio::time::timeout(
-                        std::time::Duration::from_secs(5 * 60),
-                        child.wait(),
-                    )
-                    .await
-                    {
-                        Ok(status) => status,
-                        Err(_) => {
-                            let _ = child.kill().await;
-                            Err(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "sudo symlink command timed out",
-                            ))
-                        }
-                    },
-                    Err(error) => Err(error),
-                };
-
-                match status {
-                    Ok(s) if s.success() => {
-                        print_success(&format!(
-                            "Symlinked: {} → {}",
-                            target.display(),
-                            current_exe.display()
-                        ));
-                        println!("  You can now use 'thinclaw' from any terminal.");
-                    }
-                    _ => {
-                        print_info(&format!(
-                            "Symlink failed. Add it manually:\n  \
-                             sudo ln -sf {} {}",
-                            current_exe.display(),
-                            target.display()
-                        ));
-                    }
-                }
-            }
-            _ => {
-                print_info(&format!(
-                    "Skipped. To add it later:\n  \
-                     sudo ln -sf {} {}",
-                    current_exe.display(),
-                    target.display()
-                ));
-            }
-        }
+        let parent = current_exe
+            .parent()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "the ThinClaw installation directory".to_string());
+        print_info(&format!(
+            "ThinClaw is not on PATH. Continue with `{}` or reinstall it through your package manager. To manage PATH yourself, add `{parent}` explicitly.",
+            current_exe.display()
+        ));
     }
 }
 
@@ -509,26 +341,4 @@ fn which_thinclaw() -> Option<std::path::PathBuf> {
         }
     }
     None
-}
-
-/// Try to create a symlink, removing any existing file/link at the target.
-/// Returns true on success.
-#[cfg(unix)]
-fn try_symlink(source: &std::path::Path, target: &std::path::Path) -> bool {
-    // Remove existing symlink/file if present (ignore errors)
-    let _ = std::fs::remove_file(target);
-    std::os::unix::fs::symlink(source, target).is_ok()
-}
-
-#[cfg(not(unix))]
-fn try_symlink(_source: &std::path::Path, _target: &std::path::Path) -> bool {
-    false
-}
-
-/// Check if a directory is present in the current PATH.
-fn path_contains(dir: &std::path::Path) -> bool {
-    let Some(path_var) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path_var).any(|p| p == dir)
 }

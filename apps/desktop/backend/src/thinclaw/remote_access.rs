@@ -11,7 +11,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use thinclaw_core::tunnel::{TailscaleTunnel, Tunnel};
-use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use super::bridge::{gated, BridgeError, RouteMode};
@@ -142,7 +141,7 @@ async fn probe_tailscale() -> TailscaleProbe {
     let binary = thinclaw_core::tunnel::resolve_binary("tailscale");
     let output = match tokio::time::timeout(
         COMMAND_TIMEOUT,
-        Command::new(binary)
+        thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.thinclaw.remote_access.tokio.101", binary)
             .args(["status", "--json"])
             .kill_on_drop(true)
             .output(),

@@ -5,16 +5,22 @@ pub mod error;
 pub mod http_response;
 pub mod job;
 pub mod media;
+pub mod mutation;
 pub mod repair;
 pub mod routine;
 pub mod sandbox;
 pub mod setup;
+pub mod slash_commands;
 pub mod subagent;
 pub mod tool;
 
 pub use agent::AgentWorkspaceRecord;
 pub use job::{ActionRecord, JobContext, JobState, StateTransition};
 pub use media::{MediaContent, MediaType};
+pub use mutation::{
+    CliLeafEffect, MutationApplication, MutationExecutionPolicy, MutationReceipt, MutationRequest,
+    canonical_cli_leaf_effect,
+};
 pub use repair::{BrokenTool, StuckJob};
 pub use sandbox::{
     DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS, JobMode, ResourceLimits, SandboxConfig, SandboxJobRecord,
@@ -28,4 +34,4 @@ pub use subagent::{
     SubagentMemoryMode, SubagentProvidedContext, SubagentSkillMode, SubagentTaskPacket,
     SubagentToolMode,
 };
-pub use tool::ToolProfile;
+pub use tool::{ToolInvocationId, ToolProfile};

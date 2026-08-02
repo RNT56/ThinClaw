@@ -9,7 +9,6 @@ pub struct PermissionStatus {
 #[cfg(target_os = "macos")]
 mod macos {
     use std::ffi::c_void;
-    use std::process::Command;
 
     // Core Foundation types (opaque pointers)
     type CFDictionaryRef = *const c_void;
@@ -127,7 +126,7 @@ mod macos {
         };
 
         tracing::info!("[permissions] Opening System Settings: {}", url);
-        let _ = Command::new("open").arg(url).spawn();
+        let _ = thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.permissions.std.101", "open").arg(url));
     }
 }
 

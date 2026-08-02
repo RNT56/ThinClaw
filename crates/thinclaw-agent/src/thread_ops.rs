@@ -466,7 +466,7 @@ pub fn reenter_pending_auth(thread: &mut Thread, pending: &PendingAuth) {
 
 pub fn auth_mode_status_label(mode: PendingAuthMode) -> &'static str {
     match mode {
-        PendingAuthMode::ManualToken => "manual_token",
+        PendingAuthMode::SecretSource => "secure_source",
         PendingAuthMode::ExternalOAuth => "oauth",
     }
 }
@@ -1208,7 +1208,7 @@ mod tests {
         thread.start_turn("work");
         thread.pending_auth = Some(crate::session::PendingAuth {
             extension_name: "github".to_string(),
-            auth_mode: crate::session::PendingAuthMode::ManualToken,
+            auth_mode: crate::session::PendingAuthMode::SecretSource,
             requesting_identity: Some(test_identity("actor-1")),
         });
 

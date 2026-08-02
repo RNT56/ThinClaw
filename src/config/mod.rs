@@ -34,11 +34,35 @@ pub mod watcher;
 mod webchat;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::error::ConfigError;
 use crate::secrets::SecretsStore;
 use crate::settings::Settings;
+
+static SELECTED_CLI_TOML: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// Install the validated global CLI config selection so compatibility
+/// handlers that still call `Config::from_env()` resolve the same file as the
+/// typed CLI context. Re-selecting a different file in one process is refused.
+pub(crate) fn select_cli_toml(path: &std::path::Path) -> Result<(), ConfigError> {
+    if let Some(selected) = SELECTED_CLI_TOML.get() {
+        if selected != path {
+            return Err(ConfigError::ParseError(format!(
+                "configuration was already resolved from {}",
+                selected.display()
+            )));
+        }
+        return Ok(());
+    }
+    SELECTED_CLI_TOML.set(path.to_path_buf()).map_err(|_| {
+        ConfigError::ParseError("failed to install selected CLI configuration".to_string())
+    })
+}
+
+fn selected_cli_toml() -> Option<&'static std::path::Path> {
+    SELECTED_CLI_TOML.get().map(std::path::PathBuf::as_path)
+}
 
 // Re-export all public types so `crate::config::FooConfig` continues to work.
 pub(crate) use self::agent::resolve_personality_pack_from_settings;
@@ -171,6 +195,11 @@ impl Config {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_thinclaw_env();
 
+        let toml_path = match toml_path {
+            Some(path) => Some(path),
+            None => selected_cli_toml(),
+        };
+
         // Load all settings from DB into a Settings struct
         let mut db_settings = match store.get_all_settings(user_id).await {
             Ok(map) => Settings::from_db_map(&map),
@@ -201,7 +230,12 @@ impl Config {
     /// Build config from explicit settings in tests without mutating process env.
     #[cfg(test)]
     pub(crate) async fn from_test_settings(settings: &Settings) -> Result<Self, ConfigError> {
-        Self::build(settings, false).await
+        let mut settings = settings.clone();
+        // Unit tests must not probe or unlock the host OS credential store.
+        // SecretsConfig has focused tests for each source; general config
+        // fixtures use an explicitly disabled source for determinism.
+        settings.secrets.master_key_source = crate::settings::SecretsMasterKeySource::None;
+        Self::build(&settings, false).await
     }
 
     /// Load from env with an optional TOML config file overlay.
@@ -216,6 +250,10 @@ impl Config {
         toml_path: Option<&std::path::Path>,
         resolve_database: bool,
     ) -> Result<Self, ConfigError> {
+        let toml_path = match toml_path {
+            Some(path) => Some(path),
+            None => selected_cli_toml(),
+        };
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_thinclaw_env();
         let mut settings = Settings::load();

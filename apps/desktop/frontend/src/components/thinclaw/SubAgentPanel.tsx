@@ -20,6 +20,8 @@ import { ChevronDown, Plus, X, AlertCircle, GitBranch, Archive, PanelRightClose 
 import type { ChildSessionInfo } from '../../lib/thinclaw';
 import { listChildSessions, spawnSession, abortThinClawChat, updateSubAgentStatus } from '../../lib/thinclaw';
 import { useThinClawEvents } from '../../hooks/use-thinclaw-stream';
+import { Notice } from '../ui';
+import { useAgentCockpit, useOptionalAgentCockpit } from './AgentCockpitProvider';
 import { ChildRow, type ChildEntry, type FeedMessage } from './sub-agents/ChildRow';
 
 // ── Main Panel (Right-Side Pane) ─────────────────────────────────────────
@@ -42,12 +44,16 @@ let feedIdCounter = 0;
 export function useSubAgentCount(sessionKey: string): number {
     const [count, setCount] = useState(0);
     const trackedRef = useRef(new Set<string>());
+    const cockpit = useOptionalAgentCockpit();
+    const subagentsAvailable = !cockpit || cockpit.capability('local-subagent').state === 'available';
 
     useEffect(() => {
         let cancelled = false;
         const tracked = new Set<string>();
         trackedRef.current = tracked;
         setCount(0);
+
+        if (!subagentsAvailable) return () => { cancelled = true; };
 
         // Load initial
         listChildSessions(sessionKey)
@@ -61,9 +67,10 @@ export function useSubAgentCount(sessionKey: string): number {
         return () => {
             cancelled = true;
         };
-    }, [sessionKey]);
+    }, [sessionKey, subagentsAvailable]);
 
     useThinClawEvents((data) => {
+        if (!subagentsAvailable) return;
         if (data.kind !== 'SubAgentUpdate' || data.parent_session !== sessionKey) return;
         trackedRef.current.add(data.child_session);
         setCount(trackedRef.current.size);
@@ -73,6 +80,9 @@ export function useSubAgentCount(sessionKey: string): number {
 }
 
 export default function SubAgentPanel({ sessionKey, onViewSession, onClose }: SubAgentPanelProps) {
+    const { capability } = useAgentCockpit();
+    const subagentCapability = capability('local-subagent');
+    const subagentsAvailable = subagentCapability.state === 'available';
     const [children, setChildren] = useState<ChildEntry[]>([]);
     const [showArchived, setShowArchived] = useState(false);
     const [spawning, setSpawning] = useState(false);
@@ -82,6 +92,10 @@ export default function SubAgentPanel({ sessionKey, onViewSession, onClose }: Su
 
     // Load initial children
     useEffect(() => {
+        if (!subagentsAvailable) {
+            setChildren([]);
+            return;
+        }
         listChildSessions(sessionKey)
             .then((loaded) => {
                 setChildren(
@@ -93,9 +107,10 @@ export default function SubAgentPanel({ sessionKey, onViewSession, onClose }: Su
                 );
             })
             .catch(() => {});
-    }, [sessionKey]);
+    }, [sessionKey, subagentsAvailable]);
 
     useThinClawEvents((data) => {
+        if (!subagentsAvailable) return;
         if (data.kind !== 'SubAgentUpdate' || data.parent_session !== sessionKey) return;
 
         setChildren((prev) => {
@@ -167,6 +182,10 @@ export default function SubAgentPanel({ sessionKey, onViewSession, onClose }: Su
 
     // Spawn handler
     const handleSpawn = useCallback(async () => {
+        if (!subagentsAvailable) {
+            setSpawnError([subagentCapability.reason, subagentCapability.remediation].filter(Boolean).join(' '));
+            return;
+        }
         if (!spawnTask.trim()) return;
         setSpawnError(null);
         try {
@@ -176,7 +195,7 @@ export default function SubAgentPanel({ sessionKey, onViewSession, onClose }: Su
         } catch (e: any) {
             setSpawnError(e?.message ?? 'Failed to spawn sub-agent');
         }
-    }, [spawnTask, sessionKey]);
+    }, [sessionKey, spawnTask, subagentCapability.reason, subagentCapability.remediation, subagentsAvailable]);
 
     // Cancel handler
     const handleCancel = useCallback(async (childSessionKey: string) => {
@@ -258,8 +277,10 @@ export default function SubAgentPanel({ sessionKey, onViewSession, onClose }: Su
                             setSpawnError(null);
                             setTimeout(() => inputRef.current?.focus(), 50);
                         }}
-                        className="p-1 rounded-md hover:bg-zinc-700/50 text-zinc-400 hover:text-white transition-colors"
-                        title="Spawn sub-agent"
+                        disabled={!subagentsAvailable}
+                        aria-label={subagentsAvailable ? 'Spawn sub-agent' : 'Desktop-managed sub-agents unavailable'}
+                        className="p-1 rounded-md text-zinc-400 transition-colors hover:bg-zinc-700/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                        title={subagentsAvailable ? 'Spawn sub-agent' : [subagentCapability.reason, subagentCapability.remediation].filter(Boolean).join(' ')}
                     >
                         <Plus className="w-3.5 h-3.5" />
                     </button>
@@ -277,6 +298,11 @@ export default function SubAgentPanel({ sessionKey, onViewSession, onClose }: Su
 
             {/* Scrollable content */}
             <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700 scrollbar-track-transparent p-2 space-y-1.5">
+                {!subagentsAvailable && (
+                    <Notice tone={subagentCapability.state === 'stale' ? 'warning' : 'info'} title="Desktop-managed sub-agents are unavailable">
+                        {[subagentCapability.reason, subagentCapability.remediation].filter(Boolean).join(' ')}
+                    </Notice>
+                )}
                 {/* Inline spawn input */}
                 <AnimatePresence>
                     {spawning && (

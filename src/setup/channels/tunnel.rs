@@ -253,7 +253,8 @@ async fn setup_tunnel_cloudflare(
 /// is not in `$PATH` (common for processes spawned by launchd/IDEs).
 async fn test_tailscale_cli() -> bool {
     let binary = crate::util::resolve_binary("tailscale");
-    let mut command = tokio::process::Command::new(&binary);
+    let mut command =
+        thinclaw_platform::tokio_process_command!("src.setup.channels.tunnel.tokio.1", &binary);
     command.arg("version");
     let output = thinclaw_platform::bounded_command_output(
         &mut command,
@@ -305,71 +306,15 @@ async fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
 
             crate::setup::prompts::print_blank_line();
 
-            // Check if Homebrew is available for auto-install
-            let has_brew = thinclaw_platform::find_executable_in_path("brew").is_some();
-
-            if has_brew {
-                if confirm(
-                    "Install Tailscale CLI via Homebrew? (brew install tailscale)",
-                    true,
-                )? {
-                    print_info("Installing tailscale via Homebrew (this may take a minute)...");
-                    let mut command = tokio::process::Command::new("brew");
-                    command.args(["install", "tailscale"]);
-                    let install_result = thinclaw_platform::bounded_command_output(
-                        &mut command,
-                        std::time::Duration::from_secs(30 * 60),
-                        2 * 1024 * 1024,
-                        2 * 1024 * 1024,
-                    )
-                    .await;
-
-                    match install_result {
-                        Ok(output) if output.status.success() => {
-                            if test_tailscale_cli().await {
-                                print_success("Tailscale CLI installed and working!");
-                            } else {
-                                print_success("Tailscale CLI installed.");
-                                print_info(
-                                    "You may need to start the service: brew services start tailscale",
-                                );
-                            }
-                        }
-                        Ok(_) => {
-                            print_error(
-                                "Homebrew install failed. Try manually: brew install tailscale",
-                            );
-                            crate::setup::prompts::print_blank_line();
-                            if !confirm("Continue configuring anyway?", false)? {
-                                return Ok(TunnelSettings::default());
-                            }
-                        }
-                        Err(e) => {
-                            print_error(&format!("Could not run brew: {}", e));
-                            if !confirm("Continue configuring anyway?", false)? {
-                                return Ok(TunnelSettings::default());
-                            }
-                        }
-                    }
-                } else if !confirm(
-                    "Continue without installing? (install before starting the agent)",
-                    false,
-                )? {
-                    return Ok(TunnelSettings::default());
-                }
-            } else {
-                // No Homebrew
-                print_info("Homebrew is not installed. Install the Tailscale CLI manually:");
-                crate::setup::prompts::print_blank_line();
-                print_info("  Option 1: Install Homebrew, then: brew install tailscale");
-                print_info("  Option 2: Download from https://tailscale.com/download/mac");
-                crate::setup::prompts::print_blank_line();
-                if !confirm(
-                    "Continue configuring anyway? (install before starting the agent)",
-                    false,
-                )? {
-                    return Ok(TunnelSettings::default());
-                }
+            print_info("Install the Tailscale CLI before starting ThinClaw:");
+            print_info("  Option 1: brew install tailscale");
+            print_info("  Option 2: Download from https://tailscale.com/download/mac");
+            crate::setup::prompts::print_blank_line();
+            if !confirm(
+                "Continue configuring anyway? (setup never installs host software before Apply)",
+                false,
+            )? {
+                return Ok(TunnelSettings::default());
             }
         }
 

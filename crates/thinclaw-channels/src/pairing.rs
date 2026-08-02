@@ -3,18 +3,14 @@
 //! Stored in ~/.thinclaw/{channel}-pairing.json, {channel}-allowFrom.json,
 //! and {channel}-blockFrom.json.
 
-use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
-use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
-const PAIRING_CODE_LENGTH: usize = 8;
-const PAIRING_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 /// TTL for pending pairing requests (minutes, not hours - reduces brute-force window).
 const PAIRING_PENDING_TTL_SECS: u64 = 15 * 60;
 const PAIRING_PENDING_MAX: usize = 3;
@@ -50,15 +46,17 @@ pub enum PairingStoreError {
 /// Result of upserting a pairing request.
 #[derive(Debug)]
 pub struct UpsertResult {
-    pub code: String,
+    pub request_id: String,
     pub created: bool,
 }
 
 /// A pending pairing request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairingRequest {
+    /// Stable operator-facing identifier. This is not an authentication secret.
+    #[serde(default)]
+    pub request_id: String,
     pub id: String,
-    pub code: String,
     pub created_at: String,
     pub last_seen_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -263,28 +261,6 @@ fn is_expired(req: &PairingRequest, now_secs: u64) -> bool {
     now_secs.saturating_sub(created) > PAIRING_PENDING_TTL_SECS
 }
 
-fn random_code() -> String {
-    let mut rng = rand::rng();
-    (0..PAIRING_CODE_LENGTH)
-        .map(|_| {
-            let idx = rng.random_range(0..PAIRING_ALPHABET.len());
-            PAIRING_ALPHABET[idx] as char
-        })
-        .collect()
-}
-
-fn generate_unique_code(existing: &HashSet<String>) -> String {
-    let mut rng = rand::rng();
-    for _ in 0..500 {
-        let code = random_code();
-        if !existing.contains(&code) {
-            return code;
-        }
-    }
-    // Fallback: add suffix
-    format!("{}{:04}", random_code(), rng.random_range(0..10000))
-}
-
 /// Pairing store for a channel.
 #[derive(Debug, Clone)]
 pub struct PairingStore {
@@ -330,7 +306,7 @@ impl PairingStore {
                 requests: Vec::new(),
             });
         };
-        let file: PairingStoreFile = if bytes.iter().all(u8::is_ascii_whitespace) {
+        let mut file: PairingStoreFile = if bytes.iter().all(u8::is_ascii_whitespace) {
             PairingStoreFile {
                 version: 1,
                 requests: Vec::new(),
@@ -343,15 +319,13 @@ impl PairingStore {
                 "pairing request file has an unsupported version or too many entries".to_string(),
             ));
         }
-        for request in &file.requests {
+        for request in &mut file.requests {
+            if request.request_id.is_empty() {
+                request.request_id = request.id.clone();
+            }
             validate_identity(&request.id)?;
-            if request.code.is_empty()
-                || request.code.len() > 16
-                || !request
-                    .code
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric())
-                || request.created_at.len() > 64
+            validate_identity(&request.request_id)?;
+            if request.created_at.len() > 64
                 || request.last_seen_at.len() > 64
                 || parse_timestamp(&request.created_at).is_none()
                 || parse_timestamp(&request.last_seen_at).is_none()
@@ -528,42 +502,31 @@ impl PairingStore {
         let now_secs = now_secs();
 
         store.requests.retain(|r| !is_expired(r, now_secs));
-        let existing_codes: HashSet<String> = store
-            .requests
-            .iter()
-            .map(|r| r.code.to_uppercase())
-            .collect();
-
         if let Some(idx) = store.requests.iter().position(|r| r.id == id) {
             let req = &mut store.requests[idx];
-            let code = if req.code.is_empty() {
-                generate_unique_code(&existing_codes)
-            } else {
-                req.code.clone()
-            };
             req.last_seen_at = now.clone();
-            req.code = code.clone();
             if let Some(m) = meta {
                 req.meta = Some(m);
             }
+            let request_id = req.request_id.clone();
             self.write_pairing_requests(channel, &store.requests)?;
             return Ok(UpsertResult {
-                code,
+                request_id,
                 created: false,
             });
         }
 
         if store.requests.len() >= PAIRING_PENDING_MAX {
             return Ok(UpsertResult {
-                code: String::new(),
+                request_id: String::new(),
                 created: false,
             });
         }
 
-        let code = generate_unique_code(&existing_codes);
+        let request_id = uuid::Uuid::new_v4().to_string();
         store.requests.push(PairingRequest {
+            request_id: request_id.clone(),
             id: id.clone(),
-            code: code.clone(),
             created_at: now.clone(),
             last_seen_at: now,
             meta,
@@ -572,7 +535,7 @@ impl PairingStore {
         self.write_pairing_requests(channel, &store.requests)?;
 
         Ok(UpsertResult {
-            code,
+            request_id,
             created: true,
         })
     }
@@ -600,20 +563,13 @@ impl PairingStore {
         self.write_approve_attempts(channel, &data)
     }
 
-    /// Approve a pairing code and add the sender to allowFrom.
-    pub fn approve(
+    /// Approve a pending request by its stable, non-secret request ID.
+    pub fn approve_request(
         &self,
         channel: &str,
-        code: &str,
+        request_id: &str,
     ) -> Result<Option<PairingRequest>, PairingStoreError> {
-        let code = code.trim().to_uppercase();
-        if code.is_empty() {
-            return Ok(None);
-        }
-        if code.len() > 16 || !code.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-            return Ok(None);
-        }
-
+        let request_id = validate_identity(request_id)?;
         let _lock = self.lock_channel(channel)?;
 
         if self.is_approve_rate_limited(channel)? {
@@ -627,73 +583,54 @@ impl PairingStore {
             ));
         }
         let mut store = self.read_pairing_file(channel)?;
-
-        let now_secs = now_secs();
         let before_expiry = store.requests.len();
-        store.requests.retain(|r| !is_expired(r, now_secs));
+        store
+            .requests
+            .retain(|request| !is_expired(request, now_secs()));
 
-        let idx = store.requests.iter().position(|request| {
-            use subtle::ConstantTimeEq as _;
-            request.code.len() == code.len()
-                && bool::from(request.code.as_bytes().ct_eq(code.as_bytes()))
-        });
-
-        let entry = match idx {
-            Some(i) => store.requests.remove(i),
-            None => {
-                if store.requests.len() != before_expiry {
-                    self.write_pairing_requests(channel, &store.requests)?;
-                }
-                self.record_failed_approve(channel)?;
-                return Ok(None);
+        let Some(index) = store
+            .requests
+            .iter()
+            .position(|request| request.request_id == request_id)
+        else {
+            if store.requests.len() != before_expiry {
+                self.write_pairing_requests(channel, &store.requests)?;
             }
+            self.record_failed_approve(channel)?;
+            return Ok(None);
         };
 
-        // Publish authorization first. If the subsequent pending-file write
-        // fails, the caller is still safely authorized and can retry cleanup;
-        // the inverse order could lose a valid approval entirely.
+        let entry = store.requests.remove(index);
         self.add_allow_from_unlocked(channel, &entry.id)?;
         self.write_pairing_requests(channel, &store.requests)?;
-
         Ok(Some(entry))
     }
 
-    /// Find a pending pairing request by approval code without mutating state.
-    pub fn find_pending_by_code(
+    /// Find a pending pairing request by stable request ID without mutating state.
+    pub fn find_pending_by_id(
         &self,
         channel: &str,
-        code: &str,
+        request_id: &str,
     ) -> Result<Option<PairingRequest>, PairingStoreError> {
-        let code = code.trim().to_uppercase();
-        if code.is_empty() {
-            return Ok(None);
-        }
-
-        let requests = self.list_pending(channel)?;
-        Ok(requests
+        let request_id = validate_identity(request_id)?;
+        Ok(self
+            .list_pending(channel)?
             .into_iter()
-            .find(|request| request.code.to_uppercase() == code))
+            .find(|request| request.request_id == request_id))
     }
 
-    /// Restore a pending pairing request, preserving its original code and metadata.
+    /// Restore a pending pairing request, preserving its stable ID and metadata.
     pub fn restore_pending_request(
         &self,
         channel: &str,
         request: &PairingRequest,
     ) -> Result<(), PairingStoreError> {
         validate_identity(&request.id)?;
-        if request.code.is_empty()
-            || request.code.len() > 16
-            || !request
-                .code
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric())
-            || request.meta.as_ref().is_some_and(|value| {
-                serde_json::to_vec(value)
-                    .map(|bytes| bytes.len() > MAX_PAIRING_META_BYTES)
-                    .unwrap_or(true)
-            })
-        {
+        if request.meta.as_ref().is_some_and(|value| {
+            serde_json::to_vec(value)
+                .map(|bytes| bytes.len() > MAX_PAIRING_META_BYTES)
+                .unwrap_or(true)
+        }) {
             return Err(PairingStoreError::InvalidData(
                 "restored pairing request is malformed or oversized".to_string(),
             ));
@@ -901,13 +838,6 @@ mod tests {
         safe_channel_key("").unwrap_err();
     }
 
-    #[test]
-    fn test_random_code() {
-        let c = random_code();
-        assert_eq!(c.len(), PAIRING_CODE_LENGTH);
-        assert!(c.chars().all(|c| PAIRING_ALPHABET.contains(&(c as u8))));
-    }
-
     fn test_store() -> (PairingStore, TempDir) {
         let dir = TempDir::new().unwrap();
         let store = PairingStore::with_base_dir(dir.path().to_path_buf());
@@ -932,13 +862,7 @@ mod tests {
             )
             .unwrap();
         assert!(result.created);
-        assert_eq!(result.code.len(), PAIRING_CODE_LENGTH);
-        assert!(
-            result
-                .code
-                .chars()
-                .all(|c| PAIRING_ALPHABET.contains(&(c as u8)))
-        );
+        assert!(uuid::Uuid::parse_str(&result.request_id).is_ok());
     }
 
     #[test]
@@ -950,7 +874,7 @@ mod tests {
             .upsert_request("telegram", "user123", Some(serde_json::json!({"x": 1})))
             .unwrap();
         assert!(!r2.created);
-        assert_eq!(r1.code, r2.code);
+        assert_eq!(r1.request_id, r2.request_id);
 
         let pending = store.list_pending("telegram").unwrap();
         assert_eq!(pending.len(), 1);
@@ -964,7 +888,7 @@ mod tests {
         let r = store.upsert_request("telegram", "user456", None).unwrap();
         assert!(r.created);
 
-        let approved = store.approve("telegram", &r.code).unwrap();
+        let approved = store.approve_request("telegram", &r.request_id).unwrap();
         assert!(approved.is_some());
         assert_eq!(approved.unwrap().id, "user456");
 
@@ -983,19 +907,22 @@ mod tests {
     }
 
     #[test]
-    fn test_approve_case_insensitive_code() {
+    fn test_approval_request_ids_are_exact() {
         let (store, _) = test_store();
         let r = store.upsert_request("telegram", "user789", None).unwrap();
-        let code_lower = r.code.to_lowercase();
-        let approved = store.approve("telegram", &code_lower).unwrap();
-        assert!(approved.is_some());
+        let approved = store
+            .approve_request("telegram", &r.request_id.to_uppercase())
+            .unwrap();
+        assert!(approved.is_none());
     }
 
     #[test]
-    fn test_approve_invalid_code_returns_none() {
+    fn test_approve_invalid_request_id_returns_none() {
         let (store, _) = test_store();
         store.upsert_request("telegram", "user123", None).unwrap();
-        let approved = store.approve("telegram", "BADCODE1").unwrap();
+        let approved = store
+            .approve_request("telegram", "00000000-0000-4000-8000-000000000000")
+            .unwrap();
         assert!(approved.is_none());
     }
 
@@ -1004,9 +931,11 @@ mod tests {
         let (store, _) = test_store();
         store.upsert_request("telegram", "user123", None).unwrap();
         for _ in 0..PAIRING_APPROVE_RATE_LIMIT {
-            let _ = store.approve("telegram", "WRONG01");
+            let _ = store.approve_request("telegram", "00000000-0000-4000-8000-000000000001");
         }
-        let err = store.approve("telegram", "WRONG02").unwrap_err();
+        let err = store
+            .approve_request("telegram", "00000000-0000-4000-8000-000000000002")
+            .unwrap_err();
         assert!(matches!(err, PairingStoreError::ApproveRateLimited));
     }
 
@@ -1014,7 +943,7 @@ mod tests {
     fn test_is_sender_allowed_by_id() {
         let (store, _) = test_store();
         let r = store.upsert_request("telegram", "user999", None).unwrap();
-        store.approve("telegram", &r.code).unwrap();
+        store.approve_request("telegram", &r.request_id).unwrap();
 
         assert!(
             store
@@ -1035,7 +964,9 @@ mod tests {
             )
             .unwrap();
         let pending = store.list_pending("telegram").unwrap();
-        store.approve("telegram", &pending[0].code).unwrap();
+        store
+            .approve_request("telegram", &pending[0].request_id)
+            .unwrap();
 
         // approve adds id to allow_from. For username we need to add it manually.
         // Actually approve adds entry.id which is "alice". So is_sender_allowed("telegram", "alice", None) would work.
@@ -1122,7 +1053,7 @@ mod tests {
         let (store, _) = test_store();
         // Add user to allowlist via approve
         let r = store.upsert_request("telegram", "user123", None).unwrap();
-        store.approve("telegram", &r.code).unwrap();
+        store.approve_request("telegram", &r.request_id).unwrap();
         // Confirm they're allowed
         assert!(
             store

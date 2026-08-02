@@ -71,7 +71,11 @@ pub(super) async fn launch_trial(
             .update_experiment_campaign(&campaign)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-        let response_lease = launch_outcome.requires_operator_action.then_some(lease);
+        let response_lease = launch_outcome.requires_operator_action.then_some(
+            thinclaw_gateway::web::experiments::ExperimentLeaseReference {
+                lease_id: lease.lease_id,
+            },
+        );
         return Ok(ExperimentCampaignActionResponse {
             campaign,
             trial: Some(trial),

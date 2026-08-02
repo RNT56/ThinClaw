@@ -20,13 +20,14 @@ This document does not own deployment or broader trust architecture. Use `docs/D
 Explicit onboarding:
 
 ```bash
-thinclaw onboard [--skip-auth] [--channels-only] [--guide[=<topic>]] [--ui auto|cli|tui] [--profile <profile>]
+thinclaw setup [--mode quick|advanced] [--skip-provider-auth] [--run] [--ui auto|cli|tui] [--profile <profile>]
+thinclaw setup edit [<topic>]
 ```
 
 Full reset:
 
 ```bash
-thinclaw reset [--yes]
+thinclaw setup reset [--yes]
 ```
 
 Implicit onboarding:
@@ -46,7 +47,7 @@ High-level behavior:
 - `.env` files are loaded first
 - ThinClaw checks for an existing database configuration
 - `ONBOARD_COMPLETED=true` suppresses repeat onboarding
-- `--no-onboard` bypasses the auto-launch path
+- `run`, `tui`, and `ask` accept `--skip-setup-check` to bypass the auto-launch path
 
 The exact entry logic lives in `main.rs` and the bootstrap helpers.
 
@@ -77,14 +78,15 @@ nor `--guide` is supplied, the first choice is now:
 - `Quick Setup` for the reduced day-one path
 - `Advanced Setup` for the existing topic-guided deeper configuration flow
 
-This keeps Quick Setup short instead of expanding it with extra advanced steps.
+Quick mode collapses optional detail, but it still exposes every target section
+and every value it will write in the final review.
 
-Both CLI and TUI presentations now use the same Humanist Cockpit language:
+Both CLI and TUI presentations use the same neutral section vocabulary:
 
 - readiness is framed as launch readiness, not pass/fail setup
 - follow-up work is captured explicitly instead of being silently implied
 - the TUI shell is a presentation layer only; it still runs the same shared step plan and validation logic as CLI
-- the active CLI skin now drives palette treatment across setup prompts and the onboarding TUI shell, so runtime and onboarding no longer drift visually
+- appearance is drafted locally and does not mutate the process-wide runtime skin before Apply
 
 ### `--skip-auth`
 
@@ -116,8 +118,8 @@ available for service-specific writable paths.
 Opens the guided Advanced Setup lane directly from CLI or TUI without showing
 the Quick/Advanced selector first.
 
-- `thinclaw onboard --guide` opens the guided topic menu
-- `thinclaw onboard --guide ai` jumps directly to AI & Models
+- `thinclaw setup edit` opens the guided topic menu
+- `thinclaw setup edit ai` jumps directly to AI & Models
 - Valid topics: `menu`, `ai`, `channels`, `agent`, `tools`, `automation`, `runtime`
 
 ### `--profile <profile>`
@@ -126,7 +128,7 @@ Preselects the onboarding profile and skips the Profile prompt. Valid values:
 `balanced`, `local-private`, `builder-coding`, `channel-first`, `remote`,
 `pi-os-lite-64`, and `custom`.
 
-Use `thinclaw onboard --profile remote` for Raspberry Pi, Mac Mini, VPS, or
+Use `thinclaw setup --profile remote --mode advanced` for Raspberry Pi, Mac Mini, VPS, or
 SSH-managed hosts. This profile configures a service-safe runtime:
 
 - `CLI_ENABLED=false`
@@ -137,7 +139,7 @@ SSH-managed hosts. This profile configures a service-safe runtime:
 - local libSQL database unless the operator chooses another backend
 - env-backed secrets fallback writes `THINCLAW_ALLOW_ENV_MASTER_KEY=1` when selected
 
-Use `thinclaw onboard --profile pi-os-lite-64` on Raspberry Pi OS Lite 64-bit.
+Use `thinclaw setup --profile pi-os-lite-64 --mode advanced` on Raspberry Pi OS Lite 64-bit.
 It applies the same service-safe runtime defaults and additionally writes
 `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` plus `THINCLAW_HEADLESS=true` so
 desktop autonomy tools are not registered at runtime.
@@ -171,31 +173,17 @@ The Profile step currently offers seven onboarding lanes:
 but avoids the opinionated profile presets that the other lanes apply after the
 database step.
 
-## Current Wizard Shape
+## Setup Navigation
 
-The current onboarding flow is phase-based and shared by both the CLI wizard
-and the onboarding TUI shell, but it is not one single 26-step path anymore.
+The flow is section-based and shared by the CLI wizard and onboarding TUI.
+All 27 legacy step identities retain an explicit target-section mapping for
+migration coverage; the obsolete continuity prose page is no longer executable.
 
 ### Quick Setup
 
-Quick Setup is the default reduced path. It currently includes:
-
-1. Choose Your Cockpit Skin
-2. Choose Your Setup Lane
-3. Agent Name & Personality
-4. Primary Model Provider
-5. Advisor Model (Primary)
-6. Primary Channel
-7. Channel Verification
-8. Autonomy Level
-9. Worker Sandbox
-10. Coding Workers
-11. Web UI
-12. Finish
-
-The quick path also applies the existing auto-configured runtime defaults and
-quick notification defaults between those visible steps, which is why the user
-experience is shorter than the full catalog of onboarding topics.
+Quick Setup is the default recommended path. Defaults change only the in-memory
+draft. Its final review shows every non-secret setting, migration, file,
+extension digest, listener, and external action before Apply.
 
 ### Advanced Setup
 
@@ -209,26 +197,26 @@ menu and then builds a focused plan around one topic:
 - Automation & Skills
 - Runtime & Diagnostics
 
-Each topic-specific plan still ends with Finish.
+Each topic-specific plan still passes through Verify and Review & Apply.
 
 ### Channels-only
 
-`--channels-only` runs only the Channel Configuration, Channel Verification, and
-Finish parts of the plan.
+`--channels-only` runs Channels, Verify, and Review & Apply.
 
 ### Phase Catalog
 
-Across Quick Setup and guided Advanced Setup, the available operator-facing
-phases remain:
+The ten operator-facing sections are:
 
-- Skin & Profile
-- Core Runtime
-- AI Stack
-- Identity & Presence
-- Channels & Continuity
-- Capabilities & Automation
-- Experience & Operations
-- Finish
+1. Profile
+2. Runtime Foundation
+3. AI & Memory
+4. Identity & Locale
+5. Channels
+6. Tools & Safety
+7. Automation & Delivery
+8. Appearance & Access
+9. Verify
+10. Review & Apply
 
 If you change this order, branching, or phase shape in code, update this
 section immediately.
@@ -238,9 +226,9 @@ section immediately.
 Bootstrap and runtime settings do not all live in one place.
 
 - bootstrap values such as database connection details live in `~/.thinclaw/.env`
-- service/gateway bootstrap values such as `GATEWAY_ENABLED`, `GATEWAY_HOST`,
-  `GATEWAY_PORT`, `GATEWAY_AUTH_TOKEN`, and `CLI_ENABLED` also live in
-  `~/.thinclaw/.env`
+- non-secret service/gateway bootstrap values such as `GATEWAY_ENABLED`,
+  `GATEWAY_HOST`, `GATEWAY_PORT`, and `CLI_ENABLED` also live in
+  `~/.thinclaw/.env`; bearer tokens do not
 - encrypted credentials and related secure material use the secrets path
 - broader runtime settings are persisted in the database-backed settings store
 
@@ -275,13 +263,19 @@ Profile behavior is intentionally asymmetric:
 
 - ThinClaw must know which database backend to use before the full runtime can resolve settings from the database.
 - Secret handling must be established before provider credentials can be reused safely from encrypted storage.
-- The wizard saves incrementally so failed later steps do not force operators to repeat earlier successful setup.
+- Pages and Back/Cancel mutate only the in-memory, secret-free draft. Apply is
+  the sole durable boundary; it acquires the exclusive runtime-operation lease,
+  revalidates the plan digest and baseline, and compensates files, libSQL bytes,
+  settings, encrypted/OS secrets, extensions, and worker image tags on failure.
+- A PostgreSQL schema migration committed by the migration runner is reported
+  as a precise non-compensable partial outcome if a later action fails; setup
+  never falsely reports a complete rollback.
 - Channel setup must remain reachable through `--channels-only`.
 - The CLI wizard and onboarding TUI shell must use the same step plan and validation logic.
 - The CLI wizard and onboarding TUI shell must keep the same readiness framing and follow-up semantics.
 - Onboarding must clearly point to both local runtime entrypoints: `thinclaw` and `thinclaw tui`.
-- Remote onboarding must point to `thinclaw run --no-onboard`, service commands,
-  and `thinclaw gateway access` instead of implying an interactive REPL handoff.
+- Remote setup must point to `thinclaw run --skip-setup-check`, service commands,
+  and `thinclaw runtime web access` instead of implying an interactive REPL handoff.
 - Setup docs must not claim a different step or phase shape than the code.
 
 ## High-Value Setup Areas

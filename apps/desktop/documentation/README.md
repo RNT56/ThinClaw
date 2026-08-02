@@ -1,12 +1,14 @@
 # ThinClaw Desktop Documentation Index
 
-Last updated: 2026-07-13
+Last updated: 2026-08-01
 
 This directory is the current contract surface for ThinClaw Desktop. Keep these files current when backend contracts, runtime ownership, remote gateway behavior, secrets, setup, or release acceptance changes.
 
 ## Contract And Runtime
 
 - [Runtime Boundaries](runtime-boundaries.md): the two-system Desktop architecture: Direct AI Workbench vs ThinClaw Agent Cockpit, shared services, state ownership, and iOS implications.
+- [Desktop Agent Interface Upgrade Roadmap](desktop-agent-interface-upgrade-roadmap.md): code-grounded execution plan for consolidating the 32-page Agent Cockpit into a truthful, capability-aware, task-oriented interface using the current Desktop design system.
+- [Desktop Agent Interface Upgrade Release Evidence](desktop-agent-interface-upgrade-release-evidence.md): dated automated verification, intentional capability gates, manual-smoke obligations, and rollback guidance for the completed migration.
 - [Bridge Contract](bridge-contract.md): stable `thinclaw_*` Tauri commands, `thinclaw-event`, event routing metadata, generated bindings, and local/remote command rules.
 - [Runtime Parity Checklist](runtime-parity-checklist.md): desktop runtime parity against root ThinClaw behavior, including fixture and release-operator criteria.
 - [Remote Gateway Route Matrix](remote-gateway-route-matrix.md): every desktop command group, its local behavior, remote route, and explicit unavailable behavior.

@@ -24,8 +24,8 @@ pub use model::{
 };
 pub use provider::{ApiStyle, ProviderEndpoint};
 pub use runtime::{
-    LocalRuntimeEndpoint, LocalRuntimeKind, LocalRuntimeSnapshot, RuntimeCapability,
-    RuntimeExposurePolicy, RuntimeReadiness,
+    LocalEndpointId, LocalRuntimeEndpoint, LocalRuntimeKind, LocalRuntimeSnapshot,
+    RuntimeCapability, RuntimeExposurePolicy, RuntimeReadiness,
 };
 pub use secret::{
     ProviderCredentialDescriptor, SecretAccessMode, SecretConsumer, SecretDescriptor,

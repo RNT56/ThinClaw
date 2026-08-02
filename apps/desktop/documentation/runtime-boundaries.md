@@ -1,6 +1,6 @@
 # ThinClaw Desktop Runtime Boundaries
 
-Last updated: 2026-07-13
+Last updated: 2026-08-01
 
 ThinClaw Desktop intentionally contains two AI systems. They serve different
 jobs and must not be collapsed into one architecture without an explicit
@@ -97,8 +97,10 @@ Primary user surfaces:
 - ThinClaw management pages for memory, routines, skills, MCP, jobs, autonomy,
   channels, routing, cost, learning, experiments, and pairing
 - Repo Projects keeps its command/state orchestration in
-  `components/thinclaw/repo-projects/use-repo-projects.ts`; its public panel is a
-  composition surface, not a second runtime or persistence owner.
+  `components/thinclaw/repo-projects/use-repo-projects.ts`; it remains a
+  composition surface, not a second runtime or persistence owner. The current
+  Cockpit quarantines it in Advanced rather than presenting unproven project
+  state as live.
 - Lifecycle Hooks follows the same boundary: `components/thinclaw/hooks/use-hooks.ts`
   owns generated-command interactions while cards, the custom editor, and the
   built-in template catalog remain presentation modules.

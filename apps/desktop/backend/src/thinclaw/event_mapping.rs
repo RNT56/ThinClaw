@@ -89,9 +89,14 @@ pub fn status_to_ui_event(
             delta: strip_llm_tokens(&delta),
         }),
 
-        StatusUpdate::ToolStarted { name, parameters } => Some(UiEvent::ToolUpdate {
+        StatusUpdate::ToolStarted {
+            invocation_id,
+            name,
+            parameters,
+        } => Some(UiEvent::ToolUpdate {
             session_key,
             run_id,
+            invocation_id: invocation_id.to_string(),
             tool_name: name,
             status: ToolStatus::Started,
             input: parameters.unwrap_or(Value::Null),
@@ -99,12 +104,15 @@ pub fn status_to_ui_event(
         }),
 
         StatusUpdate::ToolCompleted {
+            invocation_id,
             name,
             success,
             result_preview,
+            ..
         } => Some(UiEvent::ToolUpdate {
             session_key,
             run_id,
+            invocation_id: invocation_id.to_string(),
             tool_name: name,
             status: if success {
                 ToolStatus::Ok
@@ -115,9 +123,15 @@ pub fn status_to_ui_event(
             output: result_preview.map(Value::String).unwrap_or(Value::Null),
         }),
 
-        StatusUpdate::ToolResult { name, preview, .. } => Some(UiEvent::ToolUpdate {
+        StatusUpdate::ToolResult {
+            invocation_id,
+            name,
+            preview,
+            ..
+        } => Some(UiEvent::ToolUpdate {
             session_key,
             run_id,
+            invocation_id: invocation_id.to_string(),
             tool_name: name,
             status: ToolStatus::Stream,
             input: Value::Null,
@@ -521,6 +535,7 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
             vec![UiEvent::ToolUpdate {
                 session_key,
                 run_id,
+                invocation_id: value_string(&value, "invocation_id").unwrap_or_default(),
                 tool_name: value_string(&value, "name").unwrap_or_default(),
                 status: ToolStatus::Started,
                 input: Value::Null,
@@ -532,6 +547,7 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
             vec![UiEvent::ToolUpdate {
                 session_key,
                 run_id,
+                invocation_id: value_string(&value, "invocation_id").unwrap_or_default(),
                 tool_name: value_string(&value, "name").unwrap_or_default(),
                 status: if value_bool(&value, "success").unwrap_or(false) {
                     ToolStatus::Ok
@@ -547,6 +563,7 @@ pub fn gateway_sse_to_ui_events(value: Value) -> Vec<UiEvent> {
             vec![UiEvent::ToolUpdate {
                 session_key,
                 run_id,
+                invocation_id: value_string(&value, "invocation_id").unwrap_or_default(),
                 tool_name: value_string(&value, "name").unwrap_or_default(),
                 status: ToolStatus::Stream,
                 input: Value::Null,
@@ -837,15 +854,19 @@ mod tests {
         let statuses = vec![
             StatusUpdate::Thinking("thinking".into()),
             StatusUpdate::ToolStarted {
+                invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-read"),
                 name: "read_file".into(),
                 parameters: Some(serde_json::json!({"path": "README.md"})),
             },
             StatusUpdate::ToolCompleted {
+                invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-read"),
                 name: "read_file".into(),
                 success: true,
                 result_preview: Some("ok".into()),
+                duration_ms: Some(1),
             },
             StatusUpdate::ToolResult {
+                invocation_id: thinclaw_types::ToolInvocationId::from_provider("call-read"),
                 name: "read_file".into(),
                 preview: "result".into(),
                 artifacts: Vec::new(),

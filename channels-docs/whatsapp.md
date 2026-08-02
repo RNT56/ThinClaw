@@ -78,8 +78,8 @@ ThinClaw treats WhatsApp as a direct-message surface.
   - All inbound DMs are accepted immediately.
 - `dm_policy: "pairing"`
   - Unknown senders trigger a pairing request.
-  - ThinClaw sends a pairing code back over WhatsApp.
-  - An operator approves with `thinclaw pairing approve whatsapp <code>`.
+  - ThinClaw records a pending approval without sending an approval secret.
+  - An operator lists requests, then approves with `thinclaw access senders approve whatsapp <request-id>`.
 - `owner_id`
   - Restricts the channel to one WhatsApp sender phone number.
 

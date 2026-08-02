@@ -67,28 +67,42 @@ pub(super) fn status_to_wit(
             message: msg.clone(),
             metadata_json,
         },
-        StatusUpdate::ToolStarted { name, .. } => wit_channel::StatusUpdate {
+        StatusUpdate::ToolStarted {
+            invocation_id,
+            name,
+            ..
+        } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolStarted,
             message: format!("Tool started: {}", name),
-            metadata_json,
+            metadata_json: tool_status_metadata(metadata, invocation_id),
         },
-        StatusUpdate::ToolCompleted { name, success, .. } => wit_channel::StatusUpdate {
+        StatusUpdate::ToolCompleted {
+            invocation_id,
+            name,
+            success,
+            ..
+        } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolCompleted,
             message: format!(
                 "Tool completed: {} ({})",
                 name,
                 if *success { "ok" } else { "failed" }
             ),
-            metadata_json,
+            metadata_json: tool_status_metadata(metadata, invocation_id),
         },
-        StatusUpdate::ToolResult { name, preview, .. } => wit_channel::StatusUpdate {
+        StatusUpdate::ToolResult {
+            invocation_id,
+            name,
+            preview,
+            ..
+        } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolResult,
             message: format!(
                 "Tool result: {}\n{}",
                 name,
                 truncate_status_text(preview, 280)
             ),
-            metadata_json,
+            metadata_json: tool_status_metadata(metadata, invocation_id),
         },
         StatusUpdate::StreamChunk(chunk) => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::StreamChunk,
@@ -358,6 +372,18 @@ pub(super) fn status_to_wit(
             metadata_json,
         },
     }
+}
+
+fn tool_status_metadata(
+    metadata: &serde_json::Value,
+    invocation_id: &thinclaw_types::ToolInvocationId,
+) -> String {
+    let mut object = metadata.as_object().cloned().unwrap_or_default();
+    object.insert(
+        "tool_invocation_id".to_string(),
+        serde_json::Value::String(invocation_id.to_string()),
+    );
+    serde_json::Value::Object(object).to_string()
 }
 
 /// Clone a WIT StatusUpdate (the generated type doesn't derive Clone).

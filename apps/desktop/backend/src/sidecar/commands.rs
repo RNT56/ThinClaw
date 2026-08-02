@@ -14,49 +14,29 @@ use super::types::{ChatServerConfig, ChatServerOptions, SidecarEvent, SidecarSta
 use crate::inference::embedding::{local::LocalEmbeddingBackend, EmbeddingBackend};
 use crate::model_lifecycle::{model_path_uses_install, ModelLifecycleRoles, MODEL_LIFECYCLE_LOCK};
 
-const MANAGED_STT_MARKER: &str = "THINCLAW_MANAGED_WHISPER_ENDPOINT";
-const STT_ENDPOINT_KEY: &str = "WHISPER_HTTP_ENDPOINT";
-const STT_TOKEN_KEY: &str = "WHISPER_HTTP_TOKEN";
-const STT_MODEL_KEY: &str = "WHISPER_HTTP_MODEL";
-
 fn clear_managed_stt_endpoint() {
-    let managed = thinclaw_config::helpers::optional_env(MANAGED_STT_MARKER)
-        .ok()
-        .flatten()
-        .is_some_and(|value| value == "1");
-    if managed {
-        thinclaw_config::helpers::remove_bridge_vars(&[
-            MANAGED_STT_MARKER,
-            STT_ENDPOINT_KEY,
-            STT_TOKEN_KEY,
-            STT_MODEL_KEY,
-        ]);
-    }
+    thinclaw_core::media::local_endpoints::managed_local_endpoints().remove(
+        thinclaw_core::media::local_endpoints::ManagedLocalEndpointKind::SpeechToText,
+    );
 }
 
 #[cfg(feature = "mlx")]
 fn install_managed_stt_endpoint(port: u16, token: String) {
-    let existing = thinclaw_config::helpers::optional_env(STT_ENDPOINT_KEY)
+    let existing = thinclaw_config::helpers::optional_env("WHISPER_HTTP_ENDPOINT")
         .ok()
         .flatten();
-    let already_managed = thinclaw_config::helpers::optional_env(MANAGED_STT_MARKER)
-        .ok()
-        .flatten()
-        .is_some_and(|value| value == "1");
-    if existing.is_some() && !already_managed {
+    if existing.is_some() {
         tracing::info!("Preserving the explicitly configured Whisper HTTP endpoint");
         return;
     }
 
-    thinclaw_config::helpers::inject_bridge_vars(std::collections::HashMap::from([
-        (MANAGED_STT_MARKER.to_string(), "1".to_string()),
-        (
-            STT_ENDPOINT_KEY.to_string(),
-            format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
-        ),
-        (STT_TOKEN_KEY.to_string(), token),
-        (STT_MODEL_KEY.to_string(), "thinclaw-whisper".to_string()),
-    ]));
+    thinclaw_core::media::local_endpoints::managed_local_endpoints().install(
+        thinclaw_core::media::local_endpoints::ManagedLocalEndpointKind::SpeechToText,
+        format!("managed-whisper-{port}"),
+        format!("http://127.0.0.1:{port}/v1/audio/transcriptions"),
+        "thinclaw-whisper",
+        secrecy::SecretString::from(token),
+    );
 }
 
 #[tauri::command]
@@ -504,8 +484,6 @@ pub fn direct_runtime_get_chat_server_config(
     state.get_chat_config().map(
         |(port, _token, context_size, model_family)| ChatServerConfig {
             port,
-            // Runtime credentials are backend state and never renderer state.
-            token: String::new(),
             context_size,
             model_family,
         },

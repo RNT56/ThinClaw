@@ -982,25 +982,74 @@ pub async fn store_repo_credential(
     let params = crate::secrets::CreateSecretParams::new(name.clone(), value)
         .with_provider("github")
         .with_created_by("repo_project_setup");
-    secrets
+    let stored = secrets
         .create(user_id, params)
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?;
-    Ok(RepoCredentialStored { ok: true, name })
+    Ok(RepoCredentialStored {
+        ok: true,
+        name,
+        secret_source_id: stored.id,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoCredentialStored {
     pub ok: bool,
     pub name: String,
+    pub secret_source_id: Uuid,
 }
 
-/// Request body for storing a GitHub credential. The `value` is encrypted into
-/// the secrets store and never echoed back or written to settings/events.
+/// ID-only request for binding a pre-authorized encrypted source to one exact
+/// repository-project credential slot.
 #[derive(Debug, Clone, Deserialize)]
-pub struct RepoCredentialInput {
-    pub name: String,
-    pub value: String,
+pub struct RepoCredentialBindingInput {
+    pub slot: String,
+    pub secret_source_id: Uuid,
+}
+
+pub async fn bind_repo_credential_source(
+    secrets: &SharedSecrets,
+    user_id: &str,
+    slot: String,
+    secret_source_id: Uuid,
+) -> ApiResult<RepoCredentialStored> {
+    let slot = canonical_repo_credential_slot(&slot)?;
+    let source = secrets
+        .list(user_id)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?
+        .into_iter()
+        .find(|source| source.id == Some(secret_source_id))
+        .ok_or_else(|| ApiError::InvalidInput("secret source is unavailable".to_string()))?;
+    let value = secrets
+        .get_decrypted(user_id, &source.name)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    store_repo_credential(
+        secrets,
+        user_id,
+        slot.to_string(),
+        value.expose().to_string(),
+    )
+    .await
+}
+
+fn canonical_repo_credential_slot(slot: &str) -> ApiResult<&'static str> {
+    match slot.trim() {
+        "github_token" => Ok("github_token"),
+        "github_fork_token" => Ok("github_fork_token"),
+        "github_app_private_key" | "repo_projects_github_private_key" => {
+            Ok("repo_projects_github_private_key")
+        }
+        "github_webhook_secret" | "repo_projects_github_webhook" => {
+            Ok("repo_projects_github_webhook")
+        }
+        _ => Err(ApiError::InvalidInput(
+            "unsupported credential slot; expected github_token, github_fork_token, github_app_private_key, or github_webhook_secret"
+                .to_string(),
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -2,10 +2,11 @@
 
 > **Status:** draft v1 · **Created:** 2026-06-27 · Companion to [`OVERHAUL_PLAN.md`](OVERHAUL_PLAN.md).
 
-## Completion status (verified 2026-07-12)
+## Completion status (reconciled 2026-08-01)
 
-First parity batch is **merged to `main`**. Every row below is verified present in the
-tree. ✅ = merged to `main`.
+The first parity batch is present in the tree. ✅ = merged implementation; ⚠️ = a
+truthful capability gate or quarantine remains and is documented in the current
+Desktop roadmap.
 
 | TDO | Item | State | Verified in code |
 |---|---|---|---|
@@ -19,9 +20,9 @@ tree. ✅ = merged to `main`.
 | TDO-105 | Advisor consultation → `UiEvent::AgentLifecycleEvent` + Event Inspector row | ✅ | `event_mapping.rs`, `tool_execution.rs`, `ThinClawEventInspector.tsx` |
 | TDO-106 | Trajectory: `stats`/`records` commands + Trajectory panel | ✅ | `rpc_trajectory.rs`:45/58 |
 | TDO-111/112 | Outcome evaluation and GPU operations return typed, actionable gateway gates in local mode | ✅ | `rpc_experiments_learning.rs`:394/631/654 |
-| TDO-120 | Channel-config framework: `Channel::config_schema()` + DTOs + Signal/Discord impls + read/submit commands + Channel Config panel | ✅ | `rpc_channel_config.rs`:19/37/61 |
+| TDO-120 | Channel-config framework: `Channel::config_schema()` + DTOs + Signal/Discord impls + read/submit commands + Channel Config panel | ⚠️ secret binding gated | Non-secret current values are wired; password values are intentionally withheld until encrypted channel-secret binding exists. |
 | TDO-132 | Inline Memory Editor reads and saves the canonical memory document | ✅ | `MemoryEditor.tsx`, `commands/sessions.rs`:732/750 |
-| TDO-140 | Repo-projects enroll→plan→merge-gate flow + readiness surface | ✅ | `rpc_repo_projects.rs`, `ThinClawRepoProjects.tsx`, `src/repo_projects` |
+| TDO-140 | Repo-projects enroll→plan→merge-gate flow + readiness surface | ⚠️ quarantined in Desktop | Backend flow remains, but the Cockpit does not present fake or unproven project state as live. |
 | TDO-143 | Local/remote session subscription activates live event routing | ✅ | `commands/sessions.rs`:675, `runtime_bridge.rs`:648 |
 | Supplemental | Session search command + Session Search panel | ✅ | `rpc_session_search.rs`, `ThinClawSessionSearch.tsx` |
 
@@ -173,7 +174,7 @@ characterization test added before the split; no behavior change.
 ### Channels (largest item)
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
-| TDO-120 ✅ | **Channel-config schema framework** (`thinclaw_channel_config_schema`/`_schemas`/`_submit` commands + generic renderer in the `ThinClawChannelConfig` panel) | XL | TDO-001 | `rpc_channel_config.rs`, channel manifests |
+| TDO-120 ⚠️ | **Channel-config schema framework** (`thinclaw_channel_config_schema`/`_schemas`/`_submit` commands + generic renderer in the `ThinClawChannelConfig` panel); non-secret values only until encrypted secret binding is available | XL | TDO-001 | `rpc_channel_config.rs`, channel manifests |
 | TDO-121 | First channels on framework: Signal + Discord done; iMessage, Nostr remain | L | TDO-120 | channel adapters |
 | TDO-122 | Long-tail channel configs (Matrix, Teams, LINE, SMS, BlueBubbles, Apple Mail, …) | L | TDO-120 | channel adapters |
 | TDO-123 | Pairing/web-login parity across paired channels | S | TDO-120 | `ThinClawPairing.tsx` |
@@ -188,7 +189,7 @@ characterization test added before the split; no behavior change.
 ### Repo-projects / fleet / remote
 | ID | Title | Size | Depends | Files |
 |---|---|---|---|---|
-| TDO-140 ✅ | Repo-projects enroll→plan→merge-gate + readiness gates | L | TDO-022 | `rpc_repo_projects.rs`, component |
+| TDO-140 ⚠️ | Repo-projects enroll→plan→merge-gate backend flow; quarantined from live Desktop presentation pending end-to-end proof | L | TDO-022 | `rpc_repo_projects.rs`, component |
 | TDO-141 | Define fleet model (multi-agent A2A) → real status + broadcast | L | TDO-001 | `fleet.rs`, `fleet/FleetCommandCenter.tsx` |
 | TDO-142 | Tunnel/Tailscale commands + Remote-access panel | M | TDO-001 | `src/tunnel/` |
 | TDO-143 ✅ | Real local/remote session subscription semantics | S | TDO-001 | `sessions.rs`, `runtime_bridge.rs` |
@@ -225,5 +226,5 @@ characterization test added before the split; no behavior change.
 ## Suggested first sprint (de-risk + prove the loop)
 
 This sprint has largely executed: `TDO-001` → `TDO-002` → `TDO-100` (compaction) →
-`TDO-120` (channel-config framework) all landed. Remaining from the original ordering:
+`TDO-120` (channel-config framework, with encrypted secret binding still gated). Remaining from the original ordering:
 `TDO-021`/`TDO-020` (split god-files on touch) → `TDO-030` (CI fixture acceptance gate).

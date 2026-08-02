@@ -366,9 +366,9 @@ pub async fn run_log_command(cmd: LogCommand) -> anyhow::Result<()> {
             println!("  thinclaw::config     — Configuration loading");
             println!();
             println!("Usage:");
-            println!("  thinclaw logs tail -l error");
-            println!("  thinclaw logs search \"timeout\" --since 1h");
-            println!("  thinclaw logs show --since 30m -t thinclaw::llm");
+            println!("  thinclaw runtime logs tail -l error");
+            println!("  thinclaw runtime logs search \"timeout\" --since 1h");
+            println!("  thinclaw runtime logs show --since 30m -t thinclaw::llm");
         }
     }
 

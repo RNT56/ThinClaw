@@ -5,7 +5,7 @@ Absolute-completion checkpoint for ThinClaw Desktop remote mode. Desktop IPC nam
 HTTP gateway. Unsupported operations must return an `unavailable:` error with a
 concrete reason.
 
-Last updated: 2026-07-13
+Last updated: 2026-08-01
 
 Per-command route modes are code-authoritative: every registered command is
 classified in `ROUTE_TABLE` (`thinclaw/bridge.rs`) as `LocalAndRemote`,
@@ -34,7 +34,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_learning_evaluate_outcomes` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 | `thinclaw_test_connection` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 
-### Local only (202)
+### Local only (203)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -220,6 +220,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_set_setup_completed` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_set_workspace_mode` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_skills_toggle` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_spawn_session` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_sync_local_llm` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_toggle_auto_start` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_toggle_custom_secret` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -241,7 +242,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `update_remote_model_catalog` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `update_user_config` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 
-### Local and remote (154)
+### Local and remote (153)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -388,7 +389,6 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_skills_reload_all` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_skills_search` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_skills_status` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
-| `thinclaw_spawn_session` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_start_gateway` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_stop_gateway` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_subscribe_session` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
@@ -433,7 +433,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | Learning | learning IPC wrappers and proxy helpers | `/api/learning/*` | wired for status/history/candidates/review surfaces exposed by the gateway |
 | Session search | `thinclaw_session_search` | none | unavailable: LocalOnly — full-text search runs over the embedded session store |
 | Agent eval | `thinclaw_experiments_list_envs`, `thinclaw_experiments_run_eval` | none | unavailable: `run_eval` LocalOnly — drives the embedded agent in throwaway sessions |
-| Channel config | `thinclaw_channel_config_schema`, `thinclaw_channel_config_schemas`, `thinclaw_channel_config_submit` | none | unavailable: LocalOnly — schema read + submit operate on the embedded channel manager |
+| Channel config | `thinclaw_channel_config_schema`, `thinclaw_channel_config_schemas`, `thinclaw_channel_config_submit` | `/api/channels/{channelId}/config`, `/api/channels/config-schemas` | wired where the gateway exposes the matching schema/config routes; local schema values omit passwords, and Desktop gates secret editing until encrypted channel-secret binding exists |
 
 Known intentional gaps are external host-policy gates, not silent desktop no-ops.
 The backend fixture suite currently exercises the chat/session/memory/log/cache/hook

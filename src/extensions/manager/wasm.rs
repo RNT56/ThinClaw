@@ -170,12 +170,12 @@ impl ExtensionManager {
                 result.instructions = Some(match auth_check.auth_status {
                     WasmToolAuthStatus::NeedsReauth | WasmToolAuthStatus::InsufficientScope => {
                         format!(
-                            "This gateway cannot generate a browser callback URL right now. Run `thinclaw tool auth {}` locally to refresh the shared Google credential with the missing scopes.",
+                            "This gateway cannot generate a browser callback URL right now. Run `thinclaw extensions tools auth {}` locally to refresh the shared Google credential with the missing scopes.",
                             name
                         )
                     }
                     _ => format!(
-                        "This gateway cannot generate a browser callback URL right now. Run `thinclaw tool auth {}` locally to connect the tool, or configure a public gateway/tunnel URL first.",
+                        "This gateway cannot generate a browser callback URL right now. Run `thinclaw extensions tools auth {}` locally to connect the tool, or configure a public gateway/tunnel URL first.",
                         name
                     ),
                 });

@@ -234,6 +234,9 @@ impl Agent {
                     .send_status(
                         &message.channel,
                         StatusUpdate::ToolStarted {
+                            invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                &pending.tool_call_id,
+                            ),
                             name: pending.tool_name.clone(),
                             parameters: Some(pending.parameters.clone()),
                         },
@@ -280,6 +283,9 @@ impl Agent {
                     .send_status(
                         &message.channel,
                         StatusUpdate::ToolCompleted {
+                            invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                &pending.tool_call_id,
+                            ),
                             name: pending.tool_name.clone(),
                             success: tool_result.is_ok(),
                             result_preview: tool_result.as_ref().ok().map(|output| {
@@ -288,6 +294,7 @@ impl Agent {
                                     500,
                                 )
                             }),
+                            duration_ms: None,
                         },
                         &message.metadata,
                     )
@@ -305,6 +312,9 @@ impl Agent {
                         .send_status(
                             &message.channel,
                             StatusUpdate::ToolResult {
+                                invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                    &pending.tool_call_id,
+                                ),
                                 name: pending.tool_name.clone(),
                                 preview: output.sanitized_content.clone(),
                                 artifacts: output.artifacts.clone(),
@@ -521,6 +531,9 @@ impl Agent {
                             .send_status(
                                 &message.channel,
                                 StatusUpdate::ToolStarted {
+                                    invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                        &tc.id,
+                                    ),
                                     name: tc.name.clone(),
                                     parameters: Some(tc.arguments.clone()),
                                 },
@@ -541,6 +554,9 @@ impl Agent {
                             .send_status(
                                 &message.channel,
                                 StatusUpdate::ToolCompleted {
+                                    invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                        &tc.id,
+                                    ),
                                     name: tc.name.clone(),
                                     success: result.is_ok(),
                                     result_preview: result.as_ref().ok().map(|output| {
@@ -549,6 +565,7 @@ impl Agent {
                                             500,
                                         )
                                     }),
+                                    duration_ms: None,
                                 },
                                 &message.metadata,
                             )
@@ -576,6 +593,8 @@ impl Agent {
                                 .send_status(
                                     &channel,
                                     StatusUpdate::ToolStarted {
+                                        invocation_id:
+                                            thinclaw_types::ToolInvocationId::from_provider(&tc.id),
                                         name: tc.name.clone(),
                                         parameters: Some(tc.arguments.clone()),
                                     },
@@ -590,6 +609,8 @@ impl Agent {
                                 .send_status(
                                     &channel,
                                     StatusUpdate::ToolCompleted {
+                                        invocation_id:
+                                            thinclaw_types::ToolInvocationId::from_provider(&tc.id),
                                         name: tc.name.clone(),
                                         success: result.is_ok(),
                                         result_preview: result.as_ref().ok().map(|output| {
@@ -598,6 +619,7 @@ impl Agent {
                                                 500,
                                             )
                                         }),
+                                        duration_ms: None,
                                     },
                                     &metadata,
                                 )
@@ -681,6 +703,9 @@ impl Agent {
                             .send_status(
                                 &message.channel,
                                 StatusUpdate::ToolResult {
+                                    invocation_id: thinclaw_types::ToolInvocationId::from_provider(
+                                        &tc.id,
+                                    ),
                                     name: tc.name.clone(),
                                     preview: output.sanitized_content.clone(),
                                     artifacts: output.artifacts.clone(),
@@ -1117,170 +1142,5 @@ impl Agent {
             )
             .await;
         true
-    }
-
-    /// Handle an auth token submitted while the thread is in auth mode.
-    ///
-    /// The token goes directly to the extension manager's credential store,
-    /// completely bypassing logging, turn creation, history, and compaction.
-    pub(in crate::agent) async fn process_auth_token(
-        &self,
-        message: &IncomingMessage,
-        pending: &crate::agent::session::PendingAuth,
-        token: &str,
-        session: Arc<Mutex<Session>>,
-        thread_id: Uuid,
-    ) -> Result<Option<String>, Error> {
-        if !pending.accepts_identity(&message.resolved_identity()) {
-            return Ok(Some(
-                "This authentication request belongs to a different actor.".to_string(),
-            ));
-        }
-
-        let token = token.trim();
-
-        // Clear auth mode regardless of outcome
-        let cleared_snapshot = {
-            let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thinclaw_agent::thread_ops::clear_pending_auth(thread);
-                Some(thread.clone())
-            } else {
-                None
-            }
-        };
-        if let Some(thread_snapshot) = cleared_snapshot {
-            let _ = thread_snapshot;
-            self.persist_thread_runtime_snapshot(message, &session, thread_id)
-                .await;
-        }
-
-        let ext_mgr = match self.deps.extension_manager.as_ref() {
-            Some(mgr) => mgr,
-            None => return Ok(Some("Extension manager not available.".to_string())),
-        };
-
-        match ext_mgr.auth(&pending.extension_name, Some(token)).await {
-            Ok(result) if result.status == "authenticated" => {
-                tracing::info!(
-                    "Extension '{}' authenticated via auth mode",
-                    pending.extension_name
-                );
-
-                // Auto-activate so tools are available immediately after auth
-                match ext_mgr.activate(&pending.extension_name).await {
-                    Ok(activate_result) => {
-                        let msg = thinclaw_agent::thread_ops::auth_activation_success_message(
-                            &pending.extension_name,
-                            &activate_result.tools_loaded,
-                        );
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::AuthCompleted {
-                                    extension_name: pending.extension_name.clone(),
-                                    success: true,
-                                    message: msg.clone(),
-                                    auth_mode: Some("manual_token".to_string()),
-                                    auth_status: Some("authenticated".to_string()),
-                                    shared_auth_provider: result.shared_auth_provider.clone(),
-                                    missing_scopes: result.missing_scopes.clone(),
-                                    thread_id: Some(thread_id.to_string()),
-                                },
-                                &message.metadata,
-                            )
-                            .await;
-                        Ok(Some(msg))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Extension '{}' authenticated but activation failed: {}",
-                            pending.extension_name,
-                            e
-                        );
-                        let msg = thinclaw_agent::thread_ops::auth_activation_failed_message(
-                            &pending.extension_name,
-                            &e.to_string(),
-                        );
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::AuthCompleted {
-                                    extension_name: pending.extension_name.clone(),
-                                    success: true,
-                                    message: msg.clone(),
-                                    auth_mode: Some("manual_token".to_string()),
-                                    auth_status: Some("authenticated".to_string()),
-                                    shared_auth_provider: result.shared_auth_provider.clone(),
-                                    missing_scopes: result.missing_scopes.clone(),
-                                    thread_id: Some(thread_id.to_string()),
-                                },
-                                &message.metadata,
-                            )
-                            .await;
-                        Ok(Some(msg))
-                    }
-                }
-            }
-            Ok(result) => {
-                // Invalid token, re-enter auth mode
-                {
-                    let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thinclaw_agent::thread_ops::reenter_pending_auth(thread, pending);
-                    }
-                }
-                self.persist_thread_runtime_snapshot(message, &session, thread_id)
-                    .await;
-                let msg =
-                    thinclaw_agent::thread_ops::invalid_auth_token_message(result.instructions);
-                // Re-emit AuthRequired so web UI re-shows the card
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::AuthRequired {
-                            extension_name: pending.extension_name.clone(),
-                            instructions: Some(msg.clone()),
-                            auth_url: result.auth_url,
-                            setup_url: result.setup_url,
-                            auth_mode: result.auth_mode.clone(),
-                            auth_status: result.auth_status.clone(),
-                            shared_auth_provider: result.shared_auth_provider.clone(),
-                            missing_scopes: result.missing_scopes.clone(),
-                            thread_id: Some(thread_id.to_string()),
-                        },
-                        &message.metadata,
-                    )
-                    .await;
-                Ok(Some(msg))
-            }
-            Err(e) => {
-                let msg = thinclaw_agent::thread_ops::auth_failed_message(
-                    &pending.extension_name,
-                    &e.to_string(),
-                );
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::AuthCompleted {
-                            extension_name: pending.extension_name.clone(),
-                            success: false,
-                            message: msg.clone(),
-                            auth_mode: None,
-                            auth_status: None,
-                            shared_auth_provider: None,
-                            missing_scopes: Vec::new(),
-                            thread_id: Some(thread_id.to_string()),
-                        },
-                        &message.metadata,
-                    )
-                    .await;
-                Ok(Some(msg))
-            }
-        }
     }
 }

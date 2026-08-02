@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 use thinclaw_platform::{bounded_command_output, executable_available};
-use tokio::process::Command;
 
 const MAX_CONFIGURED_STICKER_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
@@ -279,7 +278,10 @@ async fn convert_via_ffmpeg(
         .await
         .map_err(|error| StickerError::IoError(error.to_string()))?;
 
-    let mut command = Command::new("ffmpeg");
+    let mut command = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-media.src.sticker.tokio.101",
+        "ffmpeg"
+    );
     command
         .args([
             "-nostdin",

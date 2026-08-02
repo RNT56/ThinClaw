@@ -14,7 +14,7 @@ Packaged WASM channel for Discord interactions in ThinClaw. This is the webhook/
 1. Install the packaged channel from the ThinClaw registry:
 
    ```bash
-   thinclaw registry install discord
+   thinclaw extensions registry install discord
    ```
 
 2. Create a Discord Application at <https://discord.com/developers/applications>

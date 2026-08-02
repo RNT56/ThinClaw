@@ -12,6 +12,18 @@ const ANTHROPIC_PROVIDER_SECRET_NAME: &str = "llm_anthropic_api_key";
 const OPENAI_PROVIDER_SECRET_NAME: &str = "llm_openai_api_key";
 
 impl SetupWizard {
+    async fn stage_secure_store_api_key(
+        &self,
+        account: &str,
+        value: &str,
+    ) -> Result<(), crate::secrets::SecretError> {
+        self.secret_draft.insert(
+            format!("__os_api_key::{account}"),
+            SecretString::from(value.to_string()),
+        );
+        Ok(())
+    }
+
     pub(super) fn enable_anthropic_provider_for_claude_code_key(&mut self) {
         self.ensure_provider_enabled("anthropic");
         self.ensure_provider_slot_defaults("anthropic");
@@ -212,7 +224,10 @@ impl SetupWizard {
             // Async process spawn so a slow `docker` call never blocks the tokio
             // runtime (a multi-minute `docker build` below would otherwise freeze
             // every other async task, including the UI runtime in the Tauri path).
-            let mut inspect_command = tokio::process::Command::new("docker");
+            let mut inspect_command = thinclaw_platform::tokio_process_command!(
+                "src.setup.wizard.sandbox.tokio.1",
+                "docker"
+            );
             inspect_command
                 .args(["image", "inspect", image_name])
                 .stdin(std::process::Stdio::null())
@@ -238,43 +253,10 @@ impl SetupWizard {
                 crate::setup::prompts::print_blank_line();
 
                 if confirm("Build the worker image now?", true).map_err(SetupError::Io)? {
-                    print_info("Building thinclaw-worker image (this may take a while)...");
-
-                    // Find the repo root (where Dockerfile.worker lives)
-                    let repo_root =
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-                    let mut build_command = tokio::process::Command::new("docker");
-                    build_command
-                        .args(["build", "-f", "Dockerfile.worker", "-t", image_name, "."])
-                        .current_dir(&repo_root)
-                        .stdin(std::process::Stdio::inherit())
-                        .stdout(std::process::Stdio::inherit())
-                        .stderr(std::process::Stdio::inherit());
-                    let status = owned_command_status(
-                        &mut build_command,
-                        std::time::Duration::from_secs(30 * 60),
-                    )
-                    .await;
-
-                    match status {
-                        Ok(s) if s.success() => {
-                            print_success("Worker image built successfully.");
-                        }
-                        Ok(s) => {
-                            print_error(&format!(
-                                "Docker build failed (exit code {:?}).",
-                                s.code()
-                            ));
-                            print_info("You can build it later with:");
-                            print_info("  docker build -f Dockerfile.worker -t thinclaw-worker .");
-                        }
-                        Err(e) => {
-                            print_error(&format!("Failed to start docker build: {}", e));
-                            print_info("You can build it later with:");
-                            print_info("  docker build -f Dockerfile.worker -t thinclaw-worker .");
-                        }
-                    }
+                    self.queue_action(super::PendingSetupAction::BuildWorkerImage {
+                        image: image_name.clone(),
+                    });
+                    print_success("Worker image build added to the Apply plan.");
                 } else {
                     print_info("Skipping image build. Build it later with:");
                     print_info("  docker build -f Dockerfile.worker -t thinclaw-worker .");
@@ -465,7 +447,7 @@ impl SetupWizard {
                                     print_info(
                                         "Falling back to the OS secure store for compatibility.",
                                     );
-                                    match crate::platform::secure_store::store_api_key(
+                                    match self.stage_secure_store_api_key(
                                         crate::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
                                         &api_key,
                                     )
@@ -499,11 +481,12 @@ impl SetupWizard {
                             print_info(
                                 "Encrypted secrets storage is unavailable right now, so ThinClaw will use the OS secure store instead.",
                             );
-                            match crate::platform::secure_store::store_api_key(
-                                crate::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
-                                &api_key,
-                            )
-                            .await
+                            match self
+                                .stage_secure_store_api_key(
+                                    crate::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
+                                    &api_key,
+                                )
+                                .await
                             {
                                 Ok(()) => {
                                     print_success(&format!(
@@ -532,11 +515,12 @@ impl SetupWizard {
                         }
                     }
                     #[cfg(not(target_os = "macos"))]
-                    match crate::platform::secure_store::store_api_key(
-                        crate::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
-                        &api_key,
-                    )
-                    .await
+                    match self
+                        .stage_secure_store_api_key(
+                            crate::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
+                            &api_key,
+                        )
+                        .await
                     {
                         Ok(()) => {
                             print_success(&format!(
@@ -735,7 +719,7 @@ impl SetupWizard {
                                     print_info(
                                         "Falling back to the OS secure store for compatibility.",
                                     );
-                                    match crate::platform::secure_store::store_api_key(
+                                    match self.stage_secure_store_api_key(
                                         crate::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
                                         &api_key,
                                     )
@@ -771,11 +755,12 @@ impl SetupWizard {
                             print_info(
                                 "Encrypted secrets storage is unavailable right now, so ThinClaw will use the OS secure store instead.",
                             );
-                            match crate::platform::secure_store::store_api_key(
-                                crate::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
-                                &api_key,
-                            )
-                            .await
+                            match self
+                                .stage_secure_store_api_key(
+                                    crate::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
+                                    &api_key,
+                                )
+                                .await
                             {
                                 Ok(()) => {
                                     print_success(&format!(
@@ -802,11 +787,12 @@ impl SetupWizard {
                         }
                     }
                     #[cfg(not(target_os = "macos"))]
-                    match crate::platform::secure_store::store_api_key(
-                        crate::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
-                        &api_key,
-                    )
-                    .await
+                    match self
+                        .stage_secure_store_api_key(
+                            crate::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
+                            &api_key,
+                        )
+                        .await
                     {
                         Ok(()) => {
                             print_success(&format!(

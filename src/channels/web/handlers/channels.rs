@@ -16,10 +16,13 @@ fn config_value_is_valid(
     field: &thinclaw_channels::ConfigField,
     value: &serde_json::Value,
 ) -> bool {
-    // A null or empty password means "leave the stored credential unchanged".
-    // Required-password presence is checked against the encrypted store below.
+    // Remote password fields bind opaque source UUIDs. Null means "leave the
+    // stored credential unchanged"; plaintext is never accepted here.
     if field.field_type == "password" {
-        return value.is_null() || value.is_string();
+        return value.is_null()
+            || value
+                .as_str()
+                .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok());
     }
     if field.required
         && (value.is_null() || value.as_str().is_some_and(|value| value.trim().is_empty()))
@@ -123,10 +126,9 @@ pub(crate) async fn channel_config_submit_handler(
         let replacement = values
             .get(&field.id)
             .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if let Some(value) = replacement {
-            secret_updates.push((field.id.clone(), value.to_string()));
+            .and_then(|value| uuid::Uuid::parse_str(value).ok());
+        if let Some(source_id) = replacement {
+            secret_updates.push((field.id.clone(), source_id));
             continue;
         }
         if field.required {
@@ -178,11 +180,23 @@ pub(crate) async fn channel_config_submit_handler(
             .secrets_store
             .as_ref()
             .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-        for (name, value) in secret_updates {
+        let available = secrets
+            .list(&request_identity.principal_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        for (name, source_id) in secret_updates {
+            let source = available
+                .iter()
+                .find(|source| source.id == Some(source_id))
+                .ok_or(StatusCode::NOT_FOUND)?;
+            let value = secrets
+                .get_decrypted(&request_identity.principal_id, &source.name)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             secrets
                 .create(
                     &request_identity.principal_id,
-                    crate::secrets::CreateSecretParams::new(&name, &value)
+                    crate::secrets::CreateSecretParams::new(&name, value.expose())
                         .with_provider(channel_id.clone()),
                 )
                 .await

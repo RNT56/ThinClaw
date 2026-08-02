@@ -2434,7 +2434,7 @@ function showAuthCard(data) {
     const setupLink = document.createElement('a');
     setupLink.href = data.setup_url;
     setupLink.target = '_blank';
-    setupLink.textContent = 'Get your token';
+    setupLink.textContent = 'Open secure setup';
     links.appendChild(setupLink);
   }
 
@@ -2442,19 +2442,11 @@ function showAuthCard(data) {
     card.appendChild(links);
   }
 
-  let tokenInput = null;
   if (data.auth_mode === 'manual_token' || (!data.auth_mode && !data.auth_url)) {
-    const tokenRow = document.createElement('div');
-    tokenRow.className = 'auth-token-input';
-
-    tokenInput = document.createElement('input');
-    tokenInput.type = 'password';
-    tokenInput.placeholder = 'Paste your API key or token';
-    tokenInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
-    });
-    tokenRow.appendChild(tokenInput);
-    card.appendChild(tokenRow);
+    const guidance = document.createElement('div');
+    guidance.className = 'auth-guidance';
+    guidance.textContent = 'Complete authentication through the secure setup flow. Credentials cannot be pasted into chat.';
+    card.appendChild(guidance);
   }
 
   // Error display (hidden initially)
@@ -2467,27 +2459,17 @@ function showAuthCard(data) {
   const actions = document.createElement('div');
   actions.className = 'auth-actions';
 
-  const submitBtn = document.createElement('button');
-  submitBtn.className = 'auth-submit';
-  submitBtn.textContent = 'Submit';
-  submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput ? tokenInput.value : ''));
-
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'auth-cancel';
   cancelBtn.textContent = 'Cancel';
   cancelBtn.addEventListener('click', () => cancelAuth(data.extension_name));
 
-  if (tokenInput) {
-    actions.appendChild(submitBtn);
-  }
   actions.appendChild(cancelBtn);
   card.appendChild(actions);
 
   container.appendChild(card);
   finishChatMutation(shouldPinChatToLatest(), { forceScroll: true });
-  if (tokenInput) {
-    tokenInput.focus();
-  } else if (oauthBtn) {
+  if (oauthBtn) {
     oauthBtn.focus();
   } else {
     cancelBtn.focus();
@@ -2499,36 +2481,7 @@ function removeAuthCard(extensionName) {
   if (card) card.remove();
 }
 
-function submitAuthToken(extensionName, tokenValue) {
-  if (!tokenValue || !tokenValue.trim()) return;
-
-  // Disable submit button while in flight
-  const card = document.querySelector('.auth-card[data-extension-name="' + extensionName + '"]');
-  if (card) {
-    const btns = card.querySelectorAll('button');
-    btns.forEach((b) => { b.disabled = true; });
-  }
-
-  apiFetch('/api/chat/auth-token', {
-    method: 'POST',
-    body: { extension_name: extensionName, token: tokenValue.trim() },
-  }).then((result) => {
-    if (result.success) {
-      removeAuthCard(extensionName);
-      addStandaloneMessage('system', result.message, { timestamp: new Date().toISOString() });
-    } else {
-      showAuthCardError(extensionName, result.message);
-    }
-  }).catch((err) => {
-    showAuthCardError(extensionName, 'Failed: ' + err.message);
-  });
-}
-
 function cancelAuth(extensionName) {
-  apiFetch('/api/chat/auth-cancel', {
-    method: 'POST',
-    body: { extension_name: extensionName },
-  }).catch(() => {});
   removeAuthCard(extensionName);
   enableChatInput();
 }
@@ -4853,7 +4806,6 @@ function renderConfigureModal(name, secrets) {
   const form = document.createElement('div');
   form.className = 'configure-form';
 
-  const fields = [];
   for (const secret of secrets) {
     const field = document.createElement('div');
     field.className = 'configure-field';
@@ -4870,15 +4822,12 @@ function renderConfigureModal(name, secrets) {
 
     const inputRow = document.createElement('div');
     inputRow.className = 'configure-input-row';
-
-    const input = document.createElement('input');
-    input.type = 'password';
-    input.name = secret.name;
-    input.placeholder = secret.provided ? '(already set — leave empty to keep)' : '';
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') submitConfigureModal(name, fields);
-    });
-    inputRow.appendChild(input);
+    const guidance = document.createElement('span');
+    guidance.className = 'ui-resource-note';
+    guidance.textContent = secret.provided
+      ? 'An encrypted source is already bound.'
+      : 'Create this secret with the local CLI and bind its opaque source ID. Remote clients never accept credential text.';
+    inputRow.appendChild(guidance);
 
     if (secret.provided) {
       const badge = document.createElement('span');
@@ -4895,7 +4844,6 @@ function renderConfigureModal(name, secrets) {
 
     field.appendChild(inputRow);
     form.appendChild(field);
-    fields.push({ name: secret.name, input: input });
   }
 
   modal.appendChild(form);
@@ -4903,15 +4851,9 @@ function renderConfigureModal(name, secrets) {
   const actions = document.createElement('div');
   actions.className = 'configure-actions';
 
-  const submitBtn = document.createElement('button');
-  submitBtn.className = 'btn-ext activate';
-  submitBtn.textContent = 'Save';
-  submitBtn.addEventListener('click', () => submitConfigureModal(name, fields));
-  actions.appendChild(submitBtn);
-
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-ext remove';
-  cancelBtn.textContent = 'Cancel';
+  cancelBtn.textContent = 'Close';
   cancelBtn.addEventListener('click', closeConfigureModal);
   actions.appendChild(cancelBtn);
 
@@ -4925,46 +4867,6 @@ function renderConfigureModal(name, secrets) {
     dialog.setAttribute('open', 'open');
   }
 
-  if (fields.length > 0) fields[0].input.focus();
-}
-
-function submitConfigureModal(name, fields) {
-  const secrets = {};
-  for (const f of fields) {
-    if (f.input.value.trim()) {
-      secrets[f.name] = f.input.value.trim();
-    }
-  }
-
-  // Disable buttons to prevent double-submit
-  var btns = document.querySelectorAll('.configure-actions button');
-  btns.forEach(function(b) { b.disabled = true; });
-
-  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
-    method: 'POST',
-    body: { secrets },
-  })
-    .then((res) => {
-      closeConfigureModal();
-      if (res.success) {
-        if (res.activated && name === 'telegram') {
-          showToast('Configured and activated ' + name, 'success');
-        } else if (res.activated) {
-          showToast('Configured ' + name + ' successfully', 'success');
-        } else if (res.needs_restart) {
-          showToast('Configured ' + name + '. Restart required to activate.', 'info');
-        } else {
-          showToast(res.message, 'success');
-        }
-      } else {
-        showToast(res.message || 'Configuration failed', 'error');
-      }
-      loadExtensions();
-    })
-    .catch((err) => {
-      btns.forEach(function(b) { b.disabled = false; });
-      showToast('Configuration failed: ' + err.message, 'error');
-    });
 }
 
 function closeConfigureModal() {
@@ -6095,10 +5997,8 @@ function renderRepoConnectorPanel() {
   }
 
   html += '<div class="repo-form-grid">';
-  html += '<div class="repo-form-block"><div class="autonomy-section-label">Store credential (encrypted)</div>'
-    + '<input id="repo-cred-name" type="text" placeholder="Secret name (e.g. github_token)" value="github_token" />'
-    + '<input id="repo-cred-value" type="password" autocomplete="off" placeholder="Paste token or PEM key — stored encrypted" />'
-    + '<div class="repo-form-actions"><button onclick="repoSaveCredential()">Store Securely</button></div></div>';
+  html += '<div class="repo-form-block"><div class="autonomy-section-label">Credential sources</div>'
+    + '<p>Create credentials locally with <code>thinclaw automation projects set-credential SLOT</code>. The Web UI never accepts credential text.</p></div>';
 
   const appId = (r && r.app_id != null) ? r.app_id : '';
   const instId = (r && r.installation_id != null) ? r.installation_id : '';
@@ -6241,19 +6141,6 @@ function repoSaveAppConfig() {
   repoSetup(body, 'GitHub App configuration saved');
 }
 
-function repoSaveCredential() {
-  const name = (document.getElementById('repo-cred-name').value || '').trim() || 'github_token';
-  const value = document.getElementById('repo-cred-value').value || '';
-  if (!value.trim()) { showToast('Enter the credential value', 'error'); return; }
-  apiFetch('/api/repo-projects/credentials', { method: 'POST', body: { name: name, value: value } }).then(function () {
-    document.getElementById('repo-cred-value').value = '';
-    showToast('Stored ' + name + ' securely', 'success');
-    return apiFetch('/api/repo-projects/readiness');
-  }).then(function (readiness) {
-    if (readiness) { repoProjectsState.readiness = readiness; renderRepoConnectorPanel(); }
-  }).catch(function (err) { showToast('Failed to store credential: ' + err.message, 'error'); });
-}
-
 function repoDiscover() {
   apiFetch('/api/repo-projects/connectable-repos').then(function (res) {
     repoProjectsState.repos = (res && res.repos) || [];
@@ -6306,8 +6193,8 @@ function repoProjectAction(action) {
   }).catch(function (err) { showToast('Action failed: ' + err.message, 'error'); });
 }
 
-// Inline secure credential prompt card (agent-driven). The masked value POSTs
-// straight to the secrets endpoint, never through chat/the LLM.
+// Credential requests provide local secure-input guidance. Browser chat never
+// receives or transports credential text.
 function renderCredentialPrompt(data) {
   if (!data || !data.secret_name) return;
   const container = turnCardStack(ensureLiveTurnCard());
@@ -6322,43 +6209,12 @@ function renderCredentialPrompt(data) {
 
   const desc = document.createElement('div');
   desc.className = 'approval-description';
-  desc.textContent = (data.reason || ('Enter a value for ' + data.secret_name + '.'))
-    + ' Stored encrypted — it is never sent to the model.';
+  desc.textContent = (data.reason || ('Credential source required for ' + data.secret_name + '.'))
+    + ' Create it with the local config secrets or automation projects CLI.';
   card.appendChild(desc);
-
-  const input = document.createElement('input');
-  input.type = 'password';
-  input.autocomplete = 'off';
-  input.className = 'credential-input';
-  input.placeholder = data.secret_name + ' value';
-  card.appendChild(input);
-
-  const actions = document.createElement('div');
-  actions.className = 'approval-actions';
-  const submitBtn = document.createElement('button');
-  submitBtn.className = 'approve';
-  submitBtn.textContent = 'Store securely';
-  submitBtn.addEventListener('click', function () { submitInChatCredential(data.secret_name, input.value, card); });
-  actions.appendChild(submitBtn);
-  card.appendChild(actions);
 
   container.appendChild(card);
   finishChatMutation(shouldPinChatToLatest());
-}
-
-function submitInChatCredential(name, value, card) {
-  if (!value || !value.trim()) { showToast('Enter the credential value', 'error'); return; }
-  apiFetch('/api/repo-projects/credentials', { method: 'POST', body: { name: name, value: value } })
-    .then(function () {
-      showToast('Stored ' + name + ' securely', 'success');
-      if (card) {
-        const input = card.querySelector('.credential-input');
-        if (input) input.value = '';
-        const actions = card.querySelector('.approval-actions');
-        if (actions) actions.innerHTML = '<span class="approval-resolved">Stored securely</span>';
-      }
-    })
-    .catch(function (err) { showToast('Failed to store credential: ' + err.message, 'error'); });
 }
 
 function renderAutonomySummaryCard(label, value, statusClass, detail) {
@@ -7488,7 +7344,6 @@ function renderResearchGpuCloudCard(config) {
   const inventory = getResearchGpuCloudInventoryState(config.slug);
   const cloudState = researchCloudCardState(config, inventory);
   const draft = getResearchGpuCloudDraft(config.slug);
-  const keyValue = document.getElementById('research-cloud-key-' + config.slug)?.value || '';
   const templateHint = inventory && inventory.template_hint ? parseResearchObject(inventory.template_hint) : {};
   const quantityNote = firstDefined(templateHint.quantity_note, '');
   const lambdaForm = config.slug === 'lambda'
@@ -7530,10 +7385,8 @@ function renderResearchGpuCloudCard(config) {
       '<button class="research-cloud-link button" type="button" onclick="applyResearchGpuCloudTemplate(\'' + escapeJsString(config.slug) + '\')">Use template</button>' +
     '</div>' +
     '<div class="research-cloud-credential">' +
-      '<label class="research-field-label" for="research-cloud-key-' + escapeHtml(config.slug) + '">' + escapeHtml(config.providerKeyLabel) + '</label>' +
-      '<input type="password" class="research-input" id="research-cloud-key-' + escapeHtml(config.slug) + '" placeholder="' + escapeHtml(config.providerKeyPlaceholder) + '" value="' + escapeHtml(keyValue) + '">' +
+      '<div class="research-cloud-template-hint">Create the provider credential with <code>thinclaw config secrets set ' + escapeHtml(config.secretReference) + '</code>, then bind its opaque source ID through the local CLI. Remote clients never accept API-key text.</div>' +
       '<div class="research-cloud-credential-actions">' +
-        '<button class="btn-restart" type="button" onclick="saveResearchGpuCloudCredential(\'' + escapeJsString(config.slug) + '\')">Connect</button>' +
         '<button class="btn-cancel" type="button" onclick="validateResearchGpuCloud(\'' + escapeJsString(config.slug) + '\')">Validate</button>' +
       '</div>' +
     '</div>' +
@@ -7571,33 +7424,10 @@ function renderResearchGpuClouds() {
   grid.innerHTML = cards.map((config) => renderResearchGpuCloudCard(config)).join('');
 }
 
-function saveResearchGpuCloudCredential(slug) {
-  const config = getResearchGpuCloudConfig(slug);
-  syncResearchGpuCloudDraftFromDom(slug);
-  const input = document.getElementById('research-cloud-key-' + slug);
-  const apiKey = input ? input.value.trim() : '';
-  if (!apiKey) {
-    showToast('Enter a ' + (config ? config.providerKeyLabel : 'provider') + ' first.', 'error');
-    return;
-  }
-  apiFetch('/api/experiments/providers/gpu-clouds/' + encodeURIComponent(slug) + '/connect', {
-    method: 'POST',
-    body: { api_key: apiKey },
-  }).then((data) => {
-    showToast(data.message || (config ? config.name + ' credential saved' : 'Credential saved'), 'success');
-    experimentsState.gpuCloudConnections.set(slug, true);
-    loadExperiments();
-  }).catch((err) => {
-    showToast('Failed to save credential: ' + err.message, 'error');
-  });
-}
-
 function validateResearchGpuCloud(slug) {
   const config = getResearchGpuCloudConfig(slug);
   syncResearchGpuCloudDraftFromDom(slug);
-  const input = document.getElementById('research-cloud-key-' + slug);
-  const apiKey = input ? input.value.trim() : '';
-  if (!apiKey && !getResearchGpuCloudInventoryState(slug)?.connected) {
+  if (!getResearchGpuCloudInventoryState(slug)?.connected) {
     showToast('Add a credential first for ' + (config ? config.name : slug) + '.', 'warning');
     return;
   }
@@ -11249,8 +11079,7 @@ function renderProviderApiKeyControls(provider) {
     html += '<span class="vault-key-status">API key stored</span>';
     html += '<button class="btn-vault-remove inline" data-slug="' + escapeHtml(provider.slug) + '" data-name="' + escapeHtml(provider.display_name) + '">Remove</button>';
   } else {
-    html += '<input type="password" id="vault-key-' + escapeHtml(provider.slug) + '" class="vault-key-input" placeholder="' + escapeHtml(provider.env_key_name || 'API key') + '">';
-    html += '<button class="btn-vault-save inline" data-slug="' + escapeHtml(provider.slug) + '">Save</button>';
+    html += '<span class="provider-editor-inline-note">Create this credential with the local <code>thinclaw config secrets set</code> command and bind its opaque source ID. Remote clients never accept API-key text.</span>';
   }
   html += '</div>';
   return html;
@@ -11765,11 +11594,6 @@ function attachProvidersEvents() {
       openResearchGpuClouds();
       return;
     }
-    const saveKeyBtn = event.target.closest('.btn-vault-save[data-slug]');
-    if (saveKeyBtn) {
-      saveProviderKey(saveKeyBtn.dataset.slug);
-      return;
-    }
     const removeKeyBtn = event.target.closest('.btn-vault-remove[data-slug]');
     if (removeKeyBtn) {
       removeProviderKey(removeKeyBtn.dataset.slug, removeKeyBtn.dataset.name);
@@ -12070,24 +11894,6 @@ function toggleProviderCardEnabled(row) {
   reconcileProviderRoleAssignments(nextEnabled ? getProviderCardSlug(row) : '');
   updateAliasSummaries();
   saveProvidersRoutingConfig({ quietSuccess: true, reloadAfterSave: false });
-}
-
-function saveProviderKey(slug) {
-  const input = document.getElementById('vault-key-' + slug);
-  if (!input || !input.value.trim()) { showToast('Please enter an API key', 'error'); return; }
-  const body = { api_key: input.value.trim() };
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  fetch('/api/providers/' + encodeURIComponent(slug) + '/key', {
-    method: 'POST', headers,
-    body: JSON.stringify(body),
-  }).then(async (r) => {
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.message || ('HTTP ' + r.status));
-    return data;
-  })
-    .then(d => { showToast(d.message || 'Key saved', 'success'); loadProviderVault(); })
-    .catch(e => showToast('Failed to save key: ' + e.message, 'error'));
 }
 
 function removeProviderKey(slug, displayName) {
@@ -13671,39 +13477,23 @@ function renderNostrSecretControl(status) {
   labelWrap.className = 'setting-label-wrap';
   labelWrap.innerHTML =
     '<label class="setting-label">Private key</label>'
-    + '<span class="setting-desc">Stored in the secrets store. This key is never written through the general settings API.</span>';
+    + '<span class="setting-desc">Secret values are accepted only by the local CLI; remote clients bind opaque source IDs.</span>';
   row.appendChild(labelWrap);
 
   const controlWrap = document.createElement('div');
   controlWrap.className = 'setting-control';
-
-  const input = document.createElement('input');
-  input.type = 'password';
-  input.id = 'nostr-private-key-input';
-  input.className = 'setting-input';
-  input.placeholder = status && (status.public_key_npub || status.public_key_hex)
-    ? 'Saved already — enter a new nsec or hex key to replace it'
-    : 'nsec or hex private key';
-  controlWrap.appendChild(input);
 
   const statusNote = document.createElement('div');
   statusNote.className = 'setting-desc';
   statusNote.style.marginTop = '0.5rem';
   statusNote.textContent = status && (status.public_key_npub || status.public_key_hex)
     ? ('Saved for ' + (status.public_key_npub || status.public_key_hex))
-    : 'No Nostr private key is currently saved for this user.';
+    : 'No Nostr private key is currently bound. Create it locally with `thinclaw config secrets set nostr_private_key`, then activate Nostr from the CLI.';
   controlWrap.appendChild(statusNote);
 
   const actions = document.createElement('div');
   actions.className = 'ui-resource-actions';
   actions.style.marginTop = '0.75rem';
-
-  const saveBtn = document.createElement('button');
-  saveBtn.type = 'button';
-  saveBtn.className = 'btn-restart';
-  saveBtn.textContent = 'Save key';
-  saveBtn.addEventListener('click', saveNostrPrivateKey);
-  actions.appendChild(saveBtn);
 
   const removeBtn = document.createElement('button');
   removeBtn.type = 'button';
@@ -14449,32 +14239,6 @@ function buildSkinSettingOptions(field, currentValue) {
     options.unshift({ value: '', label: field.followLabel || 'Not set' });
   }
   return options;
-}
-
-function saveNostrPrivateKey() {
-  const input = document.getElementById('nostr-private-key-input');
-  if (!input || !input.value.trim()) {
-    showToast('Enter a Nostr private key first.', 'error');
-    return;
-  }
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  fetch('/api/nostr/key', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ private_key: input.value.trim() }),
-  }).then(async (response) => {
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.message || ('HTTP ' + response.status));
-    return data;
-  }).then((data) => {
-    input.value = '';
-    var identity = data.public_key_npub || data.public_key_hex || '';
-    showToast((data.message || 'Nostr private key saved') + (identity ? (' (' + identity + ')') : ''), 'success');
-    loadSettings();
-  }).catch((error) => {
-    showToast('Failed to save Nostr key: ' + error.message, 'error');
-  });
 }
 
 function removeNostrPrivateKey() {

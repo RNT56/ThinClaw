@@ -258,14 +258,46 @@ pub(super) async fn run_cmd(command: &mut Command) -> Result<String, String> {
     )
     .await
     .map_err(|error| error.to_string())?;
+    checked_command_output(output, ERROR_PREVIEW_LIMIT)
+}
+
+/// Run a reviewed command with a bounded private-stdin payload. The payload
+/// is never copied into argv or the child environment.
+pub(super) async fn run_cmd_with_private_input(
+    command: &mut Command,
+    input: &[u8],
+) -> Result<String, String> {
+    const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+    const COMMAND_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+    const ERROR_PREVIEW_LIMIT: usize = 32 * 1024;
+    const MAX_PRIVATE_INPUT: usize = 4 * 1024;
+    if input.is_empty() || input.len() > MAX_PRIVATE_INPUT {
+        return Err("private process input must contain 1..=4096 bytes".to_string());
+    }
+    let output = thinclaw_platform::bounded_command_output_with_input(
+        command,
+        input,
+        COMMAND_TIMEOUT,
+        COMMAND_OUTPUT_LIMIT,
+        COMMAND_OUTPUT_LIMIT,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    checked_command_output(output, ERROR_PREVIEW_LIMIT)
+}
+
+fn checked_command_output(
+    output: thinclaw_platform::BoundedProcessOutput,
+    error_preview_limit: usize,
+) -> Result<String, String> {
     if !output.status.success() {
         let stderr_bytes = output
             .stderr
-            .get(..ERROR_PREVIEW_LIMIT)
+            .get(..error_preview_limit)
             .unwrap_or(&output.stderr);
         let stdout_bytes = output
             .stdout
-            .get(..ERROR_PREVIEW_LIMIT)
+            .get(..error_preview_limit)
             .unwrap_or(&output.stdout);
         let stderr = String::from_utf8_lossy(stderr_bytes).trim().to_string();
         let stdout = String::from_utf8_lossy(stdout_bytes).trim().to_string();
@@ -299,9 +331,12 @@ pub(super) async fn python_module_on_path(module: &str) -> bool {
         return false;
     }
     run_cmd(
-        Command::new("python3")
-            .arg("-c")
-            .arg(format!("import {module}")),
+        thinclaw_platform::tokio_process_command!(
+            "src.desktop_autonomy.helpers.tokio.101",
+            "python3"
+        )
+        .arg("-c")
+        .arg(format!("import {module}")),
     )
     .await
     .is_ok()

@@ -6,7 +6,7 @@ use crate::web::types::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingRequestInfoInput {
-    pub code: String,
+    pub request_id: String,
     pub sender_id: String,
     pub meta: Option<serde_json::Value>,
     pub created_at: String,
@@ -14,7 +14,7 @@ pub struct PairingRequestInfoInput {
 
 pub fn pairing_request_info(input: PairingRequestInfoInput) -> PairingRequestInfo {
     PairingRequestInfo {
-        code: input.code,
+        request_id: input.request_id,
         sender_id: input.sender_id,
         meta: input.meta,
         created_at: input.created_at,
@@ -46,8 +46,8 @@ pub fn pairing_approve_response(sender_id: impl AsRef<str>) -> ActionResponse {
     ))
 }
 
-pub fn pairing_invalid_code_response() -> ActionResponse {
-    ActionResponse::fail("Invalid or expired pairing code")
+pub fn pairing_invalid_request_response() -> ActionResponse {
+    ActionResponse::fail("Invalid, expired, or already-consumed pairing request ID")
 }
 
 pub fn pairing_error_response(message: impl Into<String>) -> ActionResponse {
@@ -63,7 +63,7 @@ mod tests {
         let response = pairing_list_response(
             "telegram",
             vec![pairing_request_info(PairingRequestInfoInput {
-                code: "123456".to_string(),
+                request_id: "request-123".to_string(),
                 sender_id: "alice".to_string(),
                 meta: Some(serde_json::json!({"chat": 1})),
                 created_at: "2026-06-02T10:00:00Z".to_string(),
@@ -76,7 +76,7 @@ mod tests {
             serde_json::json!({
                 "channel": "telegram",
                 "requests": [{
-                    "code": "123456",
+                    "request_id": "request-123",
                     "sender_id": "alice",
                     "meta": {"chat": 1},
                     "created_at": "2026-06-02T10:00:00Z",
@@ -96,10 +96,10 @@ mod tests {
             })
         );
         assert_eq!(
-            serde_json::to_value(pairing_invalid_code_response()).unwrap(),
+            serde_json::to_value(pairing_invalid_request_response()).unwrap(),
             serde_json::json!({
                 "success": false,
-                "message": "Invalid or expired pairing code",
+                "message": "Invalid, expired, or already-consumed pairing request ID",
             })
         );
         assert_eq!(

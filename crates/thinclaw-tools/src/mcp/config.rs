@@ -10,6 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use uuid::Uuid;
 
 use thinclaw_tools_core::{OutboundUrlGuardOptions, ToolError, validate_outbound_url_structure};
 
@@ -111,6 +112,11 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
 
+    /// Opaque encrypted-store sources injected into exact stdio environment
+    /// slots at spawn time. Values are source IDs, never credential material.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secret_env: BTreeMap<String, Uuid>,
+
     /// OAuth configuration (if server requires authentication).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthConfig>,
@@ -159,6 +165,10 @@ impl std::fmt::Debug for McpServerConfig {
             .field("command", &self.command)
             .field("argument_count", &self.args.len())
             .field("environment_keys", &self.env.keys().collect::<Vec<_>>())
+            .field(
+                "secret_environment_keys",
+                &self.secret_env.keys().collect::<Vec<_>>(),
+            )
             .field("oauth", &self.oauth)
             .field("enabled", &self.enabled)
             .field("allow_local_http", &self.allow_local_http)
@@ -189,6 +199,7 @@ impl McpServerConfig {
             command: None,
             args: Vec::new(),
             env: BTreeMap::new(),
+            secret_env: BTreeMap::new(),
             oauth: None,
             enabled: true,
             display_name: None,
@@ -215,6 +226,7 @@ impl McpServerConfig {
             command: Some(command.into()),
             args,
             env: BTreeMap::new(),
+            secret_env: BTreeMap::new(),
             oauth: None,
             enabled: true,
             display_name: None,
@@ -249,6 +261,12 @@ impl McpServerConfig {
     /// Set environment variables for stdio servers.
     pub fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
         self.env = env;
+        self
+    }
+
+    /// Bind encrypted credential sources to exact stdio environment slots.
+    pub fn with_secret_env(mut self, secret_env: BTreeMap<String, Uuid>) -> Self {
+        self.secret_env = secret_env;
         self
     }
 
@@ -305,6 +323,8 @@ impl McpServerConfig {
                         reason: "Command is required for stdio transport".to_string(),
                     });
                 }
+                validate_stdio_environment(&self.env, &self.secret_env)?;
+                validate_stdio_arguments(&self.args)?;
             }
         }
 
@@ -368,6 +388,114 @@ impl McpServerConfig {
     pub fn client_id_secret_name(&self) -> String {
         format!("mcp_{}_client_id", self.name)
     }
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name.bytes().enumerate().all(|(index, byte)| {
+            if index == 0 {
+                byte.is_ascii_alphabetic() || byte == b'_'
+            } else {
+                byte.is_ascii_alphanumeric() || byte == b'_'
+            }
+        })
+}
+
+fn secret_shaped_name(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    [
+        "api_key",
+        "apikey",
+        "access_token",
+        "auth_token",
+        "refresh_token",
+        "password",
+        "passwd",
+        "secret",
+        "private_key",
+        "credential",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+        || normalized == "token"
+        || normalized.ends_with("_token")
+        || normalized.ends_with("_key")
+}
+
+fn validate_stdio_environment(
+    env: &BTreeMap<String, String>,
+    secret_env: &BTreeMap<String, Uuid>,
+) -> Result<(), ConfigError> {
+    for (key, value) in env {
+        if !valid_environment_name(key) {
+            return Err(ConfigError::InvalidConfig {
+                reason: format!("Invalid MCP stdio environment name '{key}'"),
+            });
+        }
+        if secret_shaped_name(key) {
+            return Err(ConfigError::InvalidConfig {
+                reason: format!(
+                    "MCP stdio environment slot '{key}' is credential-shaped; bind it with --secret-env KEY=SOURCE_ID"
+                ),
+            });
+        }
+        if value.contains('\0')
+            || value
+                .chars()
+                .any(|character| matches!(character, '\r' | '\n'))
+        {
+            return Err(ConfigError::InvalidConfig {
+                reason: format!("MCP stdio environment value for '{key}' is malformed"),
+            });
+        }
+    }
+    for key in secret_env.keys() {
+        if !valid_environment_name(key) {
+            return Err(ConfigError::InvalidConfig {
+                reason: format!("Invalid MCP stdio secret environment name '{key}'"),
+            });
+        }
+        if env.contains_key(key) {
+            return Err(ConfigError::InvalidConfig {
+                reason: format!(
+                    "MCP stdio environment slot '{key}' cannot be both non-secret and secret-bound"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_stdio_arguments(args: &[String]) -> Result<(), ConfigError> {
+    for (index, argument) in args.iter().enumerate() {
+        let normalized = argument
+            .trim_start_matches('-')
+            .split_once('=')
+            .map_or_else(|| argument.trim_start_matches('-'), |(name, _)| name)
+            .replace('-', "_");
+        if secret_shaped_name(&normalized) {
+            return Err(ConfigError::InvalidConfig {
+                reason: format!(
+                    "MCP stdio argument {} is credential-shaped; credentials must use --secret-env",
+                    index + 1
+                ),
+            });
+        }
+        if let Ok(url) = url::Url::parse(argument)
+            && (!url.username().is_empty()
+                || url.password().is_some()
+                || url.query_pairs().any(|(key, _)| secret_shaped_name(&key)))
+        {
+            return Err(ConfigError::InvalidConfig {
+                reason: format!(
+                    "MCP stdio argument {} contains a credential-bearing URL",
+                    index + 1
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// OAuth 2.1 configuration for an MCP server.
@@ -891,6 +1019,29 @@ mod tests {
         let mut bad = McpServerConfig::new_stdio("bad", "", vec![]);
         bad.command = None;
         assert!(bad.validate().is_err());
+
+        let mut raw_secret = McpServerConfig::new_stdio("raw", "server", vec![]);
+        raw_secret
+            .env
+            .insert("API_KEY".to_string(), "plaintext".to_string());
+        assert!(raw_secret.validate().is_err());
+
+        let mut credential_argument = McpServerConfig::new_stdio(
+            "argv",
+            "server",
+            vec!["--access-token=plaintext".to_string()],
+        );
+        assert!(credential_argument.validate().is_err());
+        credential_argument.args = vec!["https://example.com?token=plaintext".to_string()];
+        assert!(credential_argument.validate().is_err());
+
+        let source_id = Uuid::new_v4();
+        let mut bound = McpServerConfig::new_stdio("bound", "server", vec![]);
+        bound.secret_env.insert("API_KEY".to_string(), source_id);
+        assert!(bound.validate().is_ok());
+        let encoded = serde_json::to_value(&bound).unwrap();
+        assert_eq!(encoded["secret_env"]["API_KEY"], source_id.to_string());
+        assert!(!encoded.to_string().contains("plaintext"));
     }
 
     #[test]

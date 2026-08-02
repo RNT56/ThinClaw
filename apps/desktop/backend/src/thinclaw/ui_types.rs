@@ -240,6 +240,7 @@ pub enum UiEvent {
     ToolUpdate {
         session_key: String,
         run_id: Option<String>,
+        invocation_id: String,
         tool_name: String,
         /// started | stream | ok | error
         status: ToolStatus,

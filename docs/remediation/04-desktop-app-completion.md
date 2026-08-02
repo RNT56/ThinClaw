@@ -144,7 +144,7 @@ sandbox_factory tool-parse TODOs — **FIXED:**
   - **Effort:** S
   - **Verification:** `cargo build -p thinclaw-desktop`; `cargo clippy -p thinclaw-desktop --all-targets -- -D warnings`; unit-check the percentage helper with a zero denominator.
 
-- [ ] **T12: Resolve the desktop build profile omitting the `wasm-runtime` feature. OPEN.** The `desktop` profile (`Cargo.toml`) still reads `desktop = ["libsql", "html-to-markdown", "document-extraction", "repl", "timezones"]` with only a general `# minimal footprint` comment. `wasm-runtime` was neither added nor given an explicit inline rationale for its omission, so this task did not land.
+- [x] **T12: Resolve the desktop build profile omitting the `wasm-runtime` feature.** The `desktop` profile intentionally remains a minimal libSQL/HTML/document host build. WASM execution is reported independently as not compiled; the empty `repl` and `timezones` compatibility aliases were removed from the aggregate.
   - **Files:** root `Cargo.toml` `[features] desktop = [...]`.
   - **Change:** Either add `wasm-runtime` to the desktop profile feature list, or explicitly document why it is omitted with an inline comment in the `[features]` block. Coordinate the doc note with **WS-12** so the rationale stays consistent with the WASM-runtime feature-flag ownership there.
   - **Acceptance:** The desktop profile either pulls in `wasm-runtime` or carries a clear comment explaining the deliberate omission; the choice is reconciled with WS-12's WASM feature-flag documentation.

@@ -37,10 +37,13 @@ impl DesktopAutonomyManager {
     pub(super) async fn user_exists(&self, username: &str) -> Result<bool, String> {
         match self.bridge_backend() {
             DesktopBridgeBackend::MacOsSwift => match run_cmd(
-                Command::new("dscl")
-                    .arg(".")
-                    .arg("-read")
-                    .arg(format!("/Users/{username}")),
+                thinclaw_platform::tokio_process_command!(
+                    "src.desktop_autonomy.dedicated_user.tokio.101",
+                    "dscl"
+                )
+                .arg(".")
+                .arg("-read")
+                .arg(format!("/Users/{username}")),
             )
             .await
             {
@@ -49,9 +52,12 @@ impl DesktopAutonomyManager {
                 Err(err) => Err(err),
             },
             DesktopBridgeBackend::WindowsPowerShell => run_cmd(
-                Command::new("cmd")
-                    .arg("/C")
-                    .arg(format!("net user {username}")),
+                thinclaw_platform::tokio_process_command!(
+                    "src.desktop_autonomy.dedicated_user.tokio.102",
+                    "cmd"
+                )
+                .arg("/C")
+                .arg(format!("net user {username}")),
             )
             .await
             .map(|_| true)
@@ -62,18 +68,23 @@ impl DesktopAutonomyManager {
                     Err(err)
                 }
             }),
-            DesktopBridgeBackend::LinuxPython => {
-                run_cmd(Command::new("id").arg("-u").arg(username))
-                    .await
-                    .map(|_| true)
-                    .or_else(|err| {
-                        if err.contains("no such user") {
-                            Ok(false)
-                        } else {
-                            Err(err)
-                        }
-                    })
-            }
+            DesktopBridgeBackend::LinuxPython => run_cmd(
+                thinclaw_platform::tokio_process_command!(
+                    "src.desktop_autonomy.dedicated_user.tokio.103",
+                    "id"
+                )
+                .arg("-u")
+                .arg(username),
+            )
+            .await
+            .map(|_| true)
+            .or_else(|err| {
+                if err.contains("no such user") {
+                    Ok(false)
+                } else {
+                    Err(err)
+                }
+            }),
             DesktopBridgeBackend::Unsupported => Ok(false),
         }
     }
@@ -81,13 +92,13 @@ impl DesktopAutonomyManager {
     pub(super) async fn has_privileged_bootstrap(&self) -> bool {
         match self.bridge_backend() {
             DesktopBridgeBackend::MacOsSwift | DesktopBridgeBackend::LinuxPython => run_cmd(
-                Command::new("id").arg("-u"),
+                thinclaw_platform::tokio_process_command!("src.desktop_autonomy.dedicated_user.tokio.104", "id").arg("-u"),
             )
             .await
             .map(|uid| uid.trim() == "0")
             .unwrap_or(false),
             DesktopBridgeBackend::WindowsPowerShell => run_cmd(
-                Command::new("powershell")
+                thinclaw_platform::tokio_process_command!("src.desktop_autonomy.dedicated_user.tokio.105", "powershell")
                     .arg("-NoLogo")
                     .arg("-NoProfile")
                     .arg("-Command")
@@ -109,47 +120,52 @@ impl DesktopAutonomyManager {
     ) -> Result<(), String> {
         match self.bridge_backend() {
             DesktopBridgeBackend::MacOsSwift => {
-                run_cmd(
-                    Command::new("sysadminctl")
-                        .arg("-addUser")
-                        .arg(username)
-                        .arg("-password")
-                        .arg(password)
-                        .arg("-home")
-                        .arg(PathBuf::from("/Users").join(username)),
+                run_cmd_with_private_input(
+                    thinclaw_platform::tokio_process_command!(
+                        "src.desktop_autonomy.dedicated_user.tokio.106",
+                        "sysadminctl"
+                    )
+                    .arg("-addUser")
+                    .arg(username)
+                    .arg("-password")
+                    .arg("-")
+                    .arg("-home")
+                    .arg(PathBuf::from("/Users").join(username)),
+                    password.as_bytes(),
                 )
                 .await?;
                 Ok(())
             }
             DesktopBridgeBackend::WindowsPowerShell => {
-                let escaped_password = password.replace('\'', "''");
-                run_cmd(
-                    Command::new("powershell")
+                run_cmd_with_private_input(
+                    thinclaw_platform::tokio_process_command!("src.desktop_autonomy.dedicated_user.tokio.107", "powershell")
                         .arg("-NoLogo")
                         .arg("-NoProfile")
                         .arg("-Command")
                         .arg(format!(
-                            "$pw = ConvertTo-SecureString '{escaped_password}' -AsPlainText -Force; \
+                            "$pwText = [Console]::In.ReadToEnd(); $pw = ConvertTo-SecureString $pwText -AsPlainText -Force; \
                              New-LocalUser -Name '{username}' -Password $pw -AccountNeverExpires -PasswordNeverExpires; \
                              Add-LocalGroupMember -Group 'Users' -Member '{username}'"
                         )),
+                    password.as_bytes(),
                 )
                 .await?;
                 Ok(())
             }
             DesktopBridgeBackend::LinuxPython => {
-                let user = shell_single_quote(username);
-                let secret = shell_single_quote(password);
-                run_cmd(
-                    Command::new("sh")
-                        .arg("-lc")
-                        .arg(format!(
-                            "useradd --create-home --shell /bin/bash {user} && \
-                             printf '%s:%s\\n' {user} {secret} | chpasswd && \
+                run_cmd_with_private_input(
+                    thinclaw_platform::tokio_process_command!("src.desktop_autonomy.dedicated_user.tokio.108", "sh")
+                        .arg("-c")
+                        .arg(
+                            "user=$1; useradd --create-home --shell /bin/bash \"$user\" && \
+                             { printf '%s:' \"$user\"; cat; } | chpasswd && \
                              for group in audio video input; do \
-                               if getent group \"$group\" >/dev/null 2>&1; then usermod -aG \"$group\" {user}; fi; \
+                               if getent group \"$group\" >/dev/null 2>&1; then usermod -aG \"$group\" \"$user\"; fi; \
                              done"
-                        )),
+                        )
+                        .arg("thinclaw-dedicated-user")
+                        .arg(username),
+                    format!("{password}\\n").as_bytes(),
                 )
                 .await?;
                 Ok(())
@@ -168,9 +184,12 @@ impl DesktopAutonomyManager {
         match self.bridge_backend() {
             DesktopBridgeBackend::MacOsSwift => {
                 if run_cmd(
-                    Command::new("launchctl")
-                        .arg("print")
-                        .arg(format!("gui/{session_subject}")),
+                    thinclaw_platform::tokio_process_command!(
+                        "src.desktop_autonomy.dedicated_user.tokio.109",
+                        "launchctl"
+                    )
+                    .arg("print")
+                    .arg(format!("gui/{session_subject}")),
                 )
                 .await
                 .is_ok()
@@ -182,10 +201,13 @@ impl DesktopAutonomyManager {
                     return false;
                 };
                 run_cmd(
-                    Command::new("stat")
-                        .arg("-f")
-                        .arg("%Su")
-                        .arg("/dev/console"),
+                    thinclaw_platform::tokio_process_command!(
+                        "src.desktop_autonomy.dedicated_user.tokio.110",
+                        "stat"
+                    )
+                    .arg("-f")
+                    .arg("%Su")
+                    .arg("/dev/console"),
                 )
                 .await
                 .map(|owner| owner.trim() == username)
@@ -193,9 +215,16 @@ impl DesktopAutonomyManager {
             }
             DesktopBridgeBackend::WindowsPowerShell => {
                 let user = username.unwrap_or(session_subject);
-                run_cmd(Command::new("query").arg("user").arg(user))
-                    .await
-                    .is_ok()
+                run_cmd(
+                    thinclaw_platform::tokio_process_command!(
+                        "src.desktop_autonomy.dedicated_user.tokio.111",
+                        "query"
+                    )
+                    .arg("user")
+                    .arg(user),
+                )
+                .await
+                .is_ok()
             }
             DesktopBridgeBackend::LinuxPython => {
                 let expected_user = username.unwrap_or(session_subject);
@@ -211,7 +240,7 @@ impl DesktopAutonomyManager {
                 }
                 let quoted_user = shell_single_quote(expected_user);
                 run_cmd(
-                    Command::new("sh")
+                    thinclaw_platform::tokio_process_command!("src.desktop_autonomy.dedicated_user.tokio.112", "sh")
                         .arg("-lc")
                         .arg(format!(
                             "command -v loginctl >/dev/null 2>&1 && \

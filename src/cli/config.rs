@@ -3,8 +3,6 @@
 //! Commands for viewing and modifying settings.
 //! Settings are stored in the database (env > DB > default).
 
-use std::sync::Arc;
-
 use clap::Subcommand;
 
 use crate::settings::Settings;
@@ -12,10 +10,18 @@ use crate::terminal_branding::TerminalBranding;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ConfigCommand {
+    /// Manage credential sources and bindings
+    #[command(subcommand)]
+    Secrets(super::SecretsCommand),
+
+    /// Inspect and verify model capabilities
+    #[command(subcommand)]
+    Models(super::ModelCommand),
+
     /// Generate a default config.toml file
     Init {
         /// Output path (default: ~/.thinclaw/config.toml)
-        #[arg(short, long)]
+        #[arg(short, long = "out", alias = "output")]
         output: Option<std::path::PathBuf>,
 
         /// Overwrite existing file
@@ -59,25 +65,20 @@ pub enum ConfigCommand {
 ///
 /// Connects to the database to read/write settings. Falls back to disk
 /// if the database is not available.
-pub async fn run_config_command(cmd: ConfigCommand) -> anyhow::Result<()> {
-    let branding = TerminalBranding::current();
-    // Try to connect to the DB for settings access
-    let db: Option<Arc<dyn crate::db::Database>> = match connect_db().await {
-        Ok(d) => Some(d),
-        Err(e) => {
-            eprintln!(
-                "{}",
-                branding.warn(format!(
-                    "Warning: Could not connect to database ({}), using disk fallback",
-                    e
-                ))
-            );
-            None
-        }
+pub async fn run_config_command(
+    cmd: ConfigCommand,
+    context: &crate::cli::CliContext,
+) -> anyhow::Result<()> {
+    let cmd = match cmd {
+        ConfigCommand::Secrets(command) => return super::run_secrets_command(command).await,
+        ConfigCommand::Models(command) => return super::run_model_command(command).await,
+        command => command,
     };
 
-    let db_ref = db.as_deref();
+    let db = context.database().await.map_err(anyhow::Error::from)?;
+    let db_ref = Some(db.as_ref());
     match cmd {
+        ConfigCommand::Secrets(_) | ConfigCommand::Models(_) => unreachable!(),
         ConfigCommand::Init { output, force } => init_toml(db_ref, output, force).await,
         ConfigCommand::List { filter } => list_settings(db_ref, filter).await,
         ConfigCommand::Get { path } => get_setting(db_ref, &path).await,
@@ -85,16 +86,6 @@ pub async fn run_config_command(cmd: ConfigCommand) -> anyhow::Result<()> {
         ConfigCommand::Reset { path } => reset_setting(db_ref, &path).await,
         ConfigCommand::Path => show_path(db_ref.is_some()),
     }
-}
-
-/// Bootstrap a DB connection for config commands (backend-agnostic).
-async fn connect_db() -> anyhow::Result<Arc<dyn crate::db::Database>> {
-    let config = crate::config::Config::from_env()
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    crate::db::connect_from_config(&config.database)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 const DEFAULT_USER_ID: &str = "default";
@@ -144,9 +135,7 @@ async fn list_settings(
         };
 
         let display_value = if is_sensitive && !value.is_empty() && value != "null" {
-            // Show first 4 chars + masked remainder
-            let prefix: String = value.chars().take(4).collect();
-            format!("{}...[REDACTED]", prefix)
+            "[REDACTED — use `thinclaw config secrets`]".to_string()
         } else if value.len() > 60 {
             let end = value
                 .char_indices()
@@ -171,6 +160,11 @@ async fn list_settings(
 
 /// Get a specific setting.
 async fn get_setting(store: Option<&dyn crate::db::Database>, path: &str) -> anyhow::Result<()> {
+    if is_sensitive_path(path) {
+        anyhow::bail!(
+            "secret settings are unavailable through config get; use `thinclaw config secrets`"
+        );
+    }
     let settings = load_settings(store).await;
 
     match settings.get(path) {
@@ -190,6 +184,11 @@ async fn set_setting(
     path: &str,
     value: &str,
 ) -> anyhow::Result<()> {
+    if is_sensitive_path(path) {
+        anyhow::bail!(
+            "secret settings cannot be written through config set; use `thinclaw config secrets`"
+        );
+    }
     let mut settings = load_settings(store).await;
 
     settings
@@ -213,6 +212,18 @@ async fn set_setting(
         TerminalBranding::current().good(format!("Set {path} = {value}"))
     );
     Ok(())
+}
+
+fn is_sensitive_path(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    (path.contains("token")
+        || path.contains("secret")
+        || path.contains("password")
+        || path.contains("api_key")
+        || path.contains("api-key"))
+        && !path.ends_with("_source")
+        && !path.ends_with("_name")
+        && !path.contains("enabled")
 }
 
 /// Reset a setting to default.

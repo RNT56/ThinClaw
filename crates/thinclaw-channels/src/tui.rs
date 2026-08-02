@@ -11,11 +11,95 @@ use thinclaw_channels_core::{
 };
 use thinclaw_types::error::ChannelError;
 
+pub const TUI_HISTORY_PAGE_SIZE: usize = 100;
+pub const TUI_HISTORY_MAX_PAGE_SIZE: usize = 500;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiHistoryMessage {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub model: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiHistoryPage {
+    pub conversation_id: String,
+    pub messages: Vec<TuiHistoryMessage>,
+    pub before_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TuiCapabilityIdentity {
+    pub name: String,
+    pub origin: String,
+    pub source_id: String,
+    pub revision: u64,
+    pub compiled: bool,
+    pub configured: Option<bool>,
+    pub registered: bool,
+    pub dependency: String,
+    pub exposed: bool,
+    pub ready: String,
+    pub approval: String,
+    pub health: String,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TuiCapabilitySnapshot {
+    pub revision: u64,
+    pub sealed: bool,
+    pub identities: Vec<TuiCapabilityIdentity>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TuiBootstrap {
+    pub principal_id: String,
+    pub actor_id: String,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub model: String,
+    pub provider: String,
+    pub workspace: Option<String>,
+    pub profile: String,
+    pub gateway_origin: Option<String>,
+    pub history: TuiHistoryPage,
+    pub capabilities: TuiCapabilitySnapshot,
+}
+
+#[async_trait]
+pub trait TuiHistoryPort: Send + Sync + 'static {
+    async fn load_before(
+        &self,
+        conversation_id: &str,
+        before_cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<TuiHistoryPage, String>;
+}
+
 #[derive(Debug)]
 pub enum TuiEvent {
     UserMessage(String),
+    ApprovalResponse {
+        request_id: String,
+        decision: TuiApprovalDecision,
+    },
     Abort,
+    LoadOlder {
+        conversation_id: String,
+        before_cursor: Option<String>,
+    },
     Exit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiApprovalDecision {
+    ApproveOnce,
+    ApproveForSession,
+    Deny,
 }
 
 #[derive(Debug, Clone)]
@@ -23,19 +107,31 @@ pub enum TuiUpdate {
     Thinking(String),
     StreamChunk(String),
     ToolStarted {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
+        parameters: Option<serde_json::Value>,
     },
-    ToolResult {
+    ToolOutput {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
-        result: String,
-        is_error: bool,
+        preview: String,
+        artifacts: Vec<thinclaw_tools_core::ToolArtifact>,
+    },
+    ToolCompleted {
+        invocation_id: thinclaw_types::ToolInvocationId,
+        name: String,
+        success: bool,
+        result_preview: Option<String>,
+        duration_ms: Option<u64>,
     },
     Response(String),
     Status(String),
     ModelChanged(String),
     ApprovalNeeded {
+        request_id: String,
         tool_name: String,
         description: String,
+        parameters: serde_json::Value,
     },
     Error(String),
     AgentMessage {
@@ -43,14 +139,16 @@ pub enum TuiUpdate {
         message_type: String,
     },
     SubagentSpawned {
+        agent_id: String,
         name: String,
         task: String,
     },
     SubagentProgress {
-        name: String,
+        agent_id: String,
         message: String,
     },
     SubagentCompleted {
+        agent_id: String,
         name: String,
         success: bool,
         duration_ms: u64,
@@ -69,6 +167,8 @@ pub enum TuiUpdate {
         success: bool,
         message: String,
     },
+    HistoryPage(TuiHistoryPage),
+    CapabilitySnapshot(TuiCapabilitySnapshot),
 }
 
 impl From<StatusUpdate> for TuiUpdate {
@@ -76,22 +176,39 @@ impl From<StatusUpdate> for TuiUpdate {
         match status {
             StatusUpdate::StreamChunk(chunk) => TuiUpdate::StreamChunk(chunk),
             StatusUpdate::Thinking(text) => TuiUpdate::Thinking(text),
-            StatusUpdate::ToolStarted { name, .. } => TuiUpdate::ToolStarted { name },
-            StatusUpdate::ToolResult { name, preview, .. } => TuiUpdate::ToolResult {
+            StatusUpdate::ToolStarted {
+                invocation_id,
                 name,
-                result: preview,
-                is_error: false,
+                parameters,
+            } => TuiUpdate::ToolStarted {
+                invocation_id,
+                name,
+                parameters,
+            },
+            StatusUpdate::ToolResult {
+                invocation_id,
+                name,
+                preview,
+                artifacts,
+            } => TuiUpdate::ToolOutput {
+                invocation_id,
+                name,
+                preview,
+                artifacts,
             },
             StatusUpdate::ToolCompleted {
+                invocation_id,
                 name,
-                success: false,
-                ..
-            } => TuiUpdate::ToolResult {
+                success,
+                result_preview,
+                duration_ms,
+            } => TuiUpdate::ToolCompleted {
+                invocation_id,
                 name,
-                result: "Failed".to_string(),
-                is_error: true,
+                success,
+                result_preview,
+                duration_ms,
             },
-            StatusUpdate::ToolCompleted { .. } => TuiUpdate::Status("Ready".to_string()),
             StatusUpdate::Status(text) => TuiUpdate::Status(text),
             StatusUpdate::ContextPressure {
                 level,
@@ -129,12 +246,15 @@ impl From<StatusUpdate> for TuiUpdate {
             )),
             StatusUpdate::Error { message, .. } => TuiUpdate::Error(message),
             StatusUpdate::ApprovalNeeded {
+                request_id,
                 tool_name,
                 description,
-                ..
+                parameters,
             } => TuiUpdate::ApprovalNeeded {
+                request_id,
                 tool_name,
                 description,
+                parameters,
             },
             StatusUpdate::AgentMessage {
                 content,
@@ -143,19 +263,27 @@ impl From<StatusUpdate> for TuiUpdate {
                 content,
                 message_type,
             },
-            StatusUpdate::SubagentSpawned { name, task, .. } => {
-                TuiUpdate::SubagentSpawned { name, task }
-            }
-            StatusUpdate::SubagentProgress { message, .. } => TuiUpdate::SubagentProgress {
-                name: String::new(),
-                message,
+            StatusUpdate::SubagentSpawned {
+                agent_id,
+                name,
+                task,
+                ..
+            } => TuiUpdate::SubagentSpawned {
+                agent_id,
+                name,
+                task,
             },
+            StatusUpdate::SubagentProgress {
+                agent_id, message, ..
+            } => TuiUpdate::SubagentProgress { agent_id, message },
             StatusUpdate::SubagentCompleted {
+                agent_id,
                 name,
                 success,
                 duration_ms,
                 ..
             } => TuiUpdate::SubagentCompleted {
+                agent_id,
                 name,
                 success,
                 duration_ms,
@@ -194,7 +322,7 @@ impl From<StatusUpdate> for TuiUpdate {
                 reason,
                 ..
             } => TuiUpdate::Status(format!(
-                "Credential needed: {reason} — store it with `thinclaw secrets set {secret_name}`"
+                "Credential needed: {reason} — store it with `thinclaw config secrets set {secret_name}`"
             )),
             StatusUpdate::CanvasAction(ref action) => {
                 let summary = match action {
@@ -226,6 +354,7 @@ impl From<StatusUpdate> for TuiUpdate {
 pub trait TuiRuntime: Send + Sync + 'static {
     fn start(
         &self,
+        bootstrap: TuiBootstrap,
         outgoing_tx: mpsc::Sender<TuiEvent>,
         incoming_rx: mpsc::Receiver<TuiUpdate>,
     ) -> JoinHandle<()>;
@@ -233,6 +362,8 @@ pub trait TuiRuntime: Send + Sync + 'static {
 
 pub struct TuiChannel {
     runtime: Arc<dyn TuiRuntime>,
+    bootstrap: TuiBootstrap,
+    history: Option<Arc<dyn TuiHistoryPort>>,
     event_tx: mpsc::Sender<TuiEvent>,
     event_rx: Mutex<Option<mpsc::Receiver<TuiEvent>>>,
     update_tx: mpsc::Sender<TuiUpdate>,
@@ -245,11 +376,19 @@ pub struct TuiChannel {
 const CHANNEL_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl TuiChannel {
-    pub fn new(runtime: Arc<dyn TuiRuntime>) -> Self {
+    pub fn new(
+        runtime: Arc<dyn TuiRuntime>,
+        bootstrap: TuiBootstrap,
+        history: Option<Arc<dyn TuiHistoryPort>>,
+    ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(64);
-        let (update_tx, update_rx) = mpsc::channel(256);
+        // Status bursts are bounded generously; terminal tool, approval, and
+        // completion events use awaited sends and therefore cannot be dropped.
+        let (update_tx, update_rx) = mpsc::channel(1_024);
         Self {
             runtime,
+            bootstrap,
+            history,
             event_tx,
             event_rx: Mutex::new(Some(event_rx)),
             update_tx,
@@ -304,11 +443,17 @@ impl Channel for TuiChannel {
         if let Some(handle) = self.runtime_task.lock().await.take() {
             drain_channel_task(handle, "tui-runtime").await;
         }
-        let runtime_handle = self.runtime.start(self.event_tx.clone(), update_rx);
+        let runtime_handle =
+            self.runtime
+                .start(self.bootstrap.clone(), self.event_tx.clone(), update_rx);
         *self.runtime_task.lock().await = Some(runtime_handle);
 
         let (msg_tx, msg_rx) = mpsc::channel(64);
         let shutdown_notify = Arc::clone(&self.shutdown_notify);
+        let history = self.history.clone();
+        let update_tx = self.update_tx.clone();
+        let principal_id = self.bootstrap.principal_id.clone();
+        let actor_id = self.bootstrap.actor_id.clone();
         let handle = tokio::spawn(async move {
             let mut sent_shutdown = false;
             loop {
@@ -321,7 +466,54 @@ impl Channel for TuiChannel {
                 };
                 let content = match event {
                     TuiEvent::UserMessage(text) => text,
+                    TuiEvent::ApprovalResponse {
+                        request_id,
+                        decision,
+                    } => {
+                        let (approved, always) = match decision {
+                            TuiApprovalDecision::ApproveOnce => (true, false),
+                            TuiApprovalDecision::ApproveForSession => (true, true),
+                            TuiApprovalDecision::Deny => (false, false),
+                        };
+                        serde_json::json!({
+                            "ExecApproval": {
+                                "request_id": request_id,
+                                "approved": approved,
+                                "always": always,
+                            }
+                        })
+                        .to_string()
+                    }
                     TuiEvent::Abort => "/interrupt".to_string(),
+                    TuiEvent::LoadOlder {
+                        conversation_id,
+                        before_cursor,
+                    } => {
+                        let Some(history) = history.as_ref() else {
+                            let _ = update_tx
+                                .send(TuiUpdate::Error(
+                                    "Durable conversation history is unavailable".to_string(),
+                                ))
+                                .await;
+                            continue;
+                        };
+                        match history
+                            .load_before(
+                                &conversation_id,
+                                before_cursor.as_deref(),
+                                TUI_HISTORY_PAGE_SIZE,
+                            )
+                            .await
+                        {
+                            Ok(page) => {
+                                let _ = update_tx.send(TuiUpdate::HistoryPage(page)).await;
+                            }
+                            Err(error) => {
+                                let _ = update_tx.send(TuiUpdate::Error(error)).await;
+                            }
+                        }
+                        continue;
+                    }
                     TuiEvent::Exit => {
                         sent_shutdown = true;
                         "/quit".to_string()
@@ -330,9 +522,9 @@ impl Channel for TuiChannel {
 
                 if msg_tx
                     .send(
-                        IncomingMessage::new("tui", "default", content)
+                        IncomingMessage::new("tui", &principal_id, content)
                             .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
-                            .with_actor_identity("default", "default"),
+                            .with_actor_identity(&principal_id, &actor_id),
                     )
                     .await
                     .is_err()
@@ -344,9 +536,9 @@ impl Channel for TuiChannel {
             if !sent_shutdown {
                 let _ = msg_tx
                     .send(
-                        IncomingMessage::new("tui", "default", "/quit")
+                        IncomingMessage::new("tui", &principal_id, "/quit")
                             .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
-                            .with_actor_identity("default", "default"),
+                            .with_actor_identity(&principal_id, &actor_id),
                     )
                     .await;
             }
@@ -440,4 +632,69 @@ fn format_response_with_attachments(response: &OutgoingResponse) -> String {
         ));
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_stream::StreamExt as _;
+
+    struct MessageRuntime;
+
+    impl TuiRuntime for MessageRuntime {
+        fn start(
+            &self,
+            _bootstrap: TuiBootstrap,
+            outgoing_tx: mpsc::Sender<TuiEvent>,
+            _incoming_rx: mpsc::Receiver<TuiUpdate>,
+        ) -> JoinHandle<()> {
+            tokio::spawn(async move {
+                outgoing_tx
+                    .send(TuiEvent::UserMessage("hello".to_string()))
+                    .await
+                    .expect("send user message");
+            })
+        }
+    }
+
+    fn bootstrap() -> TuiBootstrap {
+        TuiBootstrap {
+            principal_id: "principal-a".to_string(),
+            actor_id: "actor-a".to_string(),
+            agent_id: "agent-a".to_string(),
+            agent_name: "Agent".to_string(),
+            model: "model".to_string(),
+            provider: "provider".to_string(),
+            workspace: None,
+            profile: "test".to_string(),
+            gateway_origin: None,
+            history: TuiHistoryPage {
+                conversation_id: String::new(),
+                messages: Vec::new(),
+                before_cursor: None,
+                has_more: false,
+            },
+            capabilities: TuiCapabilitySnapshot {
+                revision: 1,
+                sealed: true,
+                identities: Vec::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn outgoing_messages_preserve_bootstrap_principal_and_actor() {
+        let channel = TuiChannel::new(Arc::new(MessageRuntime), bootstrap(), None);
+        let mut stream = channel.start().await.expect("start TUI channel");
+        let message = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("message timeout")
+            .expect("message");
+        let identity = message.resolved_identity();
+        assert_eq!(message.user_id, "principal-a");
+        assert_eq!(identity.principal_id, "principal-a");
+        assert_eq!(identity.actor_id, "actor-a");
+        assert_eq!(message.content, "hello");
+        channel.shutdown().await.expect("shutdown TUI channel");
+    }
 }

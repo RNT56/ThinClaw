@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use thinclaw::app::PeriodicPersistencePlan;
+use thinclaw::app::{
+    PeriodicPersistencePlan, RuntimeShutdownAction, RuntimeShutdownPlan, relaunch_current_process,
+    restart_is_managed_by_service,
+};
 use thinclaw::config::Config;
 
 const RUNTIME_MAINTENANCE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -184,4 +187,24 @@ pub(super) fn start_experiment_loops(
         tracing::info!("Experiment controller not started because experiments are disabled.");
     }
     tasks
+}
+
+pub(super) fn finish_runtime_shutdown(
+    restart_requested: bool,
+    gateway_restart_requested: bool,
+) -> anyhow::Result<()> {
+    let shutdown_plan = RuntimeShutdownPlan::from_restart_signals(
+        restart_requested,
+        gateway_restart_requested,
+        restart_is_managed_by_service(),
+    );
+    match shutdown_plan.action {
+        RuntimeShutdownAction::Complete => {}
+        RuntimeShutdownAction::ExitForSupervisor(code) => {
+            eprintln!("Restarting ThinClaw (exit code 75 for service manager)...");
+            std::process::exit(code);
+        }
+        RuntimeShutdownAction::Relaunch => relaunch_current_process()?,
+    }
+    Ok(())
 }

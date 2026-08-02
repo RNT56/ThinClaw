@@ -6,70 +6,34 @@
 
 use std::path::PathBuf;
 
-use crate::terminal_branding::TerminalBranding;
+use serde::Serialize;
 
 /// Run all diagnostic checks and print results.
 pub async fn run_doctor_command(
     linux_profile: crate::platform::LinuxReadinessProfile,
-) -> anyhow::Result<()> {
-    let branding = TerminalBranding::current();
-    branding.print_banner(
-        "ThinClaw Doctor",
-        Some("Probe dependencies, validate configuration, and surface readiness gaps."),
-    );
-
-    let mut passed = 0u32;
-    let mut failed = 0u32;
-    let mut skipped = 0u32;
+    context: &crate::cli::CliContext,
+) -> Result<(), crate::cli::CliError> {
+    let mut checks = Vec::new();
 
     // ── Configuration checks ──────────────────────────────────
 
-    check(
-        "LLM configuration",
-        check_llm_config().await,
-        &branding,
-        &mut passed,
-        &mut failed,
-        &mut skipped,
-    );
+    check("LLM configuration", check_llm_config().await, &mut checks);
 
-    check(
-        "Database backend",
-        check_database().await,
-        &branding,
-        &mut passed,
-        &mut failed,
-        &mut skipped,
-    );
+    check("Database backend", check_database().await, &mut checks);
 
     check(
         "Secrets posture",
         check_secrets_posture().await,
-        &branding,
-        &mut passed,
-        &mut failed,
-        &mut skipped,
+        &mut checks,
     );
 
-    check(
-        "Workspace directory",
-        check_workspace_dir(),
-        &branding,
-        &mut passed,
-        &mut failed,
-        &mut skipped,
-    );
+    check("Workspace directory", check_workspace_dir(), &mut checks);
 
     // ── Linux readiness checks ────────────────────────────────
 
-    println!();
-    println!(
-        "  {}",
-        branding.body_bold(format!("Linux readiness ({})", linux_profile.as_str()))
-    );
     let linux = crate::platform::linux_readiness_report(linux_profile).await;
     for probe in &linux.probes {
-        check_linux_probe(probe, &branding, &mut passed, &mut failed, &mut skipped);
+        check_linux_probe(probe, &mut checks);
     }
 
     // ── Optional external binary checks ───────────────────────
@@ -79,10 +43,7 @@ pub async fn run_doctor_command(
         &["--version"],
         is_tunnel_provider("cloudflare"),
         "only required when TUNNEL_PROVIDER=cloudflare",
-        &branding,
-        &mut passed,
-        &mut failed,
-        &mut skipped,
+        &mut checks,
     );
 
     check_optional_binary(
@@ -90,10 +51,7 @@ pub async fn run_doctor_command(
         &["version"],
         is_tunnel_provider("ngrok"),
         "only required when TUNNEL_PROVIDER=ngrok",
-        &branding,
-        &mut passed,
-        &mut failed,
-        &mut skipped,
+        &mut checks,
     );
 
     check_optional_binary(
@@ -101,82 +59,49 @@ pub async fn run_doctor_command(
         &["version"],
         is_tunnel_provider("tailscale"),
         "only required when TUNNEL_PROVIDER=tailscale",
-        &branding,
-        &mut passed,
-        &mut failed,
-        &mut skipped,
+        &mut checks,
     );
 
     // ── Summary ───────────────────────────────────────────────
 
-    println!();
-    println!(
-        "  {}  {}",
-        branding.good(format!("{passed} passed")),
-        branding.bad(format!("{failed} failed"))
-    );
-    if skipped > 0 {
-        println!("  {}", branding.warn(format!("{skipped} skipped")));
-    }
+    let passed = checks.iter().filter(|check| check.state == "pass").count();
+    let failed = checks.iter().filter(|check| check.state == "fail").count();
+    let skipped = checks.iter().filter(|check| check.state == "skip").count();
+    let report = DoctorReport {
+        readiness_profile: linux_profile.as_str().to_string(),
+        healthy: failed == 0,
+        passed,
+        failed,
+        skipped,
+        checks,
+    };
+    context
+        .output()
+        .write_record("doctor", &report, render_doctor_report)?;
 
     if failed > 0 {
-        println!(
-            "\n  {}",
-            branding.muted("Some checks failed. This is normal if you don't use those features.")
-        );
+        Err(crate::cli::CliError::unhealthy_reported())
+    } else {
+        Ok(())
     }
-
-    Ok(())
 }
 
 // ── Individual checks ───────────────────────────────────────
 
-fn check(
-    name: &str,
-    result: CheckResult,
-    branding: &TerminalBranding,
-    passed: &mut u32,
-    failed: &mut u32,
-    skipped: &mut u32,
-) {
-    match result {
-        CheckResult::Pass(detail) => {
-            *passed += 1;
-            println!(
-                "  {} {}: {}",
-                branding.good("[pass]"),
-                branding.body_bold(name),
-                branding.body(detail)
-            );
-        }
-        CheckResult::Fail(detail) => {
-            *failed += 1;
-            println!(
-                "  {} {}: {}",
-                branding.bad("[FAIL]"),
-                branding.body_bold(name),
-                branding.body(detail)
-            );
-        }
-        CheckResult::Skip(reason) => {
-            *skipped += 1;
-            println!(
-                "  {} {}: {}",
-                branding.warn("[skip]"),
-                branding.body_bold(name),
-                branding.muted(reason)
-            );
-        }
-    }
+fn check(name: &str, result: CheckResult, checks: &mut Vec<DoctorCheck>) {
+    let (state, detail) = match result {
+        CheckResult::Pass(detail) => ("pass", detail),
+        CheckResult::Fail(detail) => ("fail", detail),
+        CheckResult::Skip(detail) => ("skip", detail),
+    };
+    checks.push(DoctorCheck {
+        name: name.to_string(),
+        state,
+        detail,
+    });
 }
 
-fn check_linux_probe(
-    probe: &crate::platform::LinuxProbe,
-    branding: &TerminalBranding,
-    passed: &mut u32,
-    failed: &mut u32,
-    skipped: &mut u32,
-) {
+fn check_linux_probe(probe: &crate::platform::LinuxProbe, checks: &mut Vec<DoctorCheck>) {
     let result = match probe.status {
         crate::platform::LinuxProbeStatus::Pass => CheckResult::Pass(probe.detail.clone()),
         crate::platform::LinuxProbeStatus::Fail => {
@@ -189,7 +114,7 @@ fn check_linux_probe(
         }
         crate::platform::LinuxProbeStatus::Skip => CheckResult::Skip(probe.detail.clone()),
     };
-    check(probe.label, result, branding, passed, failed, skipped);
+    check(probe.label, result, checks);
 }
 
 enum CheckResult {
@@ -209,17 +134,45 @@ fn check_optional_binary(
     args: &[&str],
     required: bool,
     skip_reason: &str,
-    branding: &TerminalBranding,
-    passed: &mut u32,
-    failed: &mut u32,
-    skipped: &mut u32,
+    checks: &mut Vec<DoctorCheck>,
 ) {
     let result = if required {
         check_binary(name, args)
     } else {
         CheckResult::Skip(skip_reason.to_string())
     };
-    check(name, result, branding, passed, failed, skipped);
+    check(name, result, checks);
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorCheck {
+    name: String,
+    state: &'static str,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorReport {
+    readiness_profile: String,
+    healthy: bool,
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+    checks: Vec<DoctorCheck>,
+}
+
+fn render_doctor_report(report: &DoctorReport) -> String {
+    let mut lines = vec![format!(
+        "ThinClaw doctor: {} passed, {} failed, {} skipped ({})",
+        report.passed, report.failed, report.skipped, report.readiness_profile
+    )];
+    for check in &report.checks {
+        lines.push(format!(
+            "[{}] {}: {}",
+            check.state, check.name, check.detail
+        ));
+    }
+    lines.join("\n")
 }
 
 async fn check_llm_config() -> CheckResult {
@@ -379,7 +332,7 @@ fn check_workspace_dir() -> CheckResult {
 }
 
 fn check_binary(name: &str, args: &[&str]) -> CheckResult {
-    let mut command = std::process::Command::new(name);
+    let mut command = thinclaw_platform::std_process_command!("src.cli.doctor.std.1", name);
     command.args(args);
     match thinclaw_platform::bounded_std_command_output(
         &mut command,

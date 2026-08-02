@@ -503,7 +503,7 @@ impl VoiceWakeRuntime {
         joiner_filename: String,
     ) {
         use std::io::Write;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         // Verify the Sherpa binary and model are available.
         if !Self::sherpa_available() {
@@ -600,7 +600,10 @@ impl VoiceWakeRuntime {
             .unwrap_or(std::path::Path::new("."))
             .join("keywords.txt");
 
-        let mut command = Command::new("sherpa-onnx-keyword-spotter");
+        let mut command = thinclaw_platform::std_process_command!(
+            "src.voice_wake.std.101",
+            "sherpa-onnx-keyword-spotter"
+        );
         command
             .args([
                 "--encoder",

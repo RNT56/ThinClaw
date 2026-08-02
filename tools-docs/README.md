@@ -14,9 +14,9 @@ For the shared identity and command vocabulary that operator-facing tools should
 
 Do not assume one generic auth flow for every tool.
 
-- Use `thinclaw tool auth <tool>` when the tool exposes a CLI auth flow.
+- Use `thinclaw extensions tools auth <tool>` when the tool exposes a CLI auth flow.
 - Use the setup guide when a tool relies on manual token entry, workspace files, or deployment-specific secret handling.
-- Use `thinclaw mcp ...` only for MCP servers, not for WASM tools.
+- Use `thinclaw extensions mcp ...` only for MCP servers, not for WASM tools.
 
 ## Tool Guides
 
@@ -24,16 +24,16 @@ Do not assume one generic auth flow for every tool.
 |---|---|---|---|
 | GitHub | manual token / secret-entry flow | `github_token` | [github.md](github.md) |
 | Notion | manual token / secret-entry flow | `notion_token` | [notion.md](notion.md) |
-| Gmail | `thinclaw tool auth gmail` | `google_oauth_token` | [gmail.md](gmail.md) |
-| Google Calendar | `thinclaw tool auth google-calendar` | `google_oauth_token` | [google-calendar.md](google-calendar.md) |
-| Google Docs | `thinclaw tool auth google-docs` | `google_oauth_token` | [google-docs.md](google-docs.md) |
-| Google Drive | `thinclaw tool auth google-drive` | `google_oauth_token` | [google-drive.md](google-drive.md) |
-| Google Sheets | `thinclaw tool auth google-sheets` | `google_oauth_token` | [google-sheets.md](google-sheets.md) |
-| Google Slides | `thinclaw tool auth google-slides` | `google_oauth_token` | [google-slides.md](google-slides.md) |
-| Slack | `thinclaw tool auth slack-tool` or env-based auth | `slack_bot_token` | [slack.md](slack.md) |
+| Gmail | `thinclaw extensions tools auth gmail` | `google_oauth_token` | [gmail.md](gmail.md) |
+| Google Calendar | `thinclaw extensions tools auth google-calendar` | `google_oauth_token` | [google-calendar.md](google-calendar.md) |
+| Google Docs | `thinclaw extensions tools auth google-docs` | `google_oauth_token` | [google-docs.md](google-docs.md) |
+| Google Drive | `thinclaw extensions tools auth google-drive` | `google_oauth_token` | [google-drive.md](google-drive.md) |
+| Google Sheets | `thinclaw extensions tools auth google-sheets` | `google_oauth_token` | [google-sheets.md](google-sheets.md) |
+| Google Slides | `thinclaw extensions tools auth google-slides` | `google_oauth_token` | [google-slides.md](google-slides.md) |
+| Slack | `thinclaw extensions tools auth slack-tool` or env-based auth | `slack_bot_token` | [slack.md](slack.md) |
 | Telegram | workspace files + in-tool login flow | `telegram/api_id`, `telegram/api_hash`, `telegram/session.json` | [telegram.md](telegram.md) |
-| Okta | `thinclaw tool auth okta` + workspace domain | `okta_oauth_token`, `okta/domain` | [okta.md](okta.md) |
-| Brave Search | `thinclaw tool auth brave-search` | `brave_search_api_key` | [../tools-src/brave-search/README.md](../tools-src/brave-search/README.md) |
+| Okta | `thinclaw extensions tools auth okta` + workspace domain | `okta_oauth_token`, `okta/domain` | [okta.md](okta.md) |
+| Brave Search | `thinclaw extensions tools auth brave-search` | `brave_search_api_key` | [../tools-src/brave-search/README.md](../tools-src/brave-search/README.md) |
 | ComfyUI media generation | built-in runtime tools + optional `comfy-cli` lifecycle | `comfy_cloud_api_key` for cloud mode | [comfyui.md](comfyui.md) |
 
 ## Notes

@@ -65,6 +65,10 @@ pub enum McpServerCommand {
         #[arg(long, value_delimiter = ',')]
         env: Option<Vec<String>>,
 
+        /// Credential environment bindings (KEY=SOURCE_ID, repeatable)
+        #[arg(long = "secret-env", value_delimiter = ',')]
+        secret_env: Option<Vec<String>>,
+
         /// OAuth client ID (if authentication is required)
         #[arg(long)]
         client_id: Option<String>,
@@ -266,6 +270,7 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
                 command,
                 args,
                 env,
+                secret_env,
                 client_id,
                 auth_url,
                 token_url,
@@ -279,6 +284,7 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
                     command,
                     args,
                     env,
+                    secret_env,
                     client_id,
                     auth_url,
                     token_url,
@@ -377,6 +383,7 @@ async fn add_server(
     command: Option<String>,
     args: Option<Vec<String>>,
     env: Option<Vec<String>>,
+    secret_env: Option<Vec<String>>,
     client_id: Option<String>,
     auth_url: Option<String>,
     token_url: Option<String>,
@@ -387,6 +394,10 @@ async fn add_server(
     use crate::tools::mcp::config::McpTransport;
 
     let is_stdio = command.is_some();
+    let has_oauth_details = auth_url.is_some() || token_url.is_some() || scopes.is_some();
+    if auth_url.is_some() != token_url.is_some() {
+        anyhow::bail!("--auth-url and --token-url must be supplied together");
+    }
     let mut config = if let Some(cmd) = command {
         // Stdio transport: command is required, url is ignored
         let cmd_args = args.unwrap_or_default();
@@ -405,8 +416,33 @@ async fn add_server(
             cfg = cfg.with_env(env_map);
         }
 
+        if let Some(bindings) = secret_env {
+            let mut secret_env_map = std::collections::BTreeMap::new();
+            for binding in bindings {
+                let (key, source_id) = binding.split_once('=').ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Invalid secret env binding '{}'. Expected KEY=SOURCE_ID",
+                        binding
+                    )
+                })?;
+                let source_id = uuid::Uuid::parse_str(source_id).map_err(|_| {
+                    anyhow::anyhow!(
+                        "Invalid source ID for secret environment slot '{}'; expected UUID",
+                        key
+                    )
+                })?;
+                if secret_env_map.insert(key.to_string(), source_id).is_some() {
+                    anyhow::bail!("Duplicate secret environment slot '{}'", key);
+                }
+            }
+            cfg = cfg.with_secret_env(secret_env_map);
+        }
+
         cfg
     } else {
+        if args.is_some() || env.is_some() || secret_env.is_some() {
+            anyhow::bail!("--args, --env, and --secret-env require --command");
+        }
         // HTTP transport: url is required
         let url = url.ok_or_else(|| anyhow::anyhow!("URL is required for HTTP MCP servers"))?;
         McpServerConfig::new(&name, &url)
@@ -418,6 +454,9 @@ async fn add_server(
 
     // Track if auth is required
     let requires_auth = client_id.is_some();
+    if !requires_auth && has_oauth_details {
+        anyhow::bail!("--auth-url, --token-url, and --scopes require --client-id");
+    }
 
     // Set up OAuth if client_id is provided (HTTP servers only)
     if let Some(client_id) = client_id {
@@ -444,6 +483,19 @@ async fn add_server(
 
     // Validate
     config.validate()?;
+    if !config.secret_env.is_empty() {
+        let secrets = get_secrets_store().await?;
+        let available = secrets.list("default").await?;
+        for (slot, source_id) in &config.secret_env {
+            if !available.iter().any(|source| source.id == Some(*source_id)) {
+                anyhow::bail!(
+                    "Secret source {} for MCP environment slot '{}' is unavailable",
+                    source_id,
+                    slot
+                );
+            }
+        }
+    }
 
     // Save (DB if available, else disk)
     let db = connect_db().await;
@@ -474,7 +526,10 @@ async fn add_server(
         println!();
         println!(
             "  {}",
-            branding.muted(format!("Run `thinclaw mcp auth {}` to authenticate.", name))
+            branding.muted(format!(
+                "Run `thinclaw extensions mcp server auth {}` to authenticate.",
+                name
+            ))
         );
     }
 
@@ -512,13 +567,13 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
         println!("{}", branding.warn("No MCP servers configured."));
         println!();
         println!("{}", branding.body_bold("Add a server with:"));
-        println!("    thinclaw mcp add <name> <url>");
-        println!("    thinclaw mcp add <name> --command <cmd> --args <args>");
+        println!("    thinclaw extensions mcp server add <name> <url>");
+        println!("    thinclaw extensions mcp server add <name> --command <cmd> --args <args>");
         println!();
         println!("  Examples:");
-        println!("    thinclaw mcp add notion https://mcp.notion.com");
+        println!("    thinclaw extensions mcp server add notion https://mcp.notion.com");
         println!(
-            "    thinclaw mcp add fs --command npx --args '-y,@modelcontextprotocol/server-filesystem,/tmp'"
+            "    thinclaw extensions mcp server add fs --command npx --args '-y,@modelcontextprotocol/server-filesystem,/tmp'"
         );
         println!();
         return Ok(());
@@ -548,8 +603,13 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
                     println!("      Args: {}", server.args.join(" "));
                 }
                 if !server.env.is_empty() {
-                    for (k, v) in &server.env {
-                        println!("      Env: {}={}", k, v);
+                    for k in server.env.keys() {
+                        println!("      Env: {}=<configured>", k);
+                    }
+                }
+                if !server.secret_env.is_empty() {
+                    for (key, source_id) in &server.secret_env {
+                        println!("      Secret env: {}=source:{}", key, source_id);
                     }
                 }
             } else {
@@ -647,7 +707,10 @@ async fn build_client(server: &McpServerConfig, user_id: &str) -> anyhow::Result
     let config_store =
         Some(McpConfigStore::new(connect_db().await, user_id.to_string()).into_inner());
     if server.is_stdio() {
-        return McpClient::new_stdio_with_store(server, config_store).map_err(Into::into);
+        let secrets = get_secrets_store().await?;
+        let secret_env = config::resolve_mcp_secret_environment(server, &secrets, user_id).await?;
+        return McpClient::new_stdio_with_store_and_secret_env(server, config_store, &secret_env)
+            .map_err(Into::into);
     }
 
     let session_manager = Arc::new(McpSessionManager::new());
@@ -1007,9 +1070,9 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
                 branding.body("You may need to configure OAuth manually:")
             );
             println!();
-            println!("    thinclaw mcp remove {}", name);
+            println!("    thinclaw extensions mcp server remove {}", name);
             println!(
-                "    thinclaw mcp add {} {} --client-id YOUR_CLIENT_ID",
+                "    thinclaw extensions mcp server add {} {} --client-id YOUR_CLIENT_ID",
                 name, server.url
             );
             println!();
@@ -1047,8 +1110,15 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     // Create client — use from_config for automatic transport dispatch
     if server.is_stdio() {
         let config_store = Some(McpConfigStore::new(db.clone(), user_id.clone()).into_inner());
+        let secrets = get_secrets_store().await?;
+        let secret_env =
+            config::resolve_mcp_secret_environment(&server, &secrets, &user_id).await?;
         // Stdio: spawn the process directly
-        let client = match McpClient::new_stdio_with_store(&server, config_store) {
+        let client = match McpClient::new_stdio_with_store_and_secret_env(
+            &server,
+            config_store,
+            &secret_env,
+        ) {
             Ok(c) => c,
             Err(e) => {
                 println!(
@@ -1091,7 +1161,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
             println!(
                 "  {}",
                 branding.bad(format!(
-                    "Not authenticated. Run `thinclaw mcp auth {}` first.",
+                    "Not authenticated. Run `thinclaw extensions mcp server auth {}` first.",
                     name
                 ))
             );
@@ -1118,14 +1188,14 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                                 "Authentication failed (token may be expired). Try re-authenticating:"
                             )
                         );
-                        println!("    thinclaw mcp auth {}", name);
+                        println!("    thinclaw extensions mcp server auth {}", name);
                     } else {
                         println!("  {}", branding.bad("Server requires authentication."));
                         println!();
                         println!(
                             "  {}",
                             branding.muted(format!(
-                                "Run `thinclaw mcp auth {}` to authenticate.",
+                                "Run `thinclaw extensions mcp server auth {}` to authenticate.",
                                 name
                             ))
                         );
@@ -1242,9 +1312,7 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
     let config = Config::from_env().await?;
 
     let master_key = config.secrets.master_key().ok_or_else(|| {
-        anyhow::anyhow!(
-            "SECRETS_MASTER_KEY not set. Run 'thinclaw onboard' first or set it in .env"
-        )
+        anyhow::anyhow!("SECRETS_MASTER_KEY not set. Run 'thinclaw setup' first or set it in .env")
     })?;
 
     let crypto = SecretsCrypto::new(master_key.clone())?;

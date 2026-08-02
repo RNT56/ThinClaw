@@ -721,7 +721,7 @@ pub fn create_job_parameters_schema(
                 "credentials": {
                     "type": "object",
                     "description": "Map of secret names to env var names. Each secret must exist in the \
-                                    secrets store (via 'thinclaw tool auth' or web UI). Example: \
+                                    secrets store (via 'thinclaw extensions tools auth' or web UI). Example: \
                                     {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
                     "additionalProperties": { "type": "string" }
                 }

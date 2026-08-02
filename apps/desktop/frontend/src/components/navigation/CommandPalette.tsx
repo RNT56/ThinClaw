@@ -1,10 +1,11 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { Bot, Command, Image, MessageSquare, Search, Settings, SlidersHorizontal, X } from "lucide-react";
+import { Bot, Command, Image, MessageSquare, Search, Settings, SlidersHorizontal, X, type LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../../lib/utils";
 import type { SettingsPage } from "../settings/SettingsSidebar";
 import type { ProductMode } from "./ModeNavigator";
 import { useI18n } from "../i18n-provider";
+import type { AgentPrimaryPage, AgentRouteDefinition } from "../thinclaw/agent-routes";
 
 interface PaletteCommand {
     id: string;
@@ -12,7 +13,7 @@ interface PaletteCommand {
     description: string;
     keywords: string;
     shortcut?: string;
-    icon: typeof MessageSquare;
+    icon: LucideIcon;
     run: () => void;
 }
 
@@ -21,9 +22,11 @@ interface CommandPaletteProps {
     onOpenChange: (open: boolean) => void;
     onModeChange: (mode: ProductMode) => void;
     onSettingsChange: (page: SettingsPage) => void;
+    onAgentPageChange?: (page: AgentPrimaryPage) => void;
+    agentRoutes?: readonly AgentRouteDefinition[];
 }
 
-export function CommandPalette({ open, onOpenChange, onModeChange, onSettingsChange }: CommandPaletteProps) {
+export function CommandPalette({ open, onOpenChange, onModeChange, onSettingsChange, onAgentPageChange, agentRoutes = [] }: CommandPaletteProps) {
     const { t } = useI18n();
     const [query, setQuery] = useState("");
     const inputRef = useRef<HTMLInputElement>(null);
@@ -40,8 +43,19 @@ export function CommandPalette({ open, onOpenChange, onModeChange, onSettingsCha
             { id: "models", label: "Manage models", description: "Download and select local models", keywords: "settings llm inference", icon: SlidersHorizontal, run: () => closeAndRun(() => onSettingsChange("models")) },
             { id: "appearance", label: "Appearance and language", description: "Theme, density, language, and shortcuts", keywords: "settings theme locale accessibility", icon: Settings, run: () => closeAndRun(() => onSettingsChange("appearance")) },
             { id: "secrets", label: "Manage secrets", description: "API credentials and recovery controls", keywords: "settings keys credentials security", icon: Settings, run: () => closeAndRun(() => onSettingsChange("secrets")) },
+            ...(onAgentPageChange ? agentRoutes.map((route) => ({
+                id: `agent-${route.id}`,
+                label: `Open ${route.label}`,
+                description: route.description,
+                keywords: `agent thinclaw ${route.id} ${route.label}`,
+                icon: route.icon,
+                run: () => closeAndRun(() => {
+                    onModeChange('thinclaw');
+                    onAgentPageChange(route.id);
+                }),
+            })) : []),
         ];
-    }, [onModeChange, onOpenChange, onSettingsChange, t]);
+    }, [agentRoutes, onAgentPageChange, onModeChange, onOpenChange, onSettingsChange, t]);
 
     const normalizedQuery = query.trim().toLowerCase();
     const filtered = commands.filter((command) => !normalizedQuery ||

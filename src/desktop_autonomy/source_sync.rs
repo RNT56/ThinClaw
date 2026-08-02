@@ -19,12 +19,15 @@ impl DesktopAutonomyManager {
             }
             Ok(_) => {
                 let actual_origin = run_cmd(
-                    Command::new("git")
-                        .arg("-C")
-                        .arg(&managed_source)
-                        .arg("remote")
-                        .arg("get-url")
-                        .arg("origin"),
+                    thinclaw_platform::tokio_process_command!(
+                        "src.desktop_autonomy.source_sync.tokio.101",
+                        "git"
+                    )
+                    .arg("-C")
+                    .arg(&managed_source)
+                    .arg("remote")
+                    .arg("get-url")
+                    .arg("origin"),
                 )
                 .await?;
                 if actual_origin.trim() != source.origin {
@@ -44,12 +47,15 @@ impl DesktopAutonomyManager {
                     })?;
                 let staged_source = scratch.path().join("repository");
                 run_cmd(
-                    Command::new("git")
-                        .arg("clone")
-                        .arg("--no-hardlinks")
-                        .arg("--")
-                        .arg(&source.origin)
-                        .arg(&staged_source),
+                    thinclaw_platform::tokio_process_command!(
+                        "src.desktop_autonomy.source_sync.tokio.102",
+                        "git"
+                    )
+                    .arg("clone")
+                    .arg("--no-hardlinks")
+                    .arg("--")
+                    .arg(&source.origin)
+                    .arg(&staged_source),
                 )
                 .await?;
                 verify_thinclaw_source_checkout(&staged_source)?;
@@ -61,42 +67,54 @@ impl DesktopAutonomyManager {
 
         verify_thinclaw_source_checkout(&managed_source)?;
         run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(&managed_source)
-                .arg("fetch")
-                .arg("--force")
-                .arg("--prune")
-                .arg("origin")
-                .arg(&source.revision),
+            thinclaw_platform::tokio_process_command!(
+                "src.desktop_autonomy.source_sync.tokio.103",
+                "git"
+            )
+            .arg("-C")
+            .arg(&managed_source)
+            .arg("fetch")
+            .arg("--force")
+            .arg("--prune")
+            .arg("origin")
+            .arg(&source.revision),
         )
         .await?;
         let target = run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(&managed_source)
-                .arg("rev-parse")
-                .arg("--verify")
-                .arg("FETCH_HEAD^{commit}"),
+            thinclaw_platform::tokio_process_command!(
+                "src.desktop_autonomy.source_sync.tokio.104",
+                "git"
+            )
+            .arg("-C")
+            .arg(&managed_source)
+            .arg("rev-parse")
+            .arg("--verify")
+            .arg("FETCH_HEAD^{commit}"),
         )
         .await?;
         let target = target.trim();
         validate_source_revision(target)?;
         run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(&managed_source)
-                .arg("reset")
-                .arg("--hard")
-                .arg(target),
+            thinclaw_platform::tokio_process_command!(
+                "src.desktop_autonomy.source_sync.tokio.105",
+                "git"
+            )
+            .arg("-C")
+            .arg(&managed_source)
+            .arg("reset")
+            .arg("--hard")
+            .arg(target),
         )
         .await?;
         run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(&managed_source)
-                .arg("clean")
-                .arg("-fdx"),
+            thinclaw_platform::tokio_process_command!(
+                "src.desktop_autonomy.source_sync.tokio.106",
+                "git"
+            )
+            .arg("-C")
+            .arg(&managed_source)
+            .arg("clean")
+            .arg("-fdx"),
         )
         .await?;
         verify_thinclaw_source_checkout(&managed_source)?;
@@ -123,11 +141,14 @@ async fn resolve_managed_source_spec() -> Result<ManagedSourceSpec, String> {
     }
     for candidate in candidates {
         let root = match run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(&candidate)
-                .arg("rev-parse")
-                .arg("--show-toplevel"),
+            thinclaw_platform::tokio_process_command!(
+                "src.desktop_autonomy.source_sync.tokio.107",
+                "git"
+            )
+            .arg("-C")
+            .arg(&candidate)
+            .arg("rev-parse")
+            .arg("--show-toplevel"),
         )
         .await
         {
@@ -142,12 +163,15 @@ async fn resolve_managed_source_spec() -> Result<ManagedSourceSpec, String> {
             continue;
         }
         let revision = run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .arg("rev-parse")
-                .arg("--verify")
-                .arg("HEAD^{commit}"),
+            thinclaw_platform::tokio_process_command!(
+                "src.desktop_autonomy.source_sync.tokio.108",
+                "git"
+            )
+            .arg("-C")
+            .arg(&root)
+            .arg("rev-parse")
+            .arg("--verify")
+            .arg("HEAD^{commit}"),
         )
         .await?
         .trim()

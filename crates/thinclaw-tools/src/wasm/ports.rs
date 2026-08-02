@@ -222,7 +222,7 @@ pub trait WasmToolRegistrar: Send + Sync {
 /// Registry removal needed by the watcher.
 #[async_trait]
 pub trait RegistryUnregister: Send + Sync {
-    async fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>>;
+    async fn unregister_wasm(&self, name: &str) -> Option<Arc<dyn Tool>>;
 }
 
 impl From<WasmStorageError> for String {

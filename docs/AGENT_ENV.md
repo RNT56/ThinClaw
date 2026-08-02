@@ -28,8 +28,8 @@ The default `AgentLoopEnv` uses a simple heuristic reward: non-empty successful 
 
 The CLI can export archived trajectories for downstream training:
 
-- `thinclaw trajectory export --format sft` writes chat-format supervised records.
-- `thinclaw trajectory export --format dpo` writes preference records and requires distinct chosen/rejected scores.
+- `thinclaw data trajectories export --format sft` writes chat-format supervised records.
+- `thinclaw data trajectories export --format dpo` writes preference records and requires distinct chosen/rejected scores.
 - `--min-score` filters low-quality records before conversion.
 - `--max-records` caps output size deterministically.
 - `--with-manifest` writes counts, skipped-record reasons, thresholds, and output hash metadata alongside the dataset.

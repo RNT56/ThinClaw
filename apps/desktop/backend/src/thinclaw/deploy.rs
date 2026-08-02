@@ -466,7 +466,7 @@ async fn run_command_with_events(
     if stdin_payload.is_some_and(|payload| payload.len() > 4096) {
         return Err("subprocess stdin payload exceeds the deployment limit".into());
     }
-    let mut command = tokio::process::Command::new(program);
+    let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.thinclaw.deploy.tokio.1", program);
     command
         .args(args)
         .stdin(if stdin_payload.is_some() {

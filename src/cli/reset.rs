@@ -6,11 +6,11 @@
 
 #[cfg(feature = "postgres")]
 use std::collections::HashSet;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
 use anyhow::Context;
-use clap::Args;
+use clap::{Args, ValueEnum};
 
 use crate::config::{DatabaseBackend, DatabaseConfig};
 use crate::db::Database;
@@ -22,9 +22,25 @@ use crate::terminal_branding::TerminalBranding;
 
 #[derive(Args, Debug, Clone)]
 pub struct ResetCommand {
+    /// ThinClaw-owned state scopes to reset (defaults to all)
+    #[arg(long = "scope", value_enum, value_delimiter = ',')]
+    pub scopes: Vec<ResetScope>,
+
+    /// Print the exact reset plan without changing state
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Skip interactive confirmation prompts
     #[arg(long)]
     pub yes: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub enum ResetScope {
+    All,
+    Files,
+    Credentials,
+    Database,
 }
 
 #[cfg(feature = "libsql")]
@@ -86,11 +102,12 @@ const POSTGRES_RESET_TABLES: &[&str] = &[
 ];
 
 pub async fn run_reset_command(cmd: ResetCommand) -> anyhow::Result<()> {
+    let scopes = normalize_scopes(&cmd.scopes)?;
+    let state_path = validated_state_path(&thinclaw_home_dir())?;
+    let database = DatabaseConfig::resolve();
     let branding = TerminalBranding::current();
     branding.print_banner("Reset", Some("Clear ThinClaw runtime state"));
-    print_warning(
-        "Full reset deletes ThinClaw state from the configured database, ~/.thinclaw, and ThinClaw-managed OS secure-store entries.",
-    );
+    print_warning("Reset deletes only the selected ThinClaw-owned scopes.");
     println!(
         "{}",
         branding.body(
@@ -105,37 +122,143 @@ pub async fn run_reset_command(cmd: ResetCommand) -> anyhow::Result<()> {
     );
     println!();
 
+    println!(
+        "{}",
+        branding.key_value("Scopes", scope_names(&scopes).join(", "))
+    );
+    println!("{}", branding.key_value("State path", state_path.display()));
+    println!(
+        "{}",
+        branding.key_value(
+            "Database",
+            database
+                .as_ref()
+                .map(|config| config.backend.to_string())
+                .unwrap_or_else(|error| format!("blocked: {error}"))
+        )
+    );
+
+    if cmd.dry_run {
+        println!(
+            "{}",
+            branding.good("Dry run complete; no state was changed.")
+        );
+        return Ok(());
+    }
+
+    let _operation_lease = crate::runtime_lease::RuntimeOperationLease::acquire(&state_path)
+        .map_err(|error| anyhow::anyhow!("reset blocked: {error}. Stop ThinClaw and retry."))?;
+
+    if !cmd.yes && !io::stdin().is_terminal() {
+        anyhow::bail!("non-interactive reset requires --yes");
+    }
     if !cmd.yes {
         confirm_full_reset()?;
     }
 
-    let db_result = match DatabaseConfig::resolve() {
-        Ok(config) => reset_database(&config).await?,
-        Err(err) => ResetStepResult::Skipped(format!(
-            "database reset skipped because no configured database was found ({err})"
-        )),
+    let db_result = if scopes.contains(&ResetScope::Database) {
+        let config = database.map_err(|error| {
+            anyhow::anyhow!("database scope is blocked because no backend resolved: {error}")
+        })?;
+        Some(reset_database(&config).await?)
+    } else {
+        None
     };
 
-    let local_result = reset_local_state(&thinclaw_home_dir())?;
-    let secure_store_result = reset_secure_store_entries().await;
+    let secure_store_result = if scopes.contains(&ResetScope::Credentials) {
+        Some(reset_secure_store_entries().await)
+    } else {
+        None
+    };
+    let local_result = if scopes.contains(&ResetScope::Files) {
+        Some(reset_local_state(&state_path)?)
+    } else {
+        None
+    };
 
     println!("{}", branding.good("ThinClaw reset complete."));
-    println!("{}", branding.key_value("Database", db_result.describe()));
-    println!(
-        "{}",
-        branding.key_value("Local state", local_result.describe())
-    );
-    println!(
-        "{}",
-        branding.key_value("OS secure store", secure_store_result.describe())
-    );
+    if let Some(result) = db_result {
+        println!("{}", branding.key_value("Database", result.describe()));
+    }
+    if let Some(result) = local_result {
+        println!("{}", branding.key_value("Local state", result.describe()));
+    }
+    if let Some(result) = secure_store_result {
+        println!(
+            "{}",
+            branding.key_value("OS secure store", result.describe())
+        );
+        if matches!(result, ResetStepResult::CompletedWithWarnings(_)) {
+            anyhow::bail!("reset completed partially; review the secure-store failures above");
+        }
+    }
     println!();
     println!(
         "{}",
-        branding.muted("Next step: run `thinclaw onboard` to set ThinClaw up again.")
+        branding.muted("Next step: run `thinclaw setup` to set ThinClaw up again.")
     );
 
     Ok(())
+}
+
+fn normalize_scopes(
+    scopes: &[ResetScope],
+) -> anyhow::Result<std::collections::BTreeSet<ResetScope>> {
+    let mut normalized = scopes
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    if normalized.is_empty() || normalized == [ResetScope::All].into_iter().collect() {
+        return Ok([
+            ResetScope::Files,
+            ResetScope::Credentials,
+            ResetScope::Database,
+        ]
+        .into_iter()
+        .collect());
+    }
+    if normalized.remove(&ResetScope::All) {
+        anyhow::bail!("--scope all conflicts with every additional scope");
+    }
+    Ok(normalized)
+}
+
+fn scope_names(scopes: &std::collections::BTreeSet<ResetScope>) -> Vec<&'static str> {
+    scopes
+        .iter()
+        .map(|scope| match scope {
+            ResetScope::All => "all",
+            ResetScope::Files => "files",
+            ResetScope::Credentials => "credentials",
+            ResetScope::Database => "database",
+        })
+        .collect()
+}
+
+fn validated_state_path(path: &std::path::Path) -> anyhow::Result<PathBuf> {
+    if !path.is_absolute() {
+        anyhow::bail!("ThinClaw state path must be absolute: {}", path.display());
+    }
+    if path.parent().is_none() || dirs::home_dir().as_deref() == Some(path) {
+        anyhow::bail!("refusing unsafe ThinClaw state target: {}", path.display());
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                anyhow::bail!("ThinClaw state target must be a non-symlink directory");
+            }
+            let canonical = path.canonicalize()?;
+            if canonical.parent().is_none() || dirs::home_dir().as_deref() == Some(&canonical) {
+                anyhow::bail!(
+                    "refusing unsafe ThinClaw state target: {}",
+                    canonical.display()
+                );
+            }
+            Ok(canonical)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn confirm_full_reset() -> anyhow::Result<()> {
@@ -287,6 +410,7 @@ async fn reset_libsql_database(config: &DatabaseConfig) -> anyhow::Result<ResetS
 }
 
 fn reset_local_state(path: &std::path::Path) -> anyhow::Result<ResetStepResult> {
+    let path = validated_state_path(path)?;
     if !path.exists() {
         return Ok(ResetStepResult::Skipped(format!(
             "{} did not exist",
@@ -294,7 +418,7 @@ fn reset_local_state(path: &std::path::Path) -> anyhow::Result<ResetStepResult> 
         )));
     }
 
-    std::fs::remove_dir_all(path)
+    std::fs::remove_dir_all(&path)
         .with_context(|| format!("failed to remove {}", path.display()))?;
     Ok(ResetStepResult::Completed(format!(
         "removed {}",
@@ -389,5 +513,36 @@ mod tests {
     fn thinclaw_home_dir_resolves_to_dot_thinclaw() {
         let path = thinclaw_home_dir();
         assert!(path.ends_with(".thinclaw"));
+    }
+
+    #[test]
+    fn reset_scopes_default_deduplicate_and_reject_all_mixtures() {
+        let default = normalize_scopes(&[]).unwrap();
+        assert_eq!(
+            default,
+            [
+                ResetScope::Files,
+                ResetScope::Credentials,
+                ResetScope::Database
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert_eq!(
+            normalize_scopes(&[ResetScope::Files, ResetScope::Files]).unwrap(),
+            [ResetScope::Files].into_iter().collect()
+        );
+        assert!(normalize_scopes(&[ResetScope::All, ResetScope::Files]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_state_validation_rejects_symlinks() {
+        let parent = tempfile::tempdir().unwrap();
+        let real = parent.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = parent.path().join("state");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(validated_state_path(&link).is_err());
     }
 }

@@ -4,7 +4,7 @@
 //! Uses Streamable HTTP or stdio transport, enforces strict protocol negotiation,
 //! and preserves structured MCP tool outputs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -693,6 +693,34 @@ impl McpClient {
         config: &McpServerConfig,
         config_store: Option<McpConfigStore>,
     ) -> Result<Self, ToolError> {
+        if !config.secret_env.is_empty() {
+            return Err(ToolError::NotAuthorized(format!(
+                "MCP server '{}' has credential bindings and requires authorized source resolution",
+                config.name
+            )));
+        }
+        Self::new_stdio_with_store_and_secret_env(config, config_store, &BTreeMap::new())
+    }
+
+    /// Create a stdio client with transient, already-authorized credential
+    /// values. The values are passed directly to the child and never copied
+    /// into the persisted server configuration.
+    pub fn new_stdio_with_store_and_secret_env(
+        config: &McpServerConfig,
+        config_store: Option<McpConfigStore>,
+        secret_env: &BTreeMap<String, String>,
+    ) -> Result<Self, ToolError> {
+        if config.secret_env.len() != secret_env.len()
+            || config
+                .secret_env
+                .keys()
+                .any(|slot| !secret_env.contains_key(slot))
+        {
+            return Err(ToolError::NotAuthorized(format!(
+                "MCP server '{}' did not resolve its exact credential binding set",
+                config.name
+            )));
+        }
         let command = config.command.as_deref().ok_or_else(|| {
             ToolError::ExternalService(format!(
                 "MCP server '{}' is configured for stdio but has no command",
@@ -711,6 +739,7 @@ impl McpClient {
             command,
             &config.args,
             &config.env,
+            secret_env,
             Some(handler),
         )?;
 
@@ -1070,7 +1099,7 @@ impl McpClient {
                 }
 
                 return Err(ToolError::ExternalService(format!(
-                    "MCP server '{}' requires authentication. Run: thinclaw mcp auth {}",
+                    "MCP server '{}' requires authentication. Run: thinclaw extensions mcp server auth {}",
                     self.server_name, self.server_name
                 )));
             }

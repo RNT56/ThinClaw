@@ -84,6 +84,9 @@ impl fmt::Debug for Secret {
 /// but they cannot read the actual values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretRef {
+    /// Opaque encrypted-store source identity; never a keychain locator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
     pub name: String,
     pub provider: Option<String>,
     #[serde(default)]
@@ -111,6 +114,7 @@ pub struct MasterKeyRotationReport {
 impl SecretRef {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: None,
             name: name.into(),
             provider: None,
             encryption_version: CURRENT_ENCRYPTION_VERSION,

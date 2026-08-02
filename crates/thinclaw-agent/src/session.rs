@@ -331,16 +331,11 @@ pub enum ThreadState {
     Interrupted,
 }
 
-/// Pending auth token request.
-///
-/// When `tool_auth` returns `awaiting_token`, the thread enters auth mode.
-/// The next user message is intercepted before entering the normal pipeline
-/// (no logging, no turn creation, no history) and routed directly to the
-/// credential store.
+/// Pending out-of-band extension authentication request.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PendingAuthMode {
-    ManualToken,
+    SecretSource,
     ExternalOAuth,
 }
 
@@ -357,7 +352,7 @@ pub struct PendingAuth {
 }
 
 fn default_pending_auth_mode() -> PendingAuthMode {
-    PendingAuthMode::ManualToken
+    PendingAuthMode::SecretSource
 }
 
 /// Pending tool approval request stored on a thread.
@@ -394,16 +389,6 @@ fn same_requesting_actor(expected: &ResolvedIdentity, actual: &ResolvedIdentity)
         && expected.conversation_kind == actual.conversation_kind
         && (expected.conversation_kind == ConversationKind::Direct
             || expected.conversation_scope_id == actual.conversation_scope_id)
-}
-
-impl PendingAuth {
-    /// Whether this credential-bearing response belongs to the actor that
-    /// initiated the flow. Legacy unbound state intentionally matches nobody.
-    pub fn accepts_identity(&self, identity: &ResolvedIdentity) -> bool {
-        self.requesting_identity
-            .as_ref()
-            .is_some_and(|expected| same_requesting_actor(expected, identity))
-    }
 }
 
 impl PendingApproval {
@@ -443,7 +428,7 @@ impl From<PortableThreadState> for ThreadState {
 impl From<PendingAuthMode> for PortablePendingAuthMode {
     fn from(value: PendingAuthMode) -> Self {
         match value {
-            PendingAuthMode::ManualToken => Self::ManualToken,
+            PendingAuthMode::SecretSource => Self::SecretSource,
             PendingAuthMode::ExternalOAuth => Self::ExternalOAuth,
         }
     }
@@ -452,7 +437,7 @@ impl From<PendingAuthMode> for PortablePendingAuthMode {
 impl From<PortablePendingAuthMode> for PendingAuthMode {
     fn from(value: PortablePendingAuthMode) -> Self {
         match value {
-            PortablePendingAuthMode::ManualToken => Self::ManualToken,
+            PortablePendingAuthMode::SecretSource => Self::SecretSource,
             PortablePendingAuthMode::ExternalOAuth => Self::ExternalOAuth,
         }
     }

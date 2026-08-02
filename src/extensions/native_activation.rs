@@ -166,7 +166,9 @@ impl NativePluginState {
         Ok(ActivateResult {
             name: contribution_id.to_string(),
             kind: ExtensionKind::NativePlugin,
-            tools_loaded: vec![contribution_id.to_string()],
+            // Native contributions are not `Tool` implementations and must
+            // never be advertised as registered tool identities.
+            tools_loaded: Vec::new(),
             message: format!(
                 "Native plugin '{contribution_id}' loaded (in-process, full host privileges). \
                  Signature, ABI, allowlist, and hash checks passed before load."

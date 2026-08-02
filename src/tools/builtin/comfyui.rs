@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::process::Command;
 use tokio::sync::Semaphore;
 
 use crate::config::ComfyUiConfig;
@@ -591,7 +590,8 @@ async fn load_workflow(name_or_path: &str, allow_untrusted: bool) -> Result<Valu
 }
 
 async fn run_command(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<Value, ToolError> {
-    let mut command = Command::new(program);
+    let mut command =
+        thinclaw_platform::tokio_process_command!("src.tools.builtin.comfyui.tokio.101", program);
     command.args(args);
     if let Some(cwd) = cwd {
         tokio::fs::create_dir_all(cwd).await.map_err(|e| {

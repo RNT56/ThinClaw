@@ -11,7 +11,7 @@ use thinclaw_gateway::web::routines::{
     RoutineInfoAction, RoutineInfoCatchUpMode, RoutineInfoInput, RoutineInfoTrigger,
     parse_routine_uuid, project_routine_info, routine_deleted_action_response,
     routine_list_response, routine_not_found_message, routine_toggle_action_response,
-    routine_triggered_action_response,
+    routine_trigger_accepted_response,
 };
 
 use super::error::{ApiError, ApiResult};
@@ -45,12 +45,12 @@ pub async fn trigger_routine(
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| ApiError::SessionNotFound(routine_not_found_message(routine_id)))?;
 
-    engine
+    let run_id = engine
         .fire_manual(routine.id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    serde_json::to_value(routine_triggered_action_response(id))
+    serde_json::to_value(routine_trigger_accepted_response(id, run_id))
         .map_err(|error| ApiError::Internal(error.to_string()))
 }
 

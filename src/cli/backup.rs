@@ -9,6 +9,7 @@
 //! database file) are excluded from the file tree. Secrets are **not** exported;
 //! they live in the OS keychain / secrets store and must be re-provisioned.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -33,14 +34,19 @@ pub enum BackupCommand {
     Export {
         /// Output bundle path (default: ./thinclaw-backup-<timestamp>.tclaw).
         #[arg(long, short)]
-        output: Option<PathBuf>,
-        /// Passphrase. Prefer the `THINCLAW_BACKUP_PASSPHRASE` env var; a
-        /// value passed here can leak via shell history.
+        out: Option<PathBuf>,
+        /// Read the passphrase from a private regular file.
         #[arg(long)]
-        passphrase: Option<String>,
+        passphrase_file: Option<PathBuf>,
+        /// Replace an existing output bundle.
+        #[arg(long)]
+        force: bool,
         /// Skip the database section (config + workspace files only).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "require_database")]
         no_database: bool,
+        /// Fail instead of producing a partial bundle when database export is unavailable.
+        #[arg(long)]
+        require_database: bool,
     },
     /// Restore an encrypted bundle. Overwrites config + workspace files in the
     /// ThinClaw home; requires `--yes`.
@@ -48,10 +54,13 @@ pub enum BackupCommand {
         /// Bundle path to restore from.
         input: PathBuf,
         #[arg(long)]
-        passphrase: Option<String>,
+        passphrase_file: Option<PathBuf>,
         /// Confirm overwriting config + workspace files.
         #[arg(long)]
         yes: bool,
+        /// Inspect the restore plan without mutation (the default without --yes).
+        #[arg(long, conflicts_with = "yes")]
+        dry_run: bool,
         /// Also restore the database in place. For the local (libSQL) backend
         /// this overwrites the database file — ThinClaw must be stopped. For
         /// Postgres the restore command is printed instead of run.
@@ -63,35 +72,43 @@ pub enum BackupCommand {
         /// Bundle path to inspect.
         input: PathBuf,
         #[arg(long)]
-        passphrase: Option<String>,
+        passphrase_file: Option<PathBuf>,
     },
 }
 
 pub async fn run_backup_command(cmd: BackupCommand) -> anyhow::Result<()> {
     match cmd {
         BackupCommand::Export {
-            output,
-            passphrase,
+            out,
+            passphrase_file,
+            force,
             no_database,
-        } => export(output, passphrase, no_database).await,
+            require_database,
+        } => export(out, passphrase_file, force, no_database, require_database).await,
         BackupCommand::Import {
             input,
-            passphrase,
+            passphrase_file,
             yes,
+            dry_run: _,
             restore_database,
-        } => import(input, passphrase, yes, restore_database).await,
-        BackupCommand::Inspect { input, passphrase } => inspect(input, passphrase).await,
+        } => import(input, passphrase_file, yes, restore_database).await,
+        BackupCommand::Inspect {
+            input,
+            passphrase_file,
+        } => inspect(input, passphrase_file).await,
     }
 }
 
 async fn export(
     output: Option<PathBuf>,
-    passphrase: Option<String>,
+    passphrase_file: Option<PathBuf>,
+    force: bool,
     no_database: bool,
+    require_database: bool,
 ) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     branding.print_banner("ThinClaw Export", Some("Encrypted whole-agent backup"));
-    let passphrase = resolve_passphrase(passphrase, &branding, true)?;
+    let passphrase = resolve_passphrase(passphrase_file.as_deref(), true)?;
 
     let home = state_paths().home;
     if !home.exists() {
@@ -126,6 +143,11 @@ async fn export(
                 );
             }
             Ok(None) => {
+                if require_database {
+                    anyhow::bail!(
+                        "database export is unavailable and --require-database was requested"
+                    );
+                }
                 println!(
                     "{}",
                     branding.warn(
@@ -134,6 +156,11 @@ async fn export(
                 );
             }
             Err(error) => {
+                if require_database {
+                    anyhow::bail!(
+                        "database export failed and --require-database was requested: {error}"
+                    );
+                }
                 println!(
                     "{}",
                     branding.warn(format!(
@@ -146,6 +173,12 @@ async fn export(
 
     let sealed = writer.finish(passphrase.expose_secret())?;
     let out_path = output.unwrap_or_else(|| default_output_name(&created_at));
+    if out_path.exists() && !force {
+        anyhow::bail!(
+            "refusing to overwrite existing backup {}; pass --force",
+            out_path.display()
+        );
+    }
     thinclaw_platform::write_private_file_atomic(&out_path, &sealed, true)?;
 
     println!(
@@ -165,13 +198,13 @@ async fn export(
 
 async fn import(
     input: PathBuf,
-    passphrase: Option<String>,
+    passphrase_file: Option<PathBuf>,
     yes: bool,
     restore_database: bool,
 ) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     branding.print_banner("ThinClaw Import", Some("Restore from encrypted backup"));
-    let passphrase = resolve_passphrase(passphrase, &branding, false)?;
+    let passphrase = resolve_passphrase(passphrase_file.as_deref(), false)?;
 
     let sealed =
         thinclaw_platform::read_regular_file_bounded_async(input.clone(), MAX_SEALED_BUNDLE_BYTES)
@@ -210,10 +243,10 @@ async fn import(
     Ok(())
 }
 
-async fn inspect(input: PathBuf, passphrase: Option<String>) -> anyhow::Result<()> {
+async fn inspect(input: PathBuf, passphrase_file: Option<PathBuf>) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     branding.print_banner("ThinClaw Bundle", Some("Manifest (no changes made)"));
-    let passphrase = resolve_passphrase(passphrase, &branding, false)?;
+    let passphrase = resolve_passphrase(passphrase_file.as_deref(), false)?;
     let sealed =
         thinclaw_platform::read_regular_file_bounded_async(input.clone(), MAX_SEALED_BUNDLE_BYTES)
             .await
@@ -273,7 +306,38 @@ async fn pg_dump_export(config: &Config) -> anyhow::Result<Option<(Vec<u8>, Stri
         .map(|password| SecretString::from(password.into_owned()));
     url.set_password(None)
         .map_err(|()| anyhow::anyhow!("could not sanitize Postgres database URL"))?;
-    let mut command = tokio::process::Command::new("pg_dump");
+    let pgpass_path = if let Some(password) = password.as_ref() {
+        let host = url
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("Postgres database URL has no host"))?;
+        let port = url.port().unwrap_or(5432);
+        let database = url.path().trim_start_matches('/');
+        let user = url.username();
+        if database.is_empty() || user.is_empty() {
+            anyhow::bail!("Postgres database URL must include a database and user");
+        }
+        let escape = |value: &str| {
+            if value.contains(['\n', '\r']) {
+                anyhow::bail!("Postgres credential fields cannot contain newlines");
+            }
+            Ok::<String, anyhow::Error>(value.replace('\\', "\\\\").replace(':', "\\:"))
+        };
+        let line = format!(
+            "{}:{}:{}:{}:{}\n",
+            escape(host)?,
+            port,
+            escape(database)?,
+            escape(user)?,
+            escape(password.expose_secret())?
+        );
+        let path = temp_dir.path().join("pgpass");
+        thinclaw_platform::write_private_file_atomic(&path, line.as_bytes(), false)?;
+        Some(path)
+    } else {
+        None
+    };
+    let mut command =
+        thinclaw_platform::tokio_process_command!("src.cli.backup.tokio.1", "pg_dump");
     command
         .arg("--format=custom")
         .arg("--no-owner")
@@ -282,8 +346,8 @@ async fn pg_dump_export(config: &Config) -> anyhow::Result<Option<(Vec<u8>, Stri
         .arg(&tmp)
         .arg(url.as_str())
         .env("PGCONNECT_TIMEOUT", "15");
-    if let Some(password) = password.as_ref() {
-        command.env("PGPASSWORD", password.expose_secret());
+    if let Some(path) = pgpass_path.as_ref() {
+        command.env("PGPASSFILE", path);
     }
     let result = thinclaw_platform::bounded_command_output(
         &mut command,
@@ -401,27 +465,54 @@ fn print_manifest(branding: &TerminalBranding, manifest: &thinclaw_portability::
     }
 }
 
-/// Resolve the passphrase from the flag or `THINCLAW_BACKUP_PASSPHRASE`.
+/// Resolve passphrase precedence: private file, environment, masked TTY.
 fn resolve_passphrase(
-    flag: Option<String>,
-    branding: &TerminalBranding,
+    private_file: Option<&Path>,
     require_strong: bool,
 ) -> anyhow::Result<SecretString> {
-    if let Some(pass) = flag.filter(|p| !p.is_empty()) {
-        println!(
-            "{}",
-            branding.muted(format!(
-                "using --passphrase; prefer {PASSPHRASE_ENV} to keep it out of shell history"
-            ))
-        );
-        return validate_backup_passphrase(pass, require_strong);
+    if let Some(path) = private_file {
+        if !path.is_absolute() {
+            anyhow::bail!("--passphrase-file must be an absolute path");
+        }
+        validate_private_passphrase_permissions(path)?;
+        let mut bytes = thinclaw_platform::read_regular_file_bounded_single_link(
+            path,
+            MAX_BACKUP_PASSPHRASE_BYTES as u64,
+        )?;
+        if bytes.ends_with(b"\n") {
+            bytes.pop();
+            if bytes.ends_with(b"\r") {
+                bytes.pop();
+            }
+        }
+        let passphrase = String::from_utf8(bytes)
+            .map_err(|_| anyhow::anyhow!("backup passphrase file is not UTF-8"))?;
+        return validate_backup_passphrase(passphrase, require_strong);
     }
     match std::env::var(PASSPHRASE_ENV) {
         Ok(pass) if !pass.is_empty() => validate_backup_passphrase(pass, require_strong),
+        _ if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
+            let passphrase = crate::setup::prompts::secret_input("Backup passphrase")?;
+            validate_backup_passphrase(passphrase.expose_secret().to_string(), require_strong)
+        }
         _ => anyhow::bail!(
-            "no passphrase provided: set {PASSPHRASE_ENV} or pass --passphrase <value>"
+            "no passphrase available: use --passphrase-file, set {PASSPHRASE_ENV}, or run in a TTY"
         ),
     }
+}
+
+fn validate_private_passphrase_permissions(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+            anyhow::bail!(
+                "backup passphrase file must be owned by the effective user with no group/other permissions"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_backup_passphrase(

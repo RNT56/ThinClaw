@@ -949,7 +949,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         };
         match self.pairing_store.upsert_request(&channel, &id, meta) {
             Ok(r) => Ok(near::agent::channel_host::PairingUpsertResult {
-                code: r.code,
+                request_id: r.request_id,
                 created: r.created,
             }),
             Err(e) => Err(e.to_string()),

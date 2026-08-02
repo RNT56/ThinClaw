@@ -6,6 +6,8 @@
 //! - `gateway status` — show gateway status
 //! - `gateway access` — print WebUI access URLs and SSH tunnel guidance
 
+use std::io::{IsTerminal, Write};
+
 use clap::Subcommand;
 use fs4::{FileExt, TryLockError};
 use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
@@ -115,14 +117,25 @@ pub enum GatewayCommand {
 
     /// Print WebUI access URLs, token status, and SSH tunnel guidance
     Access {
-        /// Show the full token URL instead of redacting the token.
+        /// Reveal the bearer-bearing URL after an explicit TTY-only confirmation.
         #[arg(long)]
+        reveal_token: bool,
+
+        /// Deprecated alias for --reveal-token.
+        #[arg(long, hide = true)]
         show_token: bool,
+
+        /// Skip the prompt (stdout must still be an interactive terminal).
+        #[arg(long)]
+        yes: bool,
     },
 }
 
 /// Run a gateway command.
-pub async fn run_gateway_command(cmd: GatewayCommand) -> anyhow::Result<()> {
+pub async fn run_gateway_command(
+    cmd: GatewayCommand,
+    context: &crate::cli::CliContext,
+) -> anyhow::Result<()> {
     match cmd {
         GatewayCommand::Start {
             port,
@@ -151,9 +164,13 @@ pub async fn run_gateway_command(cmd: GatewayCommand) -> anyhow::Result<()> {
             TerminalBranding::current().print_banner("Gateway", Some("Inspect the web cockpit"));
             gateway_status().await
         }
-        GatewayCommand::Access { show_token } => {
+        GatewayCommand::Access {
+            reveal_token,
+            show_token,
+            yes,
+        } => {
             TerminalBranding::current().print_banner("Gateway", Some("WebUI access"));
-            gateway_access(show_token).await
+            gateway_access(reveal_token || show_token, yes, context).await
         }
     }
 }
@@ -395,7 +412,7 @@ async fn start_gateway(
     if let Some(record) = read_gateway_pid_record(&pid_path)? {
         if record_matches_process(&record) {
             anyhow::bail!(
-                "Gateway is already running (PID {}). Stop it first with: thinclaw gateway stop",
+                "Gateway is already running (PID {}). Stop it first with: thinclaw runtime web stop",
                 record.pid
             );
         } else {
@@ -432,14 +449,13 @@ async fn start_gateway(
 
         let exe = std::env::current_exe()?;
         let instance_token = uuid::Uuid::new_v4().to_string();
-        let mut command = std::process::Command::new(&exe);
+        let mut command = thinclaw_platform::std_process_command!("src.cli.gateway.std.1", &exe);
         command
             .arg("run")
             .env("GATEWAY_ENABLED", "true")
             .env("GATEWAY_HOST", &gw_host)
             .env("GATEWAY_PORT", gw_port.to_string())
             .env("CLI_ENABLED", "false")
-            .env("THINCLAW_GATEWAY_INSTANCE_TOKEN", &instance_token)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit());
@@ -477,14 +493,13 @@ async fn start_gateway(
         let exe = std::env::current_exe()?;
 
         let instance_token = uuid::Uuid::new_v4().to_string();
-        let mut command = std::process::Command::new(&exe);
+        let mut command = thinclaw_platform::std_process_command!("src.cli.gateway.std.2", &exe);
         command
             .arg("run")
             .env("GATEWAY_ENABLED", "true")
             .env("GATEWAY_HOST", &gw_host)
             .env("GATEWAY_PORT", gw_port.to_string())
             .env("CLI_ENABLED", "false")
-            .env("THINCLAW_GATEWAY_INSTANCE_TOKEN", &instance_token)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -501,6 +516,7 @@ async fn start_gateway(
             };
             command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | DETACHED_PROCESS);
         }
+        thinclaw_platform::apply_child_environment_policy(&mut command)?;
         let mut child = command.spawn()?;
 
         let pid = child.id();
@@ -538,25 +554,61 @@ async fn start_gateway(
                 gw_host, gw_port, pid
             ))
         );
-        println!("  {}", branding.muted("Stop with: thinclaw gateway stop"));
+        println!(
+            "  {}",
+            branding.muted("Stop with: thinclaw runtime web stop")
+        );
     }
 
     Ok(())
 }
 
 /// Print gateway access guidance.
-async fn gateway_access(show_token: bool) -> anyhow::Result<()> {
+async fn gateway_access(
+    reveal_token: bool,
+    yes: bool,
+    context: &crate::cli::CliContext,
+) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     let settings = Settings::load();
     let access = GatewayAccessInfo::from_env_and_settings(Some(&settings));
     let health_ok = gateway_health_ok(&access).await.unwrap_or(false);
+
+    if reveal_token {
+        if context.output().format.is_machine() {
+            anyhow::bail!("--reveal-token is unavailable with JSON or JSONL output");
+        }
+        if context.output().quiet {
+            anyhow::bail!("--reveal-token conflicts with --quiet");
+        }
+        if !std::io::stdout().is_terminal() {
+            anyhow::bail!("--reveal-token requires stdout to be an interactive terminal");
+        }
+        if access.auth_token.is_none() {
+            anyhow::bail!("gateway token is not configured");
+        }
+        if !yes {
+            if !std::io::stdin().is_terminal() {
+                anyhow::bail!(
+                    "--reveal-token confirmation requires an interactive terminal or --yes"
+                );
+            }
+            eprint!("Reveal the gateway bearer URL in this terminal? [y/N] ");
+            std::io::stderr().flush()?;
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer)?;
+            if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                anyhow::bail!("gateway token reveal cancelled");
+            }
+        }
+    }
 
     println!("{}", branding.key_value("Enabled", access.enabled));
     println!("{}", branding.key_value("Bind", access.bind_display()));
     println!("{}", branding.key_value("Port", access.port));
     println!("{}", branding.key_value("Auth", access.auth_status()));
     println!("{}", branding.key_value("Local URL", access.local_url()));
-    if let Some(url) = access.token_url(show_token) {
+    if let Some(url) = access.token_url(reveal_token) {
         println!("{}", branding.key_value("Token URL", url));
     }
     println!(
@@ -578,11 +630,11 @@ async fn gateway_access(show_token: bool) -> anyhow::Result<()> {
     for warning in access.service_warnings() {
         println!("{}", branding.warn(format!("Warning: {warning}")));
     }
-    if !show_token && access.auth_token.is_some() {
+    if !reveal_token && access.auth_token.is_some() {
         println!(
             "{}",
             branding
-                .muted("Use `thinclaw gateway access --show-token` to print the full token URL.")
+                .muted("Use `thinclaw runtime web access --reveal-token` for a guarded reveal.")
         );
     }
 

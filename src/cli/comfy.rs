@@ -1,7 +1,6 @@
 use clap::Subcommand;
 use serde_json::json;
 use std::path::PathBuf;
-use tokio::process::Command;
 
 use crate::config::ComfyUiConfig;
 use crate::settings::Settings;
@@ -243,7 +242,7 @@ async fn run_command(
     args: &[&str],
     cwd: Option<&std::path::Path>,
 ) -> anyhow::Result<serde_json::Value> {
-    let mut command = Command::new(program);
+    let mut command = thinclaw_platform::tokio_process_command!("src.cli.comfy.tokio.101", program);
     command.args(args);
     if let Some(cwd) = cwd {
         tokio::fs::create_dir_all(cwd).await?;

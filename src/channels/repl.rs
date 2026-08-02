@@ -47,12 +47,14 @@ use crate::channels::{
 };
 use crate::error::ChannelError;
 use crate::terminal_branding::{TerminalBranding, resolve_cli_skin_name};
+use crate::tools::{RegistrySnapshot, ToolRegistry};
 use crate::tui::skin::CliSkin;
 use thinclaw_channels::repl::{
     CLI_STATUS_MAX, CLI_TOOL_RESULT_MAX, ReplInputAction, classify_repl_line,
     repl_input_is_incomplete, slash_command_hint, slash_command_matches,
     truncate_for_terminal_preview,
 };
+use thinclaw_types::slash_commands::{CommandVisibility, LocalCommand};
 
 /// Rustyline helper for slash-command tab completion.
 struct ReplHelper;
@@ -209,6 +211,8 @@ pub struct ReplChannel {
     is_streaming: Arc<AtomicBool>,
     /// When true, the one-liner startup banner is suppressed (boot screen shown instead).
     suppress_banner: Arc<AtomicBool>,
+    /// Shared, atomically published runtime capability state.
+    tool_registry: Option<Arc<ToolRegistry>>,
 }
 
 impl ReplChannel {
@@ -222,6 +226,7 @@ impl ReplChannel {
             default_skin_name,
             is_streaming: Arc::new(AtomicBool::new(false)),
             suppress_banner: Arc::new(AtomicBool::new(false)),
+            tool_registry: None,
         }
     }
 
@@ -235,7 +240,13 @@ impl ReplChannel {
             default_skin_name,
             is_streaming: Arc::new(AtomicBool::new(false)),
             suppress_banner: Arc::new(AtomicBool::new(false)),
+            tool_registry: None,
         }
+    }
+
+    pub fn with_tool_registry(mut self, registry: Arc<ToolRegistry>) -> Self {
+        self.tool_registry = Some(registry);
+        self
     }
 
     /// Suppress the one-liner startup banner (boot screen will be shown instead).
@@ -263,114 +274,26 @@ impl Default for ReplChannel {
 
 fn print_help(skin: &CliSkin) {
     let branding = TerminalBranding::from_skin(skin.clone());
-
     branding.print_banner(
         "Agent REPL",
         Some("Interactive shell with shared identity, memory, and skin-aware controls."),
     );
     println!("  {}", branding.body_bold("Commands"));
-    println!(
-        "  {} {}",
-        branding.accent("/help"),
-        branding.muted("show this help")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/debug"),
-        branding.muted("toggle verbose output")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/quit /exit"),
-        branding.muted("exit the repl")
-    );
-    println!();
-    println!("  {}", branding.body_bold("Conversation"));
-    println!(
-        "  {} {}",
-        branding.accent("/undo"),
-        branding.muted("undo the last turn")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/redo"),
-        branding.muted("redo an undone turn")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/clear"),
-        branding.muted("clear conversation")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/compress"),
-        branding.muted("compact context window (/compact alias)")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/new"),
-        branding.muted("new conversation thread")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/thread new"),
-        branding.muted("new conversation thread")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/thread <id>"),
-        branding.muted("switch to an existing thread")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/resume <id>"),
-        branding.muted("restore a saved checkpoint into the current thread")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/interrupt"),
-        branding.muted("stop current operation")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("esc"),
-        branding.muted("stop current operation")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/rollback"),
-        branding.muted("filesystem rollback command family")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/identity"),
-        branding.muted("show the active agent name, base pack, skin, and session overlay")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/memory"),
-        branding.muted("show memory, recall, learning, and continuity surfaces")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/heartbeat"),
-        branding.muted("run the live heartbeat check")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/skills"),
-        branding.muted("list installed skills or search the registry")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/personality"),
-        branding.muted("set, show, or clear a temporary session personality (/vibe alias)")
-    );
-    println!(
-        "  {} {}",
-        branding.accent("/skin [name]"),
-        branding.muted("switch the local CLI skin or show the current skin")
-    );
+    for spec in thinclaw_types::slash_commands::COMMAND_REGISTRY
+        .iter()
+        .filter(|spec| {
+            matches!(
+                spec.visibility,
+                CommandVisibility::Common | CommandVisibility::Expert
+            ) && spec.repl.is_supported()
+        })
+    {
+        println!(
+            "  {:<24} {}",
+            branding.accent(spec.name),
+            branding.muted(spec.help)
+        );
+    }
     println!();
     println!("  {}", branding.body_bold("Approval responses"));
     println!(
@@ -389,6 +312,91 @@ fn print_help(skin: &CliSkin) {
         branding.muted("approve for this session")
     );
     println!();
+}
+
+fn render_tools_snapshot(snapshot: &RegistrySnapshot, argument: &str) -> String {
+    if argument == "--all" {
+        let live = snapshot
+            .identities
+            .iter()
+            .map(|identity| identity.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let mut lines = vec![format!(
+            "Tool catalog — capability revision {}",
+            snapshot.revision
+        )];
+        for descriptor in thinclaw_tools::STATIC_TOOL_CATALOG {
+            lines.push(format!(
+                "{}  {:<18} {}",
+                if live.contains(descriptor.name) {
+                    "registered"
+                } else {
+                    "unavailable"
+                },
+                descriptor.origin,
+                descriptor.name
+            ));
+        }
+        return lines.join("\n");
+    }
+    if !argument.is_empty() {
+        if let Some(identity) = snapshot
+            .identities
+            .iter()
+            .find(|item| item.name == argument)
+        {
+            return format!(
+                "{} — revision {}\norigin: {}\nsource: {}\ncompiled: {}\nconfigured: {}\nregistered: {}\ndependency: {}\nexposed: {}\nready: {}\napproval: {}\nhealth: {}{}",
+                identity.name,
+                snapshot.revision,
+                identity.origin,
+                identity.source_id,
+                identity.compiled,
+                identity
+                    .configured
+                    .map_or("unknown", |value| if value { "yes" } else { "no" }),
+                identity.registered,
+                identity.dependency,
+                identity.exposed,
+                identity.ready,
+                identity.approval,
+                identity.health,
+                if identity.reasons.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nreasons: {}", identity.reasons.join(", "))
+                }
+            );
+        }
+        if let Some(descriptor) = thinclaw_tools::static_tool_descriptor(argument) {
+            return format!(
+                "{} — revision {}\norigin: {}\nsource: builtin/{}\nregistered: no\nexposed: no\nready: unknown\napproval: conditional\nreason: catalogued but absent from the live registry",
+                descriptor.name, snapshot.revision, descriptor.origin, descriptor.name
+            );
+        }
+        return format!("Unknown tool identity: {argument}");
+    }
+    let mut groups = std::collections::BTreeMap::<String, usize>::new();
+    for identity in &snapshot.identities {
+        *groups.entry(identity.origin.to_string()).or_default() += 1;
+    }
+    let mut lines = vec![format!(
+        "{} registered tools — capability revision {} ({})",
+        snapshot.identities.len(),
+        snapshot.revision,
+        if snapshot.sealed {
+            "sealed"
+        } else {
+            "preparing"
+        }
+    )];
+    lines.extend(
+        groups
+            .into_iter()
+            .map(|(origin, count)| format!("{origin}: {count} registered")),
+    );
+    lines.push("Use /tools NAME for provenance or /tools --all for the catalog.".to_string());
+    lines.join("\n")
 }
 
 /// Get the history file path (~/.thinclaw/history).
@@ -417,6 +425,7 @@ impl Channel for ReplChannel {
         let skin = Arc::clone(&self.skin);
         let default_skin_name = self.default_skin_name.clone();
         let suppress_banner = Arc::clone(&self.suppress_banner);
+        let tool_registry = self.tool_registry.clone();
         let esc_interrupt_triggered_for_thread = Arc::new(AtomicBool::new(false));
 
         std::thread::spawn(move || {
@@ -501,75 +510,154 @@ impl Channel for ReplChannel {
                         // immediate local handling stay here)
                         match classify_repl_line(&line) {
                             ReplInputAction::Ignore => continue,
-                            ReplInputAction::Quit => {
-                                // Forward shutdown command so the agent loop exits even
-                                // when other channels (e.g. web gateway) are still active.
-                                let msg = IncomingMessage::new("repl", "default", "/quit")
-                                    .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
-                                    .with_actor_identity("default", "default");
-                                let _ = tx.blocking_send(msg);
-                                break;
-                            }
-                            ReplInputAction::Help => {
-                                print_help(&current_skin);
+                            ReplInputAction::Unsupported(message) => {
+                                println!(
+                                    "{}",
+                                    TerminalBranding::from_skin(current_skin.clone()).warn(message)
+                                );
                                 continue;
                             }
-                            ReplInputAction::ToggleDebug => {
-                                let current = debug_mode.load(Ordering::Relaxed);
-                                debug_mode.store(!current, Ordering::Relaxed);
-                                let branding = TerminalBranding::from_skin(current_skin.clone());
-                                if !current {
-                                    println!("{}", branding.muted("debug mode on"));
-                                } else {
-                                    println!("{}", branding.muted("debug mode off"));
+                            ReplInputAction::Local {
+                                command,
+                                argument: arg,
+                            } => match command {
+                                LocalCommand::Quit => {
+                                    // Forward shutdown so the agent loop exits even when
+                                    // other channels are active.
+                                    let msg = IncomingMessage::new("repl", "default", "/quit")
+                                        .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
+                                        .with_actor_identity("default", "default");
+                                    let _ = tx.blocking_send(msg);
+                                    break;
                                 }
-                                continue;
-                            }
-                            ReplInputAction::Skin(arg) => {
-                                let mut guard = match skin.write() {
-                                    Ok(guard) => guard,
-                                    Err(poisoned) => poisoned.into_inner(),
-                                };
-                                let branding = TerminalBranding::from_skin(guard.clone());
-                                if arg.is_empty() || arg.eq_ignore_ascii_case("current") {
+                                LocalCommand::Help => {
+                                    print_help(&current_skin);
+                                    continue;
+                                }
+                                LocalCommand::Debug => {
+                                    let current = debug_mode.load(Ordering::Relaxed);
+                                    debug_mode.store(!current, Ordering::Relaxed);
+                                    let branding =
+                                        TerminalBranding::from_skin(current_skin.clone());
                                     println!(
                                         "{}",
-                                        branding.muted(format!("Current skin: {}", guard.name))
+                                        branding.muted(if current {
+                                            "diagnostic detail off"
+                                        } else {
+                                            "diagnostic detail on"
+                                        })
                                     );
-                                    println!(
-                                        "{}",
-                                        branding.muted(format!(
-                                            "Available skins: {}",
-                                            CliSkin::available_names().join(", ")
-                                        ))
-                                    );
-                                } else if arg.eq_ignore_ascii_case("list") {
-                                    println!(
-                                        "{}",
-                                        branding.muted(format!(
-                                            "Available skins: {}",
-                                            CliSkin::available_names().join(", ")
-                                        ))
-                                    );
-                                } else {
-                                    let requested = if arg.eq_ignore_ascii_case("reset") {
-                                        default_skin_name.as_str()
-                                    } else {
-                                        &arg
+                                    continue;
+                                }
+                                LocalCommand::Skin => {
+                                    let mut guard = match skin.write() {
+                                        Ok(guard) => guard,
+                                        Err(poisoned) => poisoned.into_inner(),
                                     };
-                                    *guard = CliSkin::load(requested);
                                     let branding = TerminalBranding::from_skin(guard.clone());
+                                    if arg.is_empty() || arg.eq_ignore_ascii_case("current") {
+                                        println!(
+                                            "{}",
+                                            branding.muted(format!("Current skin: {}", guard.name))
+                                        );
+                                        println!(
+                                            "{}",
+                                            branding.muted(format!(
+                                                "Available skins: {}",
+                                                CliSkin::available_names().join(", ")
+                                            ))
+                                        );
+                                    } else if arg.eq_ignore_ascii_case("list") {
+                                        println!(
+                                            "{}",
+                                            branding.muted(format!(
+                                                "Available skins: {}",
+                                                CliSkin::available_names().join(", ")
+                                            ))
+                                        );
+                                    } else {
+                                        let requested = if arg.eq_ignore_ascii_case("reset") {
+                                            default_skin_name.as_str()
+                                        } else {
+                                            &arg
+                                        };
+                                        *guard = CliSkin::load(requested);
+                                        let branding = TerminalBranding::from_skin(guard.clone());
+                                        println!(
+                                            "{}",
+                                            branding.muted(format!(
+                                                "Skin switched to '{}' (prompt: {})",
+                                                guard.name,
+                                                guard.prompt_symbol()
+                                            ))
+                                        );
+                                    }
+                                    continue;
+                                }
+                                LocalCommand::Status => {
+                                    let message = tool_registry.as_ref().map_or_else(
+                                        || "Runtime capability snapshot unavailable".to_string(),
+                                        |registry| {
+                                            let snapshot = registry.registry_snapshot();
+                                            format!(
+                                                "Runtime capabilities: revision {} | {} | {} registered tools",
+                                                snapshot.revision,
+                                                if snapshot.sealed { "sealed" } else { "preparing" },
+                                                snapshot.identities.len()
+                                            )
+                                        },
+                                    );
                                     println!(
                                         "{}",
-                                        branding.muted(format!(
-                                            "Skin switched to '{}' (prompt: {})",
-                                            guard.name,
-                                            guard.prompt_symbol()
-                                        ))
+                                        TerminalBranding::from_skin(current_skin.clone())
+                                            .muted(message)
                                     );
+                                    continue;
                                 }
-                                continue;
-                            }
+                                LocalCommand::Tools => {
+                                    let message = tool_registry.as_ref().map_or_else(
+                                        || "Runtime capability snapshot unavailable".to_string(),
+                                        |registry| {
+                                            render_tools_snapshot(
+                                                &registry.registry_snapshot(),
+                                                &arg,
+                                            )
+                                        },
+                                    );
+                                    println!("{message}");
+                                    continue;
+                                }
+                                LocalCommand::ClearScreen => {
+                                    print!("\x1b[2J\x1b[H");
+                                    let _ = io::stdout().flush();
+                                    continue;
+                                }
+                                LocalCommand::ClearConversation
+                                | LocalCommand::NewConversation
+                                | LocalCommand::Interrupt => {
+                                    let forwarded = match command {
+                                        LocalCommand::ClearConversation => "/clear",
+                                        LocalCommand::NewConversation => "/new",
+                                        LocalCommand::Interrupt => "/interrupt",
+                                        _ => unreachable!("matched above"),
+                                    };
+                                    let msg = IncomingMessage::new("repl", "default", forwarded)
+                                        .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
+                                        .with_actor_identity("default", "default");
+                                    if tx.blocking_send(msg).is_err() {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                LocalCommand::Back | LocalCommand::Top | LocalCommand::Bottom => {
+                                    println!(
+                                        "{}",
+                                        TerminalBranding::from_skin(current_skin.clone())
+                                            .warn("Command is available only in the TUI")
+                                    );
+                                    continue;
+                                }
+                            },
                             ReplInputAction::Submit(message) => {
                                 let msg = IncomingMessage::new("repl", "default", &message)
                                     .with_metadata(serde_json::json!({"conversation_kind": "direct", "principal_admin": true}))
@@ -881,7 +969,7 @@ impl Channel for ReplChannel {
                 eprintln!(
                     "  {}",
                     branding.body(format!(
-                        "Store it with `thinclaw secrets set {secret_name}`"
+                        "Store it with `thinclaw config secrets set {secret_name}`"
                     ))
                 );
                 eprintln!();

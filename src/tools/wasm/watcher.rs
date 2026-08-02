@@ -13,7 +13,13 @@ pub type ToolWatcher = thinclaw_tools::wasm::ToolWatcher<ToolRegistry>;
 
 #[async_trait]
 impl thinclaw_tools::wasm::RegistryUnregister for ToolRegistry {
-    async fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        ToolRegistry::unregister(self, name).await
+    async fn unregister_wasm(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        ToolRegistry::unregister_owned(
+            self,
+            name,
+            crate::tools::ToolOrigin::Wasm,
+            &format!("wasm/{name}"),
+        )
+        .await
     }
 }

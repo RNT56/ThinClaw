@@ -13,12 +13,25 @@
 //!   `extensions`, `infrastructure`, `llm`, `persistence`, `presentation`,
 //!   `sandbox`, `summary`, `tui_shell`) and shared `helpers`/`contracts`.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use secrecy::SecretString;
 
 use crate::secrets::SecretsCrypto;
 use crate::settings::{OnboardingFollowup, Settings};
+use crate::setup::channels::SetupSecretDraft;
+
+pub(super) const SETUP_MASTER_KEY_SLOT: &str = "__setup_master_key_hex";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PendingSetupAction {
+    InstallTool { name: String },
+    InstallChannel { name: String },
+    BuildWorkerImage { image: String },
+}
 
 #[allow(unused_imports)]
 pub use self::contracts::{
@@ -67,8 +80,10 @@ pub struct SetupConfig {
     pub guide_topic: Option<GuideTopic>,
     /// Optional profile supplied by the CLI.
     pub profile: Option<OnboardingProfile>,
-    /// When true, save settings and return without continuing into runtime.
-    pub pause_after_completion: bool,
+    /// Quick recommended defaults or the complete advanced flow.
+    pub mode: thinclaw_app::SetupMode,
+    /// Invocation source and the exact post-setup continuation.
+    pub invocation: thinclaw_app::SetupInvocation,
 }
 
 impl Default for SetupConfig {
@@ -79,7 +94,8 @@ impl Default for SetupConfig {
             ui_mode: UiMode::Auto,
             guide_topic: None,
             profile: None,
-            pause_after_completion: false,
+            mode: thinclaw_app::SetupMode::Quick,
+            invocation: thinclaw_app::SetupInvocation::default(),
         }
     }
 }
@@ -104,6 +120,12 @@ pub struct SetupWizard {
     secrets_crypto: Option<Arc<SecretsCrypto>>,
     /// Cached API key from provider setup (used by model fetcher without env mutation).
     llm_api_key: Option<SecretString>,
+    /// Controller-owned credentials. Pages can only write this volatile draft.
+    secret_draft: SetupSecretDraft,
+    /// Filesystem/process work selected by pages and executed only after Apply.
+    pending_actions: Vec<PendingSetupAction>,
+    /// Settings baseline used to render the secret-free review diff.
+    baseline_settings: Settings,
     /// Selected onboarding profile for the current run.
     selected_profile: OnboardingProfile,
     /// Shared step/phase plan for the current onboarding run.
@@ -116,8 +138,6 @@ pub struct SetupWizard {
     verified_channels: BTreeMap<String, bool>,
     /// Quick-setup primary channel selection for notification defaults.
     quick_primary_channel: Option<String>,
-    /// Generated env-backed secrets master key when no secure store is available.
-    generated_env_master_key: Option<String>,
     /// Actual prompt/runtime mode chosen for this onboarding run.
     resolved_ui_mode: UiMode,
 }
@@ -129,14 +149,13 @@ struct WizardCheckpoint {
     db_pool: Option<deadpool_postgres::Pool>,
     #[cfg(feature = "libsql")]
     db_backend: Option<crate::db::libsql::LibSqlBackend>,
-    secrets_crypto: Option<Arc<SecretsCrypto>>,
-    llm_api_key: Option<SecretString>,
+    secret_slots: BTreeSet<String>,
+    pending_actions: Vec<PendingSetupAction>,
     selected_profile: OnboardingProfile,
     step_statuses: BTreeMap<WizardStepId, StepStatus>,
     followups: Vec<FollowupDraft>,
     verified_channels: BTreeMap<String, bool>,
     quick_primary_channel: Option<String>,
-    generated_env_master_key: Option<String>,
 }
 
 impl SetupWizard {
@@ -151,13 +170,15 @@ impl SetupWizard {
             db_backend: None,
             secrets_crypto: None,
             llm_api_key: None,
+            secret_draft: SetupSecretDraft::new(),
+            pending_actions: Vec::new(),
+            baseline_settings: Settings::default(),
             selected_profile: OnboardingProfile::default(),
             plan: None,
             step_statuses: BTreeMap::new(),
             followups: Vec::new(),
             verified_channels: BTreeMap::new(),
             quick_primary_channel: None,
-            generated_env_master_key: None,
             resolved_ui_mode: UiMode::Cli,
         }
     }
@@ -174,13 +195,15 @@ impl SetupWizard {
             db_backend: None,
             secrets_crypto: None,
             llm_api_key: None,
+            secret_draft: SetupSecretDraft::new(),
+            pending_actions: Vec::new(),
+            baseline_settings: Settings::default(),
             selected_profile,
             plan: None,
             step_statuses: BTreeMap::new(),
             followups: Vec::new(),
             verified_channels: BTreeMap::new(),
             quick_primary_channel: None,
-            generated_env_master_key: None,
             resolved_ui_mode: UiMode::Cli,
         }
     }
@@ -207,14 +230,13 @@ impl SetupWizard {
             db_pool: self.db_pool.clone(),
             #[cfg(feature = "libsql")]
             db_backend: self.db_backend.clone(),
-            secrets_crypto: self.secrets_crypto.clone(),
-            llm_api_key: self.llm_api_key.clone(),
+            secret_slots: self.secret_draft.slot_names(),
+            pending_actions: self.pending_actions.clone(),
             selected_profile: self.selected_profile,
             step_statuses: self.step_statuses.clone(),
             followups: self.followups.clone(),
             verified_channels: self.verified_channels.clone(),
             quick_primary_channel: self.quick_primary_channel.clone(),
-            generated_env_master_key: self.generated_env_master_key.clone(),
         }
     }
 
@@ -228,14 +250,21 @@ impl SetupWizard {
         {
             self.db_backend = checkpoint.db_backend;
         }
-        self.secrets_crypto = checkpoint.secrets_crypto;
-        self.llm_api_key = checkpoint.llm_api_key;
+        self.secrets_crypto = None;
+        self.llm_api_key = None;
+        self.secret_draft.retain_slots(&checkpoint.secret_slots);
+        self.pending_actions = checkpoint.pending_actions;
         self.selected_profile = checkpoint.selected_profile;
         self.step_statuses = checkpoint.step_statuses;
         self.followups = checkpoint.followups;
         self.verified_channels = checkpoint.verified_channels;
         self.quick_primary_channel = checkpoint.quick_primary_channel;
-        self.generated_env_master_key = checkpoint.generated_env_master_key;
+    }
+
+    pub(super) fn queue_action(&mut self, action: PendingSetupAction) {
+        if !self.pending_actions.contains(&action) {
+            self.pending_actions.push(action);
+        }
     }
 }
 
@@ -243,7 +272,6 @@ impl SetupWizard {
 mod flow;
 mod profile;
 mod readiness;
-mod reconnect;
 mod verification;
 
 // Step implementations are split into sub-modules by concern.
@@ -259,6 +287,7 @@ mod persistence;
 mod presentation;
 mod sandbox;
 mod summary;
+mod transaction;
 mod tui_shell;
 
 #[cfg(test)]
@@ -289,7 +318,8 @@ mod tests {
             ui_mode: UiMode::Cli,
             guide_topic: None,
             profile: None,
-            pause_after_completion: false,
+            mode: thinclaw_app::SetupMode::Quick,
+            invocation: thinclaw_app::SetupInvocation::default(),
         };
         let wizard = SetupWizard::with_config(config);
         assert!(wizard.config.skip_auth);
@@ -303,11 +333,11 @@ mod tests {
     }
 
     #[test]
-    fn test_quick_setup_plan_uses_documented_twelve_steps() {
+    fn test_quick_setup_plan_uses_documented_nineteen_steps() {
         let wizard = SetupWizard::new();
         let plan = wizard.build_plan();
 
-        assert_eq!(plan.steps.len(), 12);
+        assert_eq!(plan.steps.len(), 19);
         assert!(
             !plan
                 .steps
@@ -596,14 +626,8 @@ mod tests {
             Some("127.0.0.1")
         );
         assert_eq!(wizard.settings.channels.gateway_port, Some(3000));
-        assert!(
-            wizard
-                .settings
-                .channels
-                .gateway_auth_token
-                .as_deref()
-                .is_some_and(|token| token.len() >= 32)
-        );
+        assert!(wizard.settings.channels.gateway_auth_token.is_none());
+        assert!(wizard.secret_draft.contains("gateway_auth_token"));
         assert_eq!(wizard.settings.database_backend.as_deref(), Some("libsql"));
     }
 
@@ -658,8 +682,34 @@ mod tests {
         assert!(content.contains("GATEWAY_ENABLED=\"true\""));
         assert!(content.contains("GATEWAY_HOST=\"127.0.0.1\""));
         assert!(content.contains("GATEWAY_PORT=\"3000\""));
-        assert!(content.contains("GATEWAY_AUTH_TOKEN=\""));
+        assert!(!content.contains("GATEWAY_AUTH_TOKEN"));
         assert!(content.contains("CLI_ENABLED=\"false\""));
+    }
+
+    #[tokio::test]
+    async fn setup_plan_is_sealed_and_never_serializes_draft_values() {
+        let temp = tempdir().expect("temp thinclaw home");
+        let _home_guard =
+            EnvGuard::set("THINCLAW_HOME", temp.path().to_string_lossy().into_owned());
+        let sentinel = "setup-secret-sentinel-never-render";
+        let mut wizard = SetupWizard::new();
+        wizard.settings.database_backend = Some("libsql".to_string());
+        wizard.settings.libsql_path = Some(
+            temp.path()
+                .join("planned.db")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        wizard.secret_draft.insert(
+            "llm_openai_api_key",
+            SecretString::from(sentinel.to_string()),
+        );
+
+        let plan = wizard.build_setup_plan().await.expect("sealed setup plan");
+        assert!(plan.digest_matches(&plan.digest));
+        let encoded = serde_json::to_string(&plan).expect("serialize setup plan");
+        assert!(!encoded.contains(sentinel));
+        assert!(encoded.contains("llm_openai_api_key"));
     }
 
     #[test]

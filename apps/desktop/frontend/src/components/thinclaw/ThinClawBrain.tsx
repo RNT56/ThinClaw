@@ -23,6 +23,8 @@ import {
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
+import { Notice, Tabs, type TabDefinition } from '../ui';
+import type { AgentCapabilityState } from './AgentCockpitProvider';
 
 // ───────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -819,8 +821,31 @@ function LocalFilesTab() {
 
 type Tab = 'db' | 'local';
 
-export function ThinClawBrain() {
+export function ThinClawBrain({ localFilesCapability }: { localFilesCapability?: AgentCapabilityState }) {
+    const allowLocalFiles = !localFilesCapability || localFilesCapability.state === 'available';
     const [activeTab, setActiveTab] = useState<Tab>('db');
+    const selectedTab = !allowLocalFiles && activeTab === 'local' ? 'db' : activeTab;
+    const tabs: TabDefinition<Tab>[] = [
+        {
+            id: 'db',
+            label: 'Agent Memory',
+            icon: <Database className="size-3.5" aria-hidden="true" />,
+            title: 'DB-backed workspace files (SOUL, MEMORY, and related context)',
+        },
+        {
+            id: 'local',
+            label: 'Local Files',
+            icon: <HardDrive className="size-3.5" aria-hidden="true" />,
+            title: allowLocalFiles
+                ? 'Real files in the agent_workspace directory'
+                : [localFilesCapability?.reason, localFilesCapability?.remediation].filter(Boolean).join(' '),
+            disabled: !allowLocalFiles,
+        },
+    ];
+
+    useEffect(() => {
+        if (!allowLocalFiles && activeTab === 'local') setActiveTab('db');
+    }, [activeTab, allowLocalFiles]);
 
     return (
         <motion.div
@@ -828,39 +853,38 @@ export function ThinClawBrain() {
             animate={{ opacity: 1, y: 0 }}
             className="flex-1 flex flex-col overflow-hidden h-[calc(100vh-100px)]"
         >
+            {!allowLocalFiles && localFilesCapability && (
+                <Notice
+                    tone={localFilesCapability.state === 'stale' ? 'warning' : 'info'}
+                    title={localFilesCapability.state === 'loading' ? 'Checking local host files' : 'Local host files are unavailable'}
+                    className="mx-4 mt-4 shrink-0"
+                >
+                    {[localFilesCapability.reason, localFilesCapability.remediation].filter(Boolean).join(' ')}
+                </Notice>
+            )}
             {/* Tab bar */}
-            <div className="flex items-center border-b border-border/30 bg-muted/10 px-4 gap-1 shrink-0">
-                {([
-                    { id: 'db' as const, label: 'Agent Memory', icon: Database, hint: 'DB-backed workspace files (SOUL, MEMORY, etc.)' },
-                    { id: 'local' as const, label: 'Local Files', icon: HardDrive, hint: 'Real files in agent_workspace directory' },
-                ] as const).map(tab => (
-                    <button key={tab.id} onClick={() => setActiveTab(tab.id)} title={tab.hint}
-                        className={cn(
-                            "flex items-center gap-2 px-4 py-3 text-[11px] font-bold uppercase tracking-wider border-b-2 transition-all",
-                            activeTab === tab.id
-                                ? "border-primary text-primary"
-                                : "border-transparent text-muted-foreground hover:text-foreground hover:border-border/40"
-                        )}>
-                        <tab.icon className="w-3.5 h-3.5" />
-                        {tab.label}
-                    </button>
-                ))}
-            </div>
+            <Tabs
+                ariaLabel="Agent workspace sections"
+                tabs={tabs}
+                value={selectedTab}
+                onValueChange={(tab) => setActiveTab(tab)}
+                className="w-full max-w-none shrink-0 rounded-none border-x-0 border-t-0 border-b border-border/30 bg-muted/10 px-4 py-1"
+            />
 
             {/* Tab content */}
-            <div className="flex-1 flex overflow-hidden">
+            <section id={`${selectedTab}-panel`} role="tabpanel" aria-labelledby={`${selectedTab}-tab`} className="flex-1 flex overflow-hidden">
                 <AnimatePresence mode="wait">
-                    {activeTab === 'db' ? (
+                    {selectedTab === 'db' ? (
                         <motion.div key="db" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex-1 flex overflow-hidden">
                             <DbFilesTab />
                         </motion.div>
-                    ) : (
+                    ) : allowLocalFiles ? (
                         <motion.div key="local" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex-1 flex overflow-hidden">
                             <LocalFilesTab />
                         </motion.div>
-                    )}
+                    ) : null}
                 </AnimatePresence>
-            </div>
+            </section>
         </motion.div>
     );
 }

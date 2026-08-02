@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::process::Command;
 
 use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};
 use thinclaw_types::JobContext;
@@ -88,7 +87,10 @@ async fn capture_screen(
             .map_err(|e| ToolError::ExecutionFailed(format!("Create screenshot dir: {e}")))?;
     }
 
-    let mut cmd = Command::new("screencapture");
+    let mut cmd = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-tools.src.builtin.screen_capture.tokio.101",
+        "screencapture"
+    );
 
     if interactive {
         cmd.arg("-i"); // Interactive selection
@@ -220,7 +222,10 @@ async fn capture_screen(
             attempted.push("capture helper deadline elapsed".to_string());
             break;
         }
-        let mut command = Command::new(plan.program);
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-tools.src.builtin.screen_capture.tokio.102",
+            plan.program
+        );
         command.args(&plan.args);
         match bounded_command_output(
             &mut command,
@@ -277,7 +282,10 @@ async fn capture_screen(
             .map_err(|e| ToolError::ExecutionFailed(format!("Create screenshot dir: {e}")))?;
     }
 
-    let mut command = Command::new("powershell");
+    let mut command = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-tools.src.builtin.screen_capture.tokio.103",
+        "powershell"
+    );
     command
         .args(["-NoProfile", "-NonInteractive", "-Command"])
         .arg(WINDOWS_SCREENSHOT_SCRIPT)

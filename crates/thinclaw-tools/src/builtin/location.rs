@@ -11,9 +11,6 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Serialize;
-#[cfg(target_os = "macos")]
-use tokio::process::Command;
-
 use thinclaw_tools_core::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use thinclaw_tools_core::{OutboundUrlGuardOptions, validate_outbound_url_pinned_async};
@@ -106,7 +103,10 @@ if let loc = delegate.location {
 }
 "#;
 
-    let mut command = Command::new("swift");
+    let mut command = thinclaw_platform::tokio_process_command!(
+        "crates.thinclaw-tools.src.builtin.location.tokio.101",
+        "swift"
+    );
     command.arg("-e").arg(swift_code);
     let output = bounded_command_output(
         &mut command,

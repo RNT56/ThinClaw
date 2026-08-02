@@ -10355,7 +10355,7 @@ dependencies = [
 
 [[package]]
 name = "thinclaw"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -10523,7 +10523,9 @@ name = "thinclaw-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "serde",
+ "serde_json",
  "thinclaw-config",
  "thinclaw-platform",
  "tokio",
@@ -10671,7 +10673,7 @@ dependencies = [
 
 [[package]]
 name = "thinclaw-desktop"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -10730,6 +10732,7 @@ dependencies = [
  "thinclaw-secrets",
  "thinclaw-tools",
  "thinclaw-tools-core",
+ "thinclaw-types",
  "thiserror 2.0.18",
  "tokenizers",
  "tokio",
@@ -10774,6 +10777,7 @@ dependencies = [
  "blake3",
  "chrono",
  "regex",
+ "secrecy",
  "serde",
  "serde_json",
  "thinclaw-history",

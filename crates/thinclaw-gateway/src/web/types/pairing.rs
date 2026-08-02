@@ -12,7 +12,7 @@ pub struct PairingListResponse {
 
 #[derive(Debug, Serialize)]
 pub struct PairingRequestInfo {
-    pub code: String,
+    pub request_id: String,
     pub sender_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
@@ -26,5 +26,5 @@ pub struct PairingApprovedInfo {
 
 #[derive(Debug, Deserialize)]
 pub struct PairingApproveRequest {
-    pub code: String,
+    pub request_id: String,
 }

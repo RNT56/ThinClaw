@@ -162,11 +162,14 @@ impl DesktopAutonomyManager {
         }
         if let Some(managed_source) = validated_managed_source(&self.state_root, false).await? {
             run_cmd(
-                Command::new("git")
-                    .arg("-C")
-                    .arg(&managed_source)
-                    .arg("worktree")
-                    .arg("prune"),
+                thinclaw_platform::tokio_process_command!(
+                    "src.desktop_autonomy.rollout_helpers.tokio.101",
+                    "git"
+                )
+                .arg("-C")
+                .arg(&managed_source)
+                .arg("worktree")
+                .arg("prune"),
             )
             .await?;
         }
@@ -213,14 +216,17 @@ impl DesktopAutonomyManager {
                     .await?
                     .ok_or_else(|| "managed autonomy source checkout is missing".to_string())?;
                 run_cmd(
-                    Command::new("git")
-                        .arg("-C")
-                        .arg(&managed_source)
-                        .arg("worktree")
-                        .arg("remove")
-                        .arg("--force")
-                        .arg("--")
-                        .arg(&canonical_build),
+                    thinclaw_platform::tokio_process_command!(
+                        "src.desktop_autonomy.rollout_helpers.tokio.102",
+                        "git"
+                    )
+                    .arg("-C")
+                    .arg(&managed_source)
+                    .arg("worktree")
+                    .arg("remove")
+                    .arg("--force")
+                    .arg("--")
+                    .arg(&canonical_build),
                 )
                 .await
                 .map_err(|error| {

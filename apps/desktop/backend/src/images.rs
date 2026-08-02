@@ -272,21 +272,15 @@ pub async fn direct_assets_open_images_folder(
         .map_err(|error| error.to_string())?;
 
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open")
-        .arg(&images_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.images.std.1", "open").arg(&images_dir))
         .map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open")
-        .arg(&images_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.images.std.2", "xdg-open").arg(&images_dir))
         .map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer")
-        .arg(&images_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.images.std.3", "explorer").arg(&images_dir))
         .map_err(|e| e.to_string())?;
 
     Ok(())

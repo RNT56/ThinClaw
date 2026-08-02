@@ -1,7 +1,6 @@
 //! ngrok tunnel via the `ngrok` binary.
 
 use anyhow::{Result, bail};
-use tokio::process::Command;
 
 use crate::tunnel::{
     SharedProcess, SharedUrl, Tunnel, TunnelProcess, drain_tunnel_output, kill_shared,
@@ -42,7 +41,10 @@ impl Tunnel for NgrokTunnel {
         }
         args.extend(["--log", "stdout", "--log-format", "logfmt"].map(String::from));
 
-        let mut command = Command::new(crate::tunnel::resolve_binary("ngrok"));
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "src.tunnel.ngrok.tokio.101",
+            crate::tunnel::resolve_binary("ngrok")
+        );
         command
             .args(&args)
             .env("NGROK_AUTHTOKEN", &self.auth_token)

@@ -232,7 +232,7 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 ### 5c. Channels (breadth) — largest item
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
-| ~~Many channels lack config UI~~ **DONE** | Schema-driven local/remote forms cover the first native set, Apple Mail, BlueBubbles, manifest-backed long-tail WASM adapters, and explicit host-managed lifecycle states. Credential fields are opaque and encrypted-store-only. | `rpc_channel_config.rs`, `ThinClawChannelConfig` panel, channel manifests | **XL** |
+| Channel configuration **NON-SECRET FIELDS WIRED / SECRET BINDING GATED** | Schema-driven local/remote forms cover the first native set, Apple Mail, BlueBubbles, manifest-backed long-tail WASM adapters, and explicit host-managed lifecycle states. Current non-secret values are available; password values are neither returned nor rendered until encrypted channel-secret binding exists. | `rpc_channel_config.rs`, `ThinClawChannelConfig` panel, channel manifests | **XL** |
 | ~~Pairing/web-login parity~~ **DONE** | One accessible pairing surface covers every adapter that actually emits DM pairing codes and explains each real credential path; unused web-login commands that only returned errors were removed | `ThinClawPairing.tsx`, `pairing/catalog.ts` | S |
 
 ### 5d. Identity / memory / personality
@@ -245,8 +245,8 @@ Backlog grouped by parity domain. Sizes: S/M/L/XL. (Issue IDs in
 ### 5e. Repo-projects / fleet / remote (finish partials)
 | Gap | Approach | Key files | Size |
 |---|---|---|---|
-| ~~Repo-projects partial~~ **DONE** | Enroll→plan→merge-gate flow and readiness gates are wired end to end | `ThinClawRepoProjects.tsx`, `rpc_repo_projects.rs`, `src/repo_projects` | L |
-| ~~Fleet partial~~ **DONE** | Saved remote profiles are probed through authenticated gateway status, task assignment routes to the selected agent's gateway, and broadcast targets each local/remote node once with per-node delivery receipts | `thinclaw/fleet.rs`, `rpc_orchestration.rs`, `thinclaw/fleet/FleetCommandCenter.tsx` | L |
+| Repo-projects **QUARANTINED IN DESKTOP** | Backend flow remains wired, but Desktop does not present it as a live project-control surface until end-to-end runtime proof replaces former shell fixtures | `ThinClawRepoProjects.tsx`, `rpc_repo_projects.rs`, `src/repo_projects` | L |
+| Fleet **CORRECTED / BROADCAST-ONLY** | Saved remote profiles are probed through authenticated gateway status and broadcast targets each local/remote node once with per-node delivery receipts. Targeted task assignment/abort remains unavailable until a selected-agent dispatch contract exists. | `thinclaw/fleet.rs`, `thinclaw/fleet/FleetCommandCenter.tsx` | L |
 | ~~Tunnel/Tailscale no UI~~ **DONE** | Desktop mounts the root authenticated gateway on loopback, then local-only typed commands own Tailscale Serve/Funnel lifecycle; the Remote Access panel defaults to private tailnet access, requires per-start public confirmation, and never accepts Tailscale auth keys | `runtime_builder.rs`, `remote_access.rs`, `ThinClawRemoteAccess.tsx`, `src/tunnel/` | M |
 | ~~`subscribe_session` stub~~ **DONE** | Activates local/remote live-event routing with real subscription semantics | `thinclaw/commands/sessions.rs`, `runtime_bridge.rs` | S |
 

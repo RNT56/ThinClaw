@@ -509,7 +509,7 @@ pub(super) async fn revoke_lease_with_runner(
 
     let auth = ExperimentLeaseAuthentication {
         lease_id: lease.id,
-        token: String::new(),
+        token: String::new().into(),
     };
     let message = if let Some(runner) = store
         .get_experiment_runner_profile_for_owner(campaign.runner_profile_id, user_id)
@@ -799,7 +799,11 @@ pub async fn reissue_lease(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let response_lease = launch_outcome.requires_operator_action.then_some(lease);
+    let response_lease = launch_outcome.requires_operator_action.then_some(
+        thinclaw_gateway::web::experiments::ExperimentLeaseReference {
+            lease_id: lease.lease_id,
+        },
+    );
     Ok(ExperimentCampaignActionResponse {
         campaign,
         trial: Some(trial),

@@ -23,7 +23,6 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Serialize;
-use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 
 use crate::context::JobContext;
@@ -95,7 +94,8 @@ async fn run_audio_command(
     timeout: Duration,
 ) -> Result<thinclaw_platform::BoundedProcessOutput, ToolError> {
     let executable = resolve_audio_executable(binary)?;
-    let mut command = Command::new(executable);
+    let mut command =
+        thinclaw_platform::tokio_process_command!("src.talk_mode.tokio.101", executable);
     command.args(args);
     thinclaw_platform::bounded_command_output(&mut command, timeout, 64 * 1024, 256 * 1024)
         .await
@@ -879,9 +879,21 @@ pub async fn capture_and_transcribe(
     let result = async {
         record_audio(&path, duration, 16000, device_name).await?;
 
-        if let Some(whisper_url) = crate::config::helpers::optional_env("WHISPER_HTTP_ENDPOINT")
-            .ok()
-            .flatten()
+        if let Some(endpoint) = crate::media::local_endpoints::managed_local_endpoints()
+            .get(crate::media::local_endpoints::ManagedLocalEndpointKind::SpeechToText)
+        {
+            transcribe_whisper_http(
+                &path,
+                endpoint.endpoint(),
+                Some(endpoint.credential()),
+                endpoint.model(),
+                language,
+            )
+            .await
+        } else if let Some(whisper_url) =
+            crate::config::helpers::optional_env("WHISPER_HTTP_ENDPOINT")
+                .ok()
+                .flatten()
         {
             let token = crate::config::helpers::optional_env("WHISPER_HTTP_TOKEN")
                 .ok()

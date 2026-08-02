@@ -6,7 +6,7 @@
 //! # Authentication
 //!
 //! Requires a Brave Search API key stored in the secrets store:
-//!   `thinclaw tool auth brave-search`
+//!   `thinclaw extensions tools auth brave-search`
 //!
 //! Get a free key (2000 queries/month) at:
 //!   https://brave.com/search/api/
@@ -86,7 +86,7 @@ fn check_api_key() -> Result<(), String> {
     } else {
         Err("Brave Search API key not configured. \
              Get a free key at https://brave.com/search/api/ \
-             then store it with: thinclaw tool auth brave-search"
+             then store it with: thinclaw extensions tools auth brave-search"
             .to_string())
     }
 }

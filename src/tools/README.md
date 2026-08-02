@@ -57,19 +57,19 @@ Typical workflow:
 2. Implement the `wit/tool.wit` interface
 3. Add a `<name>.capabilities.json`
 4. Build the component
-5. Install it with `thinclaw tool install ...`
+5. Install it with `thinclaw extensions tools install ...`
 
 ## MCP Servers
 
 MCP servers are a different path.
 
-- They are not installed with `thinclaw tool install`.
-- They are managed with `thinclaw mcp ...`, especially:
-- `thinclaw mcp server ...` for server lifecycle and auth
-- `thinclaw mcp resource ...` for live resource inspection
-- `thinclaw mcp prompt ...` for prompt browsing and retrieval
-- `thinclaw mcp root ...` for roots grants
-- `thinclaw mcp log ...` for MCP logging level control
+- They are not installed with `thinclaw extensions tools install`.
+- They are managed with `thinclaw extensions mcp ...`, especially:
+- `thinclaw extensions mcp server ...` for server lifecycle and auth
+- `thinclaw extensions mcp resource ...` for live resource inspection
+- `thinclaw extensions mcp prompt ...` for prompt browsing and retrieval
+- `thinclaw extensions mcp root ...` for roots grants
+- `thinclaw extensions mcp log ...` for MCP logging level control
 - They are operator-trusted external processes or remote services, not sandboxed guest code.
 
 ThinClaw's MCP client now supports live approval flows for server-initiated `sampling/createMessage` and `elicitation/create` requests across the CLI/runtime/WebUI surfaces, and long-lived clients reload persisted roots grants when answering `roots/list`.
@@ -98,8 +98,8 @@ Two independent layers gate tool use:
 
 ## Auth Guidance
 
-- `thinclaw tool auth <tool>` is the CLI surface for WASM tool authentication.
-- `thinclaw mcp auth <server>` is the CLI surface for MCP authentication.
+- `thinclaw extensions tools auth <tool>` is the CLI surface for WASM tool authentication.
+- `thinclaw extensions mcp server auth <server>` is the CLI surface for MCP authentication.
 - Tool docs should not invent a generic top-level `thinclaw auth ...` command.
 
 ## Documentation Rules

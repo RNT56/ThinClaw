@@ -396,6 +396,7 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_set_setup_completed", RouteMode::LocalOnly),
     ("thinclaw_set_workspace_mode", RouteMode::LocalOnly),
     ("thinclaw_skills_toggle", RouteMode::LocalOnly),
+    ("thinclaw_spawn_session", RouteMode::LocalOnly),
     ("thinclaw_sync_local_llm", RouteMode::LocalOnly),
     ("thinclaw_toggle_auto_start", RouteMode::LocalOnly),
     ("thinclaw_toggle_custom_secret", RouteMode::LocalOnly),
@@ -620,7 +621,6 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_skills_reload_all", RouteMode::LocalAndRemote),
     ("thinclaw_skills_search", RouteMode::LocalAndRemote),
     ("thinclaw_skills_status", RouteMode::LocalAndRemote),
-    ("thinclaw_spawn_session", RouteMode::LocalAndRemote),
     ("thinclaw_start_gateway", RouteMode::LocalAndRemote),
     ("thinclaw_stop_gateway", RouteMode::LocalAndRemote),
     ("thinclaw_subscribe_session", RouteMode::LocalAndRemote),
@@ -915,6 +915,15 @@ mod tests {
             route_mode("thinclaw_job_restart"),
             Some(RouteMode::RemoteOnly),
             "thinclaw_job_restart must be RemoteOnly"
+        );
+    }
+
+    #[test]
+    fn desktop_managed_subagent_spawn_is_local_only() {
+        assert_eq!(
+            route_mode("thinclaw_spawn_session"),
+            Some(RouteMode::LocalOnly),
+            "Desktop-managed child sessions must never be created in the embedded runtime while a remote profile is active"
         );
     }
 

@@ -180,54 +180,6 @@ impl Agent {
             }
         }
 
-        // Manual auth interception: only manual-token flows consume the next
-        // user message as a credential. External OAuth flows remain in the
-        // normal pipeline while the browser callback finishes separately.
-        let pending_auth = {
-            let sess = session.lock().await;
-            sess.threads
-                .get(&thread_id)
-                .and_then(|t| t.pending_auth.clone())
-        };
-
-        if let Some(pending) = pending_auth
-            && pending.auth_mode == crate::agent::session::PendingAuthMode::ManualToken
-            && pending.accepts_identity(&identity)
-        {
-            if submission.consumes_pending_manual_auth() {
-                if let Submission::UserInput { content } = &submission {
-                    let response = self
-                        .process_auth_token(message, &pending, content, session, thread_id)
-                        .await?;
-                    let Some(content) = response else {
-                        return Ok(None);
-                    };
-                    let mut payload =
-                        thinclaw_agent::submission::AgentResponsePayload::text(content);
-                    self.transform_response_payload(message, thread_id, &mut payload)
-                        .await;
-                    return Ok(self.apply_before_outbound_hook(message, payload).await);
-                }
-            } else if submission.cancels_pending_manual_auth() {
-                // Any non-user-input submission (interrupt, undo, etc.) cancels auth mode.
-                let thread_snapshot = {
-                    let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.pending_auth = None;
-                        Some(thread.clone())
-                    } else {
-                        None
-                    }
-                };
-                if let Some(thread_snapshot) = thread_snapshot {
-                    let _ = thread_snapshot;
-                    self.persist_thread_runtime_snapshot(message, &session, thread_id)
-                        .await;
-                }
-                // Fall through to normal handling.
-            }
-        }
-
         tracing::debug!(
             "Received message from {} on {} ({} chars)",
             message.user_id,

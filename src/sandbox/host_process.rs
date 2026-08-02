@@ -4,7 +4,6 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
 
 use super::{Result, SandboxError};
 
@@ -28,11 +27,13 @@ pub(crate) async fn execute_host_command(
 ) -> Result<HostCommandOutput> {
     let start = std::time::Instant::now();
     let mut cmd = if cfg!(target_os = "windows") {
-        let mut command_process = Command::new("cmd");
+        let mut command_process =
+            thinclaw_platform::tokio_process_command!("src.sandbox.host_process.tokio.101", "cmd");
         command_process.args(["/C", command]);
         command_process
     } else {
-        let mut shell = Command::new("sh");
+        let mut shell =
+            thinclaw_platform::tokio_process_command!("src.sandbox.host_process.tokio.102", "sh");
         shell.args(["-c", command]);
         shell
     };

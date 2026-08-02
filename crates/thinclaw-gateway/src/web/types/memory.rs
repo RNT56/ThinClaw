@@ -103,9 +103,16 @@ pub struct MemorySearchResponse {
 
 #[derive(Debug, Serialize)]
 pub struct SearchHit {
+    pub document_id: uuid::Uuid,
     pub path: String,
+    pub chunk_id: uuid::Uuid,
     pub content: String,
     pub score: f64,
+    pub rank: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fts_rank: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_rank: Option<u32>,
 }
 
 #[cfg(test)]

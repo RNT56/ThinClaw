@@ -3,6 +3,7 @@
 mod main_helpers;
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use thinclaw::{
@@ -26,21 +27,34 @@ use thinclaw::setup::{SetupConfig, UiMode};
 
 use main_helpers::*;
 
-fn main() -> anyhow::Result<()> {
-    run_async_entrypoint(async_main)
+fn main() -> ExitCode {
+    match run_async_entrypoint(async_main) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            if let Some(cli_error) = error.downcast_ref::<thinclaw::cli::CliError>() {
+                if !cli_error.was_reported() {
+                    eprintln!("error: {cli_error}");
+                }
+                cli_error.exit_class().exit_code()
+            } else {
+                eprintln!("error: {error:#}");
+                thinclaw::cli::ExitClass::Operational.exit_code()
+            }
+        }
+    }
 }
 
 fn runtime_command_intent(command: Option<&Command>) -> RuntimeCommandIntent {
     match command {
-        None | Some(Command::Run) => RuntimeCommandIntent::AgentRuntime,
-        Some(Command::Tui) => RuntimeCommandIntent::TuiRuntime,
-        Some(Command::Onboard { .. }) => RuntimeCommandIntent::Onboarding,
+        None | Some(Command::Run(_) | Command::Ask { .. }) => RuntimeCommandIntent::AgentRuntime,
+        Some(Command::Tui(_)) => RuntimeCommandIntent::TuiRuntime,
+        Some(Command::Onboard { .. } | Command::Setup(_)) => RuntimeCommandIntent::Onboarding,
         #[cfg(feature = "docker-sandbox")]
         Some(Command::Worker { .. })
         | Some(Command::ClaudeBridge { .. })
         | Some(Command::CodexBridge { .. })
         | Some(Command::NetworkRelay { .. }) => RuntimeCommandIntent::WorkerRuntime,
-        #[cfg(all(feature = "repl", target_os = "windows"))]
+        #[cfg(target_os = "windows")]
         Some(Command::WindowsServiceRuntime { .. }) => RuntimeCommandIntent::ServiceRuntime,
         _ => RuntimeCommandIntent::ImmediateCli,
     }
@@ -56,10 +70,15 @@ fn execute_env_bootstrap_plan(plan: RuntimeEnvBootstrapPlan) {
 }
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-fn runtime_entry_mode_from_ui_mode(ui_mode: UiMode) -> RuntimeEntryMode {
-    match ui_mode {
-        UiMode::Tui => RuntimeEntryMode::Tui,
-        UiMode::Cli | UiMode::Auto => RuntimeEntryMode::Cli,
+fn runtime_entry_mode_from_setup_continuation(
+    continuation: &thinclaw_app::SetupContinuation,
+) -> RuntimeEntryMode {
+    match continuation {
+        thinclaw_app::SetupContinuation::Tui => RuntimeEntryMode::Tui,
+        thinclaw_app::SetupContinuation::Run | thinclaw_app::SetupContinuation::Ask(_) => {
+            RuntimeEntryMode::Cli
+        }
+        thinclaw_app::SetupContinuation::Exit => RuntimeEntryMode::Default,
     }
 }
 
@@ -77,20 +96,43 @@ fn setup_config_for_onboard_command(
         guide_topic,
         ui_mode,
         profile,
-        pause_after_completion: false,
+        mode: if guide_topic.is_some() {
+            thinclaw_app::SetupMode::Advanced
+        } else {
+            thinclaw_app::SetupMode::Quick
+        },
+        invocation: thinclaw_app::SetupInvocation {
+            kind: thinclaw_app::SetupInvocationKind::LegacyOnboard,
+            continuation: thinclaw_app::SetupContinuation::Run,
+        },
     }
 }
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-fn setup_config_for_startup_onboarding(runtime_entry_mode: RuntimeEntryMode) -> SetupConfig {
+fn setup_config_for_startup_onboarding(
+    runtime_entry_mode: RuntimeEntryMode,
+    one_shot_message: Option<String>,
+) -> SetupConfig {
     let ui_mode = match runtime_entry_mode {
         RuntimeEntryMode::Tui => UiMode::Tui,
         RuntimeEntryMode::Cli => UiMode::Cli,
         RuntimeEntryMode::Default => UiMode::Auto,
     };
 
+    let continuation = if let Some(text) = one_shot_message {
+        thinclaw_app::SetupContinuation::Ask(thinclaw_app::SetupAskRequest { text })
+    } else if runtime_entry_mode == RuntimeEntryMode::Tui {
+        thinclaw_app::SetupContinuation::Tui
+    } else {
+        thinclaw_app::SetupContinuation::Run
+    };
+
     SetupConfig {
         ui_mode,
+        invocation: thinclaw_app::SetupInvocation {
+            kind: thinclaw_app::SetupInvocationKind::AutomaticFirstRun,
+            continuation,
+        },
         ..SetupConfig::default()
     }
 }
@@ -108,13 +150,14 @@ fn native_lifecycle_channel_descriptors(config: &Config) -> Vec<ChannelDescripto
 
 async fn register_native_lifecycle_channels(
     config: &Config,
+    selection: &thinclaw::cli::ChannelSelectionArg,
     channels: Arc<ChannelManager>,
     channel_names: &mut Vec<String>,
 ) -> Vec<axum::Router> {
     let http: Arc<dyn NativeHttpClient> = Arc::new(ReqwestNativeHttpClient::new());
     let mut webhook_config = NativeLifecycleWebhookConfig::default();
 
-    if config.channels.matrix_enabled {
+    if config.channels.matrix_enabled && selection.allows("matrix") {
         match matrix_native_config_from_env() {
             Ok(Some(matrix_config)) => {
                 let client = Arc::new(MatrixNativeClient::new(matrix_config, Arc::clone(&http)));
@@ -136,7 +179,7 @@ async fn register_native_lifecycle_channels(
         }
     }
 
-    if config.channels.voice_call_enabled {
+    if config.channels.voice_call_enabled && selection.allows("voice-call") {
         if !config.channels.voice_call_available {
             tracing::warn!(
                 "Voice-call native lifecycle is enabled but the binary was built without the voice feature"
@@ -165,7 +208,7 @@ async fn register_native_lifecycle_channels(
         }
     }
 
-    if config.channels.apns_enabled {
+    if config.channels.apns_enabled && selection.allows("apns") {
         match apns_native_config_from_env() {
             Ok(Some(apns_config)) => {
                 if let Some(registration_secret) = env_value("APNS_REGISTRATION_SECRET") {
@@ -207,7 +250,7 @@ async fn register_native_lifecycle_channels(
         }
     }
 
-    if config.channels.browser_push_enabled {
+    if config.channels.browser_push_enabled && selection.allows("browser-push") {
         if !config.channels.browser_push_available {
             tracing::warn!(
                 "Browser-push native lifecycle is enabled but the binary was built without the browser feature"

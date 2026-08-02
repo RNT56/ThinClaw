@@ -93,6 +93,7 @@ pub mod rig_lib;
 pub mod secret_store;
 pub mod setup;
 pub mod sidecar;
+mod sidecar_auth;
 pub mod stt;
 pub mod system;
 pub mod templates;
@@ -107,6 +108,7 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 
+#[cfg(any(debug_assertions, test))]
 pub(crate) fn sanitize_typescript_bindings_source(source: &str) -> String {
     let mut source = source.to_string();
 

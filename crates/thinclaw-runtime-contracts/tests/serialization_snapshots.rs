@@ -3,7 +3,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use thinclaw_runtime_contracts::{
     ApiStyle, AssetKind, AssetNamespace, AssetOrigin, AssetRecord, AssetRef, AssetStatus,
-    AssetVisibility, DirectAttachedDocument, DirectChatMessage, DirectChatPayload,
+    AssetVisibility, DirectAttachedDocument, DirectChatMessage, DirectChatPayload, LocalEndpointId,
     LocalRuntimeEndpoint, LocalRuntimeKind, LocalRuntimeSnapshot, ModelCapabilitySet,
     ModelCategory, ModelDescriptor, ModelPricing, ProviderEndpoint, RuntimeCapability,
     RuntimeExposurePolicy, RuntimeReadiness, SecretAccessMode, SecretConsumer, SecretDescriptor,
@@ -151,8 +151,8 @@ fn runtime_contract_snapshot_is_stable() {
         display_name: "llama.cpp".into(),
         readiness: RuntimeReadiness::Ready,
         endpoint: Some(LocalRuntimeEndpoint {
+            endpoint_id: LocalEndpointId("llamacpp-chat-8080".into()),
             base_url: "http://127.0.0.1:8080/v1".into(),
-            api_key: Some("token".into()),
             model_id: Some("qwen2.5.gguf".into()),
             context_size: Some(32_768),
             model_family: Some("qwen".into()),
@@ -174,8 +174,8 @@ fn runtime_contract_snapshot_is_stable() {
             "displayName": "llama.cpp",
             "readiness": "ready",
             "endpoint": {
+                "endpointId": "llamacpp-chat-8080",
                 "baseUrl": "http://127.0.0.1:8080/v1",
-                "apiKey": "token",
                 "modelId": "qwen2.5.gguf",
                 "contextSize": 32768,
                 "modelFamily": "qwen"
@@ -187,13 +187,13 @@ fn runtime_contract_snapshot_is_stable() {
         })
     );
 
-    let redacted = LocalRuntimeSnapshot {
+    let public = LocalRuntimeSnapshot {
         kind: LocalRuntimeKind::LlamaCpp,
         display_name: "llama.cpp".into(),
         readiness: RuntimeReadiness::Ready,
         endpoint: Some(LocalRuntimeEndpoint {
+            endpoint_id: LocalEndpointId("llamacpp-chat-8080".into()),
             base_url: "http://127.0.0.1:8080/v1".into(),
-            api_key: Some("token".into()),
             model_id: Some("qwen2.5.gguf".into()),
             context_size: Some(32_768),
             model_family: Some("qwen".into()),
@@ -205,11 +205,9 @@ fn runtime_contract_snapshot_is_stable() {
     }
     .redacted_for_public_clients();
 
-    assert_eq!(
-        redacted.endpoint.and_then(|endpoint| endpoint.api_key),
-        None,
-        "public runtime snapshots must not expose local runtime API tokens"
-    );
+    let encoded = serde_json::to_string(&public).unwrap();
+    assert!(!encoded.contains("apiKey"));
+    assert!(!encoded.contains("token"));
 }
 
 #[test]

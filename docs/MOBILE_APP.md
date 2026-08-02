@@ -97,7 +97,7 @@ Design summary — full protocol and rationale in
 - Registry: `crates/thinclaw-gateway/src/web/devices/` with fs4-locked JSON
   persistence under `~/.thinclaw/`, managed via `GET /api/devices`,
   `/{id}/rename|revoke|rotate`, `GET /api/devices/me`, the web UI devices
-  card, and `thinclaw devices` CLI.
+  card, and `thinclaw access devices` CLI.
 - **Companion devices (backend milestone M4).** An already-paired device can
   mint a reduced-scope *companion* (the watch) via
   `POST /api/devices/me/companions` (`devices:self` scope; the current device

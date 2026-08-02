@@ -28,7 +28,7 @@ import { formatDate, formatDuration, projectCodingBackend, readinessIsReady, set
 export function ThinClawRepoProjects() {
     const {
         projects, selectedProjectId, setSelectedProjectId, events, mergeGates,
-        isShellMode, unavailableReason, isLoading, lastLiveRefreshAt, createInput,
+        isSetupRequired, unavailableReason, isLoading, lastLiveRefreshAt, createInput,
         setCreateInput, enqueueInput, setEnqueueInput, selectedProject, loadProjects,
         stats, pendingGate, cancellableRun, readinessItems, readinessScore, runCommand,
         createProject, enqueueWork, approveGate, actionDisabled, backlog, activeWorkers,
@@ -53,7 +53,7 @@ export function ThinClawRepoProjects() {
                             Live {formatDate(lastLiveRefreshAt)}
                         </span>
                     )}
-                    <StateBadge state={isShellMode ? 'setup_required' : 'ready'} label={isShellMode ? 'shell' : 'live'} />
+                    <StateBadge state={isSetupRequired ? 'setup_required' : 'ready'} label={isSetupRequired ? 'setup required' : 'live'} />
                     <button
                         onClick={loadProjects}
                         className="rounded-lg border border-white/5 bg-white/3 p-2 text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground"
@@ -64,13 +64,13 @@ export function ThinClawRepoProjects() {
                 </div>
             </div>
 
-            {(isShellMode || unavailableReason) && (
+            {(isSetupRequired || unavailableReason) && (
                 <div className="flex items-start gap-3 rounded-lg border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-200">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     <span>
                         {unavailableReason
                             ? `Repo project commands are unavailable: ${unavailableReason}`
-                            : 'Showing repo projects shell data.'}
+                            : 'No live repository projects are enrolled yet. Create a project or connect a repository to begin.'}
                     </span>
                 </div>
             )}
@@ -90,10 +90,14 @@ export function ThinClawRepoProjects() {
                     <div className="rounded-lg border border-border/40 bg-card/30 overflow-hidden">
                         <div className="flex items-center justify-between border-b border-border/40 px-4 py-3">
                             <p className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Projects</p>
-                            <StateBadge state={isShellMode ? 'setup_required' : 'ready'} label={isShellMode ? 'shell' : 'live'} />
+                            <StateBadge state={isSetupRequired ? 'setup_required' : 'ready'} label={isSetupRequired ? 'setup required' : 'live'} />
                         </div>
                         <div className="max-h-[560px] overflow-y-auto">
-                            {projects.map((project) => (
+                            {projects.length === 0 ? (
+                                <div className="p-6 text-center text-xs text-muted-foreground">
+                                    No live projects are available yet.
+                                </div>
+                            ) : projects.map((project) => (
                                 <button
                                     key={project.id}
                                     onClick={() => setSelectedProjectId(project.id)}

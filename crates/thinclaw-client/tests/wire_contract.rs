@@ -31,25 +31,35 @@ fn client_parses_response_event() {
 
 #[test]
 fn client_parses_tool_events() {
+    let invocation_id = thinclaw_types::ToolInvocationId::from_provider("wire-contract");
     assert_eq!(
         roundtrip(ServerEvent::ToolStarted {
+            invocation_id: invocation_id.clone(),
             name: "shell".into(),
             thread_id: Some("t-2".into()),
         }),
         ClientEvent::ToolStarted {
+            invocation_id: invocation_id.to_string(),
             name: "shell".into(),
             thread_id: Some("t-2".into()),
         }
     );
+    let invocation_id = thinclaw_types::ToolInvocationId::from_provider("wire-contract");
     assert_eq!(
         roundtrip(ServerEvent::ToolCompleted {
+            invocation_id: invocation_id.clone(),
             name: "shell".into(),
             success: true,
+            result_preview: Some("done".into()),
+            duration_ms: Some(42),
             thread_id: Some("t-2".into()),
         }),
         ClientEvent::ToolCompleted {
+            invocation_id: invocation_id.to_string(),
             name: "shell".into(),
             success: true,
+            result_preview: Some("done".into()),
+            duration_ms: Some(42),
             thread_id: Some("t-2".into()),
         }
     );

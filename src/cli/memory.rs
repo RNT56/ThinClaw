@@ -2,13 +2,14 @@
 //!
 //! Exposes the workspace system for direct CLI use without starting the agent.
 
-use std::io::Read;
+use std::io::{IsTerminal, Read, Write};
 use std::sync::Arc;
 
 use clap::Subcommand;
 
 use crate::terminal_branding::TerminalBranding;
 use crate::workspace::{EmbeddingProvider, SearchConfig, Workspace};
+use thinclaw_tools::builtin::memory::{MemoryDeleteAction, resolve_memory_delete_action};
 
 /// Run a memory command using the Database trait (works with any backend).
 pub async fn run_memory_command_with_db(
@@ -30,6 +31,9 @@ pub async fn run_memory_command_with_db(
             append,
         } => write(&workspace, &path, content, append).await,
         MemoryCommand::Tree { path, depth } => tree(&workspace, &path, depth).await,
+        MemoryCommand::Delete { path, dry_run, yes } => {
+            delete(&workspace, &path, dry_run, yes).await
+        }
         MemoryCommand::Status => status(&workspace).await,
     }
 }
@@ -78,6 +82,20 @@ pub enum MemoryCommand {
 
     /// Show workspace status (document count, index health)
     Status,
+
+    /// Delete a workspace document using the shared memory safety policy
+    Delete {
+        /// Exact workspace path to delete
+        path: String,
+
+        /// Resolve and report the operation without changing data
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Confirm destructive deletion noninteractively
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// Run a memory command (PostgreSQL backend).
@@ -101,8 +119,70 @@ pub async fn run_memory_command(
             append,
         } => write(&workspace, &path, content, append).await,
         MemoryCommand::Tree { path, depth } => tree(&workspace, &path, depth).await,
+        MemoryCommand::Delete { path, dry_run, yes } => {
+            delete(&workspace, &path, dry_run, yes).await
+        }
         MemoryCommand::Status => status(&workspace).await,
     }
+}
+
+async fn delete(workspace: &Workspace, path: &str, dry_run: bool, yes: bool) -> anyhow::Result<()> {
+    let action = match resolve_memory_delete_action(path) {
+        Ok(action) => action,
+        Err(error) => anyhow::bail!(error.to_string()),
+    };
+    let resolved = match action {
+        MemoryDeleteAction::Delete { normalized_path } => normalized_path,
+        MemoryDeleteAction::FinalizeBootstrap => crate::workspace::paths::BOOTSTRAP,
+    };
+
+    if !workspace.exists(resolved).await? {
+        anyhow::bail!("Memory document not found: {resolved}");
+    }
+
+    if dry_run {
+        println!("Would delete memory document: {resolved}");
+        return Ok(());
+    }
+    require_delete_confirmation(resolved, yes)?;
+
+    match action {
+        MemoryDeleteAction::Delete { .. } => {
+            workspace.delete(resolved).await?;
+        }
+        MemoryDeleteAction::FinalizeBootstrap => {
+            // The sentinel preserves the shared memory_delete bootstrap-completion
+            // contract: startup must not seed BOOTSTRAP.md again after completion.
+            workspace
+                .write(resolved, "<!-- bootstrap completed -->")
+                .await?;
+            if workspace.user_id() != "default" {
+                workspace
+                    .scoped_clone("default", workspace.agent_id())
+                    .write(resolved, "<!-- bootstrap completed -->")
+                    .await?;
+            }
+        }
+    }
+    println!("Deleted memory document: {resolved}");
+    Ok(())
+}
+
+fn require_delete_confirmation(path: &str, yes: bool) -> anyhow::Result<()> {
+    if yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("memory deletion requires --yes in noninteractive mode");
+    }
+    eprint!("Permanently delete memory document {path}? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        anyhow::bail!("memory deletion cancelled");
+    }
+    Ok(())
 }
 
 async fn search(workspace: &Workspace, query: &str, limit: usize) -> anyhow::Result<()> {
@@ -132,7 +212,21 @@ async fn search(workspace: &Workspace, query: &str, limit: usize) -> anyhow::Res
 
     for (i, result) in results.iter().enumerate() {
         let score_bar = score_indicator(result.score);
-        println!("{}. [{}] (score: {:.3})", i + 1, score_bar, result.score);
+        println!(
+            "{}. [{}] {} (score: {:.3}, document: {}, chunk: {}, fts-rank: {}, vector-rank: {})",
+            i + 1,
+            score_bar,
+            result.path,
+            result.score,
+            result.document_id,
+            result.chunk_id,
+            result
+                .fts_rank
+                .map_or_else(|| "-".to_string(), |rank| rank.to_string()),
+            result
+                .vector_rank
+                .map_or_else(|| "-".to_string(), |rank| rank.to_string()),
+        );
 
         // Show a content preview (first 200 chars)
         let preview = truncate_content(&result.content, 200);

@@ -22,7 +22,6 @@ export function ThinClawPairing() {
     const [selectedChannel, setSelectedChannel] = useState('telegram');
     const [pairings, setPairings] = useState<PairingItem[]>([]);
     const [loading, setLoading] = useState(false);
-    const [approveCode, setApproveCode] = useState('');
     const [approving, setApproving] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const { status: runtimeStatus } = useThinClawStatusSnapshot(15000);
@@ -51,13 +50,11 @@ export function ThinClawPairing() {
         return () => window.clearInterval(timer);
     }, [fetchPairings]);
 
-    const handleApprove = async () => {
-        if (!approveCode.trim()) return;
+    const handleApprove = async (requestId: string) => {
         setApproving(true);
         try {
-            await thinclawApi.approvePairing(selectedChannel, approveCode.trim());
+            await thinclawApi.approvePairing(selectedChannel, requestId);
             toast.success('Pairing approved');
-            setApproveCode('');
             fetchPairings();
         } catch (err) {
             toast.error(`Failed to approve: ${err}`);
@@ -133,36 +130,6 @@ export function ThinClawPairing() {
                 {' uses '}{selectedChannelInfo.setup}. Pairing starts when an unknown sender messages the configured channel; browser login is not part of this adapter.
             </div>
 
-            {/* Approve Code Input */}
-            <div className="flex gap-2 items-center">
-                <input
-                    aria-label={`Pairing code for ${selectedChannelInfo.label}`}
-                    type="text"
-                    value={approveCode}
-                    onChange={e => setApproveCode(e.target.value.toUpperCase())}
-                    placeholder="Enter pairing code..."
-                    onKeyDown={e => e.key === 'Enter' && handleApprove()}
-                    className="flex-1 px-3 py-2 rounded-lg bg-white/3 text-foreground text-sm font-mono tracking-wider placeholder:text-muted-foreground/40 outline-hidden focus:ring-1 focus:ring-primary/30 transition-all"
-                />
-                <button
-                    onClick={handleApprove}
-                    disabled={!approveCode.trim() || approving}
-                    className={cn(
-                        "flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-all",
-                        approveCode.trim()
-                            ? "bg-primary/15 text-primary hover:bg-primary/25"
-                            : "bg-white/3 text-muted-foreground/30 cursor-default"
-                    )}
-                >
-                    {approving ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                        <UserPlus className="w-3.5 h-3.5" />
-                    )}
-                    Approve
-                </button>
-            </div>
-
             {/* Content */}
             {loading ? (
                 <div className="flex justify-center py-16">
@@ -196,9 +163,15 @@ export function ThinClawPairing() {
                                                 </p>
                                             )}
                                         </div>
-                                        <span className="text-[9px] font-bold uppercase tracking-wider text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded shrink-0">
-                                            Pending
-                                        </span>
+                                        <button
+                                            type="button"
+                                            disabled={!p.request_id || approving}
+                                            onClick={() => p.request_id && handleApprove(p.request_id)}
+                                            className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-wider text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 px-2 py-1 rounded shrink-0 disabled:opacity-40"
+                                        >
+                                            {approving ? <Loader2 className="w-3 h-3 animate-spin" /> : <UserPlus className="w-3 h-3" />}
+                                            Approve
+                                        </button>
                                     </motion.div>
                                 ))}
                             </AnimatePresence>

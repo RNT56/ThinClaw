@@ -47,7 +47,7 @@ impl DesktopAutonomyManager {
             let home = self.session_launcher_home()?;
             let wrapper_path = self.session_wrapper_path(&home);
             let wrapper = format!(
-                "#!/bin/sh\nset -eu\ncandidate={candidate}\nfallback={fallback}\nif [ -f \"$candidate\" ] && [ -x \"$candidate\" ]; then\n  exec \"$candidate\" run --no-onboard\nfi\nexec \"$fallback\" run --no-onboard\n",
+                "#!/bin/sh\nset -eu\ncandidate={candidate}\nfallback={fallback}\nif [ -f \"$candidate\" ] && [ -x \"$candidate\" ]; then\n  exec \"$candidate\" run --skip-setup-check\nfi\nexec \"$fallback\" run --skip-setup-check\n",
                 candidate = shell_single_quote(
                     self.promoted_session_binary_path()
                         .to_string_lossy()
@@ -168,24 +168,33 @@ impl DesktopAutonomyManager {
         {
             let uid = self.target_session_subject().await?;
             let _ = run_cmd(
-                Command::new("launchctl")
-                    .arg("bootout")
-                    .arg(format!("gui/{uid}"))
-                    .arg(plist_path),
+                thinclaw_platform::tokio_process_command!(
+                    "src.desktop_autonomy.launchers.tokio.101",
+                    "launchctl"
+                )
+                .arg("bootout")
+                .arg(format!("gui/{uid}"))
+                .arg(plist_path),
             )
             .await;
             run_cmd(
-                Command::new("launchctl")
-                    .arg("bootstrap")
-                    .arg(format!("gui/{uid}"))
-                    .arg(plist_path),
+                thinclaw_platform::tokio_process_command!(
+                    "src.desktop_autonomy.launchers.tokio.102",
+                    "launchctl"
+                )
+                .arg("bootstrap")
+                .arg(format!("gui/{uid}"))
+                .arg(plist_path),
             )
             .await?;
             run_cmd(
-                Command::new("launchctl")
-                    .arg("kickstart")
-                    .arg("-k")
-                    .arg(format!("gui/{uid}/{}", self.launch_agent_label())),
+                thinclaw_platform::tokio_process_command!(
+                    "src.desktop_autonomy.launchers.tokio.103",
+                    "launchctl"
+                )
+                .arg("kickstart")
+                .arg("-k")
+                .arg(format!("gui/{uid}/{}", self.launch_agent_label())),
             )
             .await?;
             Ok(())
@@ -227,7 +236,7 @@ impl DesktopAutonomyManager {
                 lines.push(format!("set DESKTOP_AUTONOMY_TARGET_USERNAME={username}"));
             }
             lines.push(format!(
-                "if exist \"{}\" (\r\n  \"{}\" run --no-onboard\r\n) else (\r\n  \"{}\" run --no-onboard\r\n)",
+                "if exist \"{}\" (\r\n  \"{}\" run --skip-setup-check\r\n) else (\r\n  \"{}\" run --skip-setup-check\r\n)",
                 promoted_exe.display(),
                 promoted_exe.display(),
                 exe.display(),
@@ -254,7 +263,10 @@ impl DesktopAutonomyManager {
         {
             let task_name = self.launch_agent_label();
             let launcher_command = format!("\"{}\"", launcher_path.display());
-            let mut command = Command::new("schtasks");
+            let mut command = thinclaw_platform::tokio_process_command!(
+                "src.desktop_autonomy.launchers.tokio.104",
+                "schtasks"
+            );
             command
                 .arg("/Create")
                 .arg("/F")
@@ -264,6 +276,7 @@ impl DesktopAutonomyManager {
                 .arg("ONLOGON")
                 .arg("/TR")
                 .arg(&launcher_command);
+            let mut private_password = None;
 
             if self.config.deployment_mode == crate::settings::DesktopDeploymentMode::DedicatedUser
             {
@@ -278,16 +291,24 @@ impl DesktopAutonomyManager {
                 ))
                 .await
                 {
-                    command.arg("/RP").arg(secret);
+                    command.arg("/RP").arg("*");
+                    private_password = Some(secret);
                 }
             }
 
-            run_cmd(&mut command).await?;
+            if let Some(password) = private_password.as_deref() {
+                run_cmd_with_private_input(&mut command, password.as_bytes()).await?;
+            } else {
+                run_cmd(&mut command).await?;
+            }
             let _ = run_cmd(
-                Command::new("schtasks")
-                    .arg("/Run")
-                    .arg("/TN")
-                    .arg(&task_name),
+                thinclaw_platform::tokio_process_command!(
+                    "src.desktop_autonomy.launchers.tokio.105",
+                    "schtasks"
+                )
+                .arg("/Run")
+                .arg("/TN")
+                .arg(&task_name),
             )
             .await;
             Ok(())
@@ -358,7 +379,7 @@ impl DesktopAutonomyManager {
                 ));
             }
             let wrapper = format!(
-                "#!/bin/sh\nset -eu\nexport HOME={home}\n{env}\ncandidate={candidate}\nfallback={fallback}\nif [ -f \"$candidate\" ] && [ -x \"$candidate\" ]; then\n  exec \"$candidate\" run --no-onboard\nfi\nexec \"$fallback\" run --no-onboard\n",
+                "#!/bin/sh\nset -eu\nexport HOME={home}\n{env}\ncandidate={candidate}\nfallback={fallback}\nif [ -f \"$candidate\" ] && [ -x \"$candidate\" ]; then\n  exec \"$candidate\" run --skip-setup-check\nfi\nexec \"$fallback\" run --skip-setup-check\n",
                 home = shell_single_quote(home.to_string_lossy().as_ref()),
                 env = env_lines.join("\n"),
                 candidate = shell_single_quote(
@@ -386,9 +407,12 @@ impl DesktopAutonomyManager {
                 let launcher = shell_single_quote(launcher_path.to_string_lossy().as_ref());
                 let wrapper = shell_single_quote(wrapper_path.to_string_lossy().as_ref());
                 let _ = run_cmd(
-                    Command::new("sh")
-                        .arg("-lc")
-                        .arg(format!("chown {user}:{user} {launcher} {wrapper}")),
+                    thinclaw_platform::tokio_process_command!(
+                        "src.desktop_autonomy.launchers.tokio.106",
+                        "sh"
+                    )
+                    .arg("-lc")
+                    .arg(format!("chown {user}:{user} {launcher} {wrapper}")),
                 )
                 .await;
             }
@@ -534,11 +558,15 @@ impl DesktopAutonomyManager {
     pub(super) async fn target_session_subject(&self) -> Result<String, String> {
         match self.bridge_backend() {
             DesktopBridgeBackend::MacOsSwift => match self.config.deployment_mode {
-                crate::settings::DesktopDeploymentMode::WholeMachineAdmin => {
-                    run_cmd(Command::new("id").arg("-u"))
-                        .await
-                        .map(|value| value.trim().to_string())
-                }
+                crate::settings::DesktopDeploymentMode::WholeMachineAdmin => run_cmd(
+                    thinclaw_platform::tokio_process_command!(
+                        "src.desktop_autonomy.launchers.tokio.107",
+                        "id"
+                    )
+                    .arg("-u"),
+                )
+                .await
+                .map(|value| value.trim().to_string()),
                 crate::settings::DesktopDeploymentMode::DedicatedUser => {
                     let username = self
                         .config
@@ -546,11 +574,14 @@ impl DesktopAutonomyManager {
                         .as_deref()
                         .ok_or_else(|| "missing target username".to_string())?;
                     let output = run_cmd(
-                        Command::new("dscl")
-                            .arg(".")
-                            .arg("-read")
-                            .arg(format!("/Users/{username}"))
-                            .arg("UniqueID"),
+                        thinclaw_platform::tokio_process_command!(
+                            "src.desktop_autonomy.launchers.tokio.108",
+                            "dscl"
+                        )
+                        .arg(".")
+                        .arg("-read")
+                        .arg(format!("/Users/{username}"))
+                        .arg("UniqueID"),
                     )
                     .await?;
                     output

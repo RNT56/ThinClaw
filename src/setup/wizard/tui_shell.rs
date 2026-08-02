@@ -60,7 +60,7 @@ impl OnboardingTuiShell {
 
     pub(super) fn show_completion(&mut self, wizard: &SetupWizard) -> Result<(), SetupError> {
         self.refresh_skin(wizard);
-        self.active_phase = Some(WizardPhaseId::Finish);
+        self.active_phase = Some(WizardPhaseId::ReviewApply);
         self.active_step_id = Some(WizardStepId::Summary);
         self.current_step = Some((self.plan.total_steps(), self.plan.total_steps()));
 

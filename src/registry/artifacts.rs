@@ -200,14 +200,13 @@ pub fn build_wasm_component_sync(
 }
 
 async fn run_component_build(source_dir: &Path, release: bool) -> Result<(), WasmBuildError> {
-    use tokio::process::Command;
-
     const TOOLCHAIN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
     const BUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
     const PROBE_OUTPUT_LIMIT: usize = 64 * 1024;
     const BUILD_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 
-    let mut check_command = Command::new("cargo");
+    let mut check_command =
+        thinclaw_platform::tokio_process_command!("src.registry.artifacts.tokio.101", "cargo");
     check_command.args(["component", "--version"]);
     let check = thinclaw_platform::bounded_command_output(
         &mut check_command,
@@ -224,7 +223,8 @@ async fn run_component_build(source_dir: &Path, release: bool) -> Result<(), Was
         return Err(WasmBuildError::ToolchainUnavailable);
     }
 
-    let mut command = Command::new("cargo");
+    let mut command =
+        thinclaw_platform::tokio_process_command!("src.registry.artifacts.tokio.102", "cargo");
     command.current_dir(source_dir).args(["component", "build"]);
     if release {
         command.arg("--release");

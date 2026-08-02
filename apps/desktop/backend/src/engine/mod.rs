@@ -391,7 +391,8 @@ pub async fn direct_runtime_snapshot(
 
 use std::path::{Path, PathBuf};
 use thinclaw_runtime_contracts::{
-    LocalRuntimeEndpoint, LocalRuntimeKind, LocalRuntimeSnapshot, RuntimeCapability,
+    LocalEndpointId, LocalRuntimeEndpoint, LocalRuntimeKind, LocalRuntimeSnapshot,
+    RuntimeCapability,
     RuntimeExposurePolicy, RuntimeReadiness,
 };
 
@@ -512,14 +513,14 @@ pub async fn local_runtime_snapshot(
     let info = direct_runtime_get_active_engine_info();
     let kind = runtime_kind_from_engine_id(&info.id);
 
-    if let Some((port, token, context_size, model_family)) = sidecar.get_chat_config() {
+    if let Some((port, _token, context_size, model_family)) = sidecar.get_chat_config() {
         return LocalRuntimeSnapshot {
             kind,
             display_name: info.display_name,
             readiness: RuntimeReadiness::Ready,
             endpoint: Some(LocalRuntimeEndpoint {
+                endpoint_id: LocalEndpointId(format!("sidecar-chat-{port}")),
                 base_url: format!("http://127.0.0.1:{port}/v1"),
-                api_key: if token.is_empty() { None } else { Some(token) },
                 model_id: Some("default".to_string()),
                 context_size: Some(context_size),
                 model_family: Some(model_family),
@@ -541,8 +542,8 @@ pub async fn local_runtime_snapshot(
                     display_name: engine.display_name().to_string(),
                     readiness: RuntimeReadiness::Ready,
                     endpoint: Some(LocalRuntimeEndpoint {
+                        endpoint_id: local_endpoint_id(engine_id, &base_url),
                         base_url,
-                        api_key: engine.api_key(),
                         model_id: engine.model_id(),
                         context_size: engine.max_context(),
                         model_family: None,
@@ -616,6 +617,34 @@ pub async fn local_runtime_snapshot(
     }
 }
 
+fn local_endpoint_id(engine_id: &str, base_url: &str) -> LocalEndpointId {
+    let port = reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.port_or_known_default())
+        .unwrap_or_default();
+    LocalEndpointId(format!("{engine_id}-chat-{port}"))
+}
+
+/// Resolve a managed endpoint credential only inside the backend process.
+/// Snapshots and IPC contracts carry only the opaque endpoint ID.
+pub async fn local_runtime_api_key(
+    sidecar: &crate::sidecar::SidecarManager,
+    engine_manager: &EngineManager,
+) -> Option<String> {
+    if let Some((_port, token, _context_size, _model_family)) = sidecar.get_chat_config() {
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+    engine_manager
+        .engine
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|engine| engine.api_key())
+        .filter(|token| !token.is_empty())
+}
+
 /// Convert a runtime snapshot into the legacy local LLM tuple consumed by
 /// ThinClaw Desktop's config writer.
 ///
@@ -624,13 +653,14 @@ pub async fn local_runtime_snapshot(
 /// boundary so newer runtime selection still flows through the shared snapshot.
 pub fn local_runtime_snapshot_to_local_llm(
     snapshot: &LocalRuntimeSnapshot,
+    api_key: Option<String>,
 ) -> Option<(u16, String, u32, String)> {
     let endpoint = snapshot.endpoint.as_ref()?;
     let parsed = reqwest::Url::parse(&endpoint.base_url).ok()?;
     let port = parsed.port_or_known_default()?;
     Some((
         port,
-        endpoint.api_key.clone().unwrap_or_default(),
+        api_key.unwrap_or_default(),
         endpoint.context_size.unwrap_or(16_384),
         endpoint
             .model_family
@@ -1181,17 +1211,13 @@ pub async fn direct_runtime_start_engine(
 
     // Endpoint credentials stay in the backend runtime snapshot. They are not
     // renderer state and must not cross the Tauri IPC boundary.
-    Ok(EngineStartResult {
-        port,
-        token: String::new(),
-    })
+    Ok(EngineStartResult { port })
 }
 
 /// Result of starting an engine.
 #[derive(Clone, Serialize, Type)]
 pub struct EngineStartResult {
     pub port: u16,
-    pub token: String,
 }
 
 impl std::fmt::Debug for EngineStartResult {
@@ -1199,7 +1225,6 @@ impl std::fmt::Debug for EngineStartResult {
         formatter
             .debug_struct("EngineStartResult")
             .field("port", &self.port)
-            .field("token", &crate::debug_redaction::Redacted)
             .finish()
     }
 }
@@ -1564,8 +1589,8 @@ mod tests {
             display_name: "MLX".into(),
             readiness: RuntimeReadiness::Ready,
             endpoint: Some(LocalRuntimeEndpoint {
+                endpoint_id: LocalEndpointId("mlx-chat-8765".into()),
                 base_url: "http://127.0.0.1:8765/v1".into(),
-                api_key: Some("token".into()),
                 model_id: Some("mlx-model".into()),
                 context_size: Some(65_536),
                 model_family: None,
@@ -1577,7 +1602,7 @@ mod tests {
         };
 
         assert_eq!(
-            local_runtime_snapshot_to_local_llm(&snapshot),
+            local_runtime_snapshot_to_local_llm(&snapshot, Some("token".into())),
             Some((8765, "token".into(), 65_536, "chatml".into()))
         );
     }

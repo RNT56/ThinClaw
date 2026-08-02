@@ -4,468 +4,478 @@
 //! - `channels list` — list all configured channels and their status
 //! - `channels info` — show channel details
 
-use std::sync::Arc;
-
 use clap::Subcommand;
+use serde::Serialize;
 
-use crate::app::{AppBuilder, AppBuilderFlags};
-use crate::channels::web::log_layer::LogBroadcaster;
-use crate::terminal_branding::TerminalBranding;
+use super::{CliContext, CliError, CliOutcome, GatewayClient};
+use crate::channels::catalog::ChannelCatalogEntry;
+use thinclaw_app::capabilities::{FactState, HealthState, ProbeOutcome};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ChannelCommand {
     /// List all configured channels and their status
     List {
-        /// Output format: table (default) or json
-        #[arg(long, default_value = "table")]
-        format: String,
+        /// Deprecated command-local output selector; use global --output-format.
+        #[arg(long, hide = true)]
+        format: Option<String>,
     },
 
     /// Show details for a specific channel
     Info {
         /// Channel name (e.g. "telegram", "signal", "gateway")
         channel: String,
+        /// Select one exact driver variant (native, wasm, or local_surface).
+        #[arg(long)]
+        variant: Option<String>,
     },
 
-    /// Validate setup for a channel
+    /// Check static configuration without making network requests.
+    CheckConfig {
+        channel: String,
+        #[arg(long)]
+        variant: Option<String>,
+    },
+
+    /// Deprecated alias for `check-config`.
+    #[command(hide = true)]
     Validate {
         /// Channel name (e.g. "matrix", "telegram", "twilio_sms")
         channel: String,
     },
+
+    /// Run bounded, side-effect-minimized live health probes.
+    Probe {
+        channel: Option<String>,
+        #[arg(long, conflicts_with = "channel", required_unless_present = "channel")]
+        all: bool,
+    },
 }
 
 /// Run a channels CLI command.
-pub async fn run_channels_command(cmd: ChannelCommand) -> anyhow::Result<()> {
+pub async fn run_channels_command(
+    cmd: ChannelCommand,
+    context: &CliContext,
+) -> Result<CliOutcome, CliError> {
     match cmd {
-        ChannelCommand::List { format } => list_channels(&format).await,
-        ChannelCommand::Info { channel } => channel_info(&channel).await,
-        ChannelCommand::Validate { channel } => validate_channel(&channel).await,
-    }
-}
-
-/// Known channel configuration keys and how to detect them.
-struct ChannelCheck {
-    name: &'static str,
-    env_key: &'static str,
-    description: &'static str,
-}
-
-const KNOWN_CHANNELS: &[ChannelCheck] = &[
-    ChannelCheck {
-        name: "gateway",
-        env_key: "GATEWAY_ENABLED",
-        description: "Web gateway (chat, memory, jobs, logs)",
-    },
-    ChannelCheck {
-        name: "cli",
-        env_key: "CLI_ENABLED",
-        description: "Interactive CLI / REPL",
-    },
-    ChannelCheck {
-        name: "signal",
-        env_key: "SIGNAL_HTTP_URL",
-        description: "Signal messenger (signal-cli daemon)",
-    },
-    ChannelCheck {
-        name: "matrix",
-        env_key: "MATRIX_ENABLED",
-        description: "Matrix rooms and DMs (native lifecycle surface)",
-    },
-    ChannelCheck {
-        name: "voice-call",
-        env_key: "VOICE_CALL_ENABLED + --features voice",
-        description: "Voice-call lifecycle (Twilio Voice surface)",
-    },
-    ChannelCheck {
-        name: "apns",
-        env_key: "APNS_ENABLED",
-        description: "APNs device notifications (native lifecycle surface)",
-    },
-    ChannelCheck {
-        name: "browser-push",
-        env_key: "BROWSER_PUSH_ENABLED + --features browser",
-        description: "Browser push subscriptions (native lifecycle surface)",
-    },
-    ChannelCheck {
-        name: "nostr",
-        env_key: "NOSTR_ENABLED + NOSTR_PRIVATE_KEY",
-        description: "Nostr owner DM control + social actions",
-    },
-    ChannelCheck {
-        name: "http",
-        env_key: "HTTP_WEBHOOK_ENABLED",
-        description: "HTTP webhook channel",
-    },
-    ChannelCheck {
-        name: "telegram",
-        env_key: "TELEGRAM_BOT_TOKEN",
-        description: "Telegram bot (WASM channel)",
-    },
-    ChannelCheck {
-        name: "slack",
-        env_key: "SLACK_BOT_TOKEN",
-        description: "Slack bot (WASM channel)",
-    },
-    ChannelCheck {
-        name: "discord",
-        env_key: "DISCORD_BOT_TOKEN",
-        description: "Discord bot (native Gateway WS + REST)",
-    },
-    ChannelCheck {
-        name: "imessage",
-        env_key: "IMESSAGE_ENABLED",
-        description: "iMessage (macOS only, chat.db polling)",
-    },
-    ChannelCheck {
-        name: "apple_mail",
-        env_key: "APPLE_MAIL_ENABLED",
-        description: "Apple Mail (macOS only, Envelope Index polling)",
-    },
-    ChannelCheck {
-        name: "gmail",
-        env_key: "GMAIL_PROJECT_ID + GMAIL_SUBSCRIPTION_ID + OAuth credentials",
-        description: "Gmail (Pub/Sub pull + Gmail API replies)",
-    },
-    ChannelCheck {
-        name: "bluebubbles",
-        env_key: "BLUEBUBBLES_SERVER_URL + BLUEBUBBLES_PASSWORD",
-        description: "BlueBubbles iMessage bridge (cross-platform webhook)",
-    },
-];
-
-/// List all channels.
-async fn list_channels(format: &str) -> anyhow::Result<()> {
-    let branding = TerminalBranding::current();
-    let _ = dotenvy::dotenv();
-    crate::bootstrap::load_thinclaw_env();
-    let resolved = load_resolved_config().await?;
-
-    let mut channels: Vec<serde_json::Value> = Vec::new();
-
-    for ch in KNOWN_CHANNELS {
-        let configured = channel_is_configured(&resolved, ch.name);
-        let status = if configured {
-            "configured"
-        } else {
-            "not configured"
-        };
-
-        channels.push(serde_json::json!({
-            "name": ch.name,
-            "status": status,
-            "configured": configured,
-            "description": ch.description,
-        }));
-    }
-
-    // Check for WASM channels directory.
-    let wasm_dir = crate::platform::state_paths().channels_dir;
-    if wasm_dir.exists()
-        && let Ok(entries) = std::fs::read_dir(&wasm_dir)
-    {
-        for entry in entries.take(4_096).flatten() {
-            if entry.path().extension().is_some_and(|e| e == "wasm") {
-                if !std::fs::symlink_metadata(entry.path())
-                    .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-                {
-                    continue;
-                }
-                let name = entry
-                    .path()
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                channels.push(serde_json::json!({
-                    "name": name,
-                    "status": "wasm",
-                    "configured": true,
-                    "description": "WASM channel plugin",
-                }));
+        ChannelCommand::List { format } => list_channels(format.as_deref(), context).await,
+        ChannelCommand::Info { channel, variant } => {
+            channel_info(&channel, variant.as_deref(), context).await
+        }
+        ChannelCommand::CheckConfig { channel, variant } => {
+            check_channel_config(&channel, variant.as_deref(), context).await
+        }
+        ChannelCommand::Validate { channel } => {
+            if !context.output().format.is_machine() {
+                context.output().diagnostic(
+                    "warning: `channels validate` is deprecated; use `extensions channels check-config` (removed in 0.19)",
+                )?;
             }
+            check_channel_config(&channel, None, context).await
+        }
+        ChannelCommand::Probe { channel, all } => {
+            probe_channels(channel.as_deref(), all, context).await
         }
     }
+}
 
-    if format == "json" {
-        println!("{}", serde_json::to_string_pretty(&channels)?);
-        return Ok(());
+#[derive(Debug, Clone, Serialize)]
+struct ChannelStaticReport {
+    service_id: String,
+    driver_id: String,
+    origin: String,
+    compiled: FactState,
+    configured: FactState,
+    installed: FactState,
+    registered: FactState,
+    health: HealthState,
+    description: String,
+    reasons: Vec<String>,
+}
+
+async fn list_channels(
+    legacy_format: Option<&str>,
+    context: &CliContext,
+) -> Result<CliOutcome, CliError> {
+    if let Some(format) = legacy_format {
+        if format != "table" && format != "json" {
+            return Err(CliError::usage("--format must be table or json"));
+        }
+        if !context.output().format.is_machine() {
+            context.output().diagnostic(
+                "warning: command-local --format is deprecated; use global --output-format (removed in 0.19)",
+            )?;
+        }
     }
+    let resolved = context.config().await?;
+    let reports = channel_reports(resolved);
+    context
+        .output()
+        .write_record("extensions.channels.list", &reports, |reports| {
+            let mut text = format!(
+                "{:<20} {:<16} {:<10} {}\n",
+                "SERVICE", "DRIVER", "CONFIG", "DESCRIPTION"
+            );
+            for report in reports {
+                text.push_str(&format!(
+                    "{:<20} {:<16} {:<10} {}\n",
+                    report.service_id,
+                    report.driver_id,
+                    fact_label(report.configured),
+                    report.description
+                ));
+            }
+            text
+        })?;
+    Ok(CliOutcome::Success)
+}
 
-    branding.print_banner("Channels", Some("Inspect active message surfaces"));
-    println!(
-        "{}",
-        branding.body_bold(format!("{:<15}  {:<16}  DESCRIPTION", "CHANNEL", "STATUS"))
-    );
-    println!("{}", branding.separator(70));
+fn channel_reports(config: &crate::config::Config) -> Vec<ChannelStaticReport> {
+    let mut catalog = crate::channels::catalog::static_channel_catalog();
+    merge_installed_wasm(&mut catalog);
+    catalog.sort_by(|left, right| (&left.id, &left.variant).cmp(&(&right.id, &right.variant)));
+    catalog
+        .into_iter()
+        .map(|entry| {
+            let configured = channel_is_configured(config, &entry.id, &entry.variant);
+            let installed = if entry.variant == "wasm" {
+                bool_fact(wasm_artifact_exists(&entry.id))
+            } else {
+                FactState::NotApplicable
+            };
+            ChannelStaticReport {
+                service_id: entry.id.clone(),
+                driver_id: format!("{}:{}", entry.variant, entry.id),
+                origin: entry.origin,
+                compiled: bool_fact(entry.compiled),
+                configured: bool_fact(configured),
+                installed,
+                registered: FactState::Unknown,
+                health: HealthState::NotProbed,
+                description: entry.description,
+                reasons: if entry.compiled {
+                    Vec::new()
+                } else {
+                    vec!["not_compiled".to_string()]
+                },
+            }
+        })
+        .collect()
+}
 
-    for ch in &channels {
-        let icon = if ch["configured"].as_bool().unwrap_or(false) {
-            "✅"
-        } else {
-            "⬜"
-        };
-        println!(
-            "{} {:<13}  {:<16}  {}",
-            icon,
-            ch["name"].as_str().unwrap_or("?"),
-            ch["status"].as_str().unwrap_or("?"),
-            ch["description"].as_str().unwrap_or(""),
-        );
+fn fact_label(value: FactState) -> &'static str {
+    match value {
+        FactState::Yes => "yes",
+        FactState::No => "no",
+        FactState::Unknown => "unknown",
+        FactState::NotApplicable => "n/a",
     }
+}
 
-    let configured_count = channels
-        .iter()
-        .filter(|c| c["configured"].as_bool().unwrap_or(false))
-        .count();
-    println!();
-    println!(
-        "{}",
-        branding.muted(format!(
-            "{} channel(s) configured, {} not configured.",
-            configured_count,
-            channels.len() - configured_count
-        ))
-    );
+const fn bool_fact(value: bool) -> FactState {
+    if value { FactState::Yes } else { FactState::No }
+}
 
-    Ok(())
+fn wasm_artifact_exists(name: &str) -> bool {
+    crate::platform::state_paths()
+        .channels_dir
+        .join(format!("{name}.wasm"))
+        .is_file()
+}
+
+fn merge_installed_wasm(catalog: &mut Vec<ChannelCatalogEntry>) {
+    let wasm_dir = crate::platform::state_paths().channels_dir;
+    let Ok(entries) = std::fs::read_dir(wasm_dir) else {
+        return;
+    };
+    for entry in entries.take(4_096).flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "wasm")
+            || !std::fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if !catalog
+            .iter()
+            .any(|candidate| candidate.id == name && candidate.variant == "wasm")
+        {
+            catalog.push(ChannelCatalogEntry {
+                id: name,
+                variant: "wasm".to_string(),
+                origin: "installed".to_string(),
+                description: "Installed WASM channel".to_string(),
+                compiled: cfg!(feature = "wasm-runtime"),
+                local_surface: false,
+            });
+        }
+    }
 }
 
 /// Show details for a specific channel.
-async fn channel_info(channel: &str) -> anyhow::Result<()> {
-    let branding = TerminalBranding::current();
-    let _ = dotenvy::dotenv();
-    crate::bootstrap::load_thinclaw_env();
-    let resolved = load_resolved_config().await?;
-
-    let known = KNOWN_CHANNELS.iter().find(|c| c.name == channel);
-
-    match known {
-        Some(ch) => {
-            let configured = channel_is_configured(&resolved, ch.name);
-            branding.print_banner("Channels", Some("Inspect a configured surface"));
-            println!("{}", branding.key_value("Channel", ch.name));
-            println!("{}", branding.key_value("Description", ch.description));
-            println!(
-                "{}",
-                branding.key_value(
-                    "Status",
-                    if configured {
-                        branding.good("configured")
-                    } else {
-                        branding.warn("not configured")
-                    }
-                )
-            );
-            println!("{}", branding.key_value("Config key", ch.env_key));
-
-            // Show channel-specific details.
-            match ch.name {
-                "gateway" => {
-                    let host =
-                        std::env::var("GATEWAY_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-                    let port = std::env::var("GATEWAY_PORT").unwrap_or_else(|_| "3000".to_string());
-                    println!(
-                        "{}",
-                        branding.key_value("Endpoint", format!("http://{}:{}/", host, port))
-                    );
-                }
-                "signal" => {
-                    if let Some(signal) = resolved.channels.signal.as_ref() {
-                        let url = &signal.http_url;
-                        // Redact URL for security.
-                        let redacted = if url.len() > 20 {
-                            // Safe char-boundary slicing to avoid UTF-8 panics
-                            let prefix_end = url
-                                .char_indices()
-                                .nth(15)
-                                .map(|(i, _)| i)
-                                .unwrap_or(url.len());
-                            let suffix_start =
-                                url.char_indices().rev().nth(4).map(|(i, _)| i).unwrap_or(0);
-                            format!("{}...{}", &url[..prefix_end], &url[suffix_start..])
-                        } else {
-                            url.to_string()
-                        };
-                        println!("{}", branding.key_value("HTTP URL", redacted));
-                    }
-                }
-                "nostr" => {
-                    #[cfg(feature = "nostr")]
-                    if let Some(nostr) = resolved.channels.nostr.as_ref() {
-                        let channel = crate::channels::NostrChannel::new(
-                            crate::channels::runtime_config_from_resolved_ref(nostr),
-                        )?;
-                        let runtime = channel.runtime();
-                        println!("{}", branding.key_value("Enabled", branding.good("yes")));
-                        println!("{}", branding.key_value("Private key", "••••••• (set)"));
-                        println!(
-                            "{}",
-                            branding.key_value("Public key", runtime.public_key_hex())
-                        );
-                        println!("{}", branding.key_value("npub", runtime.public_key_npub()));
-                        println!(
-                            "{}",
-                            branding.key_value(
-                                "Owner pubkey",
-                                runtime
-                                    .owner_pubkey_hex()
-                                    .unwrap_or_else(|| "not configured".to_string())
-                            )
-                        );
-                        println!(
-                            "{}",
-                            branding.key_value(
-                                "Owner npub",
-                                runtime
-                                    .owner_pubkey_npub()
-                                    .unwrap_or_else(|| "not configured".to_string())
-                            )
-                        );
-                        println!(
-                            "{}",
-                            branding.key_value("Relay count", nostr.relays.len().to_string())
-                        );
-                        println!(
-                            "{}",
-                            branding.key_value(
-                                "Control ready",
-                                if nostr.owner_pubkey.is_some() {
-                                    branding.good("yes")
-                                } else {
-                                    branding.warn("no")
-                                }
-                            )
-                        );
-                        println!(
-                            "{}",
-                            branding.key_value(
-                                "Social DM reads",
-                                if nostr.social_dm_enabled {
-                                    branding.good("enabled")
-                                } else {
-                                    branding.warn("disabled")
-                                }
-                            )
-                        );
-                        if !nostr.allow_from.is_empty() {
-                            println!(
-                                "{}",
-                                branding.key_value(
-                                    "Legacy allow_from",
-                                    format!("deprecated ({})", nostr.allow_from.join(", "))
-                                )
-                            );
-                        }
-                    }
-                    #[cfg(not(feature = "nostr"))]
-                    {
-                        println!(
-                            "{}",
-                            branding.warn(
-                                "Nostr support not compiled into this build (--features nostr)"
-                            )
-                        );
-                    }
-                }
-                "telegram" => {
-                    if resolved.channels.telegram.is_some() {
-                        println!("{}", branding.key_value("Bot token", "••••••• (set)"));
-                    }
-                    if let Some(owner) = resolved.channels.telegram_owner_id {
-                        println!("{}", branding.key_value("Owner ID", owner.to_string()));
-                    }
-                }
-                _ => {}
-            }
-        }
-        None => {
-            // Check WASM channels.
-            let wasm_dir = crate::platform::state_paths().channels_dir;
-            let wasm_path = wasm_dir.join(format!("{}.wasm", channel));
-
-            if wasm_path.exists() {
-                let metadata = std::fs::metadata(&wasm_path)?;
-                branding.print_banner("Channels", Some("Inspect a WASM surface"));
-                println!(
-                    "{}",
-                    branding.key_value("Channel", format!("{} (WASM plugin)", channel))
-                );
-                println!("{}", branding.key_value("Path", wasm_path.display()));
-                println!(
-                    "{}",
-                    branding.key_value("Size", format!("{:.1} KB", metadata.len() as f64 / 1024.0))
-                );
-            } else {
-                anyhow::bail!(
-                    "Unknown channel '{}'. Use 'thinclaw channels list' to see available channels.",
-                    channel
-                );
-            }
-        }
-    }
-
-    Ok(())
+async fn channel_info(
+    channel: &str,
+    variant: Option<&str>,
+    context: &CliContext,
+) -> Result<CliOutcome, CliError> {
+    validate_channel_id(channel)?;
+    let config = context.config().await?;
+    let report = select_channel_report(channel_reports(config), channel, variant)?;
+    context.output().write_record("extensions.channels.info", &report, |report| {
+        format!(
+            "Service: {}\nDriver: {}\nCompiled: {}\nConfigured: {}\nInstalled: {}\nRegistered: {}\nHealth: {:?}\nDescription: {}",
+            report.service_id,
+            report.driver_id,
+            fact_label(report.compiled),
+            fact_label(report.configured),
+            fact_label(report.installed),
+            fact_label(report.registered),
+            report.health,
+            report.description,
+        )
+    })?;
+    Ok(CliOutcome::Success)
 }
 
-async fn validate_channel(channel: &str) -> anyhow::Result<()> {
-    let branding = TerminalBranding::current();
-    let _ = dotenvy::dotenv();
-    crate::bootstrap::load_thinclaw_env();
-    let resolved = load_resolved_config().await?;
-
-    branding.print_banner("Channels", Some("Validate channel setup"));
-    if let Some(ch) = KNOWN_CHANNELS.iter().find(|known| known.name == channel) {
-        let configured = channel_is_configured(&resolved, ch.name);
-        println!("{}", branding.key_value("Channel", ch.name));
-        println!("{}", branding.key_value("Description", ch.description));
-        println!("{}", branding.key_value("Config key", ch.env_key));
-        if !configured {
-            anyhow::bail!("Channel '{}' is not configured.", ch.name);
+async fn check_channel_config(
+    channel: &str,
+    variant: Option<&str>,
+    context: &CliContext,
+) -> Result<CliOutcome, CliError> {
+    validate_channel_id(channel)?;
+    let config = context.config().await?;
+    let mut report = select_channel_report(channel_reports(config), channel, variant)?;
+    if report.compiled == FactState::No {
+        report.reasons.push("not_compiled".to_string());
+    }
+    if report.configured == FactState::No && !report.driver_id.starts_with("local_surface:") {
+        report.reasons.push("not_configured".to_string());
+    }
+    if report.driver_id.starts_with("wasm:") {
+        validate_wasm_channel_installation(channel, &crate::platform::state_paths().channels_dir)
+            .map_err(|error| {
+            report.reasons.push("invalid_installation".to_string());
+            CliError::operational(error.to_string())
+        })?;
+    }
+    if report.driver_id.starts_with("native:") {
+        let missing = native_lifecycle_missing_env(channel);
+        if !missing.is_empty() {
+            report
+                .reasons
+                .push(format!("missing_bindings:{}", missing.join(",")));
         }
-
-        match ch.name {
-            "voice-call" if !resolved.channels.voice_call_available => {
-                anyhow::bail!("Voice-call channel is enabled, but this build lacks voice support.");
-            }
-            "browser-push" if !resolved.channels.browser_push_available => {
-                anyhow::bail!(
-                    "Browser-push channel is enabled, but this build lacks browser support."
-                );
-            }
-            "matrix" | "apns" | "voice-call" | "browser-push" => {
-                let missing = native_lifecycle_missing_env(ch.name);
-                if !missing.is_empty() {
-                    anyhow::bail!(
-                        "Channel '{}' is enabled but missing required runtime credentials: {}",
-                        ch.name,
-                        missing.join(", ")
-                    );
+    }
+    let healthy = report.compiled != FactState::No
+        && report.configured != FactState::No
+        && report.reasons.is_empty();
+    context
+        .output()
+        .write_record("extensions.channels.check-config", &report, |report| {
+            format!(
+                "{} ({})\ncompiled: {}\nconfigured: {}\nstatic check: {}{}",
+                report.service_id,
+                report.driver_id,
+                fact_label(report.compiled),
+                fact_label(report.configured),
+                if healthy { "ready" } else { "not ready" },
+                if report.reasons.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nreasons: {}", report.reasons.join(", "))
                 }
-                println!(
-                    "{}",
-                    branding.warn(
-                        "Native lifecycle surface credentials are present. Live delivery still depends on provider reachability and runtime client diagnostics."
-                    )
-                );
-            }
-            _ => {}
-        }
+            )
+        })?;
+    Ok(if healthy {
+        CliOutcome::Success
+    } else {
+        CliOutcome::Unhealthy
+    })
+}
 
-        println!(
-            "{}",
-            branding.good(format!("Channel '{}' is configured.", ch.name))
-        );
-        return Ok(());
+#[derive(Debug, Serialize)]
+struct ChannelProbeReport {
+    service_id: String,
+    driver_id: String,
+    probe: ProbeOutcome,
+}
+
+async fn probe_channels(
+    channel: Option<&str>,
+    all: bool,
+    context: &CliContext,
+) -> Result<CliOutcome, CliError> {
+    if !all && channel.is_none() {
+        return Err(CliError::usage("provide CHANNEL or --all"));
+    }
+    if let Some(channel) = channel {
+        validate_channel_id(channel)?;
+    }
+    let config = context.config().await?;
+    let selected: Vec<ChannelStaticReport> = channel_reports(config)
+        .into_iter()
+        .filter(|report| all || channel == Some(report.service_id.as_str()))
+        .collect();
+    if selected.is_empty() {
+        return Err(CliError::usage("unknown channel or driver"));
     }
 
-    validate_wasm_channel_installation(channel, &crate::platform::state_paths().channels_dir)?;
-    println!(
-        "{}",
-        branding.good(format!(
-            "WASM channel '{}' installation metadata is valid.",
-            channel
-        ))
-    );
+    let client = GatewayClient::resolve_from_config(None, None, config)
+        .map_err(|error| CliError::operational(error.to_string()))?;
+    let checked_at = chrono::Utc::now().to_rfc3339();
+    let status = client
+        .get_json::<_, serde_json::Value>("/api/status", &[] as &[(&str, &str)])
+        .await;
+    let mut reports = Vec::with_capacity(selected.len());
+    let mut unhealthy = false;
+    match status {
+        Ok(status) => {
+            for report in selected {
+                let (health, reason) = live_channel_health(&status, &report.service_id);
+                unhealthy |= health == HealthState::Unhealthy;
+                reports.push(ChannelProbeReport {
+                    service_id: report.service_id,
+                    driver_id: report.driver_id,
+                    probe: ProbeOutcome {
+                        health,
+                        origin: "running_gateway".to_string(),
+                        checked_at: Some(checked_at.clone()),
+                        reason,
+                    },
+                });
+            }
+        }
+        Err(error) => {
+            unhealthy = true;
+            for report in selected {
+                reports.push(ChannelProbeReport {
+                    service_id: report.service_id,
+                    driver_id: report.driver_id,
+                    probe: ProbeOutcome {
+                        health: HealthState::Unhealthy,
+                        origin: "running_gateway".to_string(),
+                        checked_at: Some(checked_at.clone()),
+                        reason: Some(format!("gateway_unreachable:{error}")),
+                    },
+                });
+            }
+        }
+    }
+    context
+        .output()
+        .write_record("extensions.channels.probe", &reports, |reports| {
+            reports
+                .iter()
+                .map(|report| {
+                    format!(
+                        "{} ({}) {:?}{}",
+                        report.service_id,
+                        report.driver_id,
+                        report.probe.health,
+                        report
+                            .probe
+                            .reason
+                            .as_deref()
+                            .map(|reason| format!(" — {reason}"))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })?;
+    Ok(if unhealthy {
+        CliOutcome::Unhealthy
+    } else {
+        CliOutcome::Success
+    })
+}
+
+fn live_channel_health(status: &serde_json::Value, channel: &str) -> (HealthState, Option<String>) {
+    if channel == "gateway" {
+        return (HealthState::Healthy, None);
+    }
+    let Some(setup) = status
+        .get("channel_setup")
+        .and_then(|setup| setup.get(channel))
+    else {
+        return (
+            HealthState::NotSupported,
+            Some("safe_probe_not_supported".to_string()),
+        );
+    };
+    if setup.get("configured").and_then(serde_json::Value::as_bool) != Some(true) {
+        return (HealthState::Unknown, Some("not_configured".to_string()));
+    }
+    if let Some(relay_health) = setup
+        .get("relay_health")
+        .and_then(serde_json::Value::as_str)
+    {
+        if matches!(relay_health, "healthy" | "ok" | "connected") {
+            return (HealthState::Healthy, None);
+        }
+        return (
+            HealthState::Unhealthy,
+            Some(format!("relay:{relay_health}")),
+        );
+    }
+    if setup.get("tool_ready").and_then(serde_json::Value::as_bool) == Some(true)
+        || setup
+            .get("control_ready")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        return (HealthState::Healthy, None);
+    }
+    (
+        HealthState::Unknown,
+        Some("configured_but_no_safe_health_probe".to_string()),
+    )
+}
+
+fn select_channel_report(
+    reports: Vec<ChannelStaticReport>,
+    channel: &str,
+    variant: Option<&str>,
+) -> Result<ChannelStaticReport, CliError> {
+    let mut matches: Vec<_> = reports
+        .into_iter()
+        .filter(|report| {
+            report.service_id == channel
+                && variant
+                    .is_none_or(|variant| report.driver_id.starts_with(&format!("{variant}:")))
+        })
+        .collect();
+    if matches.is_empty() {
+        return Err(CliError::usage("unknown channel or driver variant"));
+    }
+    if matches.len() > 1 {
+        let drivers = matches
+            .iter()
+            .map(|report| report.driver_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(CliError::usage(format!(
+            "channel is ambiguous; select --variant ({drivers})"
+        )));
+    }
+    Ok(matches.remove(0))
+}
+
+fn validate_channel_id(channel: &str) -> Result<(), CliError> {
+    if channel.is_empty()
+        || channel.len() > 128
+        || !channel.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        return Err(CliError::usage(
+            "channel must be a bounded lowercase ASCII identifier",
+        ));
+    }
     Ok(())
 }
 
@@ -493,59 +503,28 @@ fn validate_wasm_channel_installation(
     let raw = thinclaw_platform::read_regular_file_bounded_single_link(&caps_path, 1024 * 1024)
         .map_err(|_| anyhow::anyhow!("capabilities file is missing or invalid"))?;
     let caps = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&raw)?;
-    let missing: Vec<String> = caps
-        .setup
-        .required_secrets
-        .iter()
-        .filter(|secret| !secret.optional)
-        .filter(|secret| {
-            std::env::var(secret.name.to_ascii_uppercase())
-                .or_else(|_| std::env::var(&secret.name))
-                .map(|value| value.trim().is_empty())
-                .unwrap_or(true)
-        })
-        .map(|secret| secret.name.clone())
-        .collect();
-    if !missing.is_empty() {
-        anyhow::bail!(
-            "Required setup secret(s) are not present in the environment: {}. If these are stored in the Provider Vault, use the WebUI extension validator for secret-backed validation.",
-            missing.join(", ")
-        );
+    // Static validation deliberately checks only the declared schema and
+    // artifact. Credential values are resolved only by the owning runtime.
+    for secret in &caps.setup.required_secrets {
+        if secret.name.is_empty()
+            || secret.name.len() > 128
+            || secret.name.chars().any(char::is_control)
+        {
+            anyhow::bail!("capabilities file declares an invalid secret binding name");
+        }
     }
     Ok(())
 }
 
-async fn load_resolved_config() -> anyhow::Result<crate::config::Config> {
-    let config = crate::config::Config::from_env().await?;
-    let mut builder = AppBuilder::new(
-        config,
-        AppBuilderFlags::default(),
-        None,
-        Arc::new(LogBroadcaster::new()),
-    );
-
-    if let Err(err) = builder.init_database().await {
-        tracing::warn!(
-            "Channels CLI could not initialize the database for secrets-backed channel detection: {}",
-            err
-        );
-        return Ok(builder.config().clone());
+fn channel_is_configured(config: &crate::config::Config, name: &str, variant: &str) -> bool {
+    if variant == "local_surface" {
+        return true;
     }
-
-    if let Err(err) = builder.init_secrets().await {
-        tracing::warn!(
-            "Channels CLI could not initialize secrets-backed channel detection: {}",
-            err
-        );
+    if variant == "wasm" {
+        return wasm_artifact_exists(name);
     }
-
-    Ok(builder.config().clone())
-}
-
-fn channel_is_configured(config: &crate::config::Config, name: &str) -> bool {
     match name {
         "gateway" => config.channels.gateway.is_some(),
-        "cli" => config.channels.cli.enabled,
         "signal" => config.channels.signal.is_some(),
         "matrix" => config.channels.matrix_enabled,
         "voice-call" => config.channels.voice_call_enabled && config.channels.voice_call_available,
@@ -655,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn wasm_channel_validation_reports_missing_required_secrets() {
+    fn wasm_channel_static_validation_does_not_read_secret_values() {
         let temp = tempfile::tempdir().expect("temp dir");
         std::fs::write(temp.path().join("demo.wasm"), b"\0asm\x01\0\0\0").expect("write wasm");
         std::fs::write(
@@ -672,39 +651,8 @@ mod tests {
         )
         .expect("write capabilities");
 
-        unsafe {
-            std::env::remove_var("DEMO_MISSING_TOKEN");
-            std::env::remove_var("demo_missing_token");
-        }
-        let err = validate_wasm_channel_installation("demo", temp.path())
-            .expect_err("missing required secret should fail");
-        assert!(err.to_string().contains("demo_missing_token"));
-    }
-
-    #[test]
-    fn wasm_channel_validation_accepts_env_secret() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        std::fs::write(temp.path().join("demo.wasm"), b"\0asm\x01\0\0\0").expect("write wasm");
-        std::fs::write(
-            temp.path().join("demo.capabilities.json"),
-            r#"{
-                "name": "demo",
-                "setup": {
-                    "required_secrets": [
-                        {"name": "demo_env_token", "prompt": "Token"}
-                    ]
-                }
-            }"#,
-        )
-        .expect("write capabilities");
-
-        unsafe {
-            std::env::set_var("DEMO_ENV_TOKEN", "secret");
-        }
-        validate_wasm_channel_installation("demo", temp.path()).expect("env secret should pass");
-        unsafe {
-            std::env::remove_var("DEMO_ENV_TOKEN");
-        }
+        validate_wasm_channel_installation("demo", temp.path())
+            .expect("static check validates declarations without reading secret values");
     }
 
     #[test]

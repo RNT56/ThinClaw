@@ -147,12 +147,7 @@ impl SetupWizard {
     }
 
     pub(super) fn ensure_gateway_auth_token(&mut self) {
-        let has_token = self
-            .settings
-            .channels
-            .gateway_auth_token
-            .as_deref()
-            .is_some_and(|token| !token.trim().is_empty());
+        let has_token = self.secret_draft.contains("gateway_auth_token");
         if has_token {
             return;
         }
@@ -163,7 +158,9 @@ impl SetupWizard {
             .take(48)
             .map(char::from)
             .collect();
-        self.settings.channels.gateway_auth_token = Some(token);
+        self.secret_draft
+            .insert("gateway_auth_token", secrecy::SecretString::from(token));
+        self.settings.channels.gateway_auth_token = None;
     }
 
     fn remote_gateway_host_or_loopback(&self) -> &str {
@@ -221,7 +218,7 @@ impl SetupWizard {
             category: OnboardingFollowupCategory::Authentication,
             status: OnboardingFollowupStatus::Pending,
             instructions: "Skip-auth mode kept provider review non-secret. Add the relevant provider API key before relying on remote routing or failover.".to_string(),
-            action_hint: Some("Set the provider env var or rerun `thinclaw onboard --ui cli` without --skip-auth.".to_string()),
+            action_hint: Some("Configure a credential source or rerun `thinclaw setup --ui cli` without --skip-provider-auth.".to_string()),
         });
     }
 }

@@ -17,18 +17,10 @@ pub struct ExperimentsLimitQuery {
     pub limit: Option<usize>,
 }
 
-#[derive(Clone, Deserialize)]
+/// ID-only request for binding an encrypted source to a GPU provider slot.
+#[derive(Debug, Clone, Deserialize)]
 pub struct ExperimentGpuCloudConnectRequest {
-    pub api_key: String,
-}
-
-impl std::fmt::Debug for ExperimentGpuCloudConnectRequest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ExperimentGpuCloudConnectRequest")
-            .field("api_key", &"[REDACTED]")
-            .finish()
-    }
+    pub secret_source_id: Uuid,
 }
 
 #[derive(Debug, Clone, Deserialize)]

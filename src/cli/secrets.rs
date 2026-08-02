@@ -1,5 +1,7 @@
 //! Commands for managing encrypted ThinClaw secrets.
 
+use std::io::{IsTerminal, Read, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{Args, Subcommand};
@@ -28,6 +30,9 @@ pub enum SecretsCommand {
         /// User/principal id
         #[arg(long, default_value = "default")]
         user: String,
+        /// Confirm deletion noninteractively
+        #[arg(long)]
+        yes: bool,
     },
     /// Rotate the local master key for future writes
     RotateMaster,
@@ -37,9 +42,15 @@ pub enum SecretsCommand {
 pub struct SecretSetCommand {
     /// Secret name
     pub name: String,
-    /// Secret value. If omitted, an interactive prompt is used.
-    #[arg(long)]
-    pub value: Option<String>,
+    /// Read the secret from standard input
+    #[arg(long, conflicts_with_all = ["from_env", "from_file"])]
+    pub from_stdin: bool,
+    /// Read the secret from this environment variable
+    #[arg(long, value_name = "VAR", conflicts_with_all = ["from_stdin", "from_file"])]
+    pub from_env: Option<String>,
+    /// Read the secret from a private regular file
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["from_stdin", "from_env"])]
+    pub from_file: Option<PathBuf>,
     /// Optional provider label
     #[arg(long)]
     pub provider: Option<String>,
@@ -53,7 +64,7 @@ pub async fn run_secrets_command(cmd: SecretsCommand) -> anyhow::Result<()> {
         SecretsCommand::Status => status().await,
         SecretsCommand::List { user } => list(&user).await,
         SecretsCommand::Set(args) => set(args).await,
-        SecretsCommand::Delete { name, user } => delete(&user, &name).await,
+        SecretsCommand::Delete { name, user, yes } => delete(&user, &name, yes).await,
         SecretsCommand::RotateMaster => rotate_master().await,
     }
 }
@@ -111,7 +122,11 @@ async fn list(user: &str) -> anyhow::Result<()> {
             branding.key_value(
                 &secret.name,
                 format!(
-                    "provider={} version={} key_version={} used={}",
+                    "source={} provider={} version={} key_version={} used={}",
+                    secret
+                        .id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "legacy-name-only".to_string()),
                     secret.provider.unwrap_or_else(|| "unknown".to_string()),
                     secret.encryption_version,
                     secret.key_version,
@@ -124,12 +139,7 @@ async fn list(user: &str) -> anyhow::Result<()> {
 }
 
 async fn set(args: SecretSetCommand) -> anyhow::Result<()> {
-    let value = match args.value {
-        Some(value) => value,
-        None => crate::setup::secret_input("Secret value")?
-            .expose_secret()
-            .to_string(),
-    };
+    let value = resolve_secret_input(&args)?;
     validate_cli_secret_value(&value)?;
     let store = get_secrets_store().await?;
     let mut params =
@@ -137,16 +147,20 @@ async fn set(args: SecretSetCommand) -> anyhow::Result<()> {
     if let Some(provider) = args.provider {
         params = params.with_provider(provider);
     }
-    store.create(&args.user, params).await?;
+    let stored = store.create(&args.user, params).await?;
     let branding = TerminalBranding::current();
     println!(
         "{}",
-        branding.good(format!("Secret '{}' saved.", args.name))
+        branding.good(format!(
+            "Secret '{}' saved as source {}.",
+            args.name, stored.id
+        ))
     );
     Ok(())
 }
 
-async fn delete(user: &str, name: &str) -> anyhow::Result<()> {
+async fn delete(user: &str, name: &str, yes: bool) -> anyhow::Result<()> {
+    confirm_secret_deletion(name, yes)?;
     let store = get_secrets_store().await?;
     let deleted = store.delete(user, name).await?;
     let branding = TerminalBranding::current();
@@ -157,6 +171,79 @@ async fn delete(user: &str, name: &str) -> anyhow::Result<()> {
             "{}",
             branding.warn(format!("Secret '{name}' was not present."))
         );
+    }
+    Ok(())
+}
+
+fn resolve_secret_input(args: &SecretSetCommand) -> anyhow::Result<String> {
+    const MAX_SECRET_BYTES: u64 = 1024 * 1024;
+    if args.from_stdin {
+        let mut value = String::new();
+        std::io::stdin()
+            .take(MAX_SECRET_BYTES + 1)
+            .read_to_string(&mut value)?;
+        if value.len() as u64 > MAX_SECRET_BYTES {
+            anyhow::bail!("secret input exceeds 1 MiB");
+        }
+        return Ok(value.trim_end_matches(['\r', '\n']).to_string());
+    }
+    if let Some(variable) = args.from_env.as_deref() {
+        if variable.is_empty()
+            || variable.len() > 128
+            || !variable
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            anyhow::bail!("environment variable name is invalid");
+        }
+        return std::env::var(variable)
+            .map_err(|_| anyhow::anyhow!("environment variable {variable} is unavailable"));
+    }
+    if let Some(path) = args.from_file.as_deref() {
+        if !path.is_absolute() {
+            anyhow::bail!("--from-file requires an absolute path");
+        }
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > MAX_SECRET_BYTES
+        {
+            anyhow::bail!("secret source must be a regular non-symlink file no larger than 1 MiB");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.mode() & 0o077 != 0 {
+                anyhow::bail!("secret source file must not grant group or other permissions");
+            }
+        }
+        let bytes =
+            thinclaw_platform::read_regular_file_bounded_single_link(path, MAX_SECRET_BYTES)?;
+        return String::from_utf8(bytes)
+            .map(|value| value.trim_end_matches(['\r', '\n']).to_string())
+            .map_err(|_| anyhow::anyhow!("secret source file is not UTF-8"));
+    }
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("secure input is unavailable; use --from-stdin, --from-env, or --from-file");
+    }
+    Ok(crate::setup::secret_input("Secret value")?
+        .expose_secret()
+        .to_string())
+}
+
+fn confirm_secret_deletion(name: &str, yes: bool) -> anyhow::Result<()> {
+    if yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("secret deletion requires --yes in noninteractive mode");
+    }
+    eprint!("Delete secret source '{name}'? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        anyhow::bail!("secret deletion cancelled");
     }
     Ok(())
 }
@@ -220,7 +307,7 @@ pub(crate) async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore +
     let master_key = config
         .secrets
         .master_key()
-        .ok_or_else(|| anyhow::anyhow!("secrets are not configured; run `thinclaw onboard`"))?;
+        .ok_or_else(|| anyhow::anyhow!("secrets are not configured; run `thinclaw setup`"))?;
     let crypto = Arc::new(SecretsCrypto::new(SecretString::from(
         master_key.expose_secret().to_string(),
     ))?);

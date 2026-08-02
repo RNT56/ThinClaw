@@ -558,7 +558,7 @@ fn test_enter_auth_mode() {
 
     thread.enter_auth_mode(
         "telegram".to_string(),
-        PendingAuthMode::ManualToken,
+        PendingAuthMode::SecretSource,
         test_identity("actor-1"),
     );
     assert!(thread.pending_auth.is_some());
@@ -568,7 +568,7 @@ fn test_enter_auth_mode() {
     );
     assert_eq!(
         thread.pending_auth.as_ref().unwrap().auth_mode,
-        PendingAuthMode::ManualToken
+        PendingAuthMode::SecretSource
     );
 }
 
@@ -577,7 +577,7 @@ fn test_take_pending_auth() {
     let mut thread = Thread::new(Uuid::new_v4());
     thread.enter_auth_mode(
         "notion".to_string(),
-        PendingAuthMode::ManualToken,
+        PendingAuthMode::SecretSource,
         test_identity("actor-1"),
     );
 
@@ -642,7 +642,7 @@ fn test_runtime_snapshot_roundtrip_preserves_resume_fields() {
     });
     thread.pending_auth = Some(PendingAuth {
         extension_name: "github".to_string(),
-        auth_mode: PendingAuthMode::ManualToken,
+        auth_mode: PendingAuthMode::SecretSource,
         requesting_identity: Some(test_identity("actor-1")),
     });
 

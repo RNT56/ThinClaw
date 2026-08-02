@@ -7,32 +7,28 @@ This document defines the shared user-facing vocabulary ThinClaw exposes across 
 
 ## Shared Slash Commands
 
-The following commands can be typed directly into the agent's chat input:
+The executable registry in `thinclaw-types` is the source of truth for routing,
+help, and completion. Common commands include `/help`, `/status`, `/context`,
+`/model`, `/tools [NAME|--all]`, `/rollback`, `/rewind`, `/plan`, `/undo`,
+`/redo`, `/compress` (`/compact`), `/clear`, `/interrupt` (`/stop`), `/new`
+(`/reset`), `/thread`, `/resume`, `/identity`, `/personality` (`/vibe`),
+`/memory`, `/heartbeat`, `/summarize` (`/summary`), `/suggest`, `/skills`,
+`/restart`, `/job`, and `/quit` (`/exit`, `/shutdown`).
 
-- `/help` — Show the list of available commands and current context.
-- `/status` — Show system health, active providers, and current configuration.
-- `/context` — Show what the agent currently sees in its recent context window.
-- `/model` — View or switch the active LLM provider for the current session.
-- `/compress` (or `/compact`) — Manually compress the current session memory to save tokens.
-- `/identity` — Show current operator/household identity context.
-- `/memory` — Query or manage the persistent workspace memory.
-- `/personality` (or `/vibe`) — Change the agent's behavior and instructions for the current session.
-- `/skills` — List or manage the agent's active skills.
-- `/heartbeat` — Trigger a proactive system check and background routine pass. Heartbeat routines honor a `target` (`none` suppresses delivery; `<channel>` routes the summary to that channel — light-context heartbeats broadcast it via the channel forwarder) and an `include_reasoning` knob.
-- `/summarize` — Request a summary of the current session.
-- `/suggest` — Ask the agent to suggest next steps based on the current context.
-- `/rollback` — Filesystem-only checkpoint family (list/diff/restore shadow-git snapshots).
-- `/rewind [n|list]` — Unified rewind: `/rewind list` is a dry run showing conversation rewind points and turn-tagged filesystem checkpoints; `/rewind <n>` restores **both** the conversation (to the start of turn `n`) and the working files (to that turn's checkpoint) in one step.
-- `/plan [on|off]` — Toggle plan mode. While on, the agent investigates with read-only tools and proposes a numbered plan; every state-changing tool it calls pauses for operator approval before running. Survives restart.
-- `/undo` — Undo the last turn in a thread (also exposed in ThinClaw Desktop as the `thinclaw_undo` command + a cockpit toolbar button).
-- `/redo` — Redo a previously undone turn (desktop: `thinclaw_redo` command + toolbar button).
+`/job` is the canonical job family. The legacy `/create`, `/list`, `/jobs`,
+`/cancel`, `/status ID`, and `/help ID` spellings remain hidden compatibility
+routes; bare `/status` and `/help` retain their local meanings.
 
-Local clients (CLI, TUI, WebUI) may add extra client-specific controls such as:
-- `/skin <name>` — Change the interface visual theme (e.g., `/skin midnight`).
-- `/think` — Force the agent to perform an explicit reasoning step.
-- Shell escapes (e.g., `!ls`) if enabled by sandbox policy.
+REPL and TUI handle `/help`, `/status`, `/tools`, `/debug`, `/skin`, `/cls`,
+and quitting locally when declared by the registry. TUI additionally owns
+`/back`, `/top`, and `/bottom`; `/back` closes a view and never deletes a
+transcript entry. Agent-message routes are declared separately, so local-only
+commands cannot be submitted as remote system commands.
 
-However, the core commands above form the baseline shared vocabulary across all surfaces.
+Unimplemented reasoning-view toggles and raw `!command` shell escapes are not
+part of the command registry. They return a concise safety explanation and
+never become chat input or launch a process. The registered agent tool
+`agent_think` is a separate policy-controlled runtime capability.
 
 ## TUI Input Controls
 
@@ -48,6 +44,12 @@ The full-screen TUI uses `ratatui-textarea` for multi-line input:
 | `Ctrl+C` | Abort active stream, or double-tap to exit |
 | `Ctrl+L` | Clear the chat area |
 | `PageUp` / `PageDown` | Scroll the chat history |
+| `Ctrl+B` | Close the active detail view; does nothing to transcript content when none is open |
+
+The TUI hydrates the latest 100 messages from the runtime-selected durable
+direct conversation. Scrolling upward pages older messages in stable 100-message
+windows (maximum request size 500), deduplicated by durable message ID. Input
+history is stored separately in an owner-private bounded local file.
 
 ## REPL Multi-line Input
 
@@ -58,7 +60,9 @@ The REPL channel supports multi-line input via two continuation mechanisms:
 
 ## Surface Expectations
 
-- CLI and TUI should expose the same core command names.
+- REPL and TUI help/completion are generated from the same executable registry.
+- `/tools` and `/status` consume a complete sealed capability revision and
+  replace it only with a newer whole revision.
 - WebUI settings and copy should refer to `personality_pack`, `agent.name`, and shared skin vocabulary.
 - Channels should inherit the same mental model even when the transport cannot expose every local-only command.
 

@@ -27,7 +27,7 @@ pub enum TrajectoryCommand {
         format: String,
 
         /// Optional output file. If omitted, writes to stdout.
-        #[arg(short, long)]
+        #[arg(short, long = "out", alias = "output")]
         output: Option<PathBuf>,
 
         /// Minimum assessment score for SFT examples.
@@ -88,7 +88,7 @@ pub async fn run_trajectory_command(cmd: TrajectoryCommand) -> anyhow::Result<()
             )
             .await?;
             if with_manifest && output.is_none() {
-                anyhow::bail!("--with-manifest requires --output");
+                anyhow::bail!("--with-manifest requires --out");
             }
             if let Some(output) = output {
                 if let Some(parent) = output

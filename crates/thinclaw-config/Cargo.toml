@@ -31,6 +31,8 @@ url = "2"
 
 [features]
 default = []
+postgres = []
+libsql = []
 browser = []
 nostr = ["dep:thinclaw-channels", "thinclaw-channels/nostr"]
 voice = []

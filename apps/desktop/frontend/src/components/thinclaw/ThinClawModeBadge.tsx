@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Cloud, Laptop, AlertTriangle, RefreshCw } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as thinclaw from '../../lib/thinclaw';
+import { useOptionalAgentCockpit } from './AgentCockpitProvider';
 
 export function isRemoteThinClaw(status: thinclaw.ThinClawStatus | null | undefined): boolean {
     return (status?.gateway_mode || '').toLowerCase() === 'remote';
@@ -48,20 +49,22 @@ export function ThinClawModeBadge({
 }
 
 export function useThinClawStatusSnapshot(intervalMs = 15000) {
-    const [status, setStatus] = useState<thinclaw.ThinClawStatus | null>(null);
-    const [error, setError] = useState<string | null>(null);
+    const cockpit = useOptionalAgentCockpit();
+    const [fallbackStatus, setFallbackStatus] = useState<thinclaw.ThinClawStatus | null>(null);
+    const [fallbackError, setFallbackError] = useState<string | null>(null);
 
     useEffect(() => {
+        if (cockpit) return;
         let cancelled = false;
         const load = async () => {
             try {
                 const next = await thinclaw.getThinClawStatus();
                 if (!cancelled) {
-                    setStatus(next);
-                    setError(null);
+                    setFallbackStatus(next);
+                    setFallbackError(null);
                 }
             } catch (err) {
-                if (!cancelled) setError(String(err));
+                if (!cancelled) setFallbackError(String(err));
             }
         };
         load();
@@ -70,7 +73,9 @@ export function useThinClawStatusSnapshot(intervalMs = 15000) {
             cancelled = true;
             if (timer) window.clearInterval(timer);
         };
-    }, [intervalMs]);
+    }, [cockpit, intervalMs]);
 
+    const status = cockpit?.status ?? fallbackStatus;
+    const error = cockpit?.error ?? fallbackError;
     return { status, error, isRemote: isRemoteThinClaw(status) };
 }

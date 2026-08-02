@@ -364,6 +364,7 @@ export async function toggleTool(toolName: string, currentlyEnabled: boolean): P
 
 export interface PairingItem {
     channel: string;
+    request_id: string | null;
     user_id: string;
     paired_at: string;
     status: 'active' | 'pending';
@@ -379,9 +380,9 @@ export async function listPairings(channel: string): Promise<PairingListResponse
     return compatibilityCommands.thinclawPairingList(channel);
 }
 
-/** Approve a pairing code for a channel. */
-export async function approvePairing(channel: string, code: string): Promise<{ ok: boolean }> {
-    return compatibilityCommands.thinclawPairingApprove(channel, code);
+/** Approve a pairing request by its stable, non-secret request ID. */
+export async function approvePairing(channel: string, requestId: string): Promise<{ ok: boolean }> {
+    return compatibilityCommands.thinclawPairingApprove(channel, requestId);
 }
 
 // ============================================================================

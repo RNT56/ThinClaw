@@ -138,9 +138,10 @@ Authority: `docs/BUILD_PROFILES.md`. Profile composition:
 
 ```
 edge     = libsql
-light    = edge + postgres + wasm-runtime + gateway + html-to-markdown + document-extraction + timezones
-desktop  = libsql + html-to-markdown + document-extraction + repl + timezones
-full     = light + acp + repl/tui + tunnel + docker-sandbox + browser + nostr
+light    = edge + postgres + docker-sandbox + wasm-runtime + html-to-markdown + document-extraction + gateway-tls + mdns
+desktop  = libsql + html-to-markdown + document-extraction
+full     = light + acp + tunnel + docker-sandbox + browser + nostr
+compat   = repl | web-gateway | timezones (empty deprecated aliases)
 ```
 
 - **Every PR states which profiles it touches.** A change to `#[cfg(feature = "...")]`-gated code must name

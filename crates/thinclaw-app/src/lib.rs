@@ -6,6 +6,7 @@
 
 pub mod acp;
 pub mod assembly;
+pub mod capabilities;
 pub mod model;
 pub mod runtime;
 pub mod setup;
@@ -18,6 +19,10 @@ pub use assembly::{
     RuntimeLifecyclePolicy, RuntimeWorkspaceMode, ToolRuntimeAssemblyInput,
     ToolRuntimeAssemblyPlan, WorkspaceDirectoryPlan, WorkspaceFilesystemScope,
 };
+pub use capabilities::{
+    ActivityState, CapabilityFact, CapabilitySnapshot, DependencyState, FactState, HealthState,
+    ReadinessProfile, ReadinessState, ToolCapabilityFact, ToolCapabilitySnapshot,
+};
 pub use model::{apply_model_override, overridden_model_for_backend};
 pub use runtime::{
     AppBuilderFlags, EngineStatus, EngineStatusParts, ModelInfo, PeriodicPersistencePlan,
@@ -29,14 +34,17 @@ pub use runtime::{
     run_async_entrypoint, should_show_quiet_startup_spinner,
 };
 pub use setup::{
-    SetupBootstrapAgentInput, SetupBootstrapChannelInput, SetupBootstrapEnvInput,
-    SetupBootstrapEnvPlan, SetupBootstrapEnvVar, SetupBootstrapProviderInput,
-    SetupBootstrapWebUiInput, SetupEmbeddingsDefaultsPlan, SetupGuideTopic, SetupOnboardingProfile,
-    SetupProviderSlotDefaultsInput, SetupProviderSlotDefaultsPlan, SetupReadinessSummary,
-    SetupRuntimeCommandInput, SetupRuntimeProfile, SetupStepDescriptor, SetupStepStatus,
-    SetupValidationItem, SetupValidationLevel, SetupWizardPhase, SetupWizardPhaseId,
-    SetupWizardPlan, SetupWizardPlanInput, SetupWizardStepId, SetupWizardUiMode,
-    provider_default_model, provider_display_name, setup_bootstrap_env_plan,
+    ALL_SETUP_WIZARD_PHASE_IDS, ALL_SETUP_WIZARD_STEP_IDS, SetupAction, SetupActionOutcome,
+    SetupApplyReport, SetupApplyState, SetupAskRequest, SetupBootstrapAgentInput,
+    SetupBootstrapChannelInput, SetupBootstrapEnvInput, SetupBootstrapEnvPlan,
+    SetupBootstrapEnvVar, SetupBootstrapProviderInput, SetupBootstrapWebUiInput, SetupContinuation,
+    SetupDraft, SetupEmbeddingsDefaultsPlan, SetupGuideTopic, SetupInvocation, SetupInvocationKind,
+    SetupMode, SetupOnboardingProfile, SetupPlan, SetupProviderSlotDefaultsInput,
+    SetupProviderSlotDefaultsPlan, SetupReadinessSummary, SetupRuntimeCommandInput,
+    SetupRuntimeProfile, SetupSettingChange, SetupSettingValue, SetupStepDescriptor,
+    SetupStepStatus, SetupValidationItem, SetupValidationLevel, SetupWizardPhase,
+    SetupWizardPhaseId, SetupWizardPlan, SetupWizardPlanInput, SetupWizardStepId,
+    SetupWizardUiMode, provider_default_model, provider_display_name, setup_bootstrap_env_plan,
     setup_primary_runtime_command, setup_provider_slot_defaults, setup_quick_embeddings_defaults,
     setup_runtime_handoff_summary, setup_what_next_commands, setup_wizard_plan,
     suggested_cheap_model_for_provider,

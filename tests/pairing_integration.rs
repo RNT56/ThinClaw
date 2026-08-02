@@ -30,14 +30,13 @@ fn test_pairing_flow_unknown_user_to_approved() {
         )
         .unwrap();
     assert!(r1.created);
-    assert!(!r1.code.is_empty());
-    assert_eq!(r1.code.len(), 8);
+    assert!(uuid::Uuid::parse_str(&r1.request_id).is_ok());
 
     // 2. List pending shows the request
     let pending = store.list_pending(channel).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, "user_12345");
-    assert_eq!(pending[0].code, r1.code);
+    assert_eq!(pending[0].request_id, r1.request_id);
 
     // 3. User is not allowed yet
     assert!(
@@ -46,8 +45,8 @@ fn test_pairing_flow_unknown_user_to_approved() {
             .unwrap()
     );
 
-    // 4. Approve via code
-    let approved = store.approve(channel, &r1.code).unwrap();
+    // 4. Approve via stable request ID
+    let approved = store.approve_request(channel, &r1.request_id).unwrap();
     assert!(approved.is_some());
     assert_eq!(approved.unwrap().id, "user_12345");
 
@@ -77,13 +76,13 @@ fn test_pairing_flow_cli_approve() {
     let (store, _) = test_store();
     store.upsert_request("telegram", "user_999", None).unwrap();
     let pending = store.list_pending("telegram").unwrap();
-    let code = pending[0].code.clone();
+    let request_id = pending[0].request_id.clone();
 
     let result = run_pairing_command_with_store(
         &store,
         PairingCommand::Approve {
             channel: "telegram".to_string(),
-            code,
+            request_id,
             actor: None,
             name: None,
         },
@@ -97,18 +96,18 @@ fn test_pairing_flow_cli_approve() {
 }
 
 #[test]
-fn test_pairing_reject_invalid_code() {
+fn test_pairing_reject_invalid_request_id() {
     let (store, _) = test_store();
     store.upsert_request("telegram", "user_1", None).unwrap();
 
-    let result = store.approve("telegram", "INVALID1");
+    let result = store.approve_request("telegram", "invalid-request");
     assert!(result.unwrap().is_none());
 
     let result = run_pairing_command_with_store(
         &store,
         PairingCommand::Approve {
             channel: "telegram".to_string(),
-            code: "BADCODE1".to_string(),
+            request_id: "bad-request".to_string(),
             actor: None,
             name: None,
         },
@@ -128,10 +127,12 @@ fn test_pairing_multiple_channels_isolated() {
     assert_eq!(store.list_pending("slack").unwrap().len(), 1);
 
     // Approve in one channel doesn't affect the other
-    store.approve("telegram", &r_telegram.code).unwrap();
+    store
+        .approve_request("telegram", &r_telegram.request_id)
+        .unwrap();
     assert!(store.is_sender_allowed("telegram", "user_a", None).unwrap());
     assert!(!store.is_sender_allowed("slack", "user_a", None).unwrap());
 
-    store.approve("slack", &r_slack.code).unwrap();
+    store.approve_request("slack", &r_slack.request_id).unwrap();
     assert!(store.is_sender_allowed("slack", "user_b", None).unwrap());
 }

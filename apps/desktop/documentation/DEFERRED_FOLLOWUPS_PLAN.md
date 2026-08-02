@@ -2,11 +2,12 @@
 
 Tracks the follow-ups that were deferred while landing the first Lane-B parity batch
 (foundations #116 undo, #117 eval, #118 events, #119 channel-config) and their
-subsequent execution. **Verified 2026-07-13: items 1–5 and 7 are implemented and locally
-verified; item 6 needs a running app; item 8 remains intentionally skipped.**
+subsequent execution. **Reconciled 2026-08-01: items 1–5 are implemented; item 6 needs a
+running app; item 7 is partially implemented because encrypted channel-secret binding remains
+deliberately unavailable; item 8 remains intentionally skipped.**
 
-State legend: ✅ shipped (merged to `main`) · ⏳ ready, not started ·
-➖ intentionally skipped.
+State legend: ✅ shipped (merged to `main`) · ⚠️ truth-gated or partially
+delivered · ⏳ ready, not started · ➖ intentionally skipped.
 
 **Shared foundations (in place):** generic `UiEvent::AgentLifecycleEvent`
 (`apps/desktop/backend/src/thinclaw/ui_types.rs`); `event_mapping.rs::status_to_ui_event`;
@@ -39,11 +40,12 @@ manifest credentials route only to encrypted secret storage. The same validation
 contract is available locally and through the authenticated remote gateway. Startup-only fields
 still require channel restart/reactivation.
 
-## 5. Channel-config settings form — ✅ **#123**
+## 5. Channel-config settings form — ⚠️ non-secret fields wired
 **Decision D-4 applied:** delivered as a **new Lane-B panel** `ThinClawChannelConfig` (a
 `channel-config` cockpit page) rather than editing the Lane-A-owned `ThinClawChannels.tsx`.
-Renders the schema (`thinclaw_channel_config_schemas`) as a dynamic form and submits via
-item 4; surfaces the backend `restart_required` note as a toast.
+Renders the schema (`thinclaw_channel_config_schemas`) as a dynamic form and submits
+non-secret fields via item 4. Stored password values never cross IPC, and the panel reports
+secret editing as unavailable until an encrypted channel-secret binding exists.
 
 ## 6. Eval runtime smoke-test — ⏳ (needs running app)
 Not a code change. With an embedded engine running, use the Experiments Benchmarks panel
@@ -51,11 +53,12 @@ to call `thinclaw_experiments_run_eval("agent_loop", "<prompt>", 1, 4)` and conf
 scored trajectory in a throwaway `agent-env:` session. **Cannot be executed in a headless
 dev environment** — left as a manual QA step rather than faked.
 
-## 7. More channels implement `config_schema` — ✅
+## 7. More channels implement `config_schema` — ⚠️ non-secret fields wired
 Signal, Discord, iMessage, Nostr, Apple Mail, and BlueBubbles expose non-secret native
 schemas. Installed WASM channels map `setup.required_secrets` from their capabilities manifests
-to encrypted-store-only password fields. Native Matrix, voice-call, APNs, and browser-push
-surface exact host-managed setup instructions rather than presenting non-functional forms.
+to a visible secret-binding gate rather than password fields. Native Matrix, voice-call, APNs,
+and browser-push surface exact host-managed setup instructions rather than presenting
+non-functional forms.
 
 ## 8. Typed `ConfigSchema` DTO in bindings — ➖ skipped
 The read commands return `serde_json::Value` and the panel (item 5) renders dynamically from
@@ -66,5 +69,7 @@ typed props.
 
 ## Remaining work
 - **#6** eval smoke-test (manual, needs the app).
+- **#7** encrypted channel-secret binding (required before Desktop can safely render or submit
+  channel passwords).
 - Future: `Arc<RwLock>` live-reload for startup-only native channel fields so submit applies
   without a restart.

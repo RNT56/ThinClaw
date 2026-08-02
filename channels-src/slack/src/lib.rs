@@ -558,7 +558,7 @@ fn download_slack_files(files: &[SlackFile]) -> Vec<channel_host::MediaAttachmen
 // ============================================================================
 
 /// Check if a sender is permitted. Returns true if allowed.
-/// For pairing mode, sends a pairing code DM if denied.
+/// For pairing mode, sends the stable pending request ID if denied.
 fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool {
     // 1. Owner check (highest priority, applies to all contexts)
     let owner_id = channel_host::workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());
@@ -616,10 +616,10 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
             Ok(result) => {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!("Pairing request for user {}: code {}", user_id, result.code),
+                    &format!("Pairing request {} created for user {}", result.request_id, user_id),
                 );
                 if result.created {
-                    let _ = send_pairing_reply(channel_id, &result.code);
+                    let _ = send_pairing_reply(channel_id, &result.request_id);
                 }
             }
             Err(e) => {
@@ -633,13 +633,13 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
     false
 }
 
-/// Send a pairing code message via Slack chat.postMessage.
-fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
+/// Send a pairing request notice via Slack chat.postMessage.
+fn send_pairing_reply(channel_id: &str, request_id: &str) -> Result<(), String> {
     let payload = serde_json::json!({
         "channel": channel_id,
         "text": format!(
-            "To pair with this bot, run: `thinclaw pairing approve slack {}`",
-            code
+            "Your pairing request ID is `{}`. Ask the ThinClaw operator to approve it.",
+            request_id
         ),
     });
 

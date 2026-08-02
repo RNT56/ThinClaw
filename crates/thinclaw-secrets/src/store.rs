@@ -125,6 +125,7 @@ fn ensure_current_secret(secret: &Secret) -> Result<(), SecretError> {
 
 fn secret_ref_from_secret(secret: &Secret) -> SecretRef {
     SecretRef {
+        id: Some(secret.id),
         name: secret.name.clone(),
         provider: secret.provider.clone(),
         encryption_version: secret.encryption_version,

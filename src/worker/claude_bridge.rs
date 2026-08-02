@@ -31,7 +31,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::BufReader;
-use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::error::WorkerError;
@@ -409,7 +408,10 @@ impl ClaudeBridgeRuntime {
                 reason: "refusing invalid Claude resume session ID".to_string(),
             });
         }
-        let mut cmd = Command::new("claude");
+        let mut cmd = thinclaw_platform::tokio_process_command!(
+            "src.worker.claude_bridge.tokio.101",
+            "claude"
+        );
         cmd.arg("-p")
             .arg(prompt)
             .arg("--output-format")

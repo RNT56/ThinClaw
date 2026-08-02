@@ -70,7 +70,7 @@ export function projectCodingBackend(project: thinclaw.ThinClawRepoProject) {
 
 export function derivedReadinessItems(
     project: thinclaw.ThinClawRepoProject | null,
-    isShellMode: boolean,
+    isSetupRequired: boolean,
     unavailableReason: string | null,
 ): thinclaw.ThinClawRepoProjectSetupItem[] {
     if (!project) return [];
@@ -82,8 +82,8 @@ export function derivedReadinessItems(
         {
             key: 'feature_flag',
             label: 'Feature flag',
-            state: disabled ? 'blocked' : (isShellMode ? 'pending' : 'complete'),
-            detail: disabled ? 'Set repo_projects.enabled=true.' : (isShellMode ? 'Waiting for live supervisor data.' : 'Supervisor commands available.'),
+            state: disabled ? 'blocked' : (isSetupRequired ? 'pending' : 'complete'),
+            detail: disabled ? 'Set repo_projects.enabled=true.' : (isSetupRequired ? 'Create or enroll a repository before the supervisor can report readiness.' : 'Supervisor commands available.'),
         },
         {
             key: 'github_app',

@@ -6,7 +6,7 @@ another device, ThinClaw Desktop, or a webhook-capable channel.
 Remote access is a deployment choice, not a default. The first-class setup path is:
 
 ```bash
-thinclaw onboard --profile remote
+thinclaw setup --profile remote --mode advanced
 ```
 
 That profile enables the gateway, disables the interactive CLI channel for
@@ -73,8 +73,8 @@ CLI_ENABLED=false
 Check access at any time:
 
 ```bash
-thinclaw gateway access
-thinclaw gateway access --show-token
+thinclaw runtime web access
+thinclaw runtime web access --reveal-token --yes
 ```
 
 ## WebUI Access Without Tailscale
@@ -162,15 +162,15 @@ need a broader bind.
 Remote/headless hosts should run:
 
 ```bash
-thinclaw run --no-onboard
+thinclaw run --skip-setup-check
 ```
 
 Or install the OS service:
 
 ```bash
-thinclaw service install
-thinclaw service start
-thinclaw service status
+thinclaw runtime service install
+thinclaw runtime service start
+thinclaw runtime service status
 ```
 
 The service path sets `CLI_ENABLED=false` so stdin EOF does not stop the

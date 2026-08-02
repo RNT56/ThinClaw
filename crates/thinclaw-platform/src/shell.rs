@@ -45,19 +45,25 @@ impl ShellLauncher {
 
     pub fn prefix_args(self) -> &'static [&'static str] {
         match self.flavor {
-            ShellFlavor::PosixSh => &["-lc"],
+            // Service and diagnostic commands must not execute user login
+            // startup files. They inherit the caller's explicit environment.
+            ShellFlavor::PosixSh => &["-c"],
             ShellFlavor::WindowsCmd => &["/C"],
         }
     }
 
     pub fn std_command(self, script: &str) -> StdCommand {
-        let mut cmd = StdCommand::new(self.program());
+        let mut cmd =
+            crate::std_process_command!("crates.thinclaw-platform.src.shell.std.1", self.program());
         cmd.args(self.prefix_args()).arg(script);
         cmd
     }
 
     pub fn tokio_command(self, script: &str) -> TokioCommand {
-        let mut cmd = TokioCommand::new(self.program());
+        let mut cmd = crate::tokio_process_command!(
+            "crates.thinclaw-platform.src.shell.tokio.2",
+            self.program()
+        );
         cmd.args(self.prefix_args()).arg(script);
         cmd
     }
@@ -75,7 +81,7 @@ mod tests {
     fn launcher_has_expected_prefix_args() {
         let launcher = shell_launcher();
         match launcher.flavor() {
-            ShellFlavor::PosixSh => assert_eq!(launcher.prefix_args(), ["-lc"]),
+            ShellFlavor::PosixSh => assert_eq!(launcher.prefix_args(), ["-c"]),
             ShellFlavor::WindowsCmd => assert_eq!(launcher.prefix_args(), ["/C"]),
         }
     }

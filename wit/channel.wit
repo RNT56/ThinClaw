@@ -168,12 +168,12 @@ interface channel-host {
 
     /// Result of upserting a pairing request.
     record pairing-upsert-result {
-        code: string,
+        request-id: string,
         created: bool,
     }
 
     /// Upsert a pairing request for an unknown sender.
-    /// Returns (code, created). When created is true, the channel should send a pairing reply.
+    /// Returns a stable request ID and whether the request was newly created.
     pairing-upsert-request: func(
         channel: string,
         id: string,

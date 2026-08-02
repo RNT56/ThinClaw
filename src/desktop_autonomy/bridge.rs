@@ -104,12 +104,18 @@ impl DesktopAutonomyManager {
         let spec = self.bridge_spec();
         let mut child_command = match spec.backend {
             DesktopBridgeBackend::MacOsSwift => {
-                let mut command_builder = Command::new("swift");
+                let mut command_builder = thinclaw_platform::tokio_process_command!(
+                    "src.desktop_autonomy.bridge.tokio.101",
+                    "swift"
+                );
                 command_builder.arg(&self.sidecar_script_path).arg(command);
                 command_builder
             }
             DesktopBridgeBackend::WindowsPowerShell => {
-                let mut command_builder = Command::new("powershell");
+                let mut command_builder = thinclaw_platform::tokio_process_command!(
+                    "src.desktop_autonomy.bridge.tokio.102",
+                    "powershell"
+                );
                 command_builder
                     .arg("-NoLogo")
                     .arg("-NoProfile")
@@ -121,7 +127,10 @@ impl DesktopAutonomyManager {
                 command_builder
             }
             DesktopBridgeBackend::LinuxPython => {
-                let mut command_builder = Command::new("python3");
+                let mut command_builder = thinclaw_platform::tokio_process_command!(
+                    "src.desktop_autonomy.bridge.tokio.103",
+                    "python3"
+                );
                 command_builder.arg(&self.sidecar_script_path).arg(command);
                 command_builder
             }

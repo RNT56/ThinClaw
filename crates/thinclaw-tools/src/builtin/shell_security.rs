@@ -12,7 +12,6 @@ use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 use unicode_normalization::UnicodeNormalization;
 
 /// Commands that are always blocked for safety.
@@ -665,7 +664,10 @@ impl ExternalCommandScanner {
         if cmd.len() > 1024 * 1024 {
             return ExternalScanReport::unknown("command exceeds external scanner input limit");
         }
-        let mut command = Command::new(&resolved.path);
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-tools.src.builtin.shell_security.tokio.101",
+            &resolved.path
+        );
         command.arg("--json");
         let output = match thinclaw_platform::bounded_command_output_with_input(
             &mut command,

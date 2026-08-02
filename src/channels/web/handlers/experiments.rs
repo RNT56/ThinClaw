@@ -27,10 +27,10 @@ use thinclaw_gateway::web::experiments::{
     experiment_target_not_found_error, experiment_target_updated_update_message,
     parse_experiment_campaign_id, parse_experiment_lease_id, parse_experiment_project_id,
     parse_experiment_runner_id, parse_experiment_target_id, parse_experiment_trial_id,
-    research_gpu_cloud_api_key, research_gpu_cloud_backend_or_error,
-    research_gpu_cloud_connect_response, research_gpu_cloud_connected_update_message,
-    research_gpu_cloud_credential_load_validation, research_gpu_cloud_default_runner_template,
-    research_gpu_cloud_info_or_error, research_gpu_cloud_invalid_credentials_validation,
+    research_gpu_cloud_backend_or_error, research_gpu_cloud_connect_response,
+    research_gpu_cloud_connected_update_message, research_gpu_cloud_credential_load_validation,
+    research_gpu_cloud_default_runner_template, research_gpu_cloud_info_or_error,
+    research_gpu_cloud_invalid_credentials_validation,
     research_gpu_cloud_launch_missing_credentials_error,
     research_gpu_cloud_launch_requested_update_message, research_gpu_cloud_launch_test_response,
     research_gpu_cloud_missing_credentials_validation, research_gpu_cloud_template_response,
@@ -575,8 +575,29 @@ pub(crate) async fn experiments_gpu_cloud_connect_handler(
         .secrets_store
         .as_ref()
         .ok_or_else(experiment_secrets_store_unavailable_error)?;
-    let api_key = research_gpu_cloud_api_key(&req)
-        .map_err(|error| (error.status_code(), error.to_string()))?;
+    let source = secrets
+        .list(&request_identity.principal_id)
+        .await
+        .map_err(experiment_internal_server_error)?
+        .into_iter()
+        .find(|source| source.id == Some(req.secret_source_id))
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                "secret source is unavailable".to_string(),
+            )
+        })?;
+    let source_value = secrets
+        .get_decrypted(&request_identity.principal_id, &source.name)
+        .await
+        .map_err(experiment_internal_server_error)?;
+    let api_key = source_value.expose().trim().to_string();
+    if api_key.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "secret source is empty".to_string(),
+        ));
+    }
     let _ = secrets
         .delete(&request_identity.principal_id, secret_name)
         .await;

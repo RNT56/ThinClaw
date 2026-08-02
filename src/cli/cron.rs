@@ -8,8 +8,6 @@
 //! - `cron runs` — show recent runs for a routine
 //! - `cron lint` — validate a schedule expression and show next fire times
 
-use std::sync::Arc;
-
 use clap::Subcommand;
 use uuid::Uuid;
 
@@ -130,13 +128,16 @@ pub enum CronCommand {
 }
 
 /// Run a cron CLI command.
-pub async fn run_cron_command(cmd: CronCommand) -> anyhow::Result<()> {
+pub async fn run_cron_command(
+    cmd: CronCommand,
+    context: &crate::cli::CliContext,
+) -> anyhow::Result<()> {
     // Lint doesn't need DB, handle it separately
     if let CronCommand::Lint { expression, count } = cmd {
         return run_lint(&expression, count);
     }
 
-    let db = connect_db().await?;
+    let db = context.database().await.map_err(anyhow::Error::from)?;
 
     match cmd {
         CronCommand::List { format, actor } => list_routines(&*db, &format, &actor).await,
@@ -174,7 +175,7 @@ pub async fn run_cron_command(cmd: CronCommand) -> anyhow::Result<()> {
             remove_routine(&*db, &actor, &id_or_name).await
         }
         CronCommand::Trigger { id_or_name, actor } => {
-            trigger_routine(&*db, &actor, &id_or_name).await
+            trigger_routine(&*db, &actor, &id_or_name, context).await
         }
         CronCommand::Runs {
             id_or_name,
@@ -186,16 +187,6 @@ pub async fn run_cron_command(cmd: CronCommand) -> anyhow::Result<()> {
 }
 
 const DEFAULT_USER_ID: &str = "default";
-
-/// Bootstrap a DB connection.
-async fn connect_db() -> anyhow::Result<Arc<dyn crate::db::Database>> {
-    let config = crate::config::Config::from_env()
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    crate::db::connect_from_config(&config.database)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))
-}
 
 /// Resolve a routine by UUID or name.
 async fn resolve_routine(
@@ -247,7 +238,7 @@ async fn list_routines(
         println!(
             "{}",
             branding.muted(
-                "Create one with: thinclaw cron add <name> --schedule '<schedule>' --prompt '<prompt>'"
+                "Create one with: thinclaw automation routines add <name> --schedule '<schedule>' --prompt '<prompt>'"
             )
         );
         return Ok(());
@@ -540,63 +531,34 @@ async fn trigger_routine(
     db: &dyn crate::db::Database,
     actor_id: &str,
     id_or_name: &str,
+    context: &crate::cli::CliContext,
 ) -> anyhow::Result<()> {
-    let branding = TerminalBranding::current();
     let routine = resolve_routine(db, actor_id, id_or_name).await?;
-
-    let prompt = match &routine.action {
-        crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
-        crate::agent::routine::RoutineAction::FullJob {
-            title, description, ..
-        } => {
-            format!("{}: {}", title, description)
-        }
-        crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => prompt
-            .clone()
-            .unwrap_or_else(|| "Heartbeat check".to_string()),
-        crate::agent::routine::RoutineAction::ExperimentCampaign { project_id, .. } => {
-            format!("Run experiment campaign for project {project_id}")
-        }
-    };
-
-    println!(
-        "{}",
-        branding.accent(format!(
-            "Triggering routine '{}' ({})",
-            routine.name, routine.id
-        ))
-    );
-    println!(
-        "{}",
-        branding.key_value(
-            "Prompt",
-            if prompt.len() > 60 {
-                let end = prompt
-                    .char_indices()
-                    .map(|(i, _)| i)
-                    .take_while(|&i| i < 57)
-                    .last()
-                    .unwrap_or(0);
-                format!("{}…", &prompt[..end])
-            } else {
-                prompt
-            },
+    let config = context.config().await.map_err(anyhow::Error::from)?;
+    let client = crate::cli::GatewayClient::resolve_from_config(None, None, config)?;
+    let response: thinclaw_gateway::web::routines::RoutineActionResponse = client
+        .post_json(
+            &format!("/api/routines/{}/trigger", routine.id),
+            &serde_json::json!({}),
         )
-    );
-    println!();
-    println!(
-        "{}",
-        branding.muted("Note: Manual trigger via CLI logs the intent. For live execution,")
-    );
-    println!(
-        "{}",
-        branding.muted(format!(
-            "use the gateway API: POST /api/routines/{}/trigger",
-            routine.id
-        ))
-    );
-
-    Ok(())
+        .await?;
+    if response.run_id.is_none() {
+        anyhow::bail!("gateway accepted the trigger without returning a run ID");
+    }
+    context
+        .output()
+        .write_record("automation.routines.trigger", &response, |response| {
+            format!(
+                "Routine {} accepted as run {} ({})",
+                response.routine_id,
+                response.run_id.expect("run ID checked"),
+                response
+                    .initial_status
+                    .as_deref()
+                    .unwrap_or(&response.status)
+            )
+        })
+        .map_err(anyhow::Error::from)
 }
 
 /// Show recent runs for a routine.

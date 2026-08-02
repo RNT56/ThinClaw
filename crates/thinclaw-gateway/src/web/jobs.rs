@@ -348,8 +348,16 @@ pub fn sandbox_job_info(input: GatewaySandboxJobListInput) -> JobInfo {
 }
 
 pub fn job_list_response(mut jobs: Vec<JobInfo>) -> JobListResponse {
-    jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    JobListResponse { jobs }
+    jobs.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    JobListResponse {
+        jobs,
+        next_cursor: None,
+        has_more: false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -583,7 +591,7 @@ pub fn sandbox_job_transition_infos(
     transitions
 }
 
-#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct JobStatusActionResponse {
     pub status: String,
     pub job_id: Uuid,
@@ -598,7 +606,7 @@ impl JobStatusActionResponse {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct JobRestartResponse {
     pub status: String,
     pub old_job_id: Uuid,
@@ -621,7 +629,7 @@ pub struct JobPromptRequest {
     pub done: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct JobPromptQueuedResponse {
     pub status: String,
     pub job_id: String,
@@ -634,7 +642,7 @@ pub fn job_prompt_queued_response(job_id: Uuid) -> JobPromptQueuedResponse {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct JobEventInfo {
     pub id: i64,
     pub event_type: String,
@@ -659,16 +667,20 @@ pub fn job_event_info(input: JobEventInfoInput) -> JobEventInfo {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct JobEventsResponse {
     pub job_id: String,
     pub events: Vec<JobEventInfo>,
+    pub next_after: Option<i64>,
+    pub has_more: bool,
 }
 
 pub fn job_events_response(job_id: Uuid, events: Vec<JobEventInfo>) -> JobEventsResponse {
     JobEventsResponse {
         job_id: job_id.to_string(),
+        next_after: events.last().map(|event| event.id),
         events,
+        has_more: false,
     }
 }
 
@@ -1114,7 +1126,9 @@ mod tests {
                     "event_type": "message",
                     "data": {"content": "hello"},
                     "created_at": "2026-06-02T00:00:00+00:00"
-                }]
+                }],
+                "next_after": 7,
+                "has_more": false
             })
         );
     }

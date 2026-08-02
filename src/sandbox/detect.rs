@@ -174,7 +174,8 @@ async fn command_status_success_with_timeout(
     args: &[&str],
     timeout: std::time::Duration,
 ) -> bool {
-    let mut command = tokio::process::Command::new(command);
+    let mut command =
+        thinclaw_platform::tokio_process_command!("src.sandbox.detect.tokio.1", command);
     command.args(args);
     thinclaw_platform::bounded_command_output(&mut command, timeout, 1024, 1024)
         .await

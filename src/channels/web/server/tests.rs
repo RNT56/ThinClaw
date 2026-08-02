@@ -900,6 +900,14 @@ async fn channel_config_gateway_handlers_expose_and_forward_live_schema_updates(
         .unwrap(),
     );
     let secrets = Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
+    let source = crate::secrets::SecretsStore::create(
+        secrets.as_ref(),
+        "gateway-user",
+        crate::secrets::CreateSecretParams::new("configurable_test_source", "s3cret")
+            .with_provider("test-fixture"),
+    )
+    .await
+    .expect("credential source should be stored");
     let updates = Arc::new(tokio::sync::Mutex::new(None));
     let manager = Arc::new(crate::channels::ChannelManager::new());
     manager
@@ -946,7 +954,10 @@ async fn channel_config_gateway_handlers_expose_and_forward_live_schema_updates(
         axum::extract::State(state),
         identity,
         axum::extract::Path("configurable-test".to_string()),
-        axum::Json(serde_json::json!({"mode": "fast", "test_token": "s3cret"})),
+        axum::Json(serde_json::json!({
+            "mode": "fast",
+            "test_token": source.id.to_string()
+        })),
     )
     .await
     .expect("live config update succeeds");

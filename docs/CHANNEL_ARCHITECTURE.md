@@ -299,7 +299,7 @@ APNs and browser-push endpoint registrations are persisted under
 override those paths with `APNS_ENDPOINT_REGISTRY_PATH` and
 `BROWSER_PUSH_ENDPOINT_REGISTRY_PATH`.
 
-Use `thinclaw channels validate <name>` for a local CLI readiness check.
+Use `thinclaw extensions channels check-config <name>` for a local CLI readiness check.
 
 The crate-owned native driver boundary lives in `thinclaw-channels` as
 `NativeLifecycleChannel`, `NativeLifecycleClient`, `NativeLifecycleEvent`, and

@@ -1,7 +1,6 @@
 //! Local Git workspace provisioning for repo project tasks.
 
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoWorkspaceError {
@@ -309,7 +308,8 @@ fn validate_remote_name(value: &str) -> Result<(), ()> {
 }
 
 async fn run_git(cwd: &Path, args: &[&str]) -> Result<(), RepoWorkspaceError> {
-    let mut command = Command::new("git");
+    let mut command =
+        thinclaw_platform::tokio_process_command!("src.repo_projects.workspace.tokio.101", "git");
     command
         .args(args)
         .current_dir(cwd)

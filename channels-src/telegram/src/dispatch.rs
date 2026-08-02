@@ -657,13 +657,13 @@ pub(crate) fn register_webhook(
 // Pairing Reply
 // ============================================================================
 
-/// Send a pairing code message to a chat. Uses HTML formatting for the inline code.
-pub(crate) fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
+/// Send a pairing request notice to a chat.
+pub(crate) fn send_pairing_reply(chat_id: i64, request_id: &str) -> Result<(), String> {
     send_message(
         chat_id,
         &format!(
-            "To pair with this bot, run: <code>thinclaw pairing approve telegram {}</code>",
-            escape_html(code)
+            "Your pairing request ID is <code>{}</code>. Ask the ThinClaw operator to approve it.",
+            escape_html(request_id)
         ),
         None,
         Some("HTML"),

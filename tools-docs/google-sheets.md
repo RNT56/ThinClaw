@@ -7,7 +7,7 @@
 Uses **Google OAuth 2.0** (shared credentials with all Google tools).
 
 ```bash
-thinclaw tool auth google-sheets
+thinclaw extensions tools auth google-sheets
 ```
 
 Authenticate once with any installed Google tool that uses the shared token. Re-running auth later upgrades the shared credential if you install more Google tools and need additional scopes.

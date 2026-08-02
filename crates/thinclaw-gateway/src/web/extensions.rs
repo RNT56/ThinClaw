@@ -129,7 +129,7 @@ pub fn extension_manager_unavailable_install_message(
 ) -> String {
     match input.registry_source {
         Some(ExtensionRegistryEntrySource::WasmBuildable) => format!(
-            "'{}' requires building from source. Run `thinclaw registry install {}` from the CLI.",
+            "'{}' requires building from source. Run `thinclaw extensions registry install {}` from the CLI.",
             input.name, input.name
         ),
         Some(ExtensionRegistryEntrySource::Other) => format!(
@@ -152,18 +152,6 @@ pub fn extension_action_success_response(message: impl Into<String>) -> ActionRe
 
 pub fn extension_action_error_response(message: impl Into<String>) -> ActionResponse {
     ActionResponse::fail(message)
-}
-
-pub fn activation_error_needs_auth(error: &str) -> bool {
-    error.contains("authentication") || error.contains("401") || error.contains("Unauthorized")
-}
-
-pub fn extension_auth_status_is_authenticated(status: &str) -> bool {
-    status == "authenticated"
-}
-
-pub fn extension_auth_status_allows_activation_retry(status: &str) -> bool {
-    matches!(status, "authenticated" | "no_auth_required")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -802,7 +790,7 @@ mod tests {
                 name: "telegram",
                 registry_source: Some(ExtensionRegistryEntrySource::WasmBuildable),
             }),
-            "'telegram' requires building from source. Run `thinclaw registry install telegram` from the CLI."
+            "'telegram' requires building from source. Run `thinclaw extensions registry install telegram` from the CLI."
         );
 
         assert_eq!(
@@ -875,21 +863,6 @@ mod tests {
         );
         assert_eq!(parse_extension_kind_hint(Some("unknown")), None);
         assert_eq!(parse_extension_kind_hint(None), None);
-    }
-
-    #[test]
-    fn auth_status_helpers_preserve_api_and_web_retry_policy() {
-        assert!(extension_auth_status_is_authenticated("authenticated"));
-        assert!(!extension_auth_status_is_authenticated("no_auth_required"));
-        assert!(extension_auth_status_allows_activation_retry(
-            "authenticated"
-        ));
-        assert!(extension_auth_status_allows_activation_retry(
-            "no_auth_required"
-        ));
-        assert!(!extension_auth_status_allows_activation_retry(
-            "awaiting_authorization"
-        ));
     }
 
     #[test]

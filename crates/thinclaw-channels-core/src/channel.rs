@@ -250,19 +250,23 @@ pub enum StatusUpdate {
     Thinking(String),
     /// Tool execution started.
     ToolStarted {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
         /// Tool input parameters (optional — may be omitted for performance).
         parameters: Option<serde_json::Value>,
     },
     /// Tool execution completed.
     ToolCompleted {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
         success: bool,
         /// Brief preview of the result (truncated to keep events small).
         result_preview: Option<String>,
+        duration_ms: Option<u64>,
     },
     /// Brief preview of tool execution output.
     ToolResult {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
         preview: String,
         artifacts: Vec<thinclaw_tools_core::ToolArtifact>,

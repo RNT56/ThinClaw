@@ -2,14 +2,13 @@
 
 use crate::branding::skin::CliSkin;
 use crate::setup::prompts::{confirm, print_info, print_success, print_warning, select_one};
-use crate::terminal_branding::set_runtime_cli_skin_override;
 
 use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
     pub(super) fn step_cli_skin(&mut self) -> Result<(), SetupError> {
         print_info("Pick the skin for onboarding, the CLI, and the default web look.");
-        print_info("Your choice applies immediately and can be changed later.");
+        print_info("Your choice remains a draft until Review & Apply.");
 
         let current_skin = self.settings.agent.cli_skin.clone();
         let mut skin_names = CliSkin::available_names();
@@ -35,23 +34,23 @@ impl SetupWizard {
             .collect();
         let skin_refs: Vec<&str> = skin_options.iter().map(String::as_str).collect();
         let skin_idx =
-            select_one("Choose your cockpit skin", &skin_refs).map_err(SetupError::Io)?;
+            select_one("Choose your terminal appearance", &skin_refs).map_err(SetupError::Io)?;
         let chosen = skin_names
             .get(skin_idx)
             .cloned()
             .unwrap_or_else(|| current_skin.clone());
 
         self.settings.agent.cli_skin = chosen.clone();
-        set_runtime_cli_skin_override(chosen.clone());
-        print_success(&format!("Skin set to '{}'.", chosen));
+        print_success(&format!(
+            "Appearance '{}' added to the setup draft.",
+            chosen
+        ));
         Ok(())
     }
 
     pub(super) fn step_web_ui(&mut self) -> Result<(), SetupError> {
         print_info("ThinClaw includes a web dashboard for chat, monitoring, and operator control.");
-        print_info(
-            "This step tunes the cockpit feel without changing the underlying runtime behavior.",
-        );
+        print_info("Appearance and remote listener exposure are reviewed as separate settings.");
         crate::setup::prompts::print_blank_line();
 
         if matches!(
@@ -64,7 +63,7 @@ impl SetupWizard {
 
         if !confirm("Customize web UI appearance?", false).map_err(SetupError::Io)? {
             print_info(
-                "Keeping the default cockpit presentation: system theme, default accent color, and branding shown.",
+                "Keeping the default presentation: system theme, default accent color, and branding shown.",
             );
             return Ok(());
         }
@@ -102,7 +101,7 @@ impl SetupWizard {
             .as_deref()
             .unwrap_or("follow CLI skin");
         print_success(&format!(
-            "Web UI cockpit configured (skin: {}, theme: {}, branding: {})",
+            "Web UI appearance drafted (skin: {}, theme: {}, branding: {})",
             skin_display,
             theme,
             if show_branding { "shown" } else { "hidden" }
@@ -115,7 +114,7 @@ impl SetupWizard {
         print_info("Remote WebUI access stays private by default through an SSH tunnel.");
         let options = [
             "SSH tunnel (recommended)  - bind 127.0.0.1 and forward the port from your laptop",
-            "Private LAN / Tailscale   - bind 0.0.0.0 and use the token URL on a trusted network",
+            "Private LAN / Tailscale   - bind 0.0.0.0 and use authenticated access on a trusted network",
             "Reverse proxy / public    - keep token auth; TLS, proxy, and firewall are operator-owned",
         ];
         let choice = select_one("Remote WebUI access", &options).map_err(SetupError::Io)?;
@@ -153,11 +152,11 @@ impl SetupWizard {
         if access.is_loopback() {
             print_info(&format!("SSH tunnel: {}", access.ssh_tunnel_command()));
         }
-        if let Some(url) = access.token_url(true) {
-            print_info(&format!("Token URL: {}", url));
-        }
         print_info(
-            "Service handoff: run `thinclaw run --no-onboard`, or install/start the OS service after onboarding.",
+            "Gateway credentials are not printed. Use the guarded runtime access command when explicit reveal is required.",
+        );
+        print_info(
+            "Service handoff: run `thinclaw run --skip-setup-check`, or install/start the OS service after setup.",
         );
 
         Ok(())

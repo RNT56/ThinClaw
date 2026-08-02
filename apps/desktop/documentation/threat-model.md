@@ -1,6 +1,6 @@
 # ThinClaw Desktop Bridge Threat Model
 
-Last updated: 2026-07-13
+Last updated: 2026-08-01
 
 This document defines the security boundary between untrusted runtime data,
 the privileged Tauri host, the React webview, and a remote ThinClaw gateway. It
@@ -19,6 +19,7 @@ agent tool-policy threat models remain authoritative for their own internals.
 | Desktop -> SSH deployment target | User-authorized remote mutation. Host/user/key input is validated, SSH uses trust-on-first-use (`accept-new`) and rejects changed host keys, and credentials travel over stdin rather than process arguments. |
 | Profile metadata -> durable state / IPC | Non-secret metadata only. Profile bearer tokens live in the encrypted Keychain envelope and are redacted from `identity.json`, status responses, discovery responses, and debug formatting. |
 | Saved credentials -> React status/settings | Presence-only metadata. Remote gateway, custom LLM, profile, and Gmail OAuth credentials remain encrypted and broad status/OAuth responses never return reusable values. The local pairing handshake token is the deliberate exception described below. |
+| Channel Config -> React | Non-secret configuration values only. Schema responses omit password values and advertise secret-binding availability separately, so an unavailable encrypted binding cannot be mistaken for an editable credential. |
 
 ## Threats And Controls
 
@@ -33,6 +34,7 @@ agent tool-policy threat models remain authoritative for their own internals.
 | Embedded gateway unintentionally exposed to the internet | Gateway startup remains loopback-only. Remote Access defaults to private tailnet exposure, validates gateway and Tailscale readiness, accepts no caller-supplied credentials, and requires a separate warning confirmation before public Funnel exposure. Stop, profile switch, and app shutdown reset the tunnel. |
 | Profile tokens persisted in `identity.json` or returned to the webview | Existing plaintext profile tokens migrate to namespaced keys in the encrypted Keychain envelope. The source document is rewritten only after migration succeeds. Serialization emits `null`, status/list commands return redacted profiles, and in-memory profile tokens are zeroized on drop. |
 | Saved secret erased when a redacted settings form is submitted | Gateway and custom-LLM credential inputs use patch semantics: omitted values preserve the encrypted credential and an explicit clear action deletes it. Profile selection uses the profile ID and the privileged backend credential lookup rather than resubmitting a redacted profile object. |
+| Stored channel secret revealed through configuration rendering or export | Channel Config never receives password values from the backend and does not render a secret input while encrypted channel-secret binding is unavailable. The generic Config export redacts sensitive-looking key names before copying. |
 | OAuth credentials exposed through IPC or plaintext runtime settings | Gmail OAuth completion returns only non-secret status metadata. Access/refresh tokens are stored in the authenticated Keychain envelope, legacy plaintext settings migrate and are deleted, and runtime injection uses the in-memory bridge overlay. Token buffers are zeroized after storage. |
 | SSH option/shell injection or silent host-key replacement | SSH hosts, users, and Tailscale keys use strict allowlists. Commands include `--`, `BatchMode=yes`, and `StrictHostKeyChecking=accept-new`; a changed known-host key fails. Setup credentials use a two-line stdin contract and output is redacted before `deploy-log` emission. |
 | Deployment credential broadcast to unrelated listeners | `deploy-status` no longer carries credentials. The generated token is returned only as the initiating Tauri command result and is then saved through the encrypted profile/gateway secret paths. Setup output never prints it. |

@@ -99,7 +99,10 @@ pub(crate) mod telegram_html;
 mod wrapper;
 
 // Core types
-pub use bundled::{available_channel_names, bundled_channel_names, install_bundled_channel};
+pub use bundled::{
+    available_channel_names, bundled_channel_names, install_bundled_channel,
+    read_bundled_channel_capabilities,
+};
 pub use capabilities::{
     ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig, ToolCapabilities,
 };

@@ -2,6 +2,37 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Stable identity shared by every event emitted for one tool invocation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(transparent)]
+pub struct ToolInvocationId(String);
+
+impl ToolInvocationId {
+    pub fn from_provider(value: &str) -> Self {
+        let value = value.trim();
+        if !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control) {
+            Self(format!("provider:{value}"))
+        } else {
+            Self(format!("generated:{}", uuid::Uuid::new_v4()))
+        }
+    }
+
+    pub fn generated() -> Self {
+        Self(format!("generated:{}", uuid::Uuid::new_v4()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ToolInvocationId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
 /// Execution profile for a tool-capable agent lane.
 ///
 /// Profiles determine which tools are implicitly available before explicit

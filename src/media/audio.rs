@@ -4,6 +4,8 @@
 //! (local or remote) and returns the transcribed text.
 
 use super::types::{MediaContent, MediaExtractError, MediaExtractor, MediaType};
+use secrecy::{ExposeSecret as _, SecretString};
+use std::sync::Arc;
 
 const MAX_WHISPER_ENDPOINT_BYTES: usize = 4096;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
@@ -86,25 +88,40 @@ pub struct AudioExtractor {
     /// Model to request (default: "whisper-1").
     model: String,
     /// Optional bearer credential for an authenticated Whisper endpoint.
-    token: Option<String>,
+    token: Option<Arc<SecretString>>,
 }
 
 impl AudioExtractor {
     /// Create a new audio extractor with default settings.
     pub fn new() -> Self {
-        // IC-007: Use optional_env to see bridge-injected vars
-        let whisper_url = crate::config::helpers::optional_env("WHISPER_HTTP_ENDPOINT")
-            .ok()
-            .flatten()
+        let managed = super::local_endpoints::managed_local_endpoints()
+            .get(super::local_endpoints::ManagedLocalEndpointKind::SpeechToText);
+        let whisper_url = managed
+            .as_ref()
+            .map(|endpoint| endpoint.endpoint().to_string())
+            .or_else(|| {
+                crate::config::helpers::optional_env("WHISPER_HTTP_ENDPOINT")
+                    .ok()
+                    .flatten()
+            })
             .unwrap_or_else(|| DEFAULT_WHISPER_URL.to_string());
-
-        let model = crate::config::helpers::optional_env("WHISPER_HTTP_MODEL")
-            .ok()
-            .flatten()
+        let model = managed
+            .as_ref()
+            .map(|endpoint| endpoint.model().to_string())
+            .or_else(|| {
+                crate::config::helpers::optional_env("WHISPER_HTTP_MODEL")
+                    .ok()
+                    .flatten()
+            })
             .unwrap_or_else(|| "whisper-1".to_string());
-        let token = crate::config::helpers::optional_env("WHISPER_HTTP_TOKEN")
-            .ok()
-            .flatten();
+        let token = managed
+            .map(|endpoint| Arc::new(SecretString::from(endpoint.credential().to_string())))
+            .or_else(|| {
+                crate::config::helpers::optional_env("WHISPER_HTTP_TOKEN")
+                    .ok()
+                    .flatten()
+                    .map(|token| Arc::new(SecretString::from(token)))
+            });
 
         Self {
             whisper_url,
@@ -195,7 +212,7 @@ impl AudioExtractor {
 
         let mut request = client.post(endpoint).multipart(form);
         if let Some(token) = self.token.as_deref() {
-            request = request.bearer_auth(token);
+            request = request.bearer_auth(token.expose_secret());
         }
 
         let resp = request

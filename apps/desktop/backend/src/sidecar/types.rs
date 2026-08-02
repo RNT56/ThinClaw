@@ -128,7 +128,6 @@ pub struct SidecarStatus {
 #[derive(Debug, Clone, serde::Serialize, Type)]
 pub struct ChatServerConfig {
     pub port: u16,
-    pub token: String,
     pub context_size: u32,
     pub model_family: String,
 }

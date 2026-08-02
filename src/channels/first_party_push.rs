@@ -854,6 +854,7 @@ mod tests {
 
         let _guard = registry.stream_opened(&device_id);
         n.handle_event(&SseEvent::ToolStarted {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("push-test"),
             name: "shell.execute".to_string(),
             thread_id: Some("t1".to_string()),
         })
@@ -905,6 +906,7 @@ mod tests {
 
         // First, a progress event auto-tracks and emits an update.
         n.handle_event(&SseEvent::ToolStarted {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("push-test"),
             name: "shell.execute".to_string(),
             thread_id: Some("t1".to_string()),
         })
@@ -967,6 +969,7 @@ mod tests {
         let mut n = notifier(registry, sender.clone(), dir.path());
 
         n.handle_event(&SseEvent::ToolStarted {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("push-test"),
             name: "shell.execute".to_string(),
             thread_id: Some("t1".to_string()),
         })
@@ -1001,6 +1004,7 @@ mod tests {
         let mut n = notifier(registry, sender.clone(), dir.path());
 
         n.handle_event(&SseEvent::ToolStarted {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("push-test"),
             name: "shell.execute".to_string(),
             thread_id: Some("t1".to_string()),
         })
@@ -1084,6 +1088,7 @@ mod tests {
         let mut n = notifier(registry.clone(), sender.clone(), dir.path());
 
         n.handle_event(&SseEvent::ToolStarted {
+            invocation_id: thinclaw_types::ToolInvocationId::from_provider("push-test"),
             name: "shell.execute".to_string(),
             thread_id: Some("t1".to_string()),
         })

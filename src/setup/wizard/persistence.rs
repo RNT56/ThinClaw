@@ -11,7 +11,12 @@ use thinclaw_app::{
 
 impl SetupWizard {
     pub(super) async fn persist_settings(&self) -> Result<bool, SetupError> {
-        let db_map = self.settings.to_db_map();
+        let db_map: std::collections::HashMap<_, _> = self
+            .settings
+            .to_db_map()
+            .into_iter()
+            .filter(|(key, _)| !super::transaction::credential_shaped_key(key))
+            .collect();
         let saved = false;
 
         #[cfg(feature = "postgres")]
@@ -59,18 +64,7 @@ impl SetupWizard {
     /// These are the chicken-and-egg settings needed before the database is
     /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
     pub(super) fn write_bootstrap_env(&self) -> Result<(), SetupError> {
-        let secrets_master_key =
-            if self.settings.secrets_master_key_source == crate::settings::KeySource::Env {
-                self.generated_env_master_key.clone().or_else(|| {
-                    std::env::var("SECRETS_MASTER_KEY")
-                        .ok()
-                        .filter(|key| !key.trim().is_empty())
-                })
-            } else {
-                None
-            };
-
-        let input = self.bootstrap_env_input(secrets_master_key);
+        let input = self.bootstrap_env_input();
         let plan = setup_bootstrap_env_plan(&input);
 
         if !plan.is_empty() {
@@ -90,17 +84,23 @@ impl SetupWizard {
         Ok(())
     }
 
-    fn bootstrap_env_input(&self, secrets_master_key: Option<String>) -> SetupBootstrapEnvInput {
+    fn bootstrap_env_input(&self) -> SetupBootstrapEnvInput {
         let channels = &self.settings.channels;
         let env_key_source =
             self.settings.secrets_master_key_source == crate::settings::KeySource::Env;
 
         SetupBootstrapEnvInput {
             database_backend: self.settings.database_backend.clone(),
-            database_url: self.settings.database_url.clone(),
+            database_url: self
+                .settings
+                .database_url
+                .as_deref()
+                .and_then(credential_free_database_url),
             libsql_path: self.settings.libsql_path.clone(),
             libsql_url: self.settings.libsql_url.clone(),
-            secrets_master_key,
+            // Master keys and channel/provider credentials never enter the
+            // setup-owned dotenv file. Environment mode is operator-owned.
+            secrets_master_key: None,
             allow_env_master_key: env_key_source && self.settings.secrets.allow_env_master_key,
             llm_backend: self.settings.llm_backend.clone(),
             llm_base_url: self.settings.openai_compatible_base_url.clone(),
@@ -123,12 +123,12 @@ impl SetupWizard {
                 http_host: channels.http_host.clone(),
                 http_port: channels.http_port,
                 discord_enabled: channels.discord_enabled,
-                discord_bot_token: channels.discord_bot_token.clone(),
+                discord_bot_token: None,
                 discord_guild_id: channels.discord_guild_id.clone(),
                 discord_allow_from: channels.discord_allow_from.clone(),
                 slack_enabled: channels.slack_enabled,
-                slack_bot_token: channels.slack_bot_token.clone(),
-                slack_app_token: channels.slack_app_token.clone(),
+                slack_bot_token: None,
+                slack_app_token: None,
                 slack_allow_from: channels.slack_allow_from.clone(),
                 nostr_enabled: channels.nostr_enabled,
                 nostr_relays: channels.nostr_relays.clone(),
@@ -150,7 +150,7 @@ impl SetupWizard {
                 apple_mail_mark_as_read: channels.apple_mail_mark_as_read,
                 bluebubbles_enabled: channels.bluebubbles_enabled,
                 bluebubbles_server_url: channels.bluebubbles_server_url.clone(),
-                bluebubbles_password: channels.bluebubbles_password.clone(),
+                bluebubbles_password: None,
                 bluebubbles_webhook_host: channels.bluebubbles_webhook_host.clone(),
                 bluebubbles_webhook_port: channels.bluebubbles_webhook_port,
                 bluebubbles_allow_from: channels.bluebubbles_allow_from.clone(),
@@ -158,7 +158,7 @@ impl SetupWizard {
                 gateway_enabled: channels.gateway_enabled,
                 gateway_host: channels.gateway_host.clone(),
                 gateway_port: channels.gateway_port,
-                gateway_auth_token: channels.gateway_auth_token.clone(),
+                gateway_auth_token: None,
                 cli_enabled: channels.cli_enabled,
             },
             providers: SetupBootstrapProviderInput {
@@ -175,24 +175,6 @@ impl SetupWizard {
                 allow_local_tools: self.settings.agent.allow_local_tools,
                 workspace_mode: self.settings.agent.workspace_mode.clone(),
             },
-        }
-    }
-
-    /// Persist settings to DB and bootstrap .env after each step.
-    ///
-    /// Silently ignores errors (e.g., DB not connected yet before step 1
-    /// completes). This is best-effort incremental persistence.
-    pub(super) async fn persist_after_step(&self) {
-        // Write bootstrap .env (always possible)
-        if let Err(e) = self.write_bootstrap_env() {
-            tracing::debug!("Could not write bootstrap env after step: {}", e);
-        }
-
-        // Persist to DB
-        match self.persist_settings().await {
-            Ok(true) => tracing::debug!("Settings persisted to database after step"),
-            Ok(false) => tracing::debug!("No DB connection yet, skipping settings persist"),
-            Err(e) => tracing::debug!("Could not persist settings after step: {}", e),
         }
     }
 
@@ -217,9 +199,15 @@ impl SetupWizard {
                 let store = crate::db::postgres::PgBackend::from_pool(pool.clone());
                 match store.get_all_settings("default").await {
                     Ok(db_map) if !db_map.is_empty() => {
-                        let existing = Settings::from_db_map(&db_map);
+                        self.capture_plaintext_credentials_from_map(&db_map);
+                        let safe_map = db_map
+                            .into_iter()
+                            .filter(|(key, _)| !super::transaction::credential_shaped_key(key))
+                            .collect();
+                        let existing = Settings::from_db_map(&safe_map);
+                        self.baseline_settings = existing.clone();
                         self.settings.merge_from(&existing);
-                        tracing::info!("Loaded {} existing settings from database", db_map.len());
+                        tracing::info!("Loaded existing non-secret settings from database");
                         true
                     }
                     Ok(_) => false,
@@ -241,9 +229,15 @@ impl SetupWizard {
                 use crate::db::SettingsStore as _;
                 match backend.get_all_settings("default").await {
                     Ok(db_map) if !db_map.is_empty() => {
-                        let existing = Settings::from_db_map(&db_map);
+                        self.capture_plaintext_credentials_from_map(&db_map);
+                        let safe_map = db_map
+                            .into_iter()
+                            .filter(|(key, _)| !super::transaction::credential_shaped_key(key))
+                            .collect();
+                        let existing = Settings::from_db_map(&safe_map);
+                        self.baseline_settings = existing.clone();
                         self.settings.merge_from(&existing);
-                        tracing::info!("Loaded {} existing settings from database", db_map.len());
+                        tracing::info!("Loaded existing non-secret settings from database");
                         true
                     }
                     Ok(_) => false,
@@ -262,6 +256,14 @@ impl SetupWizard {
         // Suppress unused variable warning when only one backend is compiled.
         let _ = loaded;
     }
+}
+
+fn credential_free_database_url(value: &str) -> Option<String> {
+    let parsed = url::Url::parse(value).ok()?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    Some(value.to_string())
 }
 
 #[cfg(test)]
@@ -292,15 +294,12 @@ mod tests {
         wizard.settings.agent.allow_local_tools = true;
         wizard.settings.agent.workspace_mode = Some("unrestricted".to_string());
 
-        let input = wizard.bootstrap_env_input(Some("test-master-key".to_string()));
+        let input = wizard.bootstrap_env_input();
         let plan = setup_bootstrap_env_plan(&input);
 
         assert_eq!(value_for(&plan, "DATABASE_BACKEND"), Some("libsql"));
         assert_eq!(value_for(&plan, "LIBSQL_PATH"), Some("/tmp/thinclaw.db"));
-        assert_eq!(
-            value_for(&plan, "SECRETS_MASTER_KEY"),
-            Some("test-master-key")
-        );
+        assert_eq!(value_for(&plan, "SECRETS_MASTER_KEY"), None);
         assert_eq!(value_for(&plan, "THINCLAW_ALLOW_ENV_MASTER_KEY"), Some("1"));
         assert_eq!(value_for(&plan, "ONBOARD_COMPLETED"), Some("true"));
         assert_eq!(value_for(&plan, "THINCLAW_RUNTIME_PROFILE"), Some("remote"));

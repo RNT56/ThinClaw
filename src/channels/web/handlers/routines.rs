@@ -25,7 +25,7 @@ use thinclaw_gateway::web::routines::{
     routine_event_check_info, routine_invalid_schedule_error, routine_list_response,
     routine_not_found_error, routine_not_webhook_trigger_error, routine_run_info,
     routine_runs_response, routine_summary_response, routine_toggle_action_response,
-    routine_trigger_check_info, routine_triggered_action_response, routine_webhook_body_too_large,
+    routine_trigger_accepted_response, routine_trigger_check_info, routine_webhook_body_too_large,
     routine_webhook_body_too_large_error, routine_webhook_trigger_response,
     verify_routine_webhook_signature,
 };
@@ -436,14 +436,14 @@ pub(crate) async fn routines_trigger_handler(
         .routine_engine()
         .ok_or_else(routine_engine_unavailable_error)?;
 
-    engine.fire_manual(routine_id).await.map_err(|error| {
+    let run_id = engine.fire_manual(routine_id).await.map_err(|error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to trigger routine: {error}"),
         )
     })?;
 
-    Ok(Json(routine_triggered_action_response(routine_id)))
+    Ok(Json(routine_trigger_accepted_response(routine_id, run_id)))
 }
 
 pub(crate) async fn routines_toggle_handler(

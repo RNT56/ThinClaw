@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CommandPalette } from "../../components/navigation/CommandPalette";
+import { AGENT_ROUTE_REGISTRY } from "../../components/thinclaw/agent-routes";
 
 describe("CommandPalette", () => {
     it("filters commands and runs the selected mode action", async () => {
@@ -18,5 +19,15 @@ describe("CommandPalette", () => {
         render(<CommandPalette open onOpenChange={vi.fn()} onModeChange={vi.fn()} onSettingsChange={vi.fn()} />);
         await userEvent.type(screen.getByRole("textbox", { name: "Search commands" }), "no-such-action");
         expect(screen.getByRole("status")).toHaveTextContent("No matching commands");
+    });
+
+    it("opens primary Agent destinations from the shared route registry", async () => {
+        const onAgentPageChange = vi.fn();
+        const onModeChange = vi.fn();
+        render(<CommandPalette open onOpenChange={vi.fn()} onModeChange={onModeChange} onSettingsChange={vi.fn()} onAgentPageChange={onAgentPageChange} agentRoutes={AGENT_ROUTE_REGISTRY} />);
+        await userEvent.type(screen.getByRole("textbox", { name: "Search commands" }), "workspace");
+        await userEvent.click(screen.getByRole("button", { name: /Open Workspace & Memory/i }));
+        expect(onModeChange).toHaveBeenCalledWith('thinclaw');
+        expect(onAgentPageChange).toHaveBeenCalledWith('workspace');
     });
 });

@@ -7,7 +7,6 @@ use crate::setup::prompts::{
     print_info, print_phase_banner, print_step, print_success, print_warning, push_prompt_ui_mode,
     select_one, set_tui_prompt_context,
 };
-use crate::terminal_branding::set_runtime_cli_skin_override;
 use std::io::IsTerminal;
 
 use super::tui_shell;
@@ -36,6 +35,7 @@ impl SetupWizard {
         thinclaw_app::SetupWizardPlanInput {
             channels_only: self.config.channels_only,
             guide_topic: self.config.guide_topic.map(GuideTopic::app_topic),
+            mode: self.config.mode,
         }
     }
 
@@ -55,29 +55,32 @@ impl SetupWizard {
     }
 
     pub fn should_continue_to_runtime(&self) -> bool {
-        !self.config.pause_after_completion
+        self.config.invocation.continuation.continues_to_runtime()
+    }
+
+    pub fn continuation(&self) -> &thinclaw_app::SetupContinuation {
+        &self.config.invocation.continuation
     }
 
     fn runtime_command_input(&self) -> thinclaw_app::SetupRuntimeCommandInput {
         thinclaw_app::SetupRuntimeCommandInput {
             profile: self.selected_profile.app_profile(),
             ui_mode: self.runtime_ui_mode().app_mode(),
-            continue_to_runtime: self.should_continue_to_runtime(),
-            pause_after_completion: self.config.pause_after_completion,
+            continuation: self.config.invocation.continuation.clone(),
         }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn primary_runtime_command(&self) -> &'static str {
-        thinclaw_app::setup_primary_runtime_command(self.runtime_command_input())
+        thinclaw_app::setup_primary_runtime_command(&self.runtime_command_input())
     }
 
     pub(super) fn runtime_handoff_summary(&self) -> String {
-        thinclaw_app::setup_runtime_handoff_summary(self.runtime_command_input())
+        thinclaw_app::setup_runtime_handoff_summary(&self.runtime_command_input())
     }
 
     pub(super) fn what_next_commands(&self) -> Vec<String> {
-        thinclaw_app::setup_what_next_commands(self.runtime_command_input())
+        thinclaw_app::setup_what_next_commands(&self.runtime_command_input())
     }
 
     pub(super) fn build_plan(&self) -> WizardPlan {
@@ -100,26 +103,20 @@ impl SetupWizard {
 
     async fn run_cli_flow(&mut self) -> Result<(), SetupError> {
         let _prompt_mode = push_prompt_ui_mode(PromptRenderMode::Cli);
-        set_runtime_cli_skin_override(self.settings.agent.cli_skin.clone());
         let mode_label = match current_prompt_ui_mode() {
             PromptRenderMode::Cli => "cli",
             PromptRenderMode::Tui => "tui",
         };
-        print_header("ThinClaw Humanist Cockpit");
-        print_info(
-            "You will move through focused phases with calm recommendations and inline readiness checks.",
-        );
-        print_info(
-            "Progress is saved as you go, so you can pause and resume without redoing the stable parts.",
-        );
-        print_info(&format!("Cockpit mode: {mode_label}"));
+        print_header("ThinClaw Setup");
+        print_info("Review each applicable section and its consequences before Apply.");
+        print_info("Nothing is written until you explicitly choose Apply on the final review.");
+        print_info(&format!("Renderer: {mode_label}"));
         crate::setup::prompts::print_blank_line();
         self.run_planned_flow(None).await
     }
 
     async fn run_tui_flow(&mut self) -> Result<(), SetupError> {
         let _prompt_mode = push_prompt_ui_mode(PromptRenderMode::Tui);
-        set_runtime_cli_skin_override(self.settings.agent.cli_skin.clone());
         clear_tui_prompt_messages();
         clear_tui_prompt_context();
         let plan = self
@@ -213,10 +210,6 @@ impl SetupWizard {
             };
             self.step_statuses.insert(descriptor.id, status);
             self.persist_followups();
-
-            if self.should_persist_step(descriptor.id) {
-                self.persist_after_step().await;
-            }
 
             if shell.is_some() {
                 match status {
@@ -312,13 +305,6 @@ impl SetupWizard {
         Ok(true)
     }
 
-    fn should_persist_step(&self, step_id: WizardStepId) -> bool {
-        !matches!(
-            step_id,
-            WizardStepId::Profile | WizardStepId::ChannelContinuity | WizardStepId::Summary
-        )
-    }
-
     async fn execute_step(&mut self, step_id: WizardStepId) -> Result<StepStatus, SetupError> {
         match step_id {
             WizardStepId::CliSkin => {
@@ -388,9 +374,6 @@ impl SetupWizard {
                 Ok(StepStatus::Completed)
             }
             WizardStepId::Channels => {
-                if self.config.channels_only {
-                    self.reconnect_existing_db().await?;
-                }
                 if self.is_quick_setup() {
                     self.step_primary_channel_quick().await?;
                 } else {
@@ -553,8 +536,6 @@ impl SetupWizard {
 
         if self.is_quick_setup() {
             self.auto_configure_quick_runtime_defaults().await?;
-        } else if self.config.channels_only || self.is_guide_mode() {
-            let _ = self.reconnect_existing_db().await;
         }
 
         Ok(())
@@ -562,11 +543,10 @@ impl SetupWizard {
 
     /// Run the setup wizard.
     ///
-    /// Settings are persisted incrementally after each successful step so
-    /// that progress is not lost if a later step fails. On re-run, existing
-    /// settings are loaded from the database after Step 1 establishes a
-    /// connection, so users don't have to re-enter everything.
+    /// Page state is volatile. Only the final reviewed, lease-protected Apply
+    /// transaction can mutate durable state.
     pub async fn run(&mut self) -> Result<(), SetupError> {
+        self.baseline_settings = self.settings.clone();
         let requested_ui_mode = self.config.ui_mode;
         let ui_mode = self.resolve_ui_mode();
         self.resolved_ui_mode = ui_mode;

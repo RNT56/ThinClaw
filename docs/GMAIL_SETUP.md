@@ -39,18 +39,18 @@ The Gmail tool is a WASM extension that gives the agent the ability to:
 export GOOGLE_OAUTH_CLIENT_ID="your-desktop-client-id"
 export GOOGLE_OAUTH_CLIENT_SECRET="your-desktop-client-secret"
 
-# Install the Gmail tool extension
-thinclaw tool install gmail
+# Install the Gmail tool extension from the registry
+thinclaw extensions registry install gmail
 
 # Authenticate with Google
-thinclaw tool auth gmail
+thinclaw extensions tools auth gmail
 ```
 
 An official ThinClaw binary may contain a ThinClaw-owned OAuth client. When it
 does, omit both exports and start authentication directly. Official releases
 remain BYOK until maintainers provision both optional release secrets.
 
-The `thinclaw tool auth gmail` command will:
+The `thinclaw extensions tools auth gmail` command will:
 1. Open your browser to Google's OAuth consent screen
 2. Ask you to sign in with the agent's Google account
 3. Request permission for `gmail.readonly`, `gmail.send`, and `pubsub` scopes
@@ -67,7 +67,7 @@ If ThinClaw is running on a headless server (e.g., a Mac Mini via SSH), the brow
 ssh -L 9876:127.0.0.1:9876 user@your-server
 
 # On the server (via SSH), run:
-thinclaw tool auth gmail
+thinclaw extensions tools auth gmail
 
 # The CLI will print:
 #   Could not open browser: no display
@@ -168,7 +168,7 @@ gcloud pubsub subscriptions create gmail-agent-sub \
 
 ### Step 4: Configure ThinClaw
 
-During the onboarding wizard (`thinclaw onboard`), select Gmail as a channel.
+During the onboarding wizard (`thinclaw setup`), select Gmail as a channel.
 The wizard will prompt for:
 
 | Setting | Value | Example |
@@ -191,7 +191,7 @@ GMAIL_ALLOWED_SENDERS=boss@company.com,team@company.com  # optional
 ### Step 5: Authenticate
 
 ```bash
-thinclaw tool auth gmail
+thinclaw extensions tools auth gmail
 ```
 
 This uses the same OAuth flow described in the Tool section above. The token
@@ -250,18 +250,18 @@ curl -X POST \
 
 ### "No OAuth token configured"
 
-Run `thinclaw tool auth gmail` to authenticate. If the token has expired,
+Run `thinclaw extensions tools auth gmail` to authenticate. If the token has expired,
 re-run the command to get a fresh token.
 
 ### "Pub/Sub pull returned 403"
 
-The OAuth token doesn't have the `pubsub` scope. Re-run `thinclaw tool auth gmail`
+The OAuth token doesn't have the `pubsub` scope. Re-run `thinclaw extensions tools auth gmail`
 to get a token with the correct scopes.
 
 ### "Gmail list returned 401"
 
 The OAuth token has expired. ThinClaw should auto-refresh tokens,
-but if it doesn't, re-run `thinclaw tool auth gmail`.
+but if it doesn't, re-run `thinclaw extensions tools auth gmail`.
 
 ### Emails not arriving
 
@@ -272,7 +272,7 @@ but if it doesn't, re-run `thinclaw tool auth gmail`.
 
 ### Headless OAuth fails
 
-Make sure SSH port forwarding is set up **before** running `thinclaw tool auth gmail`:
+Make sure SSH port forwarding is set up **before** running `thinclaw extensions tools auth gmail`:
 
 ```bash
 ssh -L 9876:127.0.0.1:9876 user@server

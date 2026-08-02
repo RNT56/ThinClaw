@@ -42,10 +42,11 @@ export type LocalRuntimeKind = "llama_cpp" | "mlx" | "vllm" | "ollama" | "none";
 export type RuntimeCapability = "chat" | "embedding" | "tts" | "stt" | "diffusion";
 export type RuntimeExposurePolicy = "direct_only" | "shared_when_enabled" | "network_exposed";
 export type RuntimeReadiness = "ready" | "starting" | "setup_required" | "unavailable";
+export type LocalEndpointId = string;
 
 export interface LocalRuntimeEndpoint {
+  endpointId: LocalEndpointId;
   baseUrl: string;
-  apiKey?: string | null;
   modelId?: string | null;
   contextSize?: number | null;
   modelFamily?: string | null;

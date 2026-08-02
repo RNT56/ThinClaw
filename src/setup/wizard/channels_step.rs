@@ -20,8 +20,7 @@ use crate::setup::prompts::{
 };
 
 use super::helpers::{
-    build_channel_options, capitalize_first, discover_wasm_channels,
-    install_selected_bundled_channels, install_selected_registry_channels, mask_api_key,
+    build_channel_options, capitalize_first, discover_wasm_channels, mask_api_key,
 };
 use super::{FollowupDraft, SetupError, SetupWizard};
 use crate::settings::{OnboardingFollowupCategory, OnboardingFollowupStatus};
@@ -191,26 +190,23 @@ impl SetupWizard {
             .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
             .join(".thinclaw/channels");
 
-        let mut discovered = discover_wasm_channels(&channels_dir).await;
+        let discovered = discover_wasm_channels(&channels_dir).await;
         let installed_names: HashSet<String> =
             discovered.iter().map(|(name, _)| name.clone()).collect();
 
         if !installed_names.contains(channel_name) {
-            print_info(&format!("Preparing {}...", display_name));
-            let selection = vec![channel_name.to_string()];
-            let bundled_installed =
-                install_selected_bundled_channels(&channels_dir, &selection, &installed_names)
-                    .await?
-                    .unwrap_or_default();
-            let bundled_installed_set: HashSet<String> = bundled_installed.into_iter().collect();
-            let _ = install_selected_registry_channels(
-                &channels_dir,
-                &selection,
-                &installed_names,
-                &bundled_installed_set,
-            )
-            .await;
-            discovered = discover_wasm_channels(&channels_dir).await;
+            print_info(&format!(
+                "Adding {} installation to the Apply plan...",
+                display_name
+            ));
+            self.queue_action(super::PendingSetupAction::InstallChannel {
+                name: channel_name.to_string(),
+            });
+            if let Ok(caps) =
+                crate::channels::wasm::read_bundled_channel_capabilities(channel_name).await
+            {
+                return Ok(Some(caps));
+            }
         }
 
         Ok(discovered
@@ -435,7 +431,9 @@ impl SetupWizard {
                         "a bot token is required to make the channel usable",
                     );
                 } else {
-                    self.settings.channels.discord_bot_token = Some(token);
+                    self.secret_draft
+                        .insert("discord_bot_token", SecretString::from(token));
+                    self.settings.channels.discord_bot_token = None;
                     self.settings.channels.discord_enabled = true;
                     print_success("Discord is ready as your primary channel.");
                 }
@@ -458,8 +456,12 @@ impl SetupWizard {
                         "both the bot token and app token are required",
                     );
                 } else {
-                    self.settings.channels.slack_bot_token = Some(bot_token);
-                    self.settings.channels.slack_app_token = Some(app_token);
+                    self.secret_draft
+                        .insert("slack_bot_token", SecretString::from(bot_token));
+                    self.secret_draft
+                        .insert("slack_app_token", SecretString::from(app_token));
+                    self.settings.channels.slack_bot_token = None;
+                    self.settings.channels.slack_app_token = None;
                     self.settings.channels.slack_enabled = true;
                     print_success("Slack is ready as your primary channel.");
                 }
@@ -500,7 +502,9 @@ impl SetupWizard {
                     );
                 } else {
                     self.settings.channels.bluebubbles_server_url = Some(server_url);
-                    self.settings.channels.bluebubbles_password = Some(password);
+                    self.secret_draft
+                        .insert("bluebubbles_password", SecretString::from(password));
+                    self.settings.channels.bluebubbles_password = None;
                     self.settings.channels.bluebubbles_webhook_host = Some("127.0.0.1".to_string());
                     self.settings.channels.bluebubbles_webhook_port = Some(8645);
                     self.settings.channels.bluebubbles_enabled = true;
@@ -552,77 +556,7 @@ impl SetupWizard {
     }
 
     pub(super) async fn init_secrets_context(&mut self) -> Result<SecretsContext, SetupError> {
-        // Get crypto (should be set from step 2, or load from OS secure store/env)
-        let crypto = if let Some(ref c) = self.secrets_crypto {
-            Arc::clone(c)
-        } else {
-            // Try to load master key from the OS secure store or env
-            let key = if let Ok(env_key) = std::env::var("SECRETS_MASTER_KEY") {
-                env_key
-            } else if let Ok(keychain_key) = crate::platform::secure_store::get_master_key().await {
-                keychain_key.iter().map(|b| format!("{:02x}", b)).collect()
-            } else {
-                return Err(SetupError::Config(
-                    "Secrets not configured. Run full setup or set SECRETS_MASTER_KEY.".to_string(),
-                ));
-            };
-
-            let crypto = Arc::new(
-                SecretsCrypto::new(SecretString::from(key))
-                    .map_err(|e| SetupError::Config(e.to_string()))?,
-            );
-            self.secrets_crypto = Some(Arc::clone(&crypto));
-            crypto
-        };
-
-        // Create backend-appropriate secrets store.
-        // Respect the user's selected backend when both features are compiled,
-        // so we don't accidentally use a postgres pool from DATABASE_URL when
-        // libsql was chosen (or vice versa).
-        let selected_backend = self
-            .settings
-            .database_backend
-            .as_deref()
-            .unwrap_or("postgres");
-
-        #[cfg(all(feature = "libsql", feature = "postgres"))]
-        {
-            if selected_backend == "libsql" {
-                if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                    return Ok(SecretsContext::from_store(store, "default"));
-                }
-                if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                    return Ok(SecretsContext::from_store(store, "default"));
-                }
-            } else {
-                if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                    return Ok(SecretsContext::from_store(store, "default"));
-                }
-                if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                    return Ok(SecretsContext::from_store(store, "default"));
-                }
-            }
-        }
-
-        #[cfg(all(feature = "postgres", not(feature = "libsql")))]
-        {
-            let _ = selected_backend;
-            if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                return Ok(SecretsContext::from_store(store, "default"));
-            }
-        }
-
-        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
-        {
-            let _ = selected_backend;
-            if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                return Ok(SecretsContext::from_store(store, "default"));
-            }
-        }
-
-        Err(SetupError::Config(
-            "No database backend available for secrets storage".to_string(),
-        ))
+        Ok(self.secret_draft.context("default"))
     }
 
     /// Create a PostgreSQL secrets store from the current pool.
@@ -824,47 +758,16 @@ impl SetupWizard {
                 .collect()
         };
 
-        // Install selected channels that aren't already on disk
-        let mut any_installed = false;
-
-        // Try bundled channels first (pre-compiled artifacts from channels-src/)
-        let bundled_result = install_selected_bundled_channels(
-            &channels_dir,
-            &selected_wasm_channels,
-            &installed_names,
-        )
-        .await?;
-
-        let bundled_installed: HashSet<String> = bundled_result
-            .as_ref()
-            .map(|v| v.iter().cloned().collect())
-            .unwrap_or_default();
-
-        if !bundled_installed.is_empty() {
-            let names: Vec<&str> = bundled_installed.iter().map(|s| s.as_str()).collect();
-            print_success(&format!("Installed bundled channels: {}", names.join(", ")));
-            any_installed = true;
-        }
-
-        let installed_from_registry = install_selected_registry_channels(
-            &channels_dir,
-            &selected_wasm_channels,
-            &installed_names,
-            &bundled_installed,
-        )
-        .await;
-
-        if !installed_from_registry.is_empty() {
-            print_success(&format!(
-                "Built from registry: {}",
-                installed_from_registry.join(", ")
-            ));
-            any_installed = true;
-        }
-
-        // Re-discover after installs
-        if any_installed {
-            discovered_channels = discover_wasm_channels(&channels_dir).await;
+        // Missing packages are selected now and installed only after Apply.
+        for name in &selected_wasm_channels {
+            if !installed_names.contains(name) {
+                self.queue_action(super::PendingSetupAction::InstallChannel { name: name.clone() });
+                if let Ok(caps) =
+                    crate::channels::wasm::read_bundled_channel_capabilities(name).await
+                {
+                    discovered_channels.push((name.clone(), caps));
+                }
+            }
         }
 
         let needs_secrets =
@@ -1305,8 +1208,13 @@ impl SetupWizard {
             self.settings.channels.bluebubbles_server_url = Some(server_url);
 
             let password = secret_input("BlueBubbles server password").map_err(SetupError::Io)?;
-            self.settings.channels.bluebubbles_password =
-                Some(password.expose_secret().to_string());
+            if let Some(ref ctx) = secrets {
+                ctx.save_secret("bluebubbles_password", &password).await?;
+                self.settings.channels.bluebubbles_password = None;
+            } else {
+                self.secret_draft.insert("bluebubbles_password", password);
+                self.settings.channels.bluebubbles_password = None;
+            }
 
             let webhook_host =
                 optional_input("Webhook listen host (this machine)", Some("127.0.0.1"))

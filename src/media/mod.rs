@@ -27,6 +27,7 @@ pub mod cache;
 mod document;
 mod image;
 pub mod limits;
+pub mod local_endpoints;
 mod pdf;
 mod pipeline;
 pub mod sticker;

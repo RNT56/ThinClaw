@@ -846,7 +846,7 @@ async fn experiments_gateway_request(
     let response = request.send().await.map_err(|e| {
         if e.is_connect() {
             anyhow!(
-                "Could not connect to gateway at {}. Start it with `thinclaw gateway start` or pass --gateway-url.",
+                "Could not connect to gateway at {}. Start it with `thinclaw runtime web start` or pass --gateway-url.",
                 base_url
             )
         } else {

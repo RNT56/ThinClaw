@@ -7,17 +7,15 @@ use axum::{
 };
 
 use crate::api::extensions as extensions_api;
+use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::extensions::manager::AuthRequestContext;
 use thinclaw_gateway::web::extensions::{
-    ExtensionAuthRequiredResponseInput, ExtensionInstallFallbackInput,
-    ExtensionRegistryEntrySource, ExtensionSetupResponseInput, InstalledExtensionInfoInput,
-    InstalledExtensionRegistryKey, RegistryEntryProjectionInput, ToolInfoInput,
-    WasmChannelActivationStatusInput, activation_error_needs_auth,
-    channel_manager_unavailable_error, extension_action_error_response,
-    extension_action_success_response, extension_auth_required_response,
-    extension_auth_status_allows_activation_retry, extension_authentication_failed_response,
+    ExtensionInstallFallbackInput, ExtensionRegistryEntrySource, ExtensionSetupResponseInput,
+    InstalledExtensionInfoInput, InstalledExtensionRegistryKey, RegistryEntryProjectionInput,
+    ToolInfoInput, WasmChannelActivationStatusInput, channel_manager_unavailable_error,
+    extension_action_error_response, extension_action_success_response,
     extension_info_needs_channel_diagnostics, extension_internal_error,
     extension_list_response_from_installed_inputs, extension_manager_unavailable_error,
     extension_manager_unavailable_install_response, extension_reconnect_failed_response,
@@ -121,6 +119,19 @@ pub(crate) async fn extensions_tools_handler(
     Ok(Json(tool_list_response_from_inputs(tools)))
 }
 
+/// Return the exact atomically published registry population. This endpoint is
+/// the shared source for terminal status, slash surfaces, and remote desktop
+/// clients; consumers must replace snapshots by revision, never merge them.
+pub(crate) async fn capability_tools_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<crate::tools::RegistrySnapshot>, (StatusCode, String)> {
+    let registry = state
+        .tool_registry
+        .as_ref()
+        .ok_or_else(tool_registry_unavailable_error)?;
+    Ok(Json(registry.registry_snapshot()))
+}
+
 pub(crate) async fn extensions_install_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<InstallExtensionRequest>,
@@ -161,55 +172,151 @@ pub(crate) async fn extensions_install_handler(
 
 pub(crate) async fn extensions_activate_handler(
     State(state): State<Arc<GatewayState>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    request: Option<Json<ExtensionActivateRequest>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let ext_mgr = state
         .extension_manager
         .as_ref()
         .ok_or_else(extension_manager_unavailable_error)?;
-
-    match ext_mgr.activate(&name).await {
-        Ok(result) => Ok(Json(extension_action_success_response(result.message))),
-        Err(activate_err) => {
-            let err_str = activate_err.to_string();
-            let needs_auth = activation_error_needs_auth(&err_str);
-
-            if !needs_auth {
-                return Ok(Json(extension_action_error_response(err_str)));
-            }
-
-            let auth_context = AuthRequestContext {
-                callback_base_url: request_origin_from_headers(&headers),
-                callback_type: Some("web".to_string()),
-                thread_id: None,
-            };
-
-            match ext_mgr.auth_with_context(&name, None, auth_context).await {
-                Ok(auth_result)
-                    if extension_auth_status_allows_activation_retry(&auth_result.auth_status) =>
-                {
-                    match ext_mgr.activate(&name).await {
-                        Ok(result) => Ok(Json(extension_action_success_response(result.message))),
-                        Err(e) => Ok(Json(extension_action_error_response(e.to_string()))),
-                    }
-                }
-                Ok(auth_result) => Ok(Json(extension_auth_required_response(
-                    ExtensionAuthRequiredResponseInput {
-                        extension_name: &name,
-                        auth_url: auth_result.auth_url,
-                        setup_url: auth_result.setup_url,
-                        auth_mode: Some(auth_result.auth_mode),
-                        auth_status: Some(auth_result.auth_status),
-                        awaiting_token: auth_result.awaiting_token,
-                        instructions: auth_result.instructions,
-                        shared_auth_provider: auth_result.shared_auth_provider,
-                        missing_scopes: auth_result.missing_scopes,
-                    },
-                ))),
-                Err(auth_err) => Ok(Json(extension_authentication_failed_response(auth_err))),
-            }
+    let request = request.map(|Json(request)| request);
+    let request_id = request
+        .as_ref()
+        .map(|request| request.request_id)
+        .filter(|request_id| !request_id.is_nil())
+        .unwrap_or_else(uuid::Uuid::new_v4);
+    let expected_runtime_revision = request
+        .as_ref()
+        .and_then(|request| request.expected_runtime_revision);
+    let kind = request
+        .and_then(|request| request.kind)
+        .map(|kind| parse_activation_kind(&kind))
+        .transpose()?;
+    let fingerprint = blake3::hash(
+        format!(
+            "activation-v1\0{name}\0{}\0{}",
+            kind.map(|kind| kind.to_string()).unwrap_or_default(),
+            expected_runtime_revision
+                .map(|revision| revision.to_string())
+                .unwrap_or_default()
+        )
+        .as_bytes(),
+    )
+    .to_hex()
+    .to_string();
+    let registry = state
+        .tool_registry
+        .as_ref()
+        .ok_or_else(tool_registry_unavailable_error)?;
+    let _mutation_guard = ext_mgr.activation_mutation_guard().await;
+    match ext_mgr.activation_receipt(request_id, &fingerprint) {
+        Ok(Some(response)) => return Ok(Json(response)),
+        Err(message) => {
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "error": "request_id_conflict",
+                "message": message,
+                "request_id": request_id,
+                "name": name,
+                "kind": kind,
+                "capability_revision": registry.registry_snapshot().revision,
+                "activated_identities": [],
+                "readiness": "unchanged"
+            })));
         }
+        Ok(None) => {}
+    }
+    let before = registry.registry_snapshot();
+    if expected_runtime_revision.is_some_and(|expected| expected != before.revision) {
+        let response = serde_json::json!({
+            "success": false,
+            "error": "runtime_revision_conflict",
+            "message": format!(
+                "expected runtime capability revision {}, current revision is {}",
+                expected_runtime_revision.unwrap_or_default(),
+                before.revision
+            ),
+            "name": name,
+            "kind": kind,
+            "request_id": request_id,
+            "capability_revision": before.revision,
+            "activated_identities": [],
+            "readiness": "unchanged"
+        });
+        ext_mgr.record_activation_receipt(request_id, fingerprint, response.clone());
+        return Ok(Json(response));
+    }
+
+    let response = match ext_mgr.activate_kind(&name, kind).await {
+        Ok(result) => {
+            let mut snapshot = registry.registry_snapshot();
+            if result.tools_loaded.is_empty() {
+                snapshot = registry.advance_capability_revision();
+            }
+            let identities_match = result.tools_loaded.iter().all(|name| {
+                snapshot
+                    .identities
+                    .iter()
+                    .any(|identity| &identity.name == name)
+            });
+            let coherent = snapshot.sealed && identities_match;
+            let mut receipt = thinclaw_types::MutationReceipt::applied_live(
+                request_id,
+                "extensions",
+                result.name.clone(),
+                snapshot.revision,
+            );
+            if !coherent {
+                receipt.application = thinclaw_types::MutationApplication::RestartRequired;
+                receipt.partial = true;
+                receipt.restart_reasons = vec![if !snapshot.sealed {
+                    "runtime registry is not sealed".to_string()
+                } else {
+                    "activated identities are absent from the published registry revision"
+                        .to_string()
+                }];
+                receipt.recovery = Some(
+                    "restart the owned runtime and verify /api/capabilities/tools".to_string(),
+                );
+            }
+            serde_json::json!({
+                "success": coherent,
+                "message": result.message,
+                "name": result.name,
+                "kind": result.kind,
+                "activated_identities": result.tools_loaded,
+                "capability_revision": snapshot.revision,
+                "readiness": if coherent { "active" } else { "restart_required" },
+                "mutation_receipt": receipt,
+            })
+        }
+        Err(error) => serde_json::json!({
+            "success": false,
+            "message": error.to_string(),
+            "name": name,
+            "kind": kind,
+            "activated_identities": [],
+            "readiness": "inactive",
+            "capability_revision": before.revision,
+            "request_id": request_id,
+        }),
+    };
+    ext_mgr.record_activation_receipt(request_id, fingerprint, response.clone());
+    Ok(Json(response))
+}
+
+fn parse_activation_kind(
+    kind: &str,
+) -> Result<crate::extensions::ExtensionKind, (StatusCode, String)> {
+    match kind.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "mcp" | "mcp_server" => Ok(crate::extensions::ExtensionKind::McpServer),
+        "wasm" | "wasm_tool" => Ok(crate::extensions::ExtensionKind::WasmTool),
+        "channel" | "wasm_channel" => Ok(crate::extensions::ExtensionKind::WasmChannel),
+        "native" | "native_plugin" => Ok(crate::extensions::ExtensionKind::NativePlugin),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "kind must be mcp-server, wasm-tool, wasm-channel, or native-plugin".to_string(),
+        )),
     }
 }
 
@@ -377,6 +484,7 @@ pub(crate) async fn extensions_setup_handler(
 
 pub(crate) async fn extensions_setup_submit_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(name): Path<String>,
     Json(req): Json<ExtensionSetupRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
@@ -385,7 +493,35 @@ pub(crate) async fn extensions_setup_submit_handler(
         .as_ref()
         .ok_or_else(extension_manager_unavailable_error)?;
 
-    match ext_mgr.save_setup_secrets(&name, &req.secrets).await {
+    let secrets_store = state.secrets_store.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Secrets store is not available".to_string(),
+        )
+    })?;
+    let available = secrets_store
+        .list(&request_identity.principal_id)
+        .await
+        .map_err(extension_internal_error)?;
+    let mut resolved = std::collections::HashMap::with_capacity(req.secret_sources.len());
+    for (slot, source_id) in req.secret_sources {
+        let source = available
+            .iter()
+            .find(|source| source.id == Some(source_id))
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    format!("Secret source for slot '{slot}' is unavailable"),
+                )
+            })?;
+        let value = secrets_store
+            .get_decrypted(&request_identity.principal_id, &source.name)
+            .await
+            .map_err(extension_internal_error)?;
+        resolved.insert(slot, value.expose().to_string());
+    }
+
+    match ext_mgr.save_setup_secrets(&name, &resolved).await {
         Ok(result) => Ok(Json(extension_setup_save_response(
             result.message,
             result.activated,

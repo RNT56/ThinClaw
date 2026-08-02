@@ -25,15 +25,6 @@ pub enum WsClientMessage {
         /// Thread that owns the pending approval.
         thread_id: Option<String>,
     },
-    /// Submit an auth token for an extension (bypasses message pipeline).
-    #[serde(rename = "auth_token")]
-    AuthToken {
-        extension_name: String,
-        token: String,
-    },
-    /// Cancel an in-progress auth flow.
-    #[serde(rename = "auth_cancel")]
-    AuthCancel { extension_name: String },
     /// Client heartbeat ping.
     #[serde(rename = "ping")]
     Ping,

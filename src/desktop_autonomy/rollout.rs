@@ -185,14 +185,17 @@ impl DesktopAutonomyManager {
         let build_dir = self.builds_dir().join(&build_id);
 
         run_cmd(
-            Command::new("git")
-                .arg("-C")
-                .arg(&managed_source)
-                .arg("worktree")
-                .arg("add")
-                .arg("--detach")
-                .arg(&build_dir)
-                .arg("HEAD"),
+            thinclaw_platform::tokio_process_command!(
+                "src.desktop_autonomy.rollout.tokio.101",
+                "git"
+            )
+            .arg("-C")
+            .arg(&managed_source)
+            .arg("worktree")
+            .arg("add")
+            .arg("--detach")
+            .arg(&build_dir)
+            .arg("HEAD"),
         )
         .await?;
 
@@ -209,7 +212,7 @@ impl DesktopAutonomyManager {
         let patch_path = patch_file.path().to_path_buf();
 
         run_cmd(
-            Command::new("git")
+            thinclaw_platform::tokio_process_command!("src.desktop_autonomy.rollout.tokio.102", "git")
                 .arg("-C")
                 .arg(&build_dir)
                 .arg("apply")
@@ -218,7 +221,7 @@ impl DesktopAutonomyManager {
         )
         .await?;
         run_cmd(
-            Command::new("git")
+            thinclaw_platform::tokio_process_command!("src.desktop_autonomy.rollout.tokio.103", "git")
                 .arg("-C")
                 .arg(&build_dir)
                 .arg("apply")
@@ -236,7 +239,7 @@ impl DesktopAutonomyManager {
         checks.push(
             run_command_check(
                 "cargo check",
-                Command::new("cargo")
+                thinclaw_platform::tokio_process_command!("src.desktop_autonomy.rollout.tokio.104", "cargo")
                     .arg("check")
                     .env("CARGO_TARGET_DIR", &cargo_target_dir)
                     .current_dir(&build_dir),
@@ -246,7 +249,7 @@ impl DesktopAutonomyManager {
         checks.push(
             run_command_check(
                 "cargo test desktop_autonomy",
-                Command::new("cargo")
+                thinclaw_platform::tokio_process_command!("src.desktop_autonomy.rollout.tokio.105", "cargo")
                     .arg("test")
                     .arg("desktop_autonomy")
                     .env("CARGO_TARGET_DIR", &cargo_target_dir)
@@ -257,7 +260,7 @@ impl DesktopAutonomyManager {
         checks.push(
             run_command_check(
                 "cargo build",
-                Command::new("cargo")
+                thinclaw_platform::tokio_process_command!("src.desktop_autonomy.rollout.tokio.106", "cargo")
                     .arg("build")
                     .env("CARGO_TARGET_DIR", &cargo_target_dir)
                     .current_dir(&build_dir),

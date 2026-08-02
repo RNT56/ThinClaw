@@ -2148,11 +2148,20 @@
           "jobs"
         ],
         "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
           "jobs": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/JobInfo"
             }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2850,10 +2859,14 @@
           {
             "type": "object",
             "required": [
+              "invocation_id",
               "name",
               "type"
             ],
             "properties": {
+              "invocation_id": {
+                "$ref": "#/components/schemas/ToolInvocationId"
+              },
               "name": {
                 "type": "string"
               },
@@ -2874,13 +2887,31 @@
           {
             "type": "object",
             "required": [
+              "invocation_id",
               "name",
               "success",
               "type"
             ],
             "properties": {
+              "duration_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "minimum": 0
+              },
+              "invocation_id": {
+                "$ref": "#/components/schemas/ToolInvocationId"
+              },
               "name": {
                 "type": "string"
+              },
+              "result_preview": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "success": {
                 "type": "boolean"
@@ -2902,6 +2933,7 @@
           {
             "type": "object",
             "required": [
+              "invocation_id",
               "name",
               "preview",
               "type"
@@ -2912,6 +2944,9 @@
                 "items": {
                   "$ref": "#/components/schemas/ToolArtifact"
                 }
+              },
+              "invocation_id": {
+                "$ref": "#/components/schemas/ToolInvocationId"
               },
               "name": {
                 "type": "string"
@@ -3472,7 +3507,7 @@
           },
           {
             "type": "object",
-            "description": "Agent requests a credential; the browser renders an inline masked-input\ncard that POSTs the value straight to `/api/repo-projects/credentials`.\nCarries NO secret value — only the name to store under and a reason.",
+            "description": "Agent requests a credential. Remote clients render local secure-input\nremediation and never accept or transport the credential value.",
             "required": [
               "prompt_id",
               "secret_name",
@@ -4549,6 +4584,10 @@
           }
         }
       },
+      "ToolInvocationId": {
+        "type": "string",
+        "description": "Stable identity shared by every event emitted for one tool invocation."
+      },
       "TransitionInfo": {
         "type": "object",
         "required": [
@@ -4674,48 +4713,6 @@
                 "type": "string",
                 "enum": [
                   "approval"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Submit an auth token for an extension (bypasses message pipeline).",
-            "required": [
-              "extension_name",
-              "token",
-              "type"
-            ],
-            "properties": {
-              "extension_name": {
-                "type": "string"
-              },
-              "token": {
-                "type": "string"
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "auth_token"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Cancel an in-progress auth flow.",
-            "required": [
-              "extension_name",
-              "type"
-            ],
-            "properties": {
-              "extension_name": {
-                "type": "string"
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "auth_cancel"
                 ]
               }
             }

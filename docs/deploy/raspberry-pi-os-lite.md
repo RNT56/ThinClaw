@@ -66,8 +66,8 @@ Not supported on Pi OS Lite:
 Check readiness with:
 
 ```bash
-thinclaw doctor --profile pi-os-lite-64
-thinclaw status --profile pi-os-lite-64
+thinclaw doctor --readiness-profile pi-os-lite-64
+thinclaw status --readiness-profile pi-os-lite-64
 ```
 
 Run readiness again after changing `.env`, installing Docker, or enabling a new
@@ -76,9 +76,9 @@ channel.
 For an interactive first-run setup on the Pi instead of the root installer path:
 
 ```bash
-thinclaw onboard --profile pi-os-lite-64
-thinclaw gateway access
-thinclaw doctor --profile pi-os-lite-64
+thinclaw setup --profile pi-os-lite-64 --mode advanced
+thinclaw runtime web access
+thinclaw doctor --readiness-profile pi-os-lite-64
 ```
 
 ## Native Release Install
@@ -131,7 +131,7 @@ The native installer:
 The system service runs:
 
 ```text
-ExecStart=/usr/local/bin/thinclaw run --no-onboard
+ExecStart=/usr/local/bin/thinclaw run --skip-setup-check
 ```
 
 After installation:
@@ -284,7 +284,7 @@ webhook tunnels, use [remote-access.md](remote-access.md).
 - 4 GB RAM or more is recommended for `full` plus Docker.
 - Increase swap before large on-device source builds.
 - Browser automation on Lite needs Docker Chromium fallback (a digest-pinned multi-arch `chromedp/headless-shell` image by default) or an explicitly configured local browser.
-- Use `thinclaw onboard --profile pi-os-lite-64` for interactive setup on-device.
+- Use `thinclaw setup --profile pi-os-lite-64 --mode advanced` for interactive setup on-device.
 - Native installs write `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and `THINCLAW_HEADLESS=true`; with those markers, reckless desktop autonomy tools are blocked at runtime even if misconfigured.
 - Keep `DESKTOP_AUTONOMY_ENABLED=false` on Pi OS Lite.
 

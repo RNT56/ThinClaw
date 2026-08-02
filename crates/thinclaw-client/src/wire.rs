@@ -145,17 +145,22 @@ pub enum SseEvent {
     },
     /// A tool started executing.
     ToolStarted {
+        invocation_id: String,
         name: String,
         thread_id: Option<String>,
     },
     /// A tool finished executing.
     ToolCompleted {
+        invocation_id: String,
         name: String,
         success: bool,
+        result_preview: Option<String>,
+        duration_ms: Option<u64>,
         thread_id: Option<String>,
     },
     /// A tool produced a result preview.
     ToolResult {
+        invocation_id: String,
         name: String,
         preview: String,
         thread_id: Option<String>,
@@ -261,18 +266,23 @@ impl SseEvent {
                 thread_id: opt("thread_id"),
             },
             "tool_started" => Self::ToolStarted {
+                invocation_id: s("invocation_id").unwrap_or_default(),
                 name: s("name").unwrap_or_default(),
                 thread_id: opt("thread_id"),
             },
             "tool_completed" => Self::ToolCompleted {
+                invocation_id: s("invocation_id").unwrap_or_default(),
                 name: s("name").unwrap_or_default(),
                 success: value
                     .get("success")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
+                result_preview: opt("result_preview"),
+                duration_ms: value.get("duration_ms").and_then(|value| value.as_u64()),
                 thread_id: opt("thread_id"),
             },
             "tool_result" => Self::ToolResult {
+                invocation_id: s("invocation_id").unwrap_or_default(),
                 name: s("name").unwrap_or_default(),
                 preview: s("preview").unwrap_or_default(),
                 thread_id: opt("thread_id"),
@@ -395,6 +405,7 @@ mod tests {
     #[test]
     fn thread_id_correlation() {
         let ev = SseEvent::ToolStarted {
+            invocation_id: "provider:call-shell".into(),
             name: "shell".into(),
             thread_id: Some("t-2".into()),
         };

@@ -4,8 +4,10 @@
 //! `thinclaw-tools`. Database-backed loading stays here because it depends on
 //! the root database abstraction.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::secrets::{SecretAccessContext, SecretsStore};
 use async_trait::async_trait;
 pub use thinclaw_tools::mcp::config::*;
 
@@ -74,6 +76,46 @@ impl thinclaw_tools::mcp::config::McpConfigProvider for RootMcpConfigProvider {
             save_mcp_servers(config).await
         }
     }
+}
+
+/// Resolve the exact encrypted sources declared by one stdio MCP registration.
+/// The returned plaintext map is transient and must only be passed directly to
+/// the child launcher; it must never be persisted in [`McpServerConfig::env`].
+pub async fn resolve_mcp_secret_environment(
+    server: &McpServerConfig,
+    secrets: &Arc<dyn SecretsStore + Send + Sync>,
+    user_id: &str,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    if server.secret_env.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let available = secrets.list(user_id).await?;
+    let mut resolved = BTreeMap::new();
+    for (slot, source_id) in &server.secret_env {
+        let source = available
+            .iter()
+            .find(|source| source.id == Some(*source_id))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "MCP server '{}' credential source for slot '{}' is unavailable",
+                    server.name,
+                    slot
+                )
+            })?;
+        let value = secrets
+            .get_for_injection(
+                user_id,
+                &source.name,
+                SecretAccessContext::new(
+                    "mcp.stdio",
+                    format!("extension:mcp:{}:{}", server.name, slot),
+                )
+                .auth_source(source_id.to_string()),
+            )
+            .await?;
+        resolved.insert(slot.clone(), value.expose().to_string());
+    }
+    Ok(resolved)
 }
 
 /// Load MCP server configurations from the database settings table.

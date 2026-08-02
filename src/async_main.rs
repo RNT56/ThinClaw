@@ -16,8 +16,7 @@ use thinclaw::{
     app::{
         AppBuilder, AppBuilderFlags, LocalRuntimeChannel, NativeChannelActivationInput,
         NativeChannelActivationPlan, PeriodicPersistencePlan, QuietStartupSpinner,
-        RuntimeEntrypointPlan, RuntimeEnvBootstrapPlan, RuntimeShutdownAction, RuntimeShutdownPlan,
-        init_cli_tracing, relaunch_current_process, restart_is_managed_by_service,
+        RuntimeEntrypointPlan, RuntimeEnvBootstrapPlan, init_cli_tracing,
         should_show_quiet_startup_spinner,
     },
     channels::{
@@ -27,9 +26,10 @@ use thinclaw::{
         web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_channels_command, run_gateway_command, run_identity_command,
+        ChannelSelectionArg, Cli, CliContext, CliContextOptions, CliDispatch, CliOutcome, Command,
+        ResolvedRuntimeArgs, run_channels_command, run_gateway_command, run_identity_command,
         run_mcp_command, run_pairing_command, run_reset_command, run_secrets_command,
-        run_status_command, run_tool_command, run_trajectory_command,
+        run_tool_command, run_trajectory_command,
     },
     config::Config,
     pairing::PairingStore,
@@ -50,8 +50,9 @@ mod command_dispatch;
 mod runtime_maintenance;
 
 use runtime_maintenance::{
-    RuntimeHotReloadWatchers, RuntimeMaintenanceTask, shutdown_runtime_maintenance,
-    start_cost_persistence, start_experiment_loops, start_pricing_sync,
+    RuntimeHotReloadWatchers, RuntimeMaintenanceTask, finish_runtime_shutdown,
+    shutdown_runtime_maintenance, start_cost_persistence, start_experiment_loops,
+    start_pricing_sync,
 };
 
 pub(crate) async fn async_main() -> anyhow::Result<()> {
@@ -60,12 +61,81 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     let env_bootstrap_plan = RuntimeEnvBootstrapPlan::for_command(command_intent);
     let mut runtime_entry_mode = command_intent.initial_entry_mode();
 
+    // Parser information exits inside Clap before this point. Every executable
+    // invocation applies its intent-specific bootstrap exactly once before
+    // context construction, configuration loading, or dispatch.
+    execute_env_bootstrap_plan(env_bootstrap_plan);
+    let cli_context = CliContext::resolve(CliContextOptions {
+        output_format: cli.output_format,
+        color: cli.color,
+        quiet: cli.quiet,
+        verbose: cli.verbose,
+        debug: cli.debug,
+        config_path: cli.config.clone(),
+    })?;
+    let resolved_runtime_args = cli.resolve_runtime_args()?;
+
     // Terminal CLI commands do not need the full agent runtime bootstrap.
-    if let Some(result) = command_dispatch::run_terminal_command(&cli, env_bootstrap_plan).await {
-        return result;
+    match command_dispatch::run_terminal_command(&cli, &cli_context).await? {
+        CliDispatch::Handled(CliOutcome::Success) => return Ok(()),
+        CliDispatch::Handled(CliOutcome::Unhealthy) => {
+            return Err(thinclaw::cli::CliError::unhealthy_reported().into());
+        }
+        CliDispatch::Handled(CliOutcome::Interrupted) => {
+            return Err(thinclaw::cli::CliError::interrupted().into());
+        }
+        CliDispatch::Runtime => {}
     }
 
+    let runtime_args = resolved_runtime_args.unwrap_or(ResolvedRuntimeArgs {
+        no_db: false,
+        skip_setup_check: false,
+        channels: ChannelSelectionArg::Configured,
+        one_shot_message: None,
+    });
+
     match &cli.command {
+        Some(Command::Setup(setup)) => {
+            #[cfg(any(feature = "postgres", feature = "libsql"))]
+            {
+                let guide_topic = match setup.action.as_ref() {
+                    Some(thinclaw::cli::SetupAction::Edit { topic }) => Some(*topic),
+                    None => None,
+                    Some(thinclaw::cli::SetupAction::Reset(_)) => {
+                        unreachable!("setup reset is handled by immediate dispatch")
+                    }
+                };
+                let config = thinclaw::setup::SetupConfig {
+                    skip_auth: setup.skip_provider_auth || setup.legacy_skip_auth,
+                    channels_only: false,
+                    guide_topic,
+                    ui_mode: setup.ui,
+                    profile: setup.profile,
+                    mode: setup.mode.into(),
+                    invocation: thinclaw_app::SetupInvocation {
+                        kind: thinclaw_app::SetupInvocationKind::Explicit,
+                        continuation: if setup.run {
+                            thinclaw_app::SetupContinuation::Run
+                        } else {
+                            thinclaw_app::SetupContinuation::Exit
+                        },
+                    },
+                };
+                let mut wizard = SetupWizard::with_config(config);
+                wizard.run().await?;
+                if wizard.should_continue_to_runtime() {
+                    runtime_entry_mode =
+                        runtime_entry_mode_from_setup_continuation(wizard.continuation());
+                } else {
+                    return Ok(());
+                }
+            }
+            #[cfg(not(any(feature = "postgres", feature = "libsql")))]
+            {
+                let _ = setup;
+                anyhow::bail!("setup requires the 'postgres' or 'libsql' feature");
+            }
+        }
         Some(Command::Onboard {
             skip_auth,
             channels_only,
@@ -73,8 +143,6 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             ui,
             profile,
         }) => {
-            execute_env_bootstrap_plan(env_bootstrap_plan);
-
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
                 let config = setup_config_for_onboard_command(
@@ -87,7 +155,8 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
                 let mut wizard = SetupWizard::with_config(config);
                 wizard.run().await?;
                 if wizard.should_continue_to_runtime() {
-                    runtime_entry_mode = runtime_entry_mode_from_ui_mode(wizard.runtime_ui_mode());
+                    runtime_entry_mode =
+                        runtime_entry_mode_from_setup_continuation(wizard.continuation());
                 } else {
                     return Ok(());
                 }
@@ -101,7 +170,6 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::AutonomyShadowCanary { manifest }) => {
             init_cli_tracing(cli.debug);
-            execute_env_bootstrap_plan(env_bootstrap_plan);
             let report = thinclaw::desktop_autonomy::run_shadow_canary_entrypoint(manifest)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -112,39 +180,37 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             );
             return Ok(());
         }
-        None | Some(Command::Run) | Some(Command::Tui) => {}
+        None | Some(Command::Run(_) | Command::Tui(_) | Command::Ask { .. }) => {}
         _ => unreachable!("terminal command should have been dispatched"),
     }
 
     // ── Agent startup ──────────────────────────────────────────────────
 
-    // Load .env files early so DATABASE_URL (and any other vars) are
-    // available to all subsequent env-based config resolution.
-    execute_env_bootstrap_plan(env_bootstrap_plan);
-
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
-    if !cli.no_onboard
-        && let Some(reason) = check_onboard_needed(cli.config.as_deref(), cli.no_db)
+    if !runtime_args.skip_setup_check
+        && let Some(reason) = check_onboard_needed(cli.config.as_deref(), runtime_args.no_db)
     {
         println!("Onboarding needed: {}", reason);
         println!();
-        let mut wizard =
-            SetupWizard::with_config(setup_config_for_startup_onboarding(runtime_entry_mode));
+        let mut wizard = SetupWizard::with_config(setup_config_for_startup_onboarding(
+            runtime_entry_mode,
+            runtime_args.one_shot_message.clone(),
+        ));
         wizard.run().await?;
-        runtime_entry_mode = runtime_entry_mode_from_ui_mode(wizard.runtime_ui_mode());
+        runtime_entry_mode = runtime_entry_mode_from_setup_continuation(wizard.continuation());
     }
 
     // Load initial config from env + disk + optional TOML (before DB is available)
     let toml_path = cli.config.as_deref();
-    let config = match Config::from_env_with_toml_options(toml_path, !cli.no_db).await {
+    let config = match Config::from_env_with_toml_options(toml_path, !runtime_args.no_db).await {
         Ok(c) => c,
         Err(thinclaw::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
             eprintln!("  {}", hint);
             eprintln!();
             eprintln!(
-                "Run 'thinclaw onboard' to configure, or set the required environment variables."
+                "Run 'thinclaw setup' to configure, or set the required environment variables."
             );
             std::process::exit(1);
         }
@@ -159,18 +225,17 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     let entrypoint_plan = RuntimeEntrypointPlan::new(
         runtime_entry_mode,
         config.channels.cli.enabled,
-        cli.message.is_some(),
+        runtime_args.one_shot_message.is_some(),
     );
     let local_runtime_requested = matches!(
         entrypoint_plan.local_channel,
         Some(LocalRuntimeChannel::Repl | LocalRuntimeChannel::SingleMessage)
     );
 
-    #[cfg_attr(not(feature = "repl"), allow(unused_mut))]
     let mut quiet_startup_spinner = if should_show_quiet_startup_spinner(
         cli.should_run_agent(),
         cli.debug,
-        cli.message.is_some(),
+        runtime_args.one_shot_message.is_some(),
         local_runtime_requested,
         std::env::var_os("RUST_LOG").is_some(),
         std::io::stdin().is_terminal(),
@@ -209,7 +274,9 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     // ── Phase 1-5: Build all core components via AppBuilder ────────────
 
-    let flags = AppBuilderFlags { no_db: cli.no_db };
+    let flags = AppBuilderFlags {
+        no_db: runtime_args.no_db,
+    };
     let mut components = AppBuilder::new(
         config,
         flags,
@@ -467,23 +534,25 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         channels.add_descriptor(descriptor).await;
     }
     let channel_plan = NativeChannelActivationPlan::from_input(NativeChannelActivationInput {
-        cli_only: cli.cli_only,
-        signal_configured: config.channels.signal.is_some(),
+        cli_only: runtime_args.channels.disables_external_ingress(),
+        signal_configured: config.channels.signal.is_some()
+            && runtime_args.channels.allows("signal"),
         nostr_configured: {
             #[cfg(feature = "nostr")]
             {
-                config.channels.nostr.is_some()
+                config.channels.nostr.is_some() && runtime_args.channels.allows("nostr")
             }
             #[cfg(not(feature = "nostr"))]
             {
                 false
             }
         },
-        discord_configured: config.channels.discord.is_some(),
+        discord_configured: config.channels.discord.is_some()
+            && runtime_args.channels.allows("discord"),
         imessage_configured: {
             #[cfg(target_os = "macos")]
             {
-                config.channels.imessage.is_some()
+                config.channels.imessage.is_some() && runtime_args.channels.allows("imessage")
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -493,17 +562,19 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         apple_mail_configured: {
             #[cfg(target_os = "macos")]
             {
-                config.channels.apple_mail.is_some()
+                config.channels.apple_mail.is_some() && runtime_args.channels.allows("apple-mail")
             }
             #[cfg(not(target_os = "macos"))]
             {
                 false
             }
         },
-        bluebubbles_configured: config.channels.bluebubbles.is_some(),
-        gmail_configured: config.channels.gmail.is_some(),
-        http_configured: config.channels.http.is_some(),
-        gateway_configured: config.channels.gateway.is_some(),
+        bluebubbles_configured: config.channels.bluebubbles.is_some()
+            && runtime_args.channels.allows("bluebubbles"),
+        gmail_configured: config.channels.gmail.is_some() && runtime_args.channels.allows("gmail"),
+        http_configured: config.channels.http.is_some() && runtime_args.channels.allows("http"),
+        gateway_configured: config.channels.gateway.is_some()
+            && runtime_args.channels.allows("gateway"),
         wasm_channels_enabled: config.channels.wasm_channels_enabled,
         wasm_channels_dir_exists: config.channels.wasm_channels_dir.exists(),
     });
@@ -543,7 +614,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     match entrypoint_plan.local_channel {
         Some(LocalRuntimeChannel::SingleMessage) => {
-            if let Some(ref msg) = cli.message {
+            if let Some(ref msg) = runtime_args.one_shot_message {
                 channels
                     .add(Box::new(ReplChannel::with_message(msg.clone())))
                     .await;
@@ -551,12 +622,11 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             }
         }
         Some(LocalRuntimeChannel::Tui) => {
-            channels.add(Box::new(TuiChannel::new())).await;
             channel_names.push("tui".to_string());
-            tracing::info!("Full-screen TUI mode enabled");
+            tracing::info!("Full-screen TUI mode selected; startup waits for the sealed registry");
         }
         Some(LocalRuntimeChannel::Repl) => {
-            let repl = ReplChannel::new();
+            let repl = ReplChannel::new().with_tool_registry(Arc::clone(&components.tools));
             repl.suppress_banner();
             channels.add(Box::new(repl)).await;
             channel_names.push("repl".to_string());
@@ -567,10 +637,15 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     // Collect webhook route fragments; a single WebhookServer hosts them all.
     let mut webhook_routes: Vec<axum::Router> = Vec::new();
-    if !cli.cli_only {
+    if !runtime_args.channels.disables_external_ingress() {
         webhook_routes.extend(
-            register_native_lifecycle_channels(&config, Arc::clone(&channels), &mut channel_names)
-                .await,
+            register_native_lifecycle_channels(
+                &config,
+                &runtime_args.channels,
+                Arc::clone(&channels),
+                &mut channel_names,
+            )
+            .await,
         );
     }
 
@@ -1070,36 +1145,8 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         None
     };
 
-    // Register job tools (sandbox deps auto-injected when container_job_manager is available)
-    #[cfg(feature = "docker-sandbox")]
-    components.tools.register_job_tools(
-        Arc::clone(&shared_context_manager),
-        container_job_manager.clone(),
-        shared_db.clone(),
-        None,
-        job_event_tx.clone(),
-        Some(inject_sender.clone()),
-        shared_prompt_queue.clone(),
-        sandbox_children.clone(),
-        shared_secrets_store.clone(),
-    );
-
-    #[cfg(not(feature = "docker-sandbox"))]
-    components.tools.register_job_tools(
-        Arc::clone(&shared_context_manager),
-        None,
-        shared_db.clone(),
-        None,
-        job_event_tx.clone(),
-        Some(inject_sender.clone()),
-        None,
-        None,
-        shared_secrets_store.clone(),
-    );
-
     // ── Gateway channel ────────────────────────────────────────────────
 
-    #[cfg(feature = "repl")]
     let mut gateway_url: Option<String> = None;
     let mut sse_sender: Option<
         tokio::sync::broadcast::Sender<thinclaw::channels::web::types::SseEvent>,
@@ -1204,18 +1251,8 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             }
         }
 
-        let gateway_token_url = format!(
-            "http://{}:{}/?token={}",
-            gw_config.host,
-            gw_config.port,
-            gw.auth_token()
-        );
-        thinclaw::tui::set_runtime_gateway_url_override(Some(gateway_token_url.clone()));
-
-        #[cfg(feature = "repl")]
-        {
-            gateway_url = Some(gateway_token_url);
-        }
+        let gateway_origin = format!("http://{}:{}/", gw_config.host, gw_config.port);
+        gateway_url = Some(gateway_origin);
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
@@ -1252,7 +1289,6 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
 
     // ── Boot screen ────────────────────────────────────────────────────
 
-    #[cfg(feature = "repl")]
     if matches!(
         entrypoint_plan.local_channel,
         Some(LocalRuntimeChannel::Repl)
@@ -1271,14 +1307,14 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             llm_backend: config.llm.backend.to_string(),
             llm_model: boot_llm_model,
             cheap_model: boot_cheap_model,
-            db_backend: if cli.no_db {
+            db_backend: if runtime_args.no_db {
                 "none".to_string()
             } else {
                 config.database.backend.to_string()
             },
-            db_connected: !cli.no_db,
+            db_connected: !runtime_args.no_db,
             tool_count: boot_tool_count,
-            gateway_url,
+            gateway_url: gateway_url.clone(),
             embeddings_enabled: config.embeddings.enabled,
             embeddings_provider: if config.embeddings.enabled {
                 Some(config.embeddings.provider.clone())
@@ -1701,6 +1737,39 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     let shutdown_tools = Arc::clone(&components.tools);
 
     let restart_requested = Arc::new(AtomicBool::new(false));
+    let tui_bootstrap_inputs = if matches!(
+        entrypoint_plan.local_channel,
+        Some(LocalRuntimeChannel::Tui)
+    ) {
+        let principal_id = components
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.user_id().to_string())
+            .unwrap_or_else(|| "default".to_string());
+        Some((
+            principal_id.clone(),
+            principal_id,
+            components
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.agent_id())
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "main".to_string()),
+            config.agent.name.clone(),
+            components.llm.active_model_name(),
+            config.llm.backend.to_string(),
+            components
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.user_id().to_string()),
+            "server".to_string(),
+            gateway_url.clone(),
+            shared_db.clone(),
+            Arc::clone(&components.tools),
+        ))
+    } else {
+        None
+    };
     // Shared cell the agent loop writes the repo project supervisor into, so the
     // gateway's GitHub webhook handlers can wake it once it is built.
     let repo_project_supervisor_slot = gateway_state
@@ -1775,6 +1844,41 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         None,
         shared_secrets_store.clone(),
     );
+
+    if let Some((
+        principal_id,
+        actor_id,
+        agent_id,
+        agent_name,
+        model,
+        provider,
+        workspace,
+        profile,
+        gateway_origin,
+        store,
+        tools,
+    )) = tui_bootstrap_inputs
+    {
+        agent
+            .channels()
+            .add(Box::new(
+                TuiChannel::new(
+                    principal_id,
+                    actor_id,
+                    agent_id,
+                    agent_name,
+                    model,
+                    provider,
+                    workspace,
+                    profile,
+                    gateway_origin,
+                    store,
+                    tools,
+                )
+                .await,
+            ))
+            .await;
+    }
 
     if let Some(ref gw_state) = gateway_state {
         *gw_state.scheduler.write().await = Some(Arc::clone(agent.scheduler()));
@@ -1884,21 +1988,10 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             .restart_requested
             .load(std::sync::atomic::Ordering::SeqCst)
     });
-    let shutdown_plan = RuntimeShutdownPlan::from_restart_signals(
+    finish_runtime_shutdown(
         restart_requested.load(Ordering::SeqCst),
         gateway_restart_requested,
-        restart_is_managed_by_service(),
-    );
-    match shutdown_plan.action {
-        RuntimeShutdownAction::Complete => {}
-        RuntimeShutdownAction::ExitForSupervisor(code) => {
-            eprintln!("Restarting ThinClaw (exit code 75 for service manager)...");
-            std::process::exit(code);
-        }
-        RuntimeShutdownAction::Relaunch => {
-            relaunch_current_process()?;
-        }
-    }
+    )?;
 
     Ok(())
 }

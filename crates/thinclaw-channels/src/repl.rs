@@ -6,50 +6,19 @@ pub const CLI_TOOL_RESULT_MAX: usize = 200;
 /// Max characters for thinking/status messages in the terminal.
 pub const CLI_STATUS_MAX: usize = 200;
 
-/// Slash commands available in the REPL.
-pub const SLASH_COMMANDS: &[&str] = &[
-    "/help",
-    "/quit",
-    "/exit",
-    "/debug",
-    "/model",
-    "/undo",
-    "/redo",
-    "/clear",
-    "/compress",
-    "/compact",
-    "/new",
-    "/interrupt",
-    "/version",
-    "/tools",
-    "/ping",
-    "/context",
-    "/job",
-    "/status",
-    "/cancel",
-    "/list",
-    "/identity",
-    "/memory",
-    "/skills",
-    "/heartbeat",
-    "/summarize",
-    "/suggest",
-    "/thread",
-    "/resume",
-    "/rollback",
-    "/personality",
-    "/vibe",
-    "/skin",
-];
+use thinclaw_types::slash_commands::{
+    LocalCommand, SurfaceRoute, autocomplete_names, match_surface_command,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplInputAction {
     Ignore,
     Submit(String),
-    Quit,
-    Help,
-    ToggleDebug,
-    Skin(String),
+    Local {
+        command: LocalCommand,
+        argument: String,
+    },
+    Unsupported(String),
 }
 
 pub fn classify_repl_line(line: &str) -> ReplInputAction {
@@ -58,21 +27,33 @@ pub fn classify_repl_line(line: &str) -> ReplInputAction {
         return ReplInputAction::Ignore;
     }
 
-    match trimmed.to_lowercase().as_str() {
-        "/quit" | "/exit" => ReplInputAction::Quit,
-        "/help" => ReplInputAction::Help,
-        "/debug" => ReplInputAction::ToggleDebug,
-        _ if trimmed.starts_with("/skin") => {
-            let arg = trimmed.strip_prefix("/skin").map(str::trim).unwrap_or("");
-            ReplInputAction::Skin(arg.to_string())
-        }
-        _ => ReplInputAction::Submit(trimmed.to_string()),
+    if trimmed.eq_ignore_ascii_case("/think") {
+        return ReplInputAction::Unsupported(
+            "`/think` was removed because it did not control a real reasoning view.".to_string(),
+        );
     }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(spec) = match_surface_command(&lower) {
+        return match spec.repl {
+            SurfaceRoute::Local(command) => {
+                let argument = trimmed
+                    .split_once(char::is_whitespace)
+                    .map(|(_, value)| value.trim().to_string())
+                    .unwrap_or_default();
+                ReplInputAction::Local { command, argument }
+            }
+            SurfaceRoute::Forward(_) => ReplInputAction::Submit(trimmed.to_string()),
+            SurfaceRoute::Unsupported => {
+                ReplInputAction::Unsupported(format!("{} is not available in the REPL", spec.name))
+            }
+        };
+    }
+    ReplInputAction::Submit(trimmed.to_string())
 }
 
 pub fn slash_command_matches(prefix: &str) -> Vec<String> {
-    SLASH_COMMANDS
-        .iter()
+    autocomplete_names(|spec| spec.repl)
         .filter(|cmd| cmd.starts_with(prefix))
         .map(|cmd| cmd.to_string())
         .collect()
@@ -83,9 +64,8 @@ pub fn slash_command_hint(line: &str, pos: usize) -> Option<String> {
         return None;
     }
 
-    SLASH_COMMANDS
-        .iter()
-        .find(|cmd| cmd.starts_with(line) && **cmd != line)
+    autocomplete_names(|spec| spec.repl)
+        .find(|cmd| cmd.starts_with(line) && *cmd != line)
         .map(|cmd| cmd[line.len()..].to_string())
 }
 
@@ -122,14 +102,20 @@ mod tests {
     #[test]
     fn classifies_local_commands_and_submissions() {
         assert_eq!(classify_repl_line("   "), ReplInputAction::Ignore);
-        assert_eq!(classify_repl_line("/quit"), ReplInputAction::Quit);
-        assert_eq!(classify_repl_line("/exit"), ReplInputAction::Quit);
-        assert_eq!(classify_repl_line("/help"), ReplInputAction::Help);
-        assert_eq!(classify_repl_line("/debug"), ReplInputAction::ToggleDebug);
         assert_eq!(
             classify_repl_line("/skin list"),
-            ReplInputAction::Skin("list".to_string())
+            ReplInputAction::Local {
+                command: LocalCommand::Skin,
+                argument: "list".to_string(),
+            }
         );
+        assert!(matches!(
+            classify_repl_line("/quit"),
+            ReplInputAction::Local {
+                command: LocalCommand::Quit,
+                ..
+            }
+        ));
         assert_eq!(
             classify_repl_line("hello"),
             ReplInputAction::Submit("hello".to_string())

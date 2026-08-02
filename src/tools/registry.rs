@@ -54,6 +54,10 @@ use thinclaw_tools::builtin::{
     SkillTapAddHostTool, SkillTapListHostTool, SkillTapRefreshHostTool, SkillTapRemoveHostTool,
     SkillUpdateHostTool,
 };
+pub use thinclaw_tools::{
+    RegistrationConflict, RegistrationOutcome, RegistrationRequest, RegistrySealError,
+    RegistrySnapshot, ToolOrigin,
+};
 
 #[cfg(test)]
 const HIDDEN_BY_DEFAULT_TOOL_NAMES: &[&str] = &[
@@ -123,28 +127,66 @@ impl ToolRegistry {
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a built-in name.
-    pub async fn register(&self, tool: Arc<dyn Tool>) -> bool {
+    pub async fn register(&self, tool: Arc<dyn Tool>) -> RegistrationOutcome {
         let name = tool.name().to_string();
-        let registered = self.inner.register(tool).await;
-        if !registered {
+        let outcome = self.inner.register(tool).await;
+        if !outcome.accepted() {
             tracing::warn!(
                 tool = name,
-                "Rejected dynamic tool registration because its name is protected"
+                "Rejected dynamic tool registration because its identity is protected or already registered"
             );
         }
-        registered
+        outcome
+    }
+
+    pub fn register_request(&self, request: RegistrationRequest) -> RegistrationOutcome {
+        let name = request.tool.name().to_string();
+        let outcome = self.inner.register_request(request);
+        if !outcome.accepted() {
+            tracing::warn!(tool = name, ?outcome, "Rejected owned tool registration");
+        }
+        outcome
+    }
+
+    pub fn register_batch(
+        &self,
+        requests: Vec<RegistrationRequest>,
+    ) -> Result<Vec<RegistrationOutcome>, RegistrationConflict> {
+        self.inner.register_batch(requests)
+    }
+
+    pub fn reconcile_source(
+        &self,
+        origin: ToolOrigin,
+        source_id: &str,
+        requests: Vec<RegistrationRequest>,
+    ) -> Result<Vec<RegistrationOutcome>, RegistrationConflict> {
+        self.inner.reconcile_source(origin, source_id, requests)
     }
 
     /// Register a tool as built-in using async locks.
     ///
     /// Built-in tools are protected from shadowing by dynamic registrations.
-    pub async fn register_builtin(&self, tool: Arc<dyn Tool>) {
-        self.inner.register_builtin(tool).await;
+    pub async fn register_builtin(&self, tool: Arc<dyn Tool>) -> RegistrationOutcome {
+        let name = tool.name().to_string();
+        let registered = self.inner.register_builtin(tool).await;
+        if !registered.accepted() {
+            tracing::error!(tool = name, "Rejected duplicate built-in tool identity");
+        }
+        registered
     }
 
     /// Register a tool (sync version for startup, marks as built-in).
-    pub fn register_sync(&self, tool: Arc<dyn Tool>) {
-        self.inner.register_sync(tool);
+    pub fn register_sync(&self, tool: Arc<dyn Tool>) -> RegistrationOutcome {
+        let name = tool.name().to_string();
+        let registered = self.inner.register_sync(tool);
+        if !registered.accepted() {
+            tracing::error!(
+                tool = name,
+                "Rejected duplicate or contended startup tool identity"
+            );
+        }
+        registered
     }
 
     /// Unregister a tool.
@@ -153,6 +195,38 @@ impl ToolRegistry {
             registry.remove_source(name);
         }
         self.inner.unregister(name).await
+    }
+
+    pub async fn unregister_owned(
+        &self,
+        name: &str,
+        origin: ToolOrigin,
+        source_id: &str,
+    ) -> Option<Arc<dyn Tool>> {
+        if let Some(registry) = self.credential_registry.as_ref() {
+            registry.remove_source(name);
+        }
+        self.inner.unregister_owned(name, origin, source_id).await
+    }
+
+    pub async fn unregister_static(&self, name: &str, origin: ToolOrigin) -> Option<Arc<dyn Tool>> {
+        self.inner.unregister_static(name, origin).await
+    }
+
+    pub fn registry_snapshot(&self) -> RegistrySnapshot {
+        self.inner.snapshot()
+    }
+
+    pub fn subscribe_registry(&self) -> tokio::sync::watch::Receiver<RegistrySnapshot> {
+        self.inner.subscribe()
+    }
+
+    pub fn advance_capability_revision(&self) -> RegistrySnapshot {
+        self.inner.advance_capability_revision()
+    }
+
+    pub fn seal_startup(&self) -> Result<RegistrySnapshot, RegistrySealError> {
+        self.inner.seal_startup()
     }
 
     /// Get a tool by name.

@@ -12,19 +12,19 @@ This document is the canonical overview for those boundaries. For the public-fac
 
 | Kind | Runtime Shape | Trust Boundary | Typical CLI Surface |
 |---|---|---|---|
-| WASM tool | Loaded inside ThinClaw's WASM runtime | Sandboxed, host-mediated | `thinclaw tool ...` |
+| WASM tool | Loaded inside ThinClaw's WASM runtime | Sandboxed, host-mediated | `thinclaw extensions tools ...` |
 | WASM channel | Loaded inside ThinClaw's WASM channel runtime | Sandboxed, host-mediated | registry / channel setup path |
 | Native plugin | Loaded as `.so`/`.dylib` through C ABI JSON v1 | Unsafe, disabled by default, allowlisted, signed | broad plugin manifest |
-| MCP server | External process or remote service | Operator-trusted, not sandboxed | `thinclaw mcp ...` |
+| MCP server | External process or remote service | Operator-trusted, not sandboxed | `thinclaw extensions mcp ...` |
 
 ## Do Not Blur These Flows
 
 ThinClaw exposes several related but different operator paths:
 
-- `thinclaw tool ...` manages WASM tools.
-- `thinclaw mcp ...` manages MCP servers.
-- `thinclaw registry ...` works with installable registry metadata for packaged artifacts.
-- `thinclaw comfy ...` manages the built-in ComfyUI media-generation sidecar path.
+- `thinclaw extensions tools ...` manages WASM tools.
+- `thinclaw extensions mcp ...` manages MCP servers.
+- `thinclaw extensions registry ...` works with installable registry metadata for packaged artifacts.
+- `thinclaw media comfy ...` manages the built-in ComfyUI media-generation sidecar path.
 - Conversational agent tools such as `tool_search` or `tool_install` are part of the runtime's agent-facing extension surface, not a replacement for the CLI reference.
 
 ## Trust Model
@@ -74,9 +74,9 @@ Use the CLI that matches the extension kind:
 
 | Need | Use |
 |---|---|
-| Install or inspect a WASM tool | `thinclaw tool ...` |
-| Add, auth, test, or toggle an MCP server | `thinclaw mcp ...` |
-| Work with registry-backed packaged artifacts | `thinclaw registry ...` |
+| Install or inspect a WASM tool | `thinclaw extensions tools ...` |
+| Add, auth, test, or toggle an MCP server | `thinclaw extensions mcp ...` |
+| Work with registry-backed packaged artifacts | `thinclaw extensions registry ...` |
 
 Do not document these as interchangeable.
 
@@ -100,11 +100,11 @@ For the broader crate split, see [CRATE_OWNERSHIP.md](CRATE_OWNERSHIP.md).
 
 The MCP surface is now split by task instead of a single flat command set:
 
-- `thinclaw mcp server ...` for add, list, show, auth, test, remove, and toggle
-- `thinclaw mcp resource ...` for listing and reading server resources
-- `thinclaw mcp prompt ...` for listing prompts and fetching prompt payloads
-- `thinclaw mcp root ...` for inspecting and changing roots grants
-- `thinclaw mcp log ...` for inspecting and updating server log levels
+- `thinclaw extensions mcp server ...` for add, list, show, auth, test, remove, and toggle
+- `thinclaw extensions mcp resource ...` for listing and reading server resources
+- `thinclaw extensions mcp prompt ...` for listing prompts and fetching prompt payloads
+- `thinclaw extensions mcp root ...` for inspecting and changing roots grants
+- `thinclaw extensions mcp log ...` for inspecting and updating server log levels
 
 The WebUI Extensions area also exposes a live MCP browser for server metadata, resources, prompts, OAuth discovery, and pending approval requests such as `sampling/createMessage` and `elicitation/create`.
 
@@ -115,8 +115,8 @@ required secrets, validation URL, and allowed actions. The WebUI exposes
 `POST /api/extensions/{name}/validate` for installed extensions; it verifies
 required setup secrets and calls the declared validation endpoint when one is
 available. The CLI exposes the source-side counterpart as
-`thinclaw registry validate <name|bundle>` and the installed-channel check as
-`thinclaw channels validate <name>`.
+`thinclaw extensions registry check <name|bundle>` and the installed-channel check as
+`thinclaw extensions channels check-config <name>`.
 
 WASM `tool_invoke` is host-mediated. Guests may invoke only aliases declared in
 their capabilities file; the host resolves the alias, reapplies normal tool

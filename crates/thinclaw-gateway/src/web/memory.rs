@@ -25,9 +25,13 @@ pub struct GatewayMemoryListSourceEntry {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GatewayMemorySearchHit {
+    pub document_id: uuid::Uuid,
     pub path: String,
+    pub chunk_id: uuid::Uuid,
     pub content: String,
     pub score: f64,
+    pub fts_rank: Option<u32>,
+    pub vector_rank: Option<u32>,
 }
 
 pub fn tree_entries_from_paths<'a>(paths: impl IntoIterator<Item = &'a String>) -> Vec<TreeEntry> {
@@ -119,10 +123,16 @@ pub fn memory_search_response_from_hits(
     MemorySearchResponse {
         results: hits
             .into_iter()
-            .map(|hit| SearchHit {
+            .enumerate()
+            .map(|(index, hit)| SearchHit {
+                document_id: hit.document_id,
                 path: hit.path,
+                chunk_id: hit.chunk_id,
                 content: hit.content,
                 score: hit.score,
+                rank: index + 1,
+                fts_rank: hit.fts_rank,
+                vector_rank: hit.vector_rank,
             })
             .collect(),
     }
@@ -261,13 +271,18 @@ mod tests {
     #[test]
     fn memory_search_response_projects_hits() {
         let response = memory_search_response_from_hits(vec![GatewayMemorySearchHit {
+            document_id: uuid::Uuid::nil(),
             path: "MEMORY.md".to_string(),
+            chunk_id: uuid::Uuid::nil(),
             content: "hit".to_string(),
             score: 0.7,
+            fts_rank: Some(1),
+            vector_rank: None,
         }]);
 
         assert_eq!(response.results[0].path, "MEMORY.md");
         assert_eq!(response.results[0].score, 0.7);
+        assert_eq!(response.results[0].rank, 1);
     }
 
     #[test]

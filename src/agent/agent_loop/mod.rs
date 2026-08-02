@@ -726,7 +726,7 @@ impl Agent {
     /// This is separate from `run()` so that Tauri/API callers can start
     /// background tasks without entering the message-receive loop.
     /// The returned handle must be passed to `shutdown_background()` on exit.
-    pub async fn start_background_tasks(&self) -> BackgroundTasksHandle {
+    pub async fn start_background_tasks(&self) -> Result<BackgroundTasksHandle, Error> {
         if let Some(ref store) = self.deps.store {
             match store
                 .abandon_active_direct_jobs(
@@ -1181,6 +1181,18 @@ impl Agent {
             None
         };
 
+        let sealed_snapshot = self.deps.tools.seal_startup().map_err(|error| {
+            crate::error::ConfigError::InvalidValue {
+                key: "runtime.tool_registry".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        tracing::info!(
+            revision = sealed_snapshot.revision,
+            tools = sealed_snapshot.identities.len(),
+            "Sealed final runtime tool registry"
+        );
+
         // ── Channel health monitor ──────────────────────────────────
         let health_monitor = {
             let monitor = Arc::new(crate::channels::ChannelHealthMonitor::with_defaults(
@@ -1372,7 +1384,7 @@ impl Agent {
             (None, None, None)
         };
 
-        BackgroundTasksHandle {
+        Ok(BackgroundTasksHandle {
             repair_handle,
             repair_shutdown_tx: Some(repair_shutdown_tx),
             session_pruning_handle,
@@ -1392,7 +1404,7 @@ impl Agent {
             repo_project_supervisor_shutdown_tx,
             health_monitor,
             system_event_mutex: tokio::sync::Mutex::new(Some(system_event_rx)),
-        }
+        })
     }
 
     /// Stop background tasks and shut down channels.
@@ -1583,7 +1595,7 @@ impl Agent {
         let mut message_stream = self.channels.start_all().await?;
 
         // Start background tasks
-        let bg = self.start_background_tasks().await;
+        let bg = self.start_background_tasks().await?;
 
         // Extract system event receiver for the message loop
         let mut system_event_rx = bg.lock_system_events().await.take();

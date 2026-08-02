@@ -17,7 +17,7 @@
 //! ```
 
 mod channels;
-mod prompts;
+pub(crate) mod prompts;
 pub(crate) mod validation;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 mod wizard;

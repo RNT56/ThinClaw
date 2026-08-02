@@ -209,7 +209,6 @@ pub fn create_tunnel(config: &TunnelProviderConfig) -> Result<Option<Box<dyn Tun
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::process::Command;
 
     fn assert_tunnel_err(cfg: &TunnelProviderConfig, needle: &str) {
         match create_tunnel(cfg) {
@@ -336,7 +335,7 @@ mod tests {
     async fn kill_shared_terminates_child() {
         let proc = new_shared_process();
 
-        let mut command = Command::new("sleep");
+        let mut command = tokio::process::Command::new("sleep");
         command
             .arg("30")
             .stdout(std::process::Stdio::null())

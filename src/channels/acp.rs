@@ -146,12 +146,6 @@ impl AcpConnectionState {
         self.core.tool_call_started(session_id, name).await
     }
 
-    async fn tool_call_update_id(&self, session_id: &str, name: &str, complete: bool) -> String {
-        self.core
-            .tool_call_update_id(session_id, name, complete)
-            .await
-    }
-
     async fn insert_pending_permission(&self, pending: PendingPermission) {
         self.core.insert_pending_permission(pending).await;
     }
@@ -1748,8 +1742,12 @@ async fn status_to_acp_messages(
             model,
         }),
         StatusUpdate::StreamChunk(content) => Some(AcpStatusUpdate::StreamChunk { content }),
-        StatusUpdate::ToolStarted { name, parameters } => {
-            let tool_call_id = state.tool_call_started(session_id, &name).await;
+        StatusUpdate::ToolStarted {
+            invocation_id,
+            name,
+            parameters,
+        } => {
+            let tool_call_id = invocation_id.to_string();
             Some(AcpStatusUpdate::ToolStarted {
                 tool_call_id,
                 name,
@@ -1757,19 +1755,25 @@ async fn status_to_acp_messages(
             })
         }
         StatusUpdate::ToolCompleted {
-            name,
+            invocation_id,
+            name: _,
             success,
             result_preview,
+            ..
         } => {
-            let tool_call_id = state.tool_call_update_id(session_id, &name, true).await;
+            let tool_call_id = invocation_id.to_string();
             Some(AcpStatusUpdate::ToolCompleted {
                 tool_call_id,
                 success,
                 result_preview,
             })
         }
-        StatusUpdate::ToolResult { name, preview, .. } => {
-            let tool_call_id = state.tool_call_update_id(session_id, &name, false).await;
+        StatusUpdate::ToolResult {
+            invocation_id,
+            preview,
+            ..
+        } => {
+            let tool_call_id = invocation_id.to_string();
             Some(AcpStatusUpdate::ToolResult {
                 tool_call_id,
                 preview,

@@ -97,21 +97,15 @@ pub async fn open_models_folder(
     }
 
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open")
-        .arg(&models_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.model_manager.inventory.std.1", "open").arg(&models_dir))
         .map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open")
-        .arg(&models_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.model_manager.inventory.std.2", "xdg-open").arg(&models_dir))
         .map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer")
-        .arg(&models_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.model_manager.inventory.std.3", "explorer").arg(&models_dir))
         .map_err(|e| e.to_string())?;
 
     Ok(())
@@ -133,21 +127,15 @@ pub async fn open_standard_models_folder(
     }
 
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open")
-        .arg(&standard_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.model_manager.inventory.std.4", "open").arg(&standard_dir))
         .map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open")
-        .arg(&standard_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.model_manager.inventory.std.5", "xdg-open").arg(&standard_dir))
         .map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer")
-        .arg(&standard_dir)
-        .spawn()
+    thinclaw_platform::spawn_reaped_std(thinclaw_platform::std_process_command!("apps.desktop.backend.src.model_manager.inventory.std.6", "explorer").arg(&standard_dir))
         .map_err(|e| e.to_string())?;
 
     Ok(())

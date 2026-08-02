@@ -474,15 +474,11 @@
         ],
         "type": "object"
       },
+      "LocalEndpointId": {
+        "type": "string"
+      },
       "LocalRuntimeEndpoint": {
         "properties": {
-          "apiKey": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "baseUrl": {
             "type": "string"
           },
@@ -494,6 +490,9 @@
               "integer",
               "null"
             ]
+          },
+          "endpointId": {
+            "$ref": "#/components/schemas/LocalEndpointId"
           },
           "modelFamily": {
             "default": null,
@@ -511,6 +510,7 @@
           }
         },
         "required": [
+          "endpointId",
           "baseUrl"
         ],
         "type": "object"

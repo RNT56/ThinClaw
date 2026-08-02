@@ -1,5 +1,3 @@
-#![cfg(feature = "web-gateway")]
-
 use std::fs::OpenOptions;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};

@@ -378,6 +378,10 @@ pub fn routine_detail_response(input: RoutineDetailInput) -> RoutineDetailRespon
 pub struct RoutineActionResponse {
     pub status: String,
     pub routine_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_status: Option<String>,
 }
 
 pub fn routine_action_response(
@@ -387,11 +391,22 @@ pub fn routine_action_response(
     RoutineActionResponse {
         status: status.into(),
         routine_id,
+        run_id: None,
+        initial_status: None,
     }
 }
 
 pub fn routine_triggered_action_response(routine_id: Uuid) -> RoutineActionResponse {
     routine_action_response(ROUTINE_ACTION_TRIGGERED_STATUS, routine_id)
+}
+
+pub fn routine_trigger_accepted_response(routine_id: Uuid, run_id: Uuid) -> RoutineActionResponse {
+    RoutineActionResponse {
+        status: ROUTINE_ACTION_TRIGGERED_STATUS.to_string(),
+        routine_id,
+        run_id: Some(run_id),
+        initial_status: Some("running".to_string()),
+    }
 }
 
 pub fn routine_toggle_action_response(enabled: bool, routine_id: Uuid) -> RoutineActionResponse {

@@ -32,19 +32,26 @@ pub enum SseEvent {
     },
     #[serde(rename = "tool_started")]
     ToolStarted {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_completed")]
     ToolCompleted {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
         success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result_preview: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
+        invocation_id: thinclaw_types::ToolInvocationId,
         name: String,
         preview: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -200,9 +207,8 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
-    /// Agent requests a credential; the browser renders an inline masked-input
-    /// card that POSTs the value straight to `/api/repo-projects/credentials`.
-    /// Carries NO secret value — only the name to store under and a reason.
+    /// Agent requests a credential. Remote clients render local secure-input
+    /// remediation and never accept or transport the credential value.
     #[serde(rename = "credential_prompt")]
     CredentialPrompt {
         prompt_id: String,

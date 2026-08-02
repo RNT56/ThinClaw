@@ -1,6 +1,6 @@
 [package]
 name = "thinclaw-desktop"
-version = "0.15.0"
+version = "0.16.0"
 description = "ThinClaw desktop companion app"
 authors = ["RNT56"]
 license = "GPL-3.0-only"
@@ -118,6 +118,7 @@ thinclaw-secrets = { path = "../../../crates/thinclaw-secrets", default-features
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
+thinclaw-types = { path = "../../../crates/thinclaw-types" }
 
 #[cfg] secure no-follow file opens for migration inputs
 [target.'cfg(unix)'.dependencies]

@@ -309,7 +309,8 @@ pub async fn thinclaw_sync_local_llm(
     };
 
     let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
-    let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot);
+    let api_key = crate::engine::local_runtime_api_key(&sidecar, &engine_manager).await;
+    let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot, api_key);
     if local_llm.is_none() {
         return Err(format!(
             "Local LLM runtime is not running: {}",
@@ -672,7 +673,7 @@ pub async fn thinclaw_copy_gateway_token(
         use thinclaw_tools::execution::OwnedChild;
         use tokio::io::AsyncWriteExt;
 
-        let mut command = tokio::process::Command::new("/usr/bin/pbcopy");
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.thinclaw.commands.gateway.tokio.1", "/usr/bin/pbcopy");
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())

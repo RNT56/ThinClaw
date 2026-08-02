@@ -6,13 +6,13 @@
 //! stream immediately releases callers waiting for responses.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -112,6 +112,9 @@ pub struct StdioTransport {
 
     /// Server name for logging.
     server_name: String,
+
+    /// Launcher-owned private home/temp substrate retained for the child lifetime.
+    _private_environment: tempfile::TempDir,
 }
 
 impl StdioTransport {
@@ -121,19 +124,53 @@ impl StdioTransport {
         command: &str,
         args: &[String],
         env: &BTreeMap<String, String>,
+        secret_env: &BTreeMap<String, String>,
         handler: Option<Arc<dyn McpInboundHandler>>,
     ) -> Result<Self, ToolError> {
         let server_name = server_name.into();
-        validate_spawn_inputs(&server_name, command, args, env)?;
+        validate_spawn_inputs(&server_name, command, args, env, secret_env)?;
 
-        let mut command_builder = Command::new(command);
+        let executable = resolve_stdio_executable(command)?;
+        let private_environment = tempfile::Builder::new()
+            .prefix("thinclaw-mcp-")
+            .tempdir()
+            .map_err(|error| {
+                ToolError::ExternalService(format!(
+                    "Failed to create private MCP process environment: {error}"
+                ))
+            })?;
+        let private_root = private_environment.path();
+
+        let mut command_builder = thinclaw_platform::tokio_process_command!(
+            "crates.thinclaw-tools.src.mcp.stdio.tokio.101",
+            executable
+        );
         command_builder
+            .env_clear()
             .args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
+        command_builder
+            .env("HOME", private_root)
+            .env("TMPDIR", private_root)
+            .env("TMP", private_root)
+            .env("TEMP", private_root);
+        if let Some(path) = sanitized_search_path() {
+            command_builder.env("PATH", path);
+        }
+        #[cfg(windows)]
+        for key in ["SystemRoot", "WINDIR", "ComSpec"] {
+            if let Some(value) = std::env::var_os(key) {
+                command_builder.env(key, value);
+            }
+        }
+
         for (key, value) in env {
+            command_builder.env(key, value);
+        }
+        for (key, value) in secret_env {
             command_builder.env(key, value);
         }
 
@@ -203,6 +240,7 @@ impl StdioTransport {
             has_handler: handler.is_some(),
             inbound_events,
             server_name,
+            _private_environment: private_environment,
         })
     }
 
@@ -719,6 +757,7 @@ fn validate_spawn_inputs(
     command: &str,
     args: &[String],
     env: &BTreeMap<String, String>,
+    secret_env: &BTreeMap<String, String>,
 ) -> Result<(), ToolError> {
     if server_name.is_empty()
         || server_name.len() > MAX_SERVER_NAME_BYTES
@@ -756,14 +795,14 @@ fn validate_spawn_inputs(
             "MCP stdio arguments exceed the {MAX_ARGUMENT_ENV_BYTES} byte limit"
         )));
     }
-    if env.len() > MAX_ENVIRONMENT_VARIABLES {
+    if env.len().saturating_add(secret_env.len()) > MAX_ENVIRONMENT_VARIABLES {
         return Err(ToolError::InvalidParameters(format!(
             "MCP stdio environment has more than {MAX_ENVIRONMENT_VARIABLES} variables"
         )));
     }
 
     let mut environment_bytes = 0usize;
-    for (key, value) in env {
+    for (key, value) in env.iter().chain(secret_env) {
         if key.is_empty()
             || key.len() > MAX_ENVIRONMENT_KEY_BYTES
             || !key.bytes().enumerate().all(|(index, byte)| {
@@ -790,6 +829,12 @@ fn validate_spawn_inputs(
                 ToolError::InvalidParameters("MCP stdio environment size overflow".to_string())
             })?;
     }
+
+    if let Some(key) = env.keys().find(|key| secret_env.contains_key(*key)) {
+        return Err(ToolError::InvalidParameters(format!(
+            "MCP stdio environment slot '{key}' is configured as both secret and non-secret"
+        )));
+    }
     if environment_bytes > MAX_ARGUMENT_ENV_BYTES {
         return Err(ToolError::InvalidParameters(format!(
             "MCP stdio environment exceeds the {MAX_ARGUMENT_ENV_BYTES} byte limit"
@@ -797,6 +842,77 @@ fn validate_spawn_inputs(
     }
 
     Ok(())
+}
+
+fn sanitized_search_path() -> Option<std::ffi::OsString> {
+    let parent = std::env::var_os("PATH")?;
+    let directories = std::env::split_paths(&parent)
+        .filter(|path| path.is_absolute())
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .filter(|path| path.is_dir())
+        .take(64)
+        .collect::<Vec<_>>();
+    (!directories.is_empty())
+        .then(|| std::env::join_paths(directories).ok())
+        .flatten()
+}
+
+fn resolve_stdio_executable(command: &str) -> Result<PathBuf, ToolError> {
+    let candidate = Path::new(command);
+    if candidate.components().count() > 1 {
+        if !candidate.is_absolute() {
+            return Err(ToolError::InvalidParameters(
+                "MCP stdio executable paths must be absolute".to_string(),
+            ));
+        }
+        return validate_executable(candidate);
+    }
+
+    let search_path = sanitized_search_path().ok_or_else(|| {
+        ToolError::InvalidParameters(
+            "MCP stdio executable lookup requires a validated absolute PATH".to_string(),
+        )
+    })?;
+    for directory in std::env::split_paths(&search_path) {
+        let path = directory.join(command);
+        if let Ok(executable) = validate_executable(&path) {
+            return Ok(executable);
+        }
+        #[cfg(windows)]
+        for extension in ["exe", "cmd", "bat"] {
+            let path = directory.join(format!("{command}.{extension}"));
+            if let Ok(executable) = validate_executable(&path) {
+                return Ok(executable);
+            }
+        }
+    }
+    Err(ToolError::InvalidParameters(format!(
+        "MCP stdio executable '{command}' was not found in the validated search path"
+    )))
+}
+
+fn validate_executable(path: &Path) -> Result<PathBuf, ToolError> {
+    let canonical = std::fs::canonicalize(path).map_err(|_| {
+        ToolError::InvalidParameters("MCP stdio executable is unavailable".to_string())
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|_| {
+        ToolError::InvalidParameters("MCP stdio executable metadata is unavailable".to_string())
+    })?;
+    if !metadata.is_file() {
+        return Err(ToolError::InvalidParameters(
+            "MCP stdio executable must be a regular file".to_string(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(ToolError::InvalidParameters(
+                "MCP stdio executable is not executable".to_string(),
+            ));
+        }
+    }
+    Ok(canonical)
 }
 
 fn log_preview(line: &str) -> &str {
@@ -870,13 +986,14 @@ mod tests {
     #[test]
     fn spawn_validation_rejects_unbounded_and_malformed_inputs() {
         let env = BTreeMap::new();
-        assert!(validate_spawn_inputs("", "server", &[], &env).is_err());
-        assert!(validate_spawn_inputs("server", "bad\ncommand", &[], &env).is_err());
+        assert!(validate_spawn_inputs("", "server", &[], &env, &env).is_err());
+        assert!(validate_spawn_inputs("server", "bad\ncommand", &[], &env, &env).is_err());
         assert!(
             validate_spawn_inputs(
                 "server",
                 "server",
                 &vec!["arg".to_string(); MAX_ARGUMENTS + 1],
+                &env,
                 &env,
             )
             .is_err()
@@ -884,7 +1001,7 @@ mod tests {
 
         let mut invalid_env = BTreeMap::new();
         invalid_env.insert("BAD-NAME".to_string(), "value".to_string());
-        assert!(validate_spawn_inputs("server", "server", &[], &invalid_env).is_err());
+        assert!(validate_spawn_inputs("server", "server", &[], &invalid_env, &env).is_err());
     }
 
     #[test]
@@ -903,6 +1020,7 @@ mod tests {
             "exit-test",
             "/bin/sh",
             &["-c".to_string(), "IFS= read -r line; exit 0".to_string()],
+            &BTreeMap::new(),
             &BTreeMap::new(),
             None,
         )
@@ -929,6 +1047,7 @@ mod tests {
                     "-c".to_string(),
                     "while IFS= read -r line; do :; done".to_string(),
                 ],
+                &BTreeMap::new(),
                 &BTreeMap::new(),
                 None,
             )

@@ -17,7 +17,7 @@ Okta uses **OAuth 2.0** via the ThinClaw OAuth flow.
 
 3. **Run the OAuth flow**
    ```bash
-   thinclaw tool auth okta
+   thinclaw extensions tools auth okta
    ```
    This opens a browser for Okta consent. Sign in and authorize the integration.
 

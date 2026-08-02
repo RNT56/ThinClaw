@@ -8,6 +8,7 @@
 //! - `models sync` — refresh the local model compat catalog
 
 use std::collections::BTreeSet;
+use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,13 +38,13 @@ pub enum ModelCommand {
         model: String,
     },
 
-    /// Test connectivity to a model endpoint
+    /// Send exactly one live model request (may be remote and billable)
     Test {
         /// Model name or ID to test
         model: String,
     },
 
-    /// Live-verify discovery and chat probing for configured remote providers
+    /// Discover configured provider/model capabilities; chat probes are opt-in
     Verify {
         /// Verify a single provider slug instead of all remote providers
         #[arg(long)]
@@ -53,9 +54,17 @@ pub enum ModelCommand {
         #[arg(long, default_value = "text")]
         format: String,
 
-        /// Only run live model discovery; skip the paid chat probe
+        /// Also send one minimal, potentially billable chat request per provider
         #[arg(long)]
+        chat_probe: bool,
+
+        /// Deprecated no-op; discovery-only is now the default
+        #[arg(long, hide = true, conflicts_with = "chat_probe")]
         discovery_only: bool,
+
+        /// Confirm the potentially billable --chat-probe without prompting
+        #[arg(long, requires = "chat_probe")]
+        yes: bool,
 
         /// Timeout in seconds for discovery and chat probes
         #[arg(long, default_value_t = 12)]
@@ -70,7 +79,7 @@ pub enum ModelCommand {
 
         /// Override the destination catalog path
         #[arg(long)]
-        output: Option<std::path::PathBuf>,
+        out: Option<std::path::PathBuf>,
 
         /// Output format: text (default) or json
         #[arg(long, default_value = "text")]
@@ -333,9 +342,15 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
         ModelCommand::Verify {
             provider,
             format,
-            discovery_only,
+            chat_probe,
+            discovery_only: _,
+            yes,
             timeout_secs,
         } => {
+            if chat_probe {
+                confirm_chat_probe(yes)?;
+            }
+            let discovery_only = !chat_probe;
             let context = load_verification_context().await?;
             let providers_settings = crate::llm::normalize_providers_settings(&context.settings);
             let providers = filter_verification_providers(provider.as_deref())?;
@@ -366,7 +381,7 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
 
         ModelCommand::Sync {
             provider,
-            output,
+            out,
             format,
             timeout_secs,
         } => {
@@ -391,7 +406,7 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
             .await;
 
             let output_path =
-                output.unwrap_or_else(crate::config::model_compat::preferred_catalog_write_path);
+                out.unwrap_or_else(crate::config::model_compat::preferred_catalog_write_path);
             crate::config::model_compat::write_catalog_snapshot(&output_path, &result.snapshot)
                 .map_err(anyhow::Error::msg)?;
 
@@ -406,6 +421,23 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn confirm_chat_probe(yes: bool) -> anyhow::Result<()> {
+    if yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("--chat-probe requires --yes in noninteractive mode");
+    }
+    eprint!("Send potentially billable chat probes to configured providers? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        anyhow::bail!("model chat probes cancelled");
+    }
     Ok(())
 }
 

@@ -817,7 +817,7 @@ pub(super) async fn create_lease(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(ExperimentLeaseAuthentication {
         lease_id: lease.id,
-        token,
+        token: token.into(),
     })
 }
 

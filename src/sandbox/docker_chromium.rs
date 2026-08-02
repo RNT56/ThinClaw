@@ -259,7 +259,11 @@ impl DockerChromiumConfig {
 
     pub fn is_docker_available() -> bool {
         command_success_with_timeout(
-            Command::new("docker").arg("version"),
+            thinclaw_platform::std_process_command!(
+                "src.sandbox.docker_chromium.std.101",
+                "docker"
+            )
+            .arg("version"),
             Duration::from_secs(5),
         )
     }
@@ -305,14 +309,16 @@ impl DockerChromiumConfig {
 
 fn image_reference_available_locally(reference: &str) -> bool {
     command_success_with_timeout(
-        Command::new("docker").args(["image", "inspect", reference]),
+        thinclaw_platform::std_process_command!("src.sandbox.docker_chromium.std.102", "docker")
+            .args(["image", "inspect", reference]),
         Duration::from_secs(5),
     )
 }
 
 fn image_manifest_available(reference: &str) -> bool {
     command_success_with_timeout(
-        Command::new("docker").args(["manifest", "inspect", reference]),
+        thinclaw_platform::std_process_command!("src.sandbox.docker_chromium.std.103", "docker")
+            .args(["manifest", "inspect", reference]),
         DOCKER_COMMAND_TIMEOUT,
     )
 }

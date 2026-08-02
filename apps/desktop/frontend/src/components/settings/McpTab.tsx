@@ -14,8 +14,6 @@ import {
     Clock,
     Hash,
     RefreshCw,
-    Eye,
-    EyeOff,
     Info,
     Sparkles,
     Link,
@@ -231,8 +229,6 @@ export function McpTab() {
 
     // Local draft state (applied on blur/save)
     const [baseUrl, setBaseUrl] = useState('');
-    const [authToken, setAuthToken] = useState('');
-    const [showToken, setShowToken] = useState(false);
     const [sandboxEnabled, setSandboxEnabled] = useState(false);
     const [cacheTtl, setCacheTtl] = useState(300);
     const [maxResultChars, setMaxResultChars] = useState(5000);
@@ -262,7 +258,6 @@ export function McpTab() {
             if (cfg) {
                 setConfig(cfg);
                 setBaseUrl(cfg.mcp_base_url ?? '');
-                setAuthToken(cfg.mcp_auth_token ?? '');
                 setSandboxEnabled(cfg.mcp_sandbox_enabled ?? false);
                 setCacheTtl(cfg.mcp_cache_ttl_secs ?? 300);
                 setMaxResultChars(cfg.mcp_tool_result_max_chars ?? 5000);
@@ -376,7 +371,6 @@ export function McpTab() {
     }, [config]);
 
     const handleUrlBlur = () => persist({ mcp_base_url: baseUrl || null });
-    const handleTokenBlur = () => persist({ mcp_auth_token: authToken || null });
     const handleCacheTtlBlur = () => persist({ mcp_cache_ttl_secs: cacheTtl });
     const handleMaxCharsBlur = () => persist({ mcp_tool_result_max_chars: maxResultChars });
 
@@ -393,10 +387,10 @@ export function McpTab() {
         try {
             // Probe the configured MCP server by requesting its tool list.
             const toolListUrl = baseUrl.replace(/\/$/, '') + '/tools';
-            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-            if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-
-            const res = await fetch(toolListUrl, { headers, signal: AbortSignal.timeout(8000) });
+            const res = await fetch(toolListUrl, {
+                headers: { 'Content-Type': 'application/json' },
+                signal: AbortSignal.timeout(8000),
+            });
             const latencyMs = Date.now() - start;
 
             if (!res.ok) {
@@ -651,34 +645,6 @@ export function McpTab() {
                     </div>
                 </SettingRow>
 
-                <SettingRow
-                    label="Auth Token"
-                    description="JWT bearer token sent as Authorization header with every MCP request. Leave empty for unauthenticated servers."
-                >
-                    <div className="relative w-[320px]">
-                        <input
-                            type={showToken ? 'text' : 'password'}
-                            value={authToken}
-                            onChange={(e) => setAuthToken(e.target.value)}
-                            onBlur={handleTokenBlur}
-                            placeholder="••••••••••••••••••••••••"
-                            spellCheck={false}
-                            autoComplete="new-password"
-                            className="w-full h-10 pl-3 pr-10 rounded-xl border border-border/50 bg-background/70 text-sm font-mono transition-all duration-200 backdrop-blur-xs outline-hidden focus:border-primary focus:ring-2 focus:ring-primary/20"
-                        />
-                        <button
-                            type="button"
-                            onClick={() => setShowToken(v => !v)}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                        >
-                            {showToken
-                                ? <EyeOff className="w-3.5 h-3.5" />
-                                : <Eye className="w-3.5 h-3.5" />
-                            }
-                        </button>
-                    </div>
-                </SettingRow>
-
                 {/* Test Connection */}
                 <div className="pt-4 flex items-center justify-between">
                     <div className="flex items-center gap-3">
@@ -852,7 +818,6 @@ export function McpTab() {
                 <div className="grid grid-cols-2 gap-2 mt-1">
                     {[
                         ['THINCLAW_MCP_URL', 'Server Base URL'],
-                        ['THINCLAW_MCP_TOKEN', 'Auth Token'],
                     ].map(([env, label]) => (
                         <div key={env} className="flex flex-col gap-0.5 bg-background/50 p-2.5 rounded-lg border border-border/30">
                             <code className="text-[11px] font-mono text-primary/80">{env}</code>

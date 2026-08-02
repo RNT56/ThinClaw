@@ -11,7 +11,7 @@ use thinclaw_gateway::web::nostr::{
 
 use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
-use crate::channels::web::types::NostrPrivateKeyRequest;
+use crate::channels::web::types::NostrSecretSourceRequest;
 
 const NOSTR_SECRET_NAME: &str = "nostr_private_key";
 const NOSTR_TOOL_NAME: &str = "nostr_actions";
@@ -75,13 +75,13 @@ pub(crate) async fn reconcile_nostr_runtime(
     }
 
     if let Some(tool_registry) = state.tool_registry.as_ref() {
-        let _ = tool_registry.unregister(NOSTR_TOOL_NAME).await;
+        let _ = tool_registry
+            .unregister_static(NOSTR_TOOL_NAME, crate::tools::ToolOrigin::Channel)
+            .await;
         if let Some(runtime) = next_runtime {
-            tool_registry
-                .register(Arc::new(crate::tools::builtin::NostrActionsTool::new(
-                    runtime,
-                )))
-                .await;
+            tool_registry.register_sync(Arc::new(crate::tools::builtin::NostrActionsTool::new(
+                runtime,
+            )));
         }
     }
 
@@ -91,20 +91,31 @@ pub(crate) async fn reconcile_nostr_runtime(
 pub(crate) async fn nostr_save_key_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
-    Json(body): Json<NostrPrivateKeyRequest>,
+    Json(body): Json<NostrSecretSourceRequest>,
 ) -> Result<(StatusCode, Json<NostrSaveKeyResponse>), StatusCode> {
     let secrets = state
         .secrets_store
         .as_ref()
         .ok_or_else(nostr_secrets_store_unavailable_status)?;
 
-    let private_key = body.private_key.as_deref().unwrap_or("").trim().to_string();
+    let source = secrets
+        .list(&request_identity.principal_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .find(|source| source.id == Some(body.secret_source_id))
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let source_value = secrets
+        .get_decrypted(&request_identity.principal_id, &source.name)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let private_key = source_value.expose().trim().to_string();
     if private_key.is_empty() {
         return Err(invalid_nostr_private_key_status());
     }
 
     let keys = Keys::parse(&private_key).map_err(|err| {
-        tracing::warn!("Rejected invalid Nostr private key from WebUI: {}", err);
+        tracing::warn!("Rejected invalid Nostr private key secret source: {}", err);
         invalid_nostr_private_key_status()
     })?;
 
@@ -126,7 +137,7 @@ pub(crate) async fn nostr_save_key_handler(
         crate::config::refresh_secrets(secrets.as_ref(), &request_identity.principal_id).await;
     tracing::info!(
         refreshed,
-        "Nostr private key saved via WebUI and secrets overlay refreshed"
+        "Nostr private key bound from an encrypted source and secrets overlay refreshed"
     );
 
     let public_key_hex = keys.public_key().to_hex();

@@ -1,40 +1,22 @@
-import { lazy, Suspense, useState, useEffect, useRef } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { X } from 'lucide-react';
+
 import { useChatLayout } from '../ChatProvider';
 import * as thinclaw from '../../../lib/thinclaw';
-import { AsyncState } from '../../ui';
+import { AsyncState, Button } from '../../ui';
+import { resolveAgentRoute } from '../../thinclaw/agent-routes';
 
 const ThinClawChatView = lazy(() => import('../../thinclaw/ThinClawChatView').then((module) => ({ default: module.ThinClawChatView })));
-const ThinClawDashboard = lazy(() => import('../../thinclaw/ThinClawDashboard').then((module) => ({ default: module.ThinClawDashboard })));
-const ThinClawChannels = lazy(() => import('../../thinclaw/ThinClawChannels').then((module) => ({ default: module.ThinClawChannels })));
-const ThinClawChannelStatus = lazy(() => import('../../thinclaw/ThinClawChannelStatus').then((module) => ({ default: module.ThinClawChannelStatus })));
-const ThinClawChannelConfig = lazy(() => import('../../thinclaw/ThinClawChannelConfig').then((module) => ({ default: module.ThinClawChannelConfig })));
-const ThinClawPresence = lazy(() => import('../../thinclaw/ThinClawPresence').then((module) => ({ default: module.ThinClawPresence })));
-const ThinClawAutomations = lazy(() => import('../../thinclaw/ThinClawAutomations').then((module) => ({ default: module.ThinClawAutomations })));
+const ThinClawHome = lazy(() => import('../../thinclaw/ThinClawHome').then((module) => ({ default: module.ThinClawHome })));
+const ThinClawWorkspaceMemory = lazy(() => import('../../thinclaw/ThinClawWorkspaceMemory').then((module) => ({ default: module.ThinClawWorkspaceMemory })));
+const ThinClawChannelCenter = lazy(() => import('../../thinclaw/ThinClawChannelCenter').then((module) => ({ default: module.ThinClawChannelCenter })));
+const ThinClawAutomationCenter = lazy(() => import('../../thinclaw/ThinClawAutomationCenter').then((module) => ({ default: module.ThinClawAutomationCenter })));
 const ThinClawJobs = lazy(() => import('../../thinclaw/ThinClawJobs').then((module) => ({ default: module.ThinClawJobs })));
-const ThinClawAutonomy = lazy(() => import('../../thinclaw/ThinClawAutonomy').then((module) => ({ default: module.ThinClawAutonomy })));
-const ThinClawRoutineAudit = lazy(() => import('../../thinclaw/ThinClawRoutineAudit').then((module) => ({ default: module.ThinClawRoutineAudit })));
-const ThinClawSkills = lazy(() => import('../../thinclaw/ThinClawSkills').then((module) => ({ default: module.ThinClawSkills })));
-const ThinClawHooks = lazy(() => import('../../thinclaw/ThinClawHooks').then((module) => ({ default: module.ThinClawHooks })));
-const ThinClawPlugins = lazy(() => import('../../thinclaw/ThinClawPlugins').then((module) => ({ default: module.ThinClawPlugins })));
-const ThinClawConfig = lazy(() => import('../../thinclaw/ThinClawConfig').then((module) => ({ default: module.ThinClawConfig })));
-const ThinClawDoctor = lazy(() => import('../../thinclaw/ThinClawDoctor').then((module) => ({ default: module.ThinClawDoctor })));
-const ThinClawEventInspector = lazy(() => import('../../thinclaw/ThinClawEventInspector').then((module) => ({ default: module.ThinClawEventInspector })));
-const ThinClawToolPolicies = lazy(() => import('../../thinclaw/ThinClawToolPolicies').then((module) => ({ default: module.ThinClawToolPolicies })));
-const ThinClawPairing = lazy(() => import('../../thinclaw/ThinClawPairing').then((module) => ({ default: module.ThinClawPairing })));
-const ThinClawSystemControl = lazy(() => import('../../thinclaw/ThinClawSystemControl').then((module) => ({ default: module.ThinClawSystemControl })));
-const ThinClawBrain = lazy(() => import('../../thinclaw/ThinClawBrain').then((module) => ({ default: module.ThinClawBrain })));
-const ThinClawMemory = lazy(() => import('../../thinclaw/ThinClawMemory').then((module) => ({ default: module.ThinClawMemory })));
-const FleetCommandCenter = lazy(() => import('../../thinclaw/fleet/FleetCommandCenter').then((module) => ({ default: module.FleetCommandCenter })));
-const ThinClawCostDashboard = lazy(() => import('../../thinclaw/ThinClawCostDashboard').then((module) => ({ default: module.ThinClawCostDashboard })));
-const ThinClawCacheStats = lazy(() => import('../../thinclaw/ThinClawCacheStats').then((module) => ({ default: module.ThinClawCacheStats })));
-const ThinClawTrajectory = lazy(() => import('../../thinclaw/ThinClawTrajectory').then((module) => ({ default: module.ThinClawTrajectory })));
-const ThinClawRollback = lazy(() => import('../../thinclaw/ThinClawRollback').then((module) => ({ default: module.ThinClawRollback })));
+const ThinClawCapabilitiesCenter = lazy(() => import('../../thinclaw/ThinClawCapabilitiesCenter').then((module) => ({ default: module.ThinClawCapabilitiesCenter })));
+const ThinClawUsageCenter = lazy(() => import('../../thinclaw/ThinClawUsageCenter').then((module) => ({ default: module.ThinClawUsageCenter })));
+const ThinClawOperationsCenter = lazy(() => import('../../thinclaw/ThinClawOperationsCenter').then((module) => ({ default: module.ThinClawOperationsCenter })));
+const ThinClawAdvancedLabs = lazy(() => import('../../thinclaw/ThinClawAdvancedLabs').then((module) => ({ default: module.ThinClawAdvancedLabs })));
 const ThinClawSessionSearch = lazy(() => import('../../thinclaw/ThinClawSessionSearch').then((module) => ({ default: module.ThinClawSessionSearch })));
-const ThinClawRouting = lazy(() => import('../../thinclaw/ThinClawRouting').then((module) => ({ default: module.ThinClawRouting })));
-const ThinClawExperiments = lazy(() => import('../../thinclaw/ThinClawExperiments').then((module) => ({ default: module.ThinClawExperiments })));
-const ThinClawLearning = lazy(() => import('../../thinclaw/ThinClawLearning').then((module) => ({ default: module.ThinClawLearning })));
-const ThinClawRepoProjects = lazy(() => import('../../thinclaw/ThinClawRepoProjects').then((module) => ({ default: module.ThinClawRepoProjects })));
-const ThinClawRemoteAccess = lazy(() => import('../../thinclaw/ThinClawRemoteAccess').then((module) => ({ default: module.ThinClawRemoteAccess })));
 
 function ThinClawPageSkeleton() {
     return <AsyncState kind="loading" title="Loading control surface" className="flex-1" />;
@@ -49,85 +31,49 @@ export function ThinClawView() {
         setActiveThinClawPage,
         setActiveTab,
     } = useChatLayout();
+    const resolved = resolveAgentRoute(activeThinClawPage);
 
-    // Track whether bootstrap check has been performed this session
     const bootstrapCheckedRef = useRef(false);
     const [bootstrapNeeded, setBootstrapNeeded] = useState<boolean | null>(null);
 
     const checkBootstrap = () => {
         thinclaw.checkBootstrapNeeded()
-            .then(needed => {
+            .then((needed) => {
                 setBootstrapNeeded(needed);
-                // If bootstrap needed, navigate straight to chat — the agent will lead
-                if (needed) {
-                    setActiveThinClawPage('chat');
-                }
+                if (needed) setActiveThinClawPage('chat');
             })
-            .catch(() => {
-                setBootstrapNeeded(false);
-            });
+            .catch(() => setBootstrapNeeded(false));
     };
 
     useEffect(() => {
-        // Only check once on mount
         if (bootstrapCheckedRef.current) return;
         bootstrapCheckedRef.current = true;
         checkBootstrap();
+        // Bootstrap is intentionally checked once per mounted Agent Cockpit.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [setActiveThinClawPage]);
 
-    // Render the active non-chat sub-page (these don't need state preservation)
     const renderSubPage = () => {
-        switch (activeThinClawPage) {
-            case 'chat': return null; // Chat is always-mounted below
-            case 'dashboard': return <ThinClawDashboard />;
-            case 'fleet': return <FleetCommandCenter />;
-            case 'channels': return <ThinClawChannels />;
-            case 'channel-status': return <ThinClawChannelStatus />;
-            case 'channel-config': return <ThinClawChannelConfig />;
-            case 'presence': return <ThinClawPresence />;
-            case 'automations': return <ThinClawAutomations />;
+        switch (resolved.destination) {
+            case 'home': return <ThinClawHome />;
+            case 'workspace': return <ThinClawWorkspaceMemory initialTab={resolved.tab} />;
+            case 'channels': return <ThinClawChannelCenter initialTab={resolved.tab} />;
+            case 'automations': return <ThinClawAutomationCenter initialTab={resolved.tab} />;
             case 'jobs': return <ThinClawJobs />;
-            case 'repo-projects': return <ThinClawRepoProjects />;
-            case 'autonomy': return <ThinClawAutonomy />;
-            case 'routine-audit': return <ThinClawRoutineAudit />;
-            case 'skills': return <ThinClawSkills />;
-            case 'hooks': return <ThinClawHooks />;
-            case 'plugins': return <ThinClawPlugins />;
-            case 'system-control': return <ThinClawSystemControl />;
-            case 'brain': return <ThinClawBrain />;
-            case 'memory': return <ThinClawMemory />;
-            case 'config': return <ThinClawConfig />;
-            case 'doctor': return <ThinClawDoctor />;
-            case 'event-inspector': return <ThinClawEventInspector />;
-            case 'tool-policies': return <ThinClawToolPolicies />;
-            case 'pairing': return <ThinClawPairing />;
-            case 'cost-dashboard': return <ThinClawCostDashboard />;
-            case 'cache-stats': return <ThinClawCacheStats />;
-            case 'trajectory': return <ThinClawTrajectory />;
-            case 'rollback': return <ThinClawRollback />;
-            case 'session-search': return <ThinClawSessionSearch />;
-            case 'routing': return <ThinClawRouting />;
-            case 'experiments': return <ThinClawExperiments />;
-            case 'learning': return <ThinClawLearning />;
-            case 'remote-access': return <ThinClawRemoteAccess />;
-            default: return (
-                <AsyncState kind="empty" title="Select a control surface" description="Choose a page from the Agent Cockpit sidebar." className="flex-1" />
-            );
+            case 'capabilities': return <ThinClawCapabilitiesCenter initialTab={resolved.tab} />;
+            case 'usage': return <ThinClawUsageCenter initialTab={resolved.tab} />;
+            case 'operations': return <ThinClawOperationsCenter initialTab={resolved.tab} />;
+            case 'advanced': return <ThinClawAdvancedLabs initialTab={resolved.tab} />;
+            case 'chat': return null;
+            default: return <AsyncState kind="empty" title="Select a control surface" description="Choose a page from the Agent Cockpit sidebar." className="flex-1" />;
         }
     };
 
+    const chatVisible = resolved.destination === 'chat';
     return (
-        <div
-            className="flex-1 flex flex-col h-full overflow-hidden bg-surface-canvas text-content-primary"
-            data-product-surface="agent-cockpit"
-        >
-            {/* Chat view — always mounted to preserve messages, event listeners,
-                and active run state. Hidden via CSS when another sub-page is active. */}
-            <div
-                className="flex-1 flex flex-col h-full overflow-hidden"
-                style={{ display: activeThinClawPage === 'chat' ? undefined : 'none' }}
-            >
+        <div className="relative flex h-full flex-1 flex-col overflow-hidden bg-surface-canvas text-content-primary" data-product-surface="agent-cockpit">
+            {/* Always mounted: navigation must not interrupt a live agent run or draft. */}
+            <div className="flex h-full flex-1 flex-col overflow-hidden" style={{ display: chatVisible ? undefined : 'none' }}>
                 <Suspense fallback={<ThinClawPageSkeleton />}>
                     <ThinClawChatView
                         sessionKey={selectedThinClawSession}
@@ -135,19 +81,11 @@ export function ThinClawView() {
                         bootstrapNeeded={bootstrapNeeded ?? false}
                         onBootstrapComplete={() => setBootstrapNeeded(false)}
                         onFactoryReset={() => {
-                            // Backend has reset bootstrap_completed=false in identity.json.
-                            // Re-check so button label and auto-trigger update immediately.
                             bootstrapCheckedRef.current = false;
                             checkBootstrap();
-
-                            // Auto-restart the gateway so the bootstrap ritual kicks off
-                            // without requiring the user to manually click "Start Gateway".
-                            // Small delay gives the DB deletion time to finish.
-                            setTimeout(() => {
-                                thinclaw.startThinClawGateway().catch(() => { });
-                            }, 2000);
+                            window.setTimeout(() => { void thinclaw.startThinClawGateway(); }, 2_000);
                         }}
-                        onNavigateToSettings={(page) => setActiveTab(page as any)}
+                        onNavigateToSettings={(page) => setActiveTab(page as never)}
                         onViewSession={(key) => {
                             setSelectedThinClawSession(key);
                             setActiveThinClawPage('chat');
@@ -156,9 +94,20 @@ export function ThinClawView() {
                 </Suspense>
             </div>
 
-            {/* Other sub-pages — conditionally rendered (no critical state to preserve) */}
-            {activeThinClawPage !== 'chat' && (
-                <Suspense fallback={<ThinClawPageSkeleton />}>{renderSubPage()}</Suspense>
+            {!chatVisible && <Suspense fallback={<ThinClawPageSkeleton />}>{renderSubPage()}</Suspense>}
+
+            {/* Session search is a Chat inspector, not a second primary destination. */}
+            {activeThinClawPage === 'session-search' && (
+                <div className="absolute inset-0 z-20 flex bg-background/75 p-4 backdrop-blur-sm">
+                    <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[var(--radius-dialog)] border border-surface-outline bg-surface-elevated shadow-lg">
+                        <div className="flex shrink-0 justify-end border-b border-surface-outline p-2">
+                            <Button size="sm" variant="ghost" onClick={() => setActiveThinClawPage('chat')}>
+                                <X className="size-3.5" aria-hidden="true" /> Close search
+                            </Button>
+                        </div>
+                        <Suspense fallback={<ThinClawPageSkeleton />}><ThinClawSessionSearch /></Suspense>
+                    </div>
+                </div>
             )}
         </div>
     );

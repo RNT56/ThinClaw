@@ -759,7 +759,7 @@ fn lease_debug_output_redacts_authentication_and_credentials() {
     let token = "exp_0123456789ab_0123456789abcdef0123456789abcdef";
     let auth = ExperimentLeaseAuthentication {
         lease_id: Uuid::new_v4(),
-        token: token.to_string(),
+        token: token.to_string().into(),
     };
     assert!(!format!("{auth:?}").contains(token));
 

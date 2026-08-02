@@ -4,16 +4,16 @@ use axum::http::{HeaderMap, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use thinclaw_experiments::{
     ExperimentArtifactRef, ExperimentAutonomyMode, ExperimentCampaign, ExperimentComparisonPolicy,
-    ExperimentLeaseAuthentication, ExperimentMetricDefinition, ExperimentModelUsageRecord,
-    ExperimentOpportunity, ExperimentPreset, ExperimentProject, ExperimentProjectStatus,
-    ExperimentRunnerBackend, ExperimentRunnerJob, ExperimentRunnerProfile,
-    ExperimentRunnerReadinessClass, ExperimentRunnerStatus, ExperimentStopPolicy, ExperimentTarget,
-    ExperimentTargetKind, ExperimentTrial, experiment_target_not_found_message,
+    ExperimentMetricDefinition, ExperimentModelUsageRecord, ExperimentOpportunity,
+    ExperimentPreset, ExperimentProject, ExperimentProjectStatus, ExperimentRunnerBackend,
+    ExperimentRunnerJob, ExperimentRunnerProfile, ExperimentRunnerReadinessClass,
+    ExperimentRunnerStatus, ExperimentStopPolicy, ExperimentTarget, ExperimentTargetKind,
+    ExperimentTrial, experiment_target_not_found_message,
 };
 use uuid::Uuid;
 
 use crate::web::api::bounded_limit;
-use crate::web::types::{ExperimentGpuCloudConnectRequest, ExperimentGpuCloudTemplateRequest};
+use crate::web::types::ExperimentGpuCloudTemplateRequest;
 
 const DEFAULT_RESEARCH_RUNNER_IMAGE: &str = "ghcr.io/thinclaw/research-runner:latest";
 
@@ -287,20 +287,6 @@ impl ResearchGpuCloudTemplateError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ResearchGpuCloudApiKeyError {
-    #[error("API key is required")]
-    Missing,
-}
-
-impl ResearchGpuCloudApiKeyError {
-    pub fn status_code(&self) -> StatusCode {
-        match self {
-            Self::Missing => StatusCode::BAD_REQUEST,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResearchGpuCloudProviderInfo {
     pub slug: String,
@@ -472,12 +458,17 @@ pub struct ExperimentRunnerValidationResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ExperimentLeaseReference {
+    pub lease_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ExperimentCampaignActionResponse {
     pub campaign: ExperimentCampaign,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trial: Option<ExperimentTrial>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lease: Option<ExperimentLeaseAuthentication>,
+    pub lease: Option<ExperimentLeaseReference>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch: Option<ExperimentLaunchDetails>,
     pub message: String,
@@ -890,17 +881,6 @@ pub fn research_gpu_cloud_info_or_error(
 ) -> Result<ResearchGpuCloudProviderInfo, (StatusCode, String)> {
     research_gpu_cloud_info(provider, connected)
         .ok_or_else(research_gpu_cloud_provider_not_found_error)
-}
-
-pub fn research_gpu_cloud_api_key(
-    req: &ExperimentGpuCloudConnectRequest,
-) -> Result<String, ResearchGpuCloudApiKeyError> {
-    let api_key = req.api_key.trim().to_string();
-    if api_key.is_empty() {
-        Err(ResearchGpuCloudApiKeyError::Missing)
-    } else {
-        Ok(api_key)
-    }
 }
 
 pub fn research_gpu_cloud_missing_credentials_validation(
@@ -1466,24 +1446,6 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("normalized_lambda_form")
         );
-    }
-
-    #[test]
-    fn gpu_cloud_api_key_validation_trims_and_rejects_empty_values() {
-        assert_eq!(
-            research_gpu_cloud_api_key(&ExperimentGpuCloudConnectRequest {
-                api_key: " token ".to_string(),
-            }),
-            Ok("token".to_string())
-        );
-
-        let error = research_gpu_cloud_api_key(&ExperimentGpuCloudConnectRequest {
-            api_key: " ".to_string(),
-        })
-        .unwrap_err();
-
-        assert_eq!(error, ResearchGpuCloudApiKeyError::Missing);
-        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
     }
 
     #[test]

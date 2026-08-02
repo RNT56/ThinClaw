@@ -1,9 +1,9 @@
-import { AlertCircle, Inbox, LoaderCircle } from "lucide-react";
+import { AlertCircle, AlertTriangle, Clock3, Inbox, LoaderCircle } from "lucide-react";
 import { type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import { Button } from "./Button";
 
-type AsyncStateKind = "loading" | "empty" | "error";
+type AsyncStateKind = "loading" | "empty" | "error" | "unavailable" | "partial" | "stale";
 
 export interface AsyncStateProps {
     kind: AsyncStateKind;
@@ -20,6 +20,9 @@ const defaultIcons: Record<AsyncStateKind, ReactNode> = {
     loading: <LoaderCircle className="size-5 animate-spin" aria-hidden="true" />,
     empty: <Inbox className="size-5" aria-hidden="true" />,
     error: <AlertCircle className="size-5" aria-hidden="true" />,
+    unavailable: <AlertTriangle className="size-5" aria-hidden="true" />,
+    partial: <AlertTriangle className="size-5" aria-hidden="true" />,
+    stale: <Clock3 className="size-5" aria-hidden="true" />,
 };
 
 export function AsyncState({
@@ -46,6 +49,7 @@ export function AsyncState({
             <div className={cn(
                 "grid size-10 place-items-center rounded-full bg-muted",
                 kind === "error" && "text-destructive",
+                (kind === "unavailable" || kind === "partial" || kind === "stale") && "text-amber-600 dark:text-amber-300",
             )}>
                 {icon ?? defaultIcons[kind]}
             </div>

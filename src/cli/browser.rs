@@ -42,7 +42,12 @@ pub enum BrowserCommand {
         url: String,
 
         /// Output file path (default: screenshot.png)
-        #[arg(short, long, default_value = "screenshot.png")]
+        #[arg(
+            short,
+            long = "out",
+            alias = "output",
+            default_value = "screenshot.png"
+        )]
         output: String,
 
         /// Viewport width
@@ -104,7 +109,7 @@ fn find_browser() -> Option<PathBuf> {
 async fn headless_dom_dump(browser: &Path, url: &str, wait_secs: u64) -> anyhow::Result<String> {
     validate_browser_url(url)?;
     let wait_secs = wait_secs.min(120);
-    let mut command = tokio::process::Command::new(browser);
+    let mut command = thinclaw_platform::tokio_process_command!("src.cli.browser.tokio.1", browser);
     command.args([
         "--headless",
         "--disable-gpu",
@@ -164,7 +169,7 @@ async fn headless_screenshot(
         .prefix(".thinclaw-screenshot-")
         .tempdir_in(&canonical_parent)?;
     let staged_path = stage_dir.path().join("screenshot.png");
-    let mut command = tokio::process::Command::new(browser);
+    let mut command = thinclaw_platform::tokio_process_command!("src.cli.browser.tokio.2", browser);
     command.args([
         "--headless",
         "--disable-gpu",
@@ -303,7 +308,8 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
                     println!("✅ Browser found: {}", path.display());
 
                     // Try getting version
-                    let mut command = tokio::process::Command::new(&path);
+                    let mut command =
+                        thinclaw_platform::tokio_process_command!("src.cli.browser.tokio.3", &path);
                     command.arg("--version");
                     if let Ok(output) = thinclaw_platform::bounded_command_output(
                         &mut command,
@@ -348,7 +354,9 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
             screenshot,
         } => {
             let browser = find_browser().ok_or_else(|| {
-                anyhow::anyhow!("No browser found. Run `thinclaw browser check` for setup info.")
+                anyhow::anyhow!(
+                    "No browser found. Run `thinclaw dev browser check` for setup info."
+                )
             })?;
 
             let html = headless_dom_dump(&browser, &url, wait).await?;
@@ -388,7 +396,9 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
             height,
         } => {
             let browser = find_browser().ok_or_else(|| {
-                anyhow::anyhow!("No browser found. Run `thinclaw browser check` for setup info.")
+                anyhow::anyhow!(
+                    "No browser found. Run `thinclaw dev browser check` for setup info."
+                )
             })?;
 
             headless_screenshot(&browser, &url, &output, width, height).await?;
@@ -397,7 +407,9 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
 
         BrowserCommand::Links { url, external_only } => {
             let browser = find_browser().ok_or_else(|| {
-                anyhow::anyhow!("No browser found. Run `thinclaw browser check` for setup info.")
+                anyhow::anyhow!(
+                    "No browser found. Run `thinclaw dev browser check` for setup info."
+                )
             })?;
 
             let html = headless_dom_dump(&browser, &url, 3).await?;

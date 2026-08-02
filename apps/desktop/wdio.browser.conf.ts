@@ -84,6 +84,22 @@ const desktopStatus = {
   bedrock_granted: false,
 };
 
+const remoteDesktopStatus = {
+  ...desktopStatus,
+  gateway_mode: "remote",
+  remote_url: "https://remote.browser-e2e.test",
+  profiles: [
+    {
+      id: "remote-browser-e2e",
+      name: "Browser E2E Remote",
+      url: "https://remote.browser-e2e.test",
+      token: null,
+      mode: "remote",
+      auto_connect: true,
+    },
+  ],
+};
+
 const startupCommandResults = {
   get_user_config: {},
   get_system_specs: {
@@ -152,8 +168,24 @@ const startupCommandResults = {
       },
     ],
   },
+  thinclaw_get_history: { messages: [], has_more: false },
   thinclaw_channels_list: { channels: [] },
   thinclaw_config_get: { settings: [] },
+  thinclaw_list_workspace_files: [],
+  thinclaw_skills_status: { skills: [] },
+  thinclaw_cost_summary: {
+    total_cost_usd: 0,
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+    total_requests: 0,
+    avg_cost_per_request: 0,
+    daily: {},
+    monthly: {},
+    by_model: {},
+    by_agent: {},
+    alert_threshold_usd: 0,
+    alert_triggered: false,
+  },
   thinclaw_gmail_status: {
     enabled: false,
     configured: false,
@@ -186,11 +218,14 @@ const startupFixtureScript = `
     window.__wdio_mocks__[command] = async () => structuredClone(result);
   }
   const desktopStatus = ${JSON.stringify(desktopStatus)};
+  const remoteDesktopStatus = ${JSON.stringify(remoteDesktopStatus)};
   window.__wdio_mocks__.thinclaw_get_status = async () => {
     const setupComplete = localStorage.getItem("__thinclaw_e2e_setup_complete") === "true";
+    const selectedProfile = localStorage.getItem("__thinclaw_e2e_profile");
+    const selectedStatus = selectedProfile === "remote" ? remoteDesktopStatus : desktopStatus;
     return structuredClone(setupComplete
-      ? desktopStatus
-      : { ...desktopStatus, setup_completed: false, dev_mode_wizard: true });
+      ? selectedStatus
+      : { ...selectedStatus, setup_completed: false, dev_mode_wizard: true });
   };
   window.__TAURI_INTERNALS__.metadata ??= {};
   window.__TAURI_INTERNALS__.metadata.currentWindow ??= { label: "main" };

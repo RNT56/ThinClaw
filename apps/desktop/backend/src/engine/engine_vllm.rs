@@ -5,7 +5,6 @@
 //! runs in a descendant-owned boundary and exposes an authenticated loopback API.
 
 use async_trait::async_trait;
-use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -30,6 +29,25 @@ const VENV_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const REQUIREMENTS_LOCK: &[u8] = include_bytes!("../../../runtime/vllm/requirements.lock");
+const AUTH_ADAPTER: &str = r#"# ThinClaw vLLM private-auth adapter v1
+import os
+import sys
+
+auth_path = os.environ.pop("THINCLAW_VLLM_AUTH_FILE", "")
+if not auth_path:
+    raise RuntimeError("ThinClaw vLLM API credential is unavailable")
+fd = os.open(auth_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    token = os.read(fd, 4097).decode("ascii")
+finally:
+    os.close(fd)
+    os.unlink(auth_path)
+if len(token) < 32 or len(token) > 4096:
+    raise RuntimeError("ThinClaw vLLM API credential is invalid")
+sys.argv = ["vllm"] + sys.argv[1:] + ["--api-key", token]
+from vllm.entrypoints.cli.main import main
+main()
+"#;
 
 static BOOTSTRAP_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -39,6 +57,7 @@ pub struct VllmEngine {
     lifecycle: tokio::sync::Mutex<()>,
     port: Mutex<Option<u16>>,
     process: Mutex<Option<OwnedChild>>,
+    runtime_dir: Mutex<Option<tempfile::TempDir>>,
     venv_path: Mutex<Option<PathBuf>>,
     served_model: Mutex<Option<String>>,
     effective_context: Mutex<Option<u32>>,
@@ -54,6 +73,7 @@ impl VllmEngine {
             lifecycle: tokio::sync::Mutex::new(()),
             port: Mutex::new(None),
             process: Mutex::new(None),
+            runtime_dir: Mutex::new(None),
             venv_path: Mutex::new(None),
             served_model: Mutex::new(None),
             effective_context: Mutex::new(None),
@@ -152,7 +172,7 @@ impl VllmEngine {
     }
 
     fn hardened_uv_command(uv: &Path, data_root: &Path) -> Command {
-        let mut command = Command::new(uv);
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.engine.engine_vllm.tokio.101", uv);
         for (key, _) in std::env::vars_os() {
             let name = key.to_string_lossy().to_ascii_uppercase();
             if name.starts_with("UV_")
@@ -265,7 +285,7 @@ impl VllmEngine {
         }
         let ldd = find_executable_in_path("ldd")
             .ok_or_else(|| "Could not inspect glibc because ldd is unavailable".to_string())?;
-        let mut command = Command::new(ldd);
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.engine.engine_vllm.tokio.102", ldd);
         command.arg("--version");
         let output = bounded_command_output(&mut command, CUDA_PROBE_TIMEOUT, 16 * 1024, 16 * 1024)
             .await
@@ -303,7 +323,7 @@ impl VllmEngine {
         let executable = find_executable_in_path("nvidia-smi").ok_or_else(|| {
             "nvidia-smi is unavailable; install a working NVIDIA driver".to_string()
         })?;
-        let mut command = Command::new(executable);
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.engine.engine_vllm.tokio.103", executable);
         command
             .arg("--query-gpu=name,compute_cap,driver_version,memory.total")
             .arg("--format=csv,noheader,nounits");
@@ -349,7 +369,7 @@ del probe
 print("thinclaw-vllm-runtime-ok")
 "#
         );
-        let mut command = Command::new(python);
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.engine.engine_vllm.tokio.104", python);
         command
             .arg("-c")
             .arg(validation)
@@ -380,7 +400,7 @@ print("thinclaw-vllm-runtime-ok")
 
     async fn validate_activated_environment(venv: &Path) -> Result<(), String> {
         let server = Self::server_path_for(venv);
-        let mut command = Command::new(server);
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.engine.engine_vllm.tokio.105", server);
         command
             .arg("--help")
             .env_remove("PYTHONPATH")
@@ -587,12 +607,6 @@ print("thinclaw-vllm-runtime-ok")
             .map_err(|error| format!("Could not resolve model directory: {error}"))
     }
 
-    fn generate_api_token() -> String {
-        let mut bytes = [0_u8; 32];
-        OsRng.fill_bytes(&mut bytes);
-        hex::encode(bytes)
-    }
-
     fn local_client() -> Result<reqwest::Client, String> {
         reqwest::Client::builder()
             .no_proxy()
@@ -610,6 +624,7 @@ print("thinclaw-vllm-runtime-ok")
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         *self.api_token.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.runtime_dir.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
@@ -657,14 +672,27 @@ impl InferenceEngine for VllmEngine {
         let venv = self
             .get_venv_path()
             .ok_or_else(|| "vLLM environment not configured".to_string())?;
-        let server = Self::server_path_for(&venv);
+        let python = Self::python_path_for(&venv);
+        let runtime_parent = venv
+            .parent()
+            .ok_or_else(|| "vLLM environment has no parent directory".to_string())?;
+        let runtime_dir = tempfile::Builder::new()
+            .prefix(".vllm-runtime-")
+            .tempdir_in(runtime_parent)
+            .map_err(|error| format!("Could not create private vLLM runtime directory: {error}"))?;
+        let adapter = runtime_dir.path().join("auth-adapter.py");
+        Self::write_private_file(&adapter, AUTH_ADAPTER.as_bytes()).await?;
         let port = Self::find_free_port()?;
-        let token = Self::generate_api_token();
+        let auth = crate::sidecar_auth::EphemeralSidecarAuth::generate();
+        let token = auth.expose().to_string();
+        let auth_file =
+            crate::sidecar_auth::PrivateSidecarAuthFile::create(runtime_dir.path(), &auth)?;
         let client = Self::local_client()?;
 
         self.diagnostics.reset().await;
-        let mut command = Command::new(&server);
+        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.engine.engine_vllm.tokio.106", &python);
         command
+            .arg(&adapter)
             .args([
                 "serve",
                 &model_path_string,
@@ -674,8 +702,6 @@ impl InferenceEngine for VllmEngine {
                 &port.to_string(),
                 "--host",
                 "127.0.0.1",
-                "--api-key",
-                &token,
                 "--max-model-len",
                 &effective_context.to_string(),
                 "--disable-log-requests",
@@ -683,6 +709,8 @@ impl InferenceEngine for VllmEngine {
             .env_remove("PYTHONPATH")
             .env_remove("PYTHONHOME")
             .env("PYTHONNOUSERSITE", "1")
+            .env("THINCLAW_VLLM_AUTH_FILE", auth_file.path())
+            .current_dir(runtime_dir.path())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -727,6 +755,10 @@ impl InferenceEngine for VllmEngine {
                 .await
                 .is_ok_and(|response| response.status().is_success())
             {
+                if !auth_file.consumed() {
+                    let _ = child.kill().await;
+                    return Err("vLLM sidecar did not consume its private auth file".to_string());
+                }
                 *self.port.lock().unwrap_or_else(|e| e.into_inner()) = Some(port);
                 *self.process.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
                 *self.served_model.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -736,6 +768,7 @@ impl InferenceEngine for VllmEngine {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) = Some(effective_context);
                 *self.api_token.lock().unwrap_or_else(|e| e.into_inner()) = Some(token.clone());
+                *self.runtime_dir.lock().unwrap_or_else(|e| e.into_inner()) = Some(runtime_dir);
                 return Ok((port, token));
             }
             tokio::time::sleep(Duration::from_millis(750)).await;
@@ -872,16 +905,6 @@ mod tests {
         std::fs::write(venv.join(BOOTSTRAP_MARKER), VllmEngine::expected_marker()).unwrap();
         assert!(engine.is_bootstrapped());
     }
-
-    #[test]
-    fn generated_api_tokens_are_high_entropy_and_unique() {
-        let first = VllmEngine::generate_api_token();
-        let second = VllmEngine::generate_api_token();
-        assert_eq!(first.len(), 64);
-        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_ne!(first, second);
-    }
-
     #[test]
     fn host_version_comparison_enforces_reviewed_minimums() {
         assert!(VllmEngine::version_at_least("2.31", "2.31"));

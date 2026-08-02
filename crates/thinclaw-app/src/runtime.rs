@@ -206,12 +206,13 @@ impl RuntimeShutdownPlan {
 
 pub fn relaunch_current_process() -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(&exe);
+    let mut cmd =
+        thinclaw_platform::std_process_command!("crates.thinclaw-app.src.runtime.std.1", &exe);
     cmd.args(std::env::args_os().skip(1));
-    let child = cmd.spawn()?;
+    let child_id = thinclaw_platform::spawn_reaped_std(&mut cmd)?;
     eprintln!(
         "Restarting ThinClaw (spawned PID {} from {})...",
-        child.id(),
+        child_id,
         exe.display()
     );
     Ok(())

@@ -9,13 +9,29 @@ use thinclaw_types::error::ConfigError;
 use crate::helpers::{optional_env, parse_optional_env};
 
 /// Which database backend to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseBackend {
-    /// PostgreSQL via deadpool-postgres (default).
-    #[default]
+    /// PostgreSQL via deadpool-postgres.
     Postgres,
     /// libSQL/Turso embedded database.
     LibSql,
+}
+
+impl Default for DatabaseBackend {
+    fn default() -> Self {
+        if cfg!(all(feature = "libsql", not(feature = "postgres"))) {
+            Self::LibSql
+        } else {
+            // PostgreSQL-only builds select their only backend. Dual-backend
+            // 0.17/0.18 builds retain this warned compatibility fallback.
+            if cfg!(all(feature = "libsql", feature = "postgres")) {
+                tracing::warn!(
+                    "database backend is not explicitly selected; using the deprecated PostgreSQL compatibility default"
+                );
+            }
+            Self::Postgres
+        }
+    }
 }
 
 impl std::fmt::Display for DatabaseBackend {
@@ -90,6 +106,17 @@ impl DatabaseConfig {
             DatabaseBackend::default()
         };
 
+        if (backend == DatabaseBackend::Postgres && !cfg!(feature = "postgres"))
+            || (backend == DatabaseBackend::LibSql && !cfg!(feature = "libsql"))
+        {
+            return Err(ConfigError::InvalidValue {
+                key: "DATABASE_BACKEND".to_string(),
+                message: format!(
+                    "backend '{backend}' is not compiled into this build; select a compiled backend or rebuild with the matching feature"
+                ),
+            });
+        }
+
         let url = optional_env("DATABASE_URL")?
             .or_else(|| {
                 if backend == DatabaseBackend::LibSql {
@@ -100,7 +127,7 @@ impl DatabaseConfig {
             })
             .ok_or_else(|| ConfigError::MissingRequired {
                 key: "DATABASE_URL".to_string(),
-                hint: "Run 'thinclaw onboard' or set DATABASE_URL environment variable".to_string(),
+                hint: "Run 'thinclaw setup' or set DATABASE_URL environment variable".to_string(),
             })?;
 
         let pool_size = parse_optional_env("DATABASE_POOL_SIZE", 10)?;

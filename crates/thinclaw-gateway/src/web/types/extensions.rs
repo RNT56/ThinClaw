@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use thinclaw_types::IntegrationSetupStatus;
+use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
 pub struct ExtensionInfo {
@@ -95,20 +96,11 @@ pub struct SecretFieldInfo {
     pub auto_generate: bool,
 }
 
-#[derive(Deserialize)]
+/// Secret-slot bindings accepted by remote clients. Values are opaque source IDs,
+/// never credential text.
+#[derive(Debug, Deserialize)]
 pub struct ExtensionSetupRequest {
-    pub secrets: std::collections::HashMap<String, String>,
-}
-
-impl std::fmt::Debug for ExtensionSetupRequest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut secret_names = self.secrets.keys().collect::<Vec<_>>();
-        secret_names.sort_unstable();
-        formatter
-            .debug_struct("ExtensionSetupRequest")
-            .field("secret_names", &secret_names)
-            .finish()
-    }
+    pub secret_sources: std::collections::HashMap<String, Uuid>,
 }
 
 // --- Registry ---
@@ -133,45 +125,18 @@ pub struct RegistrySearchQuery {
     pub query: Option<String>,
 }
 
-// --- Auth Token ---
-
-/// Request to submit an auth token for an extension (dedicated endpoint).
-#[derive(Deserialize)]
-pub struct AuthTokenRequest {
-    pub extension_name: String,
-    pub token: String,
+/// Optional exact selector for running-runtime extension activation.
+#[derive(Debug, Default, Deserialize)]
+pub struct ExtensionActivateRequest {
+    pub kind: Option<String>,
+    #[serde(default = "Uuid::new_v4")]
+    pub request_id: Uuid,
+    /// Compare-and-swap guard over the complete runtime tool registry.
+    pub expected_runtime_revision: Option<u64>,
 }
 
-impl std::fmt::Debug for AuthTokenRequest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("AuthTokenRequest")
-            .field("extension_name", &self.extension_name)
-            .field("token", &"[REDACTED]")
-            .finish()
-    }
-}
-
-/// Request to cancel an in-progress auth flow.
+/// ID-only request for binding an encrypted secret source to the Nostr key slot.
 #[derive(Debug, Deserialize)]
-pub struct AuthCancelRequest {
-    pub extension_name: String,
-}
-
-#[derive(Deserialize)]
-pub struct NostrPrivateKeyRequest {
-    #[serde(default)]
-    pub private_key: Option<String>,
-}
-
-impl std::fmt::Debug for NostrPrivateKeyRequest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NostrPrivateKeyRequest")
-            .field(
-                "private_key",
-                &self.private_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .finish()
-    }
+pub struct NostrSecretSourceRequest {
+    pub secret_source_id: Uuid,
 }

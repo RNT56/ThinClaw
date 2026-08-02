@@ -20,18 +20,17 @@ use crate::channels::web::identity_helpers::{
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use thinclaw_gateway::web::chat::{
-    ChatAuthRequiredResponseInput, ChatThreadDeleteResponse, GatewaySessionToolCallInfo,
-    GatewaySessionTurnInfo, GatewayThreadExportMessage, GatewayThreadSummaryInput, ThreadInfoInput,
-    chat_auth_cancel_response, chat_auth_required_response, chat_auth_success_response,
+    ChatThreadDeleteResponse, GatewaySessionToolCallInfo, GatewaySessionTurnInfo,
+    GatewayThreadExportMessage, GatewayThreadSummaryInput, ThreadInfoInput,
     chat_database_unavailable_error, chat_rate_limit_error, chat_store_unavailable_error,
-    chat_thread_delete_response, delete_assistant_thread_forbidden_error,
-    extension_manager_unavailable_error, history_response, normalize_chat_history_query,
-    parse_approval_request_id, parse_chat_thread_delete_id, parse_chat_thread_path_id,
-    pending_approvals_response, resolve_chat_history_thread_id, send_message_response,
-    session_manager_unavailable_error, supported_thread_export_format, thread_command_response,
-    thread_export_content, thread_export_response, thread_info, thread_list_response,
-    thread_list_response_from_summaries, thread_not_found_error, too_many_chat_connections_error,
-    turn_info_from_session_turn, turns_from_history_messages, unknown_approval_action_error,
+    chat_thread_delete_response, delete_assistant_thread_forbidden_error, history_response,
+    normalize_chat_history_query, parse_approval_request_id, parse_chat_thread_delete_id,
+    parse_chat_thread_path_id, pending_approvals_response, resolve_chat_history_thread_id,
+    send_message_response, session_manager_unavailable_error, supported_thread_export_format,
+    thread_command_response, thread_export_content, thread_export_response, thread_info,
+    thread_list_response, thread_list_response_from_summaries, thread_not_found_error,
+    too_many_chat_connections_error, turn_info_from_session_turn, turns_from_history_messages,
+    unknown_approval_action_error,
 };
 use thinclaw_gateway::web::identity::DeviceContext;
 use thinclaw_gateway::web::ports::{
@@ -318,97 +317,6 @@ pub(crate) async fn chat_thread_compact_handler(
     .await
 }
 
-pub(crate) async fn chat_auth_token_handler(
-    State(state): State<Arc<GatewayState>>,
-    request_identity: GatewayRequestIdentity,
-    Json(req): Json<AuthTokenRequest>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    if req.extension_name.trim().is_empty()
-        || req.extension_name.len() > 128
-        || req.extension_name.chars().any(char::is_control)
-        || req.token.trim().is_empty()
-        || req.token.len() > 1024 * 1024
-        || req.token.contains('\0')
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Extension authentication input is malformed or oversized".to_string(),
-        ));
-    }
-    let ext_mgr = state
-        .extension_manager
-        .as_ref()
-        .ok_or_else(extension_manager_unavailable_error)?;
-
-    let thread_id = active_thread_id_for_identity(&state, &request_identity).await;
-    let result = ext_mgr
-        .auth(&req.extension_name, Some(&req.token))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if result.auth_status == "authenticated" || result.auth_status == "no_auth_required" {
-        let msg = match ext_mgr.activate(&req.extension_name).await {
-            Ok(r) => format!(
-                "{} authenticated ({} tools loaded)",
-                req.extension_name,
-                r.tools_loaded.len()
-            ),
-            Err(e) => format!(
-                "{} authenticated but activation failed: {}",
-                req.extension_name, e
-            ),
-        };
-
-        clear_auth_mode_for_identity(&state, &request_identity).await;
-
-        state.sse.broadcast(SseEvent::AuthCompleted {
-            extension_name: req.extension_name,
-            success: true,
-            message: msg.clone(),
-            auth_mode: Some(result.auth_mode),
-            auth_status: Some(result.auth_status),
-            shared_auth_provider: result.shared_auth_provider,
-            missing_scopes: result.missing_scopes,
-            thread_id,
-        });
-
-        Ok(Json(chat_auth_success_response(msg)))
-    } else {
-        state.sse.broadcast(SseEvent::AuthRequired {
-            extension_name: req.extension_name.clone(),
-            instructions: result.instructions.clone(),
-            auth_url: result.auth_url.clone(),
-            setup_url: result.setup_url.clone(),
-            auth_mode: result.auth_mode.clone(),
-            auth_status: result.auth_status.clone(),
-            shared_auth_provider: result.shared_auth_provider.clone(),
-            missing_scopes: result.missing_scopes.clone(),
-            thread_id: thread_id.clone(),
-        });
-        Ok(Json(chat_auth_required_response(
-            ChatAuthRequiredResponseInput {
-                auth_url: result.auth_url,
-                setup_url: result.setup_url,
-                auth_mode: result.auth_mode,
-                auth_status: result.auth_status,
-                awaiting_token: result.awaiting_token,
-                instructions: result.instructions,
-                shared_auth_provider: result.shared_auth_provider,
-                missing_scopes: result.missing_scopes,
-            },
-        )))
-    }
-}
-
-pub(crate) async fn chat_auth_cancel_handler(
-    State(state): State<Arc<GatewayState>>,
-    request_identity: GatewayRequestIdentity,
-    Json(_req): Json<AuthCancelRequest>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    clear_auth_mode_for_identity(&state, &request_identity).await;
-    Ok(Json(chat_auth_cancel_response()))
-}
-
 pub(crate) async fn clear_auth_mode_for_identity(
     state: &GatewayState,
     request_identity: &GatewayRequestIdentity,
@@ -424,18 +332,6 @@ pub(crate) async fn clear_auth_mode_for_identity(
             thread.pending_auth = None;
         }
     }
-}
-
-pub(crate) async fn active_thread_id_for_identity(
-    state: &GatewayState,
-    request_identity: &GatewayRequestIdentity,
-) -> Option<String> {
-    let sm = state.session_manager.as_ref()?;
-    let session = sm
-        .get_or_create_session_for_identity(&request_identity.resolved_identity(None))
-        .await;
-    let sess = session.lock().await;
-    sess.active_thread.map(|id| id.to_string())
 }
 
 pub(crate) async fn chat_events_handler(

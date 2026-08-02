@@ -616,7 +616,7 @@ impl CreateJobTool {
 
             if !exists {
                 return Err(ToolError::ExecutionFailed(format!(
-                    "secret '{}' not found. Store it first via 'thinclaw tool auth' or the web UI.",
+                    "secret '{}' not found. Store it first via 'thinclaw extensions tools auth' or the web UI.",
                     request.secret_name
                 )));
             }

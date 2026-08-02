@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tokio::io::BufReader;
-use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::error::WorkerError;
@@ -240,7 +239,8 @@ impl CodexBridgeRuntime {
                 reason: "refusing invalid Codex resume session ID".to_string(),
             });
         }
-        let mut cmd = Command::new("codex");
+        let mut cmd =
+            thinclaw_platform::tokio_process_command!("src.worker.codex_bridge.tokio.101", "codex");
         cmd.args(codex_args(&self.config.model, prompt, resume_session_id))
             .env("CODEX_HOME", CODEX_HOME_PATH)
             .envs(extra_env)

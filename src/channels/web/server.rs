@@ -1166,8 +1166,6 @@ pub async fn start_server(
         .route("/api/chat/abort", post(chat_abort_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
         .route("/api/chat/approvals", get(chat_approvals_handler))
-        .route("/api/chat/auth-token", post(chat_auth_token_handler))
-        .route("/api/chat/auth-cancel", post(chat_auth_cancel_handler))
         .route("/api/chat/events", get(chat_events_handler))
         .route("/api/chat/ws", get(chat_ws_handler))
         .route("/api/chat/history", get(chat_history_handler))
@@ -1296,6 +1294,7 @@ pub async fn start_server(
         // Extensions
         .route("/api/extensions", get(extensions_list_handler))
         .route("/api/extensions/tools", get(extensions_tools_handler))
+        .route("/api/capabilities/tools", get(capability_tools_handler))
         .route("/api/extensions/registry", get(extensions_registry_handler))
         .route("/api/extensions/install", post(extensions_install_handler))
         .route(

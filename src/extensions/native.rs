@@ -312,7 +312,6 @@ fn stage_verified_library(path: &Path, expected_hex: &str) -> Result<(tempfile::
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
 
     use tempfile::tempdir;
 
@@ -551,7 +550,7 @@ int thinclaw_native_plugin_invoke_v1(
         )
         .expect("write C fixture");
 
-        let mut command = Command::new("cc");
+        let mut command = std::process::Command::new("cc");
         #[cfg(target_os = "macos")]
         command.arg("-dynamiclib");
         #[cfg(not(target_os = "macos"))]

@@ -47,10 +47,23 @@ Do not treat all integrations as if they had the same isolation guarantees.
 - Treats ComfyUI as a trusted media sidecar: lifecycle actions are explicit and approval-gated, untrusted workflow paths are disabled by default, cloud API keys stay in the secrets store, and generated output paths are sanitized before being returned
 - Makes the gateway, channels, tools, and extension surfaces part of the security model
 - Keeps reckless desktop autonomy explicit instead of implying it has the same trust profile as a normal local run
+- Makes setup Review & Apply the only mutation boundary: pages keep secrets in
+  a non-serializable draft, Apply holds the stopped-runtime exclusive lease,
+  pins extension/build inputs by digest, and reports any non-compensable
+  PostgreSQL migration outcome instead of claiming a full rollback
+- Clears ambient child environments at the typed process constructor, rejects
+  unclassified production launch identities, and checks every launch against a
+  committed descriptor manifest covering owner, executable, environment,
+  credentials, I/O, lifetime, network, and isolation policy
+- Seals a non-empty final tool registry and refuses startup when any ignored
+  registration collision occurred; hot mutations publish whole monotonic
+  capability revisions and extension retries are request-ID/fingerprint bound
 
 ## Local Secrets
 
 The default secrets backend is `local_encrypted`. Secret values live in the database only as encrypted blobs, while the master key is created and retrieved from the platform secure store:
+
+CI maintains an exhaustive checked ledger for public secret-shaped Rust fields. Each candidate has exactly one lifecycle disposition: `source_bound`, `bootstrap_direct`, `ephemeral_internal`, `protocol_sensitive`, `deliberate_reveal`, or `non_secret_semantic`, including explicit persistence, presentation, and resolution rules. New or changed candidates fail the ledger check until reviewed.
 
 - macOS: Keychain
 - Windows: Credential Manager
@@ -69,9 +82,9 @@ cache_ttl_secs = 0
 strict_sensitive_routes = true
 ```
 
-Use `thinclaw secrets status` or `thinclaw doctor` to check secure-store readiness, env-fallback risk, schema posture, and sensitive-route policy. Provider Vault writes require header/proxy authentication; query-string bearer tokens are rejected for credential write/delete routes.
+Use `thinclaw config secrets status` or `thinclaw doctor` to check secure-store readiness, env-fallback risk, schema posture, and sensitive-route policy. Provider Vault writes require header/proxy authentication; query-string bearer tokens are rejected for credential write/delete routes.
 
-Master-key rotation is exposed as `thinclaw secrets rotate-master`. The command decrypts active v2 rows with the current key, re-encrypts them with a newly generated OS-secure-store key, verifies decryptability, and advances the local key version. Existing legacy or incompatible rows are not silently decrypted after this hardening change; re-enter those credentials through Provider Vault or `thinclaw secrets set`.
+Master-key rotation is exposed as `thinclaw config secrets rotate-master`. The command decrypts active v2 rows with the current key, re-encrypts them with a newly generated OS-secure-store key, verifies decryptability, and advances the local key version. Existing legacy or incompatible rows are not silently decrypted after this hardening change; re-enter those credentials through Provider Vault or `thinclaw config secrets set`.
 
 Backups need both pieces: the database and the OS secure-store master key. Losing the secure-store item makes encrypted local secret values unrecoverable. A host compromise while ThinClaw is running can still access secrets that the trusted host is authorized to inject; encryption protects at-rest storage, not a fully compromised runtime.
 

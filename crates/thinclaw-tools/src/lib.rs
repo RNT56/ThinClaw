@@ -16,7 +16,9 @@ pub mod user_tool;
 pub mod wasm;
 
 pub use registry::{
-    ToolRegistry, deny_reason_for_lane, deny_reason_for_profile, descriptor_allowed_for_profile,
-    tool_allowed_for_lane,
+    PROTECTED_TOOL_NAMES, RegistrationConflict, RegistrationOutcome, RegistrationRequest,
+    RegistryIdentity, RegistrySealError, RegistrySnapshot, STATIC_TOOL_CATALOG,
+    StaticToolDescriptor, ToolOrigin, ToolRegistry, deny_reason_for_lane, deny_reason_for_profile,
+    descriptor_allowed_for_profile, static_tool_descriptor, tool_allowed_for_lane,
 };
 pub use thinclaw_tools_core::*;

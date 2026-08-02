@@ -59,7 +59,6 @@ compile_error!(
 pub mod agent;
 pub mod api;
 pub mod app;
-#[cfg(feature = "repl")]
 pub mod boot_screen;
 pub mod bootstrap;
 pub mod branding;
@@ -99,7 +98,6 @@ pub mod sandbox;
 pub mod sandbox_jobs;
 pub mod sandbox_types;
 pub mod secrets;
-#[cfg(feature = "repl")]
 pub mod service;
 pub mod settings;
 pub mod setup;
