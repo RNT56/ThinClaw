@@ -247,7 +247,7 @@ features = [
 ]
 
 [dev-dependencies.rand]
-version = "0.8.5"
+version = "0.10.2"
 
 [dev-dependencies.tempfile]
 version = "3.7.0"
