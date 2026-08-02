@@ -42,10 +42,10 @@ def main() -> int:
     declared = set(re.findall(r"^mod\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;", parent_text, re.MULTILINE))
     for child in child_files:
         if child.stem not in declared:
-            problems.append(f"uncompiled runtime-builder source: {child.relative_to(ROOT)}")
+            problems.append("uncompiled runtime-builder source detected")
     for module in declared:
         if not (CHILD_DIR / f"{module}.rs").is_file():
-            problems.append(f"declared runtime-builder module is missing: {module}")
+            problems.append("declared runtime-builder module is missing")
 
     all_builder_text = [parent_text, *(path.read_text(encoding="utf-8") for path in child_files)]
     build_inner_count = sum(
@@ -53,7 +53,7 @@ def main() -> int:
         for text in all_builder_text
     )
     if build_inner_count != 1:
-        problems.append(f"expected one compiled build_inner definition, found {build_inner_count}")
+        problems.append("expected exactly one compiled build_inner definition")
 
     if "struct DesktopRuntimeInputs" not in parent_text:
         problems.append("desktop runtime inputs must use the closed typed projection")
@@ -63,9 +63,9 @@ def main() -> int:
     unknown = sorted(keys - ALLOWED_BRIDGE_KEYS)
     missing = sorted(ALLOWED_BRIDGE_KEYS - keys)
     if unknown:
-        problems.append(f"unreviewed desktop bridge keys: {unknown}")
+        problems.append("unreviewed desktop bridge keys detected")
     if missing:
-        problems.append(f"desktop bridge allowlist drift (missing source keys): {missing}")
+        problems.append("desktop bridge allowlist is missing required source keys")
     secret_keys = sorted(
         key
         for key in keys
@@ -74,7 +74,7 @@ def main() -> int:
         and key != "AGENT_THINKING_BUDGET_TOKENS"
     )
     if secret_keys:
-        problems.append(f"secret-shaped desktop bridge keys are forbidden: {secret_keys}")
+        problems.append("secret-shaped desktop bridge keys are forbidden")
 
     bridge = ROOT / "apps/desktop/backend/src/thinclaw/runtime_bridge.rs"
     bridge_text = bridge.read_text(encoding="utf-8")
