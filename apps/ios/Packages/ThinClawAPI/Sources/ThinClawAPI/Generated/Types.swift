@@ -1263,17 +1263,31 @@ public enum Components {
         }
         /// - Remark: Generated from `#/components/schemas/JobListResponse`.
         public struct JobListResponse: Codable, Hashable, Sendable {
+            /// - Remark: Generated from `#/components/schemas/JobListResponse/has_more`.
+            public var hasMore: Swift.Bool?
             /// - Remark: Generated from `#/components/schemas/JobListResponse/jobs`.
             public var jobs: [Components.Schemas.JobInfo]
+            /// - Remark: Generated from `#/components/schemas/JobListResponse/next_cursor`.
+            public var nextCursor: Swift.String?
             /// Creates a new `JobListResponse`.
             ///
             /// - Parameters:
+            ///   - hasMore:
             ///   - jobs:
-            public init(jobs: [Components.Schemas.JobInfo]) {
+            ///   - nextCursor:
+            public init(
+                hasMore: Swift.Bool? = nil,
+                jobs: [Components.Schemas.JobInfo],
+                nextCursor: Swift.String? = nil
+            ) {
+                self.hasMore = hasMore
                 self.jobs = jobs
+                self.nextCursor = nextCursor
             }
             public enum CodingKeys: String, CodingKey {
+                case hasMore = "has_more"
                 case jobs
+                case nextCursor = "next_cursor"
             }
         }
         /// - Remark: Generated from `#/components/schemas/JobSummaryResponse`.

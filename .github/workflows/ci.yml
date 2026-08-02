@@ -461,6 +461,8 @@ jobs:
           GATEWAY_PORT: "3000"
           CLI_ENABLED: "false"
           DATABASE_BACKEND: "libsql"
+          LLM_BACKEND: "ollama"
+          OLLAMA_BASE_URL: "http://127.0.0.1:11434"
           BROWSER_DOCKER: "never"
           DESKTOP_AUTONOMY_ENABLED: "false"
           THINCLAW_LINUX_READINESS_OS_RELEASE: |
