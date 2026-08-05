@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-base64 = "0.22.1"
+base64 = "0.23.0"
 chrono = { workspace = true }
 dirs = "6"
 sha2 = "0.11"

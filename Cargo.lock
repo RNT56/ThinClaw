@@ -1103,6 +1103,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
+
+[[package]]
 name = "base64-simd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8009,7 +8015,7 @@ dependencies = [
  "aws-smithy-types",
  "axum 0.8.9",
  "axum-server",
- "base64 0.22.1",
+ "base64 0.23.0",
  "blake3",
  "bollard",
  "bytes",
@@ -8142,7 +8148,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.9",
- "base64 0.22.1",
+ "base64 0.23.0",
  "blake3",
  "chrono",
  "chrono-tz",
@@ -8213,7 +8219,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.9",
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "dirs",
  "ed25519-dalek",
@@ -8291,7 +8297,7 @@ dependencies = [
 name = "thinclaw-config"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "dirs",
  "ratatui",
@@ -8376,7 +8382,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
- "base64 0.22.1",
+ "base64 0.23.0",
  "blake3",
  "chrono",
  "fs4 1.1.0",
@@ -8643,7 +8649,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.0",
  "blake3",
  "bytes",
  "chromiumoxide",
@@ -8721,7 +8727,7 @@ dependencies = [
 name = "thinclaw-types"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.0",
  "chrono",
  "deadpool-postgres",
  "libsql",
