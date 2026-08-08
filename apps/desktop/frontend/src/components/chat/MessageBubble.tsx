@@ -19,6 +19,10 @@ import { useInferenceBackends } from '../../hooks/use-inference-backends';
 import { parseStatusTaggedContent } from '../../lib/status-tags';
 import { bridgeErrorMessage } from '../../lib/command-errors';
 
+export function sanitizeMessageContent(content: string): string {
+    return DOMPurify.sanitize(content);
+}
+
 function extractText(node: any): string {
     if (typeof node === 'string' || typeof node === 'number') return String(node);
     if (Array.isArray(node)) return node.map(extractText).join('');
@@ -368,7 +372,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
     const isUser = message.role === 'user';
     const { thoughts, content } = !isUser ? parseThoughts(message.content) : { thoughts: [], content: message.content };
     const rawContent = isUser ? message.content : content;
-    const sanitizedContent = DOMPurify.sanitize(rawContent);
+    const sanitizedContent = sanitizeMessageContent(rawContent);
 
     const [isEditing, setIsEditing] = useState(false);
     const [editContent, setEditContent] = useState(message.content);
