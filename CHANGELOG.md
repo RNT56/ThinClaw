@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Releases prior to v0.13.0 were published under the IronClaw name and are not listed here.
 > See the [IronClaw releases](https://github.com/nearai/ironclaw/releases) for earlier history.
 
+## [0.17.0](https://github.com/RNT56/ThinClaw/compare/v0.16.0...v0.17.0) (2026-08-08)
+
+
+### Features
+
+* **cli:** add guarded skills memory and activation surfaces ([a6ca0eb](https://github.com/RNT56/ThinClaw/commit/a6ca0ebeb1cb974fa29bd64cd57dad7a2547bc4f))
+* **cli:** close overhaul verification and safety gaps ([fb9e981](https://github.com/RNT56/ThinClaw/commit/fb9e9819b3a7310fcce28710d4bc1f8ac03100fa))
+* **cli:** complete runtime surfaces and capability contracts ([7254e85](https://github.com/RNT56/ThinClaw/commit/7254e85e6605418957157ef0ce784bd2988b097c))
+* **cli:** expose durable learning administration ([34eac1c](https://github.com/RNT56/ThinClaw/commit/34eac1c3f15922a4ae0818b62ee740cb0321c0b0))
+* **data:** include memory search citations ([e7a57d7](https://github.com/RNT56/ThinClaw/commit/e7a57d72cc5676484c952a9aa8f81b40b01204e4))
+* **setup:** add digest-pinned apply contracts ([acdf1bd](https://github.com/RNT56/ThinClaw/commit/acdf1bdfd1f4c1f5b3b1739648b2cd7fbdfc76e9))
+* **setup:** make apply lease-exclusive and transactional ([0f4941f](https://github.com/RNT56/ThinClaw/commit/0f4941f9d84277640dc7154589ad859a19f44d63))
+
+
+### Bug Fixes
+
+* **ci:** redact source-derived contract diagnostics ([9596756](https://github.com/RNT56/ThinClaw/commit/9596756df816f7d921199ef339e049bcf5ab1813))
+* **ci:** sync generated API and Pi doctor config ([65ea71b](https://github.com/RNT56/ThinClaw/commit/65ea71b2e5f8ca7ea25ec6d838b7512b7c2ffc5f))
+* **cli:** align build profiles services and backup safety ([69f2fa2](https://github.com/RNT56/ThinClaw/commit/69f2fa26bf391f16eeed1d295d657bdfadaa53c7))
+* **contracts:** close final cross-profile verification gaps ([a8e4f21](https://github.com/RNT56/ThinClaw/commit/a8e4f21b427acf7359a11b536ca80ac191b5c3e8))
+* **tools:** import location contracts on all platforms ([c009eab](https://github.com/RNT56/ThinClaw/commit/c009eaba917845ae9ec265aff40da0c0122051d0))
+* **tools:** reject all registry identity collisions ([c374250](https://github.com/RNT56/ThinClaw/commit/c3742508d2ae4712466f603308287a9390d93349))
+
 ## [0.16.0](https://github.com/RNT56/ThinClaw/compare/v0.15.0...v0.16.0) (2026-08-01)
 
 

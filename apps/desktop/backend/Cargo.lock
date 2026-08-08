@@ -10355,7 +10355,7 @@ dependencies = [
 
 [[package]]
 name = "thinclaw"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -10673,7 +10673,7 @@ dependencies = [
 
 [[package]]
 name = "thinclaw-desktop"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
