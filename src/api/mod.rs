@@ -31,6 +31,7 @@ pub mod routines;
 pub mod sessions;
 pub mod skills;
 pub mod system;
+pub mod tool_risk;
 
 mod error;
 pub use error::{ApiError, ApiResult};

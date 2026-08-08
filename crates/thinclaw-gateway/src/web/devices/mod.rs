@@ -32,7 +32,10 @@ pub mod scopes;
 pub mod store;
 pub mod types;
 
-pub use approval_risk::{ApprovalRisk, classify as classify_approval_risk};
+pub use approval_risk::{
+    ApprovalRisk, ApprovalRiskAssessment, ApprovalRiskReason, assess as assess_approval_risk,
+    classify as classify_approval_risk,
+};
 pub use audit::{DeviceAuditError, DeviceAuditEvent, DeviceAuditLog};
 pub use pairing::{
     ConsumeOutcome, CreatedPairing, DevicePairingError, DevicePairingStore, PAIRING_FAILED_LIMIT,

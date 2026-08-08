@@ -431,12 +431,23 @@ pub struct DiagnosticsResponse {
 // ============================================================================
 
 /// Info about a registered tool
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRiskTier {
+    Low,
+    High,
+}
+
 #[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct ToolInfoItem {
     pub name: String,
     pub description: String,
     pub enabled: bool,
     pub source: String, // "builtin" | "skill" | "extension" | "mcp"
+    /// Authoritative risk tier from the shared Rust classifier.
+    pub risk: ToolRiskTier,
+    /// Stable reason/capability codes supporting user-facing confirmation.
+    pub risk_reasons: Vec<String>,
 }
 
 /// Tool list response
