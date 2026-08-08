@@ -4514,10 +4514,19 @@ bootstrap_completed: boolean; custom_llm_url: string | null; has_custom_llm_key:
  * Thinking mode configuration
  */
 export type ThinkingConfig = { enabled: boolean; budget_tokens: number | null }
+export type ToolInfoItem = { name: string; description: string; enabled: boolean; source: string;
+/**
+ * Authoritative risk tier from the shared Rust classifier.
+ */
+risk: ToolRiskTier;
+/**
+ * Stable reason/capability codes supporting user-facing confirmation.
+ */
+risk_reasons: string[] }
 /**
  * Info about a registered tool
  */
-export type ToolInfoItem = { name: string; description: string; enabled: boolean; source: string }
+export type ToolRiskTier = "low" | "high"
 export type ToolSecurityPosture = { name: string; side_effect: string; approval_class: string; empty_params_requirement: string; sanitizes_output: boolean; reason: string }
 export type ToolSecuritySummary = { registered: number; write_capable: number; always_approval: number; conditional_approval: number; write_without_coarse_approval: number; auto_approve_enabled: boolean; reviewed_tools: ToolSecurityPosture[] }
 /**

@@ -21,7 +21,7 @@
 //! informational tool is treated as [`ApprovalRisk::High`]. Concretely:
 //!
 //! - **High** — a tool whose name contains any of the side-effecting or
-//!   egress substrings in [`HIGH_RISK_SUBSTRINGS`] (shell/exec/command,
+//!   egress substrings in [`HIGH_RISK_GROUPS`] (shell/exec/command,
 //!   http/fetch/network egress, browser automation, filesystem writes/deletes,
 //!   deploy/install, etc.), OR any tool not matched by the low-risk allowlist.
 //! - **Low** — only tools whose name matches the read-only allowlist in
@@ -63,12 +63,47 @@ impl ApprovalRisk {
     }
 }
 
-/// Substrings that mark a tool name as **high risk**. Matched case-insensitively
-/// against the tool name. Kept as a flat, auditable allowlist of dangerous
-/// verbs/domains: side effects, code execution, network egress, browser
-/// control, filesystem mutation, and deployment/installation.
-const HIGH_RISK_SUBSTRINGS: &[&str] = &[
-    // Code / command execution
+/// Stable reason attached to a risk assessment. These values are suitable for
+/// API/UI transport; clients may translate them into presentation copy but
+/// must not use them to reimplement classification policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalRiskReason {
+    CommandExecution,
+    NetworkEgress,
+    BrowserControl,
+    FilesystemMutation,
+    DeployOrPublish,
+    SecretsOrMessaging,
+    ReadOnly,
+    Unknown,
+}
+
+impl ApprovalRiskReason {
+    /// Stable snake_case identifier used by non-Rust clients.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CommandExecution => "command_execution",
+            Self::NetworkEgress => "network_egress",
+            Self::BrowserControl => "browser_control",
+            Self::FilesystemMutation => "filesystem_mutation",
+            Self::DeployOrPublish => "deploy_or_publish",
+            Self::SecretsOrMessaging => "secrets_or_messaging",
+            Self::ReadOnly => "read_only",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Risk tier plus stable reasons computed by the authoritative classifier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalRiskAssessment {
+    pub risk: ApprovalRisk,
+    pub reasons: Vec<ApprovalRiskReason>,
+}
+
+const COMMAND_EXECUTION_SUBSTRINGS: &[&str] = &[
     "exec",
     "shell",
     "command",
@@ -76,49 +111,51 @@ const HIGH_RISK_SUBSTRINGS: &[&str] = &[
     "bash",
     "sh",
     "process",
-    // Network egress
-    "http",
-    "fetch",
-    "curl",
-    "request",
-    "download",
-    "upload",
-    "webhook",
-    // Browser automation
+];
+const NETWORK_EGRESS_SUBSTRINGS: &[&str] = &[
+    "http", "fetch", "curl", "request", "download", "upload", "webhook",
+];
+const BROWSER_CONTROL_SUBSTRINGS: &[&str] = &[
     "browser",
     "navigate",
     "click",
     "puppeteer",
     "playwright",
     "cdp",
-    // Filesystem mutation
-    "write",
-    "delete",
-    "remove",
-    "rm",
-    "edit",
-    "create",
-    "mkdir",
-    "move",
-    "rename",
-    "chmod",
-    "truncate",
-    "append",
-    // Deploy / install / package
-    "deploy",
-    "install",
-    "publish",
-    "release",
-    "push",
-    "commit",
-    "apply",
-    // Secrets / credentials / send
-    "secret",
-    "credential",
-    "send",
-    "email",
-    "message",
-    "post",
+];
+const FILESYSTEM_MUTATION_SUBSTRINGS: &[&str] = &[
+    "write", "delete", "remove", "rm", "edit", "create", "mkdir", "move", "rename", "chmod",
+    "truncate", "append",
+];
+const DEPLOY_OR_PUBLISH_SUBSTRINGS: &[&str] = &[
+    "deploy", "install", "publish", "release", "push", "commit", "apply",
+];
+const SECRETS_OR_MESSAGING_SUBSTRINGS: &[&str] =
+    &["secret", "credential", "send", "email", "message", "post"];
+
+/// Auditable high-risk matcher groups. A tool can carry more than one reason.
+const HIGH_RISK_GROUPS: &[(ApprovalRiskReason, &[&str])] = &[
+    (
+        ApprovalRiskReason::CommandExecution,
+        COMMAND_EXECUTION_SUBSTRINGS,
+    ),
+    (ApprovalRiskReason::NetworkEgress, NETWORK_EGRESS_SUBSTRINGS),
+    (
+        ApprovalRiskReason::BrowserControl,
+        BROWSER_CONTROL_SUBSTRINGS,
+    ),
+    (
+        ApprovalRiskReason::FilesystemMutation,
+        FILESYSTEM_MUTATION_SUBSTRINGS,
+    ),
+    (
+        ApprovalRiskReason::DeployOrPublish,
+        DEPLOY_OR_PUBLISH_SUBSTRINGS,
+    ),
+    (
+        ApprovalRiskReason::SecretsOrMessaging,
+        SECRETS_OR_MESSAGING_SUBSTRINGS,
+    ),
 ];
 
 /// Substrings that mark a tool name as **low risk** (read-only /
@@ -129,28 +166,53 @@ const LOW_RISK_SUBSTRINGS: &[&str] = &[
     "todo", "recall", "info", "status", "describe", "inspect", "history",
 ];
 
-/// Classify a tool approval into a [`ApprovalRisk`] tier from its `tool_name`
-/// (and raw `parameters`, reserved for future refinement).
+/// Assess a tool approval from its `tool_name` (and raw `parameters`, reserved
+/// for future refinement), returning both the tier and stable reason codes.
 ///
 /// Policy (see the module docs):
-/// 1. If the name contains any [`HIGH_RISK_SUBSTRINGS`] → `High` (a mutating /
+/// 1. If the name contains any [`HIGH_RISK_GROUPS`] substring → `High` (a mutating /
 ///    egress verb wins even if a read-ish word also appears, e.g.
 ///    `read_and_delete`).
 /// 2. Otherwise, if the name matches a [`LOW_RISK_SUBSTRINGS`] read-only word →
 ///    `Low`.
 /// 3. Otherwise (unrecognised) → `High` (conservative least-privilege default).
 #[must_use]
-pub fn classify(tool_name: &str, _parameters: &str) -> ApprovalRisk {
+pub fn assess(tool_name: &str, _parameters: &str) -> ApprovalRiskAssessment {
     let name = tool_name.to_ascii_lowercase();
+    let reasons = HIGH_RISK_GROUPS
+        .iter()
+        .filter_map(|(reason, substrings)| {
+            substrings
+                .iter()
+                .any(|substring| name.contains(substring))
+                .then_some(*reason)
+        })
+        .collect::<Vec<_>>();
 
-    if HIGH_RISK_SUBSTRINGS.iter().any(|s| name.contains(s)) {
-        return ApprovalRisk::High;
+    if !reasons.is_empty() {
+        return ApprovalRiskAssessment {
+            risk: ApprovalRisk::High,
+            reasons,
+        };
     }
     if LOW_RISK_SUBSTRINGS.iter().any(|s| name.contains(s)) {
-        return ApprovalRisk::Low;
+        return ApprovalRiskAssessment {
+            risk: ApprovalRisk::Low,
+            reasons: vec![ApprovalRiskReason::ReadOnly],
+        };
     }
     // Unknown tool: default High for safety (least-privilege biometric gate).
-    ApprovalRisk::High
+    ApprovalRiskAssessment {
+        risk: ApprovalRisk::High,
+        reasons: vec![ApprovalRiskReason::Unknown],
+    }
+}
+
+/// Classify a tool approval into a [`ApprovalRisk`] tier while preserving the
+/// established API used by gateway/mobile approval paths.
+#[must_use]
+pub fn classify(tool_name: &str, parameters: &str) -> ApprovalRisk {
+    assess(tool_name, parameters).risk
 }
 
 #[cfg(test)]
@@ -269,6 +331,32 @@ mod tests {
     }
 
     #[test]
+    fn assessment_exposes_stable_reasons_without_weakening_precedence() {
+        assert_eq!(
+            assess("read_then_write", "{}"),
+            ApprovalRiskAssessment {
+                risk: ApprovalRisk::High,
+                reasons: vec![ApprovalRiskReason::FilesystemMutation],
+            }
+        );
+        assert_eq!(
+            assess("browser_upload", "{}").reasons,
+            vec![
+                ApprovalRiskReason::NetworkEgress,
+                ApprovalRiskReason::BrowserControl,
+            ]
+        );
+        assert_eq!(
+            assess("read_file", "{}").reasons,
+            vec![ApprovalRiskReason::ReadOnly]
+        );
+        assert_eq!(
+            assess("frobnicate", "{}").reasons,
+            vec![ApprovalRiskReason::Unknown]
+        );
+    }
+
+    #[test]
     fn unknown_tools_default_high() {
         for tool in ["frobnicate", "mystery_tool", "quux", ""] {
             assert_high(tool);
@@ -295,5 +383,13 @@ mod tests {
         );
         assert_eq!(ApprovalRisk::Low.as_str(), "low");
         assert_eq!(ApprovalRisk::High.as_str(), "high");
+        assert_eq!(
+            serde_json::to_string(&ApprovalRiskReason::FilesystemMutation).unwrap(),
+            "\"filesystem_mutation\""
+        );
+        assert_eq!(
+            ApprovalRiskReason::SecretsOrMessaging.as_str(),
+            "secrets_or_messaging"
+        );
     }
 }

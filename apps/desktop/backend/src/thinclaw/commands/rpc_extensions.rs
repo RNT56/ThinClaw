@@ -1209,6 +1209,20 @@ pub async fn thinclaw_diagnostics(
 // Tool Listing
 // ============================================================================
 
+fn desktop_tool_risk(tool_name: &str) -> (ToolRiskTier, Vec<String>) {
+    let assessment = thinclaw_core::api::tool_risk::assess_tool_risk(tool_name, "{}");
+    let risk = match assessment.risk {
+        thinclaw_core::api::tool_risk::ApprovalRisk::Low => ToolRiskTier::Low,
+        thinclaw_core::api::tool_risk::ApprovalRisk::High => ToolRiskTier::High,
+    };
+    let reasons = assessment
+        .reasons
+        .into_iter()
+        .map(|reason| reason.as_str().to_string())
+        .collect();
+    (risk, reasons)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_tools_list(
@@ -1221,19 +1235,25 @@ pub async fn thinclaw_tools_list(
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .map(|tool| ToolInfoItem {
-                        name: tool
+                    .map(|tool| {
+                        let name = tool
                             .get("name")
                             .and_then(|v| v.as_str())
                             .unwrap_or_default()
-                            .to_string(),
-                        description: tool
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        enabled: true,
-                        source: "remote".to_string(),
+                            .to_string();
+                        let (risk, risk_reasons) = desktop_tool_risk(&name);
+                        ToolInfoItem {
+                            name,
+                            description: tool
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            enabled: true,
+                            source: "remote".to_string(),
+                            risk,
+                            risk_reasons,
+                        }
                     })
                     .collect()
             })
@@ -1296,17 +1316,44 @@ pub async fn thinclaw_tools_list(
                 "extension"
             };
 
+            let (risk, risk_reasons) = desktop_tool_risk(&td.name);
             ToolInfoItem {
                 name: td.name.clone(),
                 description: td.description.clone(),
                 enabled: !disabled_tools.contains(&td.name),
                 source: source.to_string(),
+                risk,
+                risk_reasons,
             }
         })
         .collect();
 
     let total = tools.len() as u32;
     Ok(ToolsListResponse { tools, total })
+}
+
+#[cfg(test)]
+mod desktop_tool_risk_tests {
+    use super::{ToolRiskTier, desktop_tool_risk};
+
+    #[test]
+    fn maps_shared_low_and_high_risk_assessments_for_desktop() {
+        assert_eq!(
+            desktop_tool_risk("read_file"),
+            (ToolRiskTier::Low, vec!["read_only".to_string()])
+        );
+        assert_eq!(
+            desktop_tool_risk("write_file"),
+            (
+                ToolRiskTier::High,
+                vec!["filesystem_mutation".to_string()]
+            )
+        );
+        assert_eq!(
+            desktop_tool_risk("unclassified_plugin"),
+            (ToolRiskTier::High, vec!["unknown".to_string()])
+        );
+    }
 }
 
 /// Get the set of globally disabled tools (deny-list stored in settings).

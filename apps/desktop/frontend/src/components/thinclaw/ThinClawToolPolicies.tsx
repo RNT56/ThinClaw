@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Wrench, RefreshCw, Search, Shield, ChevronDown, ChevronRight,
-    Cpu, HardDrive, Puzzle, Settings2, Package, Filter, ToggleLeft, ToggleRight
+    AlertTriangle, Cpu, HardDrive, Puzzle, Settings2, Package, Filter, ToggleLeft, ToggleRight
 } from 'lucide-react';
 import * as thinclawApi from '../../lib/thinclaw';
+import { ConfirmDialog, Notice } from '../ui';
 
 const SOURCE_CONFIG: Record<string, { icon: typeof Wrench; color: string; label: string }> = {
     builtin: { icon: Cpu, color: 'text-blue-400', label: 'Built-in' },
@@ -14,6 +15,25 @@ const SOURCE_CONFIG: Record<string, { icon: typeof Wrench; color: string; label:
     extension: { icon: Puzzle, color: 'text-primary', label: 'Extension' },
 };
 
+const RISK_REASON_COPY: Record<string, string> = {
+    command_execution: 'execute commands or processes',
+    network_egress: 'send requests or transfer data over the network',
+    browser_control: 'control a browser or interact with web pages',
+    filesystem_mutation: 'create, edit, move, or delete files',
+    deploy_or_publish: 'install, deploy, commit, or publish changes',
+    secrets_or_messaging: 'access credentials or send messages externally',
+    read_only: 'read or inspect information without making changes',
+    unknown: 'perform actions that are not classified as read-only',
+};
+
+function describeRisk(tool: thinclawApi.ToolInfoItem): string {
+    const reasons = tool.risk_reasons
+        .map(reason => RISK_REASON_COPY[reason] ?? reason.split('_').join(' '));
+    return reasons.length > 0
+        ? reasons.join('; ')
+        : 'perform actions that are not classified as read-only';
+}
+
 export function ThinClawToolPolicies() {
     const [tools, setTools] = useState<thinclawApi.ToolInfoItem[]>([]);
     const [loading, setLoading] = useState(true);
@@ -22,35 +42,65 @@ export function ThinClawToolPolicies() {
     const [expandedTool, setExpandedTool] = useState<string | null>(null);
     const [filterSource, setFilterSource] = useState<string | null>(null);
     const [showFilters, setShowFilters] = useState(false);
+    const [pendingEnable, setPendingEnable] = useState<thinclawApi.ToolInfoItem | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const mutationInFlight = useRef(false);
+    const enableTrigger = useRef<HTMLButtonElement | null>(null);
 
     const loadTools = useCallback(async () => {
         setLoading(true);
+        setError(null);
         try {
             const resp = await thinclawApi.listTools();
             setTools(resp.tools || []);
         } catch (e) {
             console.error('Failed to list tools', e);
             setTools([]);
+            setError(e instanceof Error ? e.message : 'Failed to load tool policies.');
         } finally {
             setLoading(false);
         }
     }, []);
 
-    const handleToggle = async (e: React.MouseEvent, tool: thinclawApi.ToolInfoItem) => {
-        e.stopPropagation();
-        if (toggling) return;
+    const applyToggle = async (tool: thinclawApi.ToolInfoItem): Promise<boolean> => {
+        if (mutationInFlight.current) return false;
+        mutationInFlight.current = true;
+        setError(null);
         setToggling(tool.name);
-        // Optimistic update
-        setTools(prev => prev.map(t => t.name === tool.name ? { ...t, enabled: !t.enabled } : t));
         try {
-            await thinclawApi.toggleTool(tool.name, tool.enabled);
+            const enabled = await thinclawApi.toggleTool(tool.name, tool.enabled);
+            setTools(prev => prev.map(item => item.name === tool.name ? { ...item, enabled } : item));
+            return true;
         } catch (e) {
             console.error('Failed to toggle tool', e);
-            // Rollback
-            setTools(prev => prev.map(t => t.name === tool.name ? { ...t, enabled: tool.enabled } : t));
+            setError(e instanceof Error ? e.message : `Failed to update ${tool.name}.`);
+            return false;
         } finally {
+            mutationInFlight.current = false;
             setToggling(null);
         }
+    };
+
+    const closePendingEnable = () => {
+        const trigger = enableTrigger.current;
+        setPendingEnable(null);
+        window.setTimeout(() => trigger?.focus(), 0);
+    };
+
+    const handleToggle = (e: React.MouseEvent<HTMLButtonElement>, tool: thinclawApi.ToolInfoItem) => {
+        e.stopPropagation();
+        if (mutationInFlight.current) return;
+        if (!tool.enabled && tool.risk !== 'low') {
+            enableTrigger.current = e.currentTarget;
+            setPendingEnable(tool);
+            return;
+        }
+        void applyToggle(tool);
+    };
+
+    const confirmEnable = async () => {
+        if (!pendingEnable) return;
+        if (await applyToggle(pendingEnable)) closePendingEnable();
     };
 
     useEffect(() => { loadTools(); }, [loadTools]);
@@ -115,6 +165,12 @@ export function ThinClawToolPolicies() {
                         className="w-full pl-9 pr-3 py-2 rounded-lg bg-muted/30 border border-border/40 text-sm text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-indigo-500/50"
                     />
                 </div>
+
+                {error && (
+                    <Notice tone="error" title="Tool policy update failed" className="mb-2">
+                        {error}
+                    </Notice>
+                )}
 
                 {/* Source Filters */}
                 <AnimatePresence>
@@ -198,10 +254,17 @@ export function ThinClawToolPolicies() {
                                                     <span className="text-sm font-mono text-foreground flex-1">
                                                         {tool.name}
                                                     </span>
+                                                    {tool.risk !== 'low' && (
+                                                        <span className="flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-800 dark:text-amber-300">
+                                                            <AlertTriangle className="size-3" aria-hidden="true" />
+                                                            High risk
+                                                        </span>
+                                                    )}
                                                     {/* Toggle switch */}
                                                     <button
                                                         onClick={(e) => handleToggle(e, tool)}
-                                                        disabled={toggling === tool.name}
+                                                        disabled={toggling !== null}
+                                                        aria-label={`${tool.enabled ? 'Disable' : 'Enable'} ${tool.name}`}
                                                         title={tool.enabled ? 'Click to disable' : 'Click to enable'}
                                                         className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold transition-all border ${tool.enabled
                                                                 ? 'border-emerald-500/30 bg-emerald-500/10 text-primary hover:bg-emerald-500/20'
@@ -230,7 +293,11 @@ export function ThinClawToolPolicies() {
                                                                 <div className="flex items-center gap-3 mt-2 text-[10px] text-muted-foreground/60">
                                                                     <span>Source: {cfg.label}</span>
                                                                     <span>Status: {tool.enabled ? 'Active' : 'Disabled'}</span>
+                                                                    <span>Risk: {tool.risk === 'low' ? 'Low' : 'High'}</span>
                                                                 </div>
+                                                                <p className="mt-2 text-[10px] text-muted-foreground/70">
+                                                                    Risk basis: {describeRisk(tool)}.
+                                                                </p>
                                                             </div>
                                                         </motion.div>
                                                     )}
@@ -244,6 +311,24 @@ export function ThinClawToolPolicies() {
                     })
                 )}
             </div>
+            <ConfirmDialog
+                open={pendingEnable !== null}
+                onOpenChange={(open) => {
+                    if (!open && !mutationInFlight.current) closePendingEnable();
+                }}
+                title={pendingEnable ? `Enable high-risk tool ${pendingEnable.name}?` : 'Enable high-risk tool?'}
+                description={pendingEnable ? (
+                    <>
+                        <span className="font-mono text-content-primary">{pendingEnable.name}</span>
+                        {' '}from {SOURCE_CONFIG[pendingEnable.source]?.label ?? pendingEnable.source} can {describeRisk(pendingEnable)}.
+                        Enabling it restores this capability to agent executions until you disable it again.
+                    </>
+                ) : ''}
+                confirmLabel="Enable high-risk tool"
+                onConfirm={confirmEnable}
+                isConfirming={pendingEnable !== null && toggling === pendingEnable.name}
+                tone="warning"
+            />
         </div>
     );
 }

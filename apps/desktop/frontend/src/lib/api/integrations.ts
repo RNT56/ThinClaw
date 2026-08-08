@@ -321,6 +321,8 @@ export interface ToolInfoItem {
     description: string;
     enabled: boolean;
     source: string; // 'builtin' | 'skill' | 'extension' | 'mcp'
+    risk: 'low' | 'high';
+    risk_reasons: string[];
 }
 
 export interface ToolsListResponse {

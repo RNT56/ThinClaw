@@ -310,6 +310,12 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
+      - name: Audit Desktop production dependencies
+        working-directory: apps/desktop
+        run: npm run audit:prod
+      - name: Audit complete Desktop dependency graph
+        working-directory: apps/desktop
+        run: npm run audit:all
       - name: Clean-machine sidecar setup acceptance
         working-directory: apps/desktop
         run: npm run test:setup:all
