@@ -13,6 +13,13 @@ pub enum GatewayAuthSource {
     BearerHeader,
     BearerQuery,
     TrustedProxy,
+    /// Identity authenticated by the local Tailscale daemon's `whois`
+    /// boundary for the request's tailnet source address.
+    TailscaleWhois,
+    /// Identity asserted by a loopback-only Tailscale Serve proxy. Funnel
+    /// never enables this source because public traffic has no identity
+    /// headers.
+    TailscaleServe,
     DeviceToken,
 }
 
@@ -22,6 +29,8 @@ impl GatewayAuthSource {
             Self::BearerHeader => "bearer_header",
             Self::BearerQuery => "bearer_query",
             Self::TrustedProxy => "trusted_proxy",
+            Self::TailscaleWhois => "tailscale_whois",
+            Self::TailscaleServe => "tailscale_serve",
             Self::DeviceToken => "device_token",
         }
     }

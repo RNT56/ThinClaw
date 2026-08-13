@@ -196,7 +196,7 @@ async fn start_ui_gateway(
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().expect("valid bind addr");
-    start_server(addr, state, AUTH_TOKEN.to_string(), vec![], vec![]).await
+    start_server(addr, state, AUTH_TOKEN.to_string(), vec![], false, vec![]).await
 }
 
 async fn eval_value(page: &Page, expression: &str) -> Value {

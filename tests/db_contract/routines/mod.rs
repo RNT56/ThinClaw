@@ -339,6 +339,7 @@ async fn start_routine_gateway_server(
         state,
         "routine-test-token".to_string(),
         vec![],
+        false,
         vec![],
     )
     .await

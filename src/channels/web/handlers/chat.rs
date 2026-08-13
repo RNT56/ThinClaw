@@ -32,7 +32,7 @@ use thinclaw_gateway::web::chat::{
     too_many_chat_connections_error, turn_info_from_session_turn, turns_from_history_messages,
     unknown_approval_action_error,
 };
-use thinclaw_gateway::web::identity::DeviceContext;
+use thinclaw_gateway::web::identity::{DeviceContext, GatewayAuthSource};
 use thinclaw_gateway::web::ports::{
     RouteStatePort, request_origin_from_headers, validate_websocket_origin,
 };
@@ -413,7 +413,16 @@ pub(crate) async fn chat_events_handler(
     // first poll is not missed. `take_until` ends the SSE stream when the
     // guard future resolves.
     let revocation_guard = device_revocation_guard(device_id, Arc::clone(&state.device_registry));
-    let stream = stream.take_until(revocation_guard);
+    let reauthentication_guard =
+        passwordless_reauthentication_guard(request_identity.auth_source.clone());
+    let stream = stream.take_until(async move {
+        tokio::pin!(revocation_guard);
+        tokio::pin!(reauthentication_guard);
+        tokio::select! {
+            _ = &mut revocation_guard => {}
+            _ = &mut reauthentication_guard => {}
+        }
+    });
 
     Ok((
         [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
@@ -453,6 +462,25 @@ pub(crate) fn device_revocation_guard(
                     return;
                 }
             }
+        }
+    }
+}
+
+/// Bound passwordless streams to a short lifetime so Tailscale ACL/user/node
+/// revocation is re-checked even when an SSE or WebSocket connection would
+/// otherwise remain open indefinitely. Clients reconnect through middleware;
+/// bearer/device streams retain their existing lifetime behavior.
+pub(crate) fn passwordless_reauthentication_guard(
+    auth_source: GatewayAuthSource,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    async move {
+        if matches!(
+            auth_source,
+            GatewayAuthSource::TailscaleWhois | GatewayAuthSource::TailscaleServe
+        ) {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        } else {
+            std::future::pending::<()>().await;
         }
     }
 }

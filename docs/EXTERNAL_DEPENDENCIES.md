@@ -82,6 +82,8 @@ ThinClaw supports managed tunnel integrations when the relevant feature/profile 
 1. **Secure remote access** — Connect ThinClaw Desktop to ThinClaw over an encrypted tunnel without exposing ports to the internet
 2. **Tailscale Serve** — Expose the gateway to your tailnet (private)
 3. **Tailscale Funnel** — Expose the gateway to the public internet (for webhooks)
+4. **Identity-aware gateway access** — Map current Tailscale users/nodes/tags
+   to bounded ThinClaw RBAC principals without distributing a gateway token
 
 **Where to get it:**
 
@@ -108,7 +110,18 @@ Or simply use Tailscale as a VPN and set the gateway to bind to the Tailscale IP
 
 ```env
 GATEWAY_HOST=100.64.0.2   # Your Tailscale IP
+
+# Optional passwordless allowlist. Obtain stable IDs with
+# `tailscale whois --json <client-tailscale-ip>` on the ThinClaw host.
+GATEWAY_TAILSCALE_PRINCIPALS='[{"user_id":"5678","principal_id":"alice","role":"operator"}]'
 ```
+
+Direct tailnet access resolves every request through the local Tailscale
+daemon. A successfully started managed `tailscale serve` tunnel also supports
+explicit `user_login` mappings while the gateway remains loopback-bound.
+Tailscale Funnel is public and can never use passwordless identity; use bearer
+tokens or per-webhook signatures there. See `src/NETWORK_SECURITY.md` for the
+selector, conflict, revocation, and audit contract.
 
 **Verify:**
 

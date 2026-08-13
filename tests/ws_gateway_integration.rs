@@ -91,9 +91,16 @@ async fn start_test_server() -> (
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state.clone(), AUTH_TOKEN.to_string(), vec![], vec![])
-        .await
-        .expect("Failed to start test server");
+    let bound_addr = start_server(
+        addr,
+        state.clone(),
+        AUTH_TOKEN.to_string(),
+        vec![],
+        false,
+        vec![],
+    )
+    .await
+    .expect("Failed to start test server");
 
     (bound_addr, state, agent_rx)
 }

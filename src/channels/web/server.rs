@@ -21,12 +21,16 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::agent::SessionManager;
 use crate::channels::IncomingMessage;
-use crate::channels::web::auth::{AuthState, auth_middleware, load_trusted_proxy_config};
+use crate::channels::web::auth::{
+    AuthState, TailscaleAuthState, auth_middleware, load_trusted_proxy_config,
+    parse_tailscale_principals,
+};
 use crate::channels::web::handlers::*;
 use crate::channels::web::log_layer::LogBroadcaster;
 pub(crate) use crate::channels::web::rate_limiter::RateLimiter;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::static_files::*;
+use crate::channels::web::tailscale_identity::TailscaleWhoisResolver;
 use crate::channels::web::types::SseEvent;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
@@ -884,6 +888,7 @@ pub async fn start_server(
     state: Arc<GatewayState>,
     auth_token: String,
     principals: Vec<thinclaw_settings::GatewayPrincipalConfig>,
+    tailscale_serve_proxy: bool,
     extra_public_routes: Vec<axum::Router>,
 ) -> Result<SocketAddr, crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
@@ -968,6 +973,44 @@ pub async fn start_server(
     // Protected routes (require auth)
     let auth_state = {
         let (trusted_proxy_header, trusted_proxy_ips) = load_trusted_proxy_config();
+        let tailscale_principals = match std::env::var("GATEWAY_TAILSCALE_PRINCIPALS") {
+            Ok(raw) => parse_tailscale_principals(&raw).map_err(|reason| {
+                crate::error::ChannelError::StartupFailed {
+                    name: "gateway".to_string(),
+                    reason: format!("GATEWAY_TAILSCALE_PRINCIPALS is invalid: {reason}"),
+                }
+            })?,
+            Err(std::env::VarError::NotPresent) => Vec::new(),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(crate::error::ChannelError::StartupFailed {
+                    name: "gateway".to_string(),
+                    reason: "GATEWAY_TAILSCALE_PRINCIPALS is not valid UTF-8".to_string(),
+                });
+            }
+        };
+        if tailscale_serve_proxy && !tailscale_principals.is_empty() && !addr.ip().is_loopback() {
+            return Err(crate::error::ChannelError::StartupFailed {
+                name: "gateway".to_string(),
+                reason: "Tailscale Serve identity auth requires GATEWAY_HOST to be loopback"
+                    .to_string(),
+            });
+        }
+        let tailscale = if tailscale_principals.is_empty() {
+            None
+        } else {
+            tracing::info!(
+                mapping_count = tailscale_principals.len(),
+                direct_whois = true,
+                serve_proxy = tailscale_serve_proxy,
+                funnel_passwordless = false,
+                "Tailscale identity authentication enabled"
+            );
+            Some(TailscaleAuthState::new(
+                Arc::new(TailscaleWhoisResolver::new()),
+                tailscale_principals,
+                tailscale_serve_proxy,
+            ))
+        };
         if trusted_proxy_header.is_some() {
             tracing::info!(
                 header = ?trusted_proxy_header,
@@ -995,6 +1038,7 @@ pub async fn start_server(
             // Device-token auth (milestone B1, `thinclaw-gateway::web::devices`).
             devices: Some(Arc::clone(&state.device_registry)),
             principals,
+            tailscale,
         }
     };
     let protected = Router::new()

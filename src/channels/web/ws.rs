@@ -104,6 +104,15 @@ pub async fn handle_ws_connection(
             Arc::clone(&state.device_registry),
         ),
     );
+    let sender_reauthentication =
+        crate::channels::web::handlers::chat::passwordless_reauthentication_guard(
+            request_identity.auth_source.clone(),
+        );
+    let mut receiver_reauthentication = Box::pin(
+        crate::channels::web::handlers::chat::passwordless_reauthentication_guard(
+            request_identity.auth_source.clone(),
+        ),
+    );
 
     // Track connection
     if let Some(ref tracker) = state.ws_tracker {
@@ -151,9 +160,11 @@ pub async fn handle_ws_connection(
         // Held for the connection's lifetime; dropped when this task exits.
         let _stream_guard = stream_guard;
         tokio::pin!(sender_revocation);
+        tokio::pin!(sender_reauthentication);
         loop {
             let msg = tokio::select! {
                 _ = &mut sender_revocation => break, // device revoked: stop forwarding
+                _ = &mut sender_reauthentication => break, // re-check passwordless identity
                 event = event_stream.next() => {
                     match event {
                         Some(sse_event) => WsServerMessage::from_sse_event(&sse_event),
@@ -184,6 +195,7 @@ pub async fn handle_ws_connection(
     loop {
         let frame = tokio::select! {
             _ = &mut receiver_revocation => break, // device revoked: stop accepting frames
+            _ = &mut receiver_reauthentication => break, // re-check passwordless identity
             frame = ws_stream.next() => frame,
         };
         let Some(Ok(frame)) = frame else { break };

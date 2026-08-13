@@ -1093,7 +1093,10 @@ fn provider_key_write_limiter() -> &'static RateLimiter {
 
 fn require_sensitive_route_auth(identity: &GatewayRequestIdentity) -> Result<(), StatusCode> {
     match identity.auth_source {
-        GatewayAuthSource::BearerHeader | GatewayAuthSource::TrustedProxy => Ok(()),
+        GatewayAuthSource::BearerHeader
+        | GatewayAuthSource::TrustedProxy
+        | GatewayAuthSource::TailscaleWhois
+        | GatewayAuthSource::TailscaleServe => Ok(()),
         // Provider Vault (API key management) is never grantable to device
         // tokens (docs/MOBILE_SECURITY.md D-T4: settings/secrets/providers
         // are excluded from all v1 device scopes), same as the query-param

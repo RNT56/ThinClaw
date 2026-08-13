@@ -1,5 +1,5 @@
 {
-  "launch_count": 211,
+  "launch_count": 212,
   "launches": [
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
@@ -34,7 +34,7 @@
       "proof_id": "process-launch-8a2af666bee3351e15c79722",
       "rust_module": "tauri_app_lib::config",
       "source": "apps/desktop/backend/src/config.rs",
-      "source_line": 845,
+      "source_line": 967,
       "temp_policy": "reviewed_system_temp"
     },
     {
@@ -70,13 +70,13 @@
       "proof_id": "process-launch-b812008caaf87997370f90db",
       "rust_module": "tauri_app_lib::config",
       "source": "apps/desktop/backend/src/config.rs",
-      "source_line": 851,
+      "source_line": 973,
       "temp_policy": "reviewed_system_temp"
     },
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "7d7f4b91cea17e9112a3052e16dbe1bc06a96d2aaf939bcce654f904d3aab744",
+      "callsite_digest": "2d55abddfcfe1a9388892d9788b5ba59b4d913d8b3c95cde8667834022044f2f",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "std",
@@ -106,7 +106,7 @@
       "proof_id": "process-launch-863297a249f0444f7a83dbd5",
       "rust_module": "tauri_app_lib::config",
       "source": "apps/desktop/backend/src/config.rs",
-      "source_line": 856,
+      "source_line": 978,
       "temp_policy": "reviewed_system_temp"
     },
     {
@@ -986,7 +986,7 @@
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "e9a4363f990c6180d6ef6f993faf3d9a4dbf276b8a98a24d4ad5ca97d2c68317",
+      "callsite_digest": "93acf077ff5014153d99997fd3d2347ee7bc556e5f2d4df4e19e94170d2f146a",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "tokio",
@@ -1016,7 +1016,7 @@
       "proof_id": "process-launch-400304bf2f7c8783cc99f3da",
       "rust_module": "tauri_app_lib::thinclaw::commands::gateway",
       "source": "apps/desktop/backend/src/thinclaw/commands/gateway.rs",
-      "source_line": 676,
+      "source_line": 865,
       "temp_policy": "reviewed_system_temp"
     },
     {
@@ -1418,7 +1418,7 @@
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "c75f2ffaf8028d85738188bdcc98c1fa6143108a5f16884eb9fd05655535ac0d",
+      "callsite_digest": "ddf1debf5377f2a9909450d4b01a293cea2e79d96a1df6d3a42848d595f0bde7",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "std",
@@ -1448,7 +1448,7 @@
       "proof_id": "process-launch-2533110d6117d07c5f131c2d",
       "rust_module": "thinclaw_app::runtime",
       "source": "crates/thinclaw-app/src/runtime.rs",
-      "source_line": 210,
+      "source_line": 211,
       "temp_policy": "reviewed_system_temp"
     },
     {
@@ -2210,7 +2210,7 @@
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "3df938f74febed7a7f6e16fcabacec6c1bd419a761ae4ac8ff03c9c3eb4b3c47",
+      "callsite_digest": "c38d6d68769bb3866d9283912ca4c9fded53c3d37123a4685a24f35df40ee7c2",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "tokio",
@@ -3852,6 +3852,42 @@
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
+      "callsite_digest": "791390f8bd167f8ef0bbcd7221051443d5d48ce7dcff14af193fd04b727a6cda",
+      "child_environment": "exact_reviewed",
+      "classification": "production",
+      "constructor": "tokio",
+      "credential_slots": [],
+      "cwd_filesystem": "typed_call_site_review",
+      "environment_schema": "literal_keys_only",
+      "exact_environment": [],
+      "executable_policy": "validated_search_path_or_absolute_pinned",
+      "execution_policy": "bounded_owned",
+      "home_policy": "reviewed_operator_home",
+      "id": "src.channels.web.tailscale_identity.tokio.101",
+      "io_policy": {
+        "bounded": true,
+        "stderr_limit": 8388608,
+        "stdout_limit": 8388608
+      },
+      "isolation_policy": "reviewed_direct_host",
+      "lifetime_policy": {
+        "owns_process_tree": true,
+        "reap_on_drop": true,
+        "timeout_ms": 1800000
+      },
+      "network_policy": "reviewed_external",
+      "owner": "src::channels::web::tailscale_identity",
+      "process_class": "channel_adapter",
+      "program": "typed_dynamic_expression",
+      "proof_id": "process-launch-5387f92eaabd5280c41d35d5",
+      "rust_module": "thinclaw::channels::web::tailscale_identity",
+      "source": "src/channels/web/tailscale_identity.rs",
+      "source_line": 41,
+      "temp_policy": "reviewed_system_temp"
+    },
+    {
+      "argument_schema": "argv_reviewed_at_typed_call_site",
+      "availability": [],
       "callsite_digest": "8ba93f5917f62050d637db9659f5ef5f4a061ddb669201220294f7920c4dd6dd",
       "child_environment": "exact_reviewed",
       "classification": "production",
@@ -4035,7 +4071,7 @@
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "4d578b893a6bff497085e708a25df3972cab01d05078105db72256de73b8c36c",
+      "callsite_digest": "94969afbce42c0dcf1abb149dd86a668e1def886e8154eba63f4e13454f67652",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "std",
@@ -4065,7 +4101,7 @@
       "proof_id": "process-launch-e13be7d891129c13b2de1b36",
       "rust_module": "thinclaw::cli::doctor",
       "source": "src/cli/doctor.rs",
-      "source_line": 335,
+      "source_line": 422,
       "temp_policy": "reviewed_system_temp"
     },
     {
@@ -6014,7 +6050,7 @@
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "01af672eca0e598c967f4616f94f574dc93636bdaa68d5b981338993c0d66a21",
+      "callsite_digest": "be584b3a58aec9ff0e76ce5236549568506fea0fbb9283930473111a6467c190",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "tokio",
@@ -6044,13 +6080,13 @@
       "proof_id": "process-launch-8dcb40ecd2cbcd865d6c9ac6",
       "rust_module": "thinclaw::registry::artifacts",
       "source": "src/registry/artifacts.rs",
-      "source_line": 209,
+      "source_line": 217,
       "temp_policy": "reviewed_system_temp"
     },
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "73174a3ca3471d126dbf50297dc7cb05bd79a912a36fb9311e332cc1e3b206b8",
+      "callsite_digest": "1d073d27143274b707c66495232eb610676a07541110ede6c96287a47ed08741",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "tokio",
@@ -6080,7 +6116,7 @@
       "proof_id": "process-launch-ed385b991b36a76c6a601e21",
       "rust_module": "thinclaw::registry::artifacts",
       "source": "src/registry/artifacts.rs",
-      "source_line": 227,
+      "source_line": 245,
       "temp_policy": "reviewed_system_temp"
     },
     {

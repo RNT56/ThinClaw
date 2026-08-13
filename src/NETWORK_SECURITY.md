@@ -120,6 +120,47 @@ role-gated) is covered by end-to-end middleware tests.
 (`auth_middleware`, `enforce_capability`),
 `thinclaw_settings::gateway_rbac` (`GatewayRole`, `GatewayPrincipalConfig`)
 
+#### Tailscale identity principals (opt-in)
+
+`GATEWAY_TAILSCALE_PRINCIPALS` enables passwordless gateway authentication for
+an explicit JSON allowlist of tailnet identities. Each entry sets exactly one
+stable selector (`user_id`, `node_id`, `user_login`, or `tag`) plus a bound
+`principal_id`, optional `actor_id`, and normal gateway `role`. Invalid,
+duplicate, ambiguous, or conflicting mappings fail closed. For example:
+
+```env
+GATEWAY_TAILSCALE_PRINCIPALS='[
+  {"user_id":"5678","principal_id":"alice","role":"operator"},
+  {"node_id":"1234","principal_id":"build-agent","role":"read_only"},
+  {"tag":"tag:thinclaw-admin","principal_id":"tailnet-admin","role":"admin"}
+]'
+```
+
+Two authenticated ingress boundaries are supported:
+
+- **Direct tailnet connection:** for a source in Tailscale's IPv4/IPv6 ranges,
+  ThinClaw runs bounded `tailscale whois --json <ip:port>` against the local
+  daemon. The returned node must contain the exact queried source address. No
+  result is cached, so daemon-side node/user revocation applies on the next
+  request. Calls have a two-second deadline, bounded output, and a four-call
+  concurrency ceiling.
+- **Managed Tailscale Serve:** when the live runtime successfully starts
+  tailnet-only `tailscale serve`, ThinClaw accepts its spoof-stripped
+  `Tailscale-User-Login` header from loopback only. The gateway must itself be
+  loopback-bound. Only `user_login` mappings can match this header contract.
+
+Tailscale Funnel never enables the Serve identity path: Funnel is public and
+does not supply identity headers. Bearer/device authentication remains
+available and takes precedence when a valid credential is supplied. SSE and
+WebSocket sessions authenticated passwordlessly are limited to 60 seconds;
+clients reconnect through the identity middleware so revocation cannot leave
+an indefinite authenticated stream. Accepted requests emit a structured audit
+record with mechanism, bound principal/actor/role, source IP, and resolved
+Tailscale identifiers; no credential is logged.
+
+**References:** `crates/thinclaw-gateway/src/web/auth.rs`,
+`src/channels/web/tailscale_identity.rs`, `src/tunnel/tailscale.rs`
+
 ### Unauthenticated Routes
 
 | Route | Purpose | Response |
@@ -589,6 +630,7 @@ a write outside the confine root is rejected.
 | Mechanism | Constant-Time | Used By | Reference |
 |-----------|:------------:|---------|-----------|
 | Gateway bearer token | Yes | Web gateway (header + query) | `src/channels/web/auth.rs` — `auth_middleware()` |
+| Tailscale identity | N/A (daemon-authenticated identity) | Explicitly mapped direct tailnet peers or loopback-only managed Serve; never Funnel | `crates/thinclaw-gateway/src/web/auth.rs`, `src/channels/web/tailscale_identity.rs` |
 | Webhook shared secret | Yes | HTTP webhook (`ct_eq` comparison) | `src/channels/http.rs` — `webhook_handler()` |
 | Per-job bearer token | Yes | Orchestrator worker API | `src/orchestrator/auth.rs` — `TokenStore::validate()` |
 | OAuth callback | N/A | CLI OAuth flow (no auth, loopback-only) | `src/cli/oauth_defaults.rs` — `bind_callback_listener()` |

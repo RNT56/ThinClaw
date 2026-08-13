@@ -25,6 +25,7 @@ pub mod rate_limiter;
 pub mod server;
 pub mod sse;
 pub mod static_files;
+pub(crate) mod tailscale_identity;
 pub mod tls;
 pub mod types;
 pub mod ws;
@@ -94,6 +95,9 @@ pub struct GatewayChannel {
     /// Extra public routes (e.g. WASM channel webhook endpoints) to merge
     /// into the gateway server so they are reachable via the tunnel.
     webhook_routes: Vec<axum::Router>,
+    /// Whether this gateway is behind the runtime-managed, tailnet-only
+    /// Tailscale Serve proxy. Funnel deliberately leaves this false.
+    tailscale_serve_proxy: bool,
     /// Live LAN discovery advertiser (milestone B3). Held for the channel's
     /// lifetime so the mDNS registration stays up; dropping it unregisters.
     /// `None` until `start()` runs, when discovery is disabled, or when the
@@ -187,6 +191,7 @@ impl GatewayChannel {
             state,
             auth_token,
             webhook_routes: Vec::new(),
+            tailscale_serve_proxy: false,
             mdns_advertiser: tokio::sync::Mutex::new(None),
         }
     }
@@ -439,6 +444,14 @@ impl GatewayChannel {
         self
     }
 
+    /// Enable the strict loopback Tailscale Serve identity-header contract.
+    /// This is set only by the managed `tailscale serve` runtime path; public
+    /// Funnel traffic must never opt in.
+    pub fn with_tailscale_serve_proxy(mut self, enabled: bool) -> Self {
+        self.tailscale_serve_proxy = enabled;
+        self
+    }
+
     /// Get the auth token (for printing to console on startup).
     pub fn auth_token(&self) -> &str {
         &self.auth_token
@@ -497,6 +510,7 @@ impl Channel for GatewayChannel {
             self.state.clone(),
             self.auth_token.clone(),
             self.config.principals.clone(),
+            self.tailscale_serve_proxy,
             self.webhook_routes.clone(),
         )
         .await?;

@@ -585,7 +585,21 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     if channel_plan.gateway
         && let Some(ref gw_config) = config.channels.gateway
     {
+        #[cfg(feature = "tunnel")]
+        let managed_tailscale_serve = active_tunnel
+            .as_ref()
+            .is_some_and(|tunnel| tunnel.name() == "tailscale")
+            && config
+                .tunnel
+                .provider
+                .as_ref()
+                .and_then(|provider| provider.tailscale.as_ref())
+                .is_some_and(|tailscale| !tailscale.funnel);
+        #[cfg(not(feature = "tunnel"))]
+        let managed_tailscale_serve = false;
+
         let mut gw = GatewayChannel::new(gw_config.clone())
+            .with_tailscale_serve_proxy(managed_tailscale_serve)
             .with_llm_provider(Arc::clone(&components.llm))
             .with_llm_runtime(Arc::clone(&components.llm_runtime));
         if let Some(ref ws) = components.workspace {

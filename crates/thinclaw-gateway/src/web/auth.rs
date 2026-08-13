@@ -1,6 +1,7 @@
 //! Bearer token authentication middleware for the web gateway.
 //!
-//! Supports three authentication modes, tried in order:
+//! Supports authentication modes that preserve explicit credentials first,
+//! then opt-in identity-aware ingress:
 //! 1. **Trusted proxy** (optional): When `TRUSTED_PROXY_HEADER` env var is set, the gateway
 //!    trusts that header (e.g., `X-Forwarded-User`) as the authenticated identity. This mode
 //!    requires `TRUSTED_PROXY_IPS` to restrict which source IPs can use it (CIDR notation,
@@ -13,6 +14,10 @@
 //!    carries the `tcd_` prefix, so the shared-token fast path above is never slowed down.
 //!    Device tokens are header-only: a `tcd_` token via `?token=` is rejected outright. See
 //!    `docs/MOBILE_SECURITY.md` (D-T*, §8 gateway hardening) and `docs/MOBILE_APP.md`.
+//! 4. **Tailscale identity** (optional): an explicitly mapped tailnet peer is
+//!    resolved through the authenticated local `tailscale whois` boundary, or
+//!    through Tailscale Serve's loopback-only, spoof-stripping identity header
+//!    contract. Funnel/public traffic never enables the Serve path.
 
 use axum::{
     extract::{ConnectInfo, Request, State},
@@ -20,6 +25,8 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use serde::Deserialize;
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
@@ -81,6 +88,167 @@ pub struct AuthState {
     /// [`thinclaw_settings::GatewayRole::Admin`]. Empty by default, so RBAC is
     /// inactive unless the operator configures principals.
     pub principals: Vec<GatewayPrincipalConfig>,
+    /// Optional Tailscale identity adapter. It is absent unless the operator
+    /// supplies an explicit identity-to-principal mapping.
+    pub tailscale: Option<TailscaleAuthState>,
+}
+
+/// One explicit Tailscale identity selector mapped to a bound ThinClaw
+/// principal. Exactly one selector must be set. Stable numeric user/node IDs
+/// are preferred; login and tag selectors are supported for operator
+/// convenience.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TailscalePrincipalConfig {
+    #[serde(default)]
+    pub user_login: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub node_id: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
+    pub principal_id: String,
+    #[serde(default)]
+    pub actor_id: Option<String>,
+    #[serde(default)]
+    pub role: GatewayRole,
+}
+
+impl TailscalePrincipalConfig {
+    fn effective_actor_id(&self) -> &str {
+        self.actor_id.as_deref().unwrap_or(&self.principal_id)
+    }
+
+    fn same_target(&self, other: &Self) -> bool {
+        self.principal_id == other.principal_id
+            && self.effective_actor_id() == other.effective_actor_id()
+            && self.role == other.role
+    }
+}
+
+/// Identity returned by the authenticated local Tailscale daemon boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailscalePeerIdentity {
+    pub node_id: String,
+    pub node_name: Option<String>,
+    pub user_id: Option<String>,
+    pub user_login: Option<String>,
+    pub tags: Vec<String>,
+}
+
+/// Adapter boundary kept in the gateway crate so authentication can be tested
+/// without launching a real Tailscale process.
+#[async_trait::async_trait]
+pub trait TailscaleIdentityResolver: Send + Sync {
+    async fn resolve(&self, source: SocketAddr) -> Result<Option<TailscalePeerIdentity>, String>;
+}
+
+/// Shared, immutable state for Tailscale passwordless authentication.
+#[derive(Clone)]
+pub struct TailscaleAuthState {
+    resolver: Arc<dyn TailscaleIdentityResolver>,
+    principals: Arc<[TailscalePrincipalConfig]>,
+    allow_serve_proxy: bool,
+}
+
+impl TailscaleAuthState {
+    pub fn new(
+        resolver: Arc<dyn TailscaleIdentityResolver>,
+        principals: Vec<TailscalePrincipalConfig>,
+        allow_serve_proxy: bool,
+    ) -> Self {
+        Self {
+            resolver,
+            principals: principals.into(),
+            allow_serve_proxy,
+        }
+    }
+
+    pub fn allow_serve_proxy(&self) -> bool {
+        self.allow_serve_proxy
+    }
+}
+
+/// Parse the opt-in `GATEWAY_TAILSCALE_PRINCIPALS` JSON mapping. Invalid,
+/// ambiguous, duplicate, or oversized configurations fail closed rather than
+/// silently weakening passwordless identity binding.
+pub fn parse_tailscale_principals(raw: &str) -> Result<Vec<TailscalePrincipalConfig>, String> {
+    const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+    const MAX_PRINCIPALS: usize = 1024;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    if raw.len() > MAX_CONFIG_BYTES {
+        return Err("Tailscale principal mapping exceeds the 1 MiB limit".to_string());
+    }
+    let mut mappings: Vec<TailscalePrincipalConfig> = serde_json::from_str(raw)
+        .map_err(|error| format!("invalid Tailscale principal mapping JSON: {error}"))?;
+    if mappings.len() > MAX_PRINCIPALS {
+        return Err("Tailscale principal mapping contains more than 1024 entries".to_string());
+    }
+
+    let mut selectors = HashSet::new();
+    for mapping in &mut mappings {
+        mapping.user_login = normalize_selector(mapping.user_login.take(), true);
+        mapping.user_id = normalize_selector(mapping.user_id.take(), false);
+        mapping.node_id = normalize_selector(mapping.node_id.take(), false);
+        mapping.tag = normalize_selector(mapping.tag.take(), false);
+        mapping.principal_id = mapping.principal_id.trim().to_string();
+        mapping.actor_id = normalize_selector(mapping.actor_id.take(), false);
+
+        if !valid_gateway_identity_component(&mapping.principal_id)
+            || mapping
+                .actor_id
+                .as_deref()
+                .is_some_and(|actor| !valid_gateway_identity_component(actor))
+        {
+            return Err(
+                "Tailscale mappings require valid principal_id/actor_id values".to_string(),
+            );
+        }
+
+        let configured = [
+            ("user_login", mapping.user_login.as_deref()),
+            ("user_id", mapping.user_id.as_deref()),
+            ("node_id", mapping.node_id.as_deref()),
+            ("tag", mapping.tag.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(kind, value)| value.map(|value| (kind, value)))
+        .collect::<Vec<_>>();
+        if configured.len() != 1 {
+            return Err(
+                "each Tailscale mapping must configure exactly one of user_login, user_id, node_id, or tag"
+                    .to_string(),
+            );
+        }
+        let (kind, value) = configured[0];
+        if !valid_gateway_identity_component(value) {
+            return Err(format!("Tailscale {kind} selector is invalid"));
+        }
+        if kind == "tag" && !value.starts_with("tag:") {
+            return Err("Tailscale tag selectors must start with `tag:`".to_string());
+        }
+        if !selectors.insert((kind.to_string(), value.to_string())) {
+            return Err(format!("duplicate Tailscale {kind} selector `{value}`"));
+        }
+    }
+    Ok(mappings)
+}
+
+fn normalize_selector(value: Option<String>, lowercase: bool) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim();
+        if value.is_empty() {
+            None
+        } else if lowercase {
+            Some(value.to_ascii_lowercase())
+        } else {
+            Some(value.to_string())
+        }
+    })
 }
 
 /// Check if an IP is trusted for proxy auth.
@@ -123,6 +291,156 @@ pub fn load_trusted_proxy_config() -> (Option<String>, Vec<IpNet>) {
         .filter_map(|s| parse_trusted_proxy_entry(s.trim()))
         .collect();
     (header, ips)
+}
+
+/// Tailscale allocates IPv4 peers from 100.64.0.0/10 and IPv6 peers from
+/// fd7a:115c:a1e0::/48. This range check is only a cheap precondition: the
+/// authenticated local daemon still has to resolve the exact source address.
+pub fn is_tailscale_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            octets[0] == 100 && (octets[1] & 0b1100_0000) == 64
+        }
+        IpAddr::V6(ip) => ip.octets()[..6] == [0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0],
+    }
+}
+
+fn mapping_matches_peer(mapping: &TailscalePrincipalConfig, peer: &TailscalePeerIdentity) -> bool {
+    (mapping.user_login.as_deref().is_some_and(|expected| {
+        peer.user_login
+            .as_deref()
+            .is_some_and(|actual| expected.eq_ignore_ascii_case(actual))
+    }) && peer.user_id.is_some())
+        || mapping
+            .user_id
+            .as_deref()
+            .is_some_and(|expected| peer.user_id.as_deref() == Some(expected))
+        || mapping
+            .node_id
+            .as_deref()
+            .is_some_and(|expected| peer.node_id == expected)
+        || mapping
+            .tag
+            .as_deref()
+            .is_some_and(|expected| peer.tags.iter().any(|tag| tag == expected))
+}
+
+/// Resolve all selectors that match a peer. Multiple selectors may point to
+/// the same target (for example a stable user id plus a node-specific rule),
+/// but conflicting targets fail closed instead of depending on JSON order.
+fn mapped_tailscale_principal(
+    tailscale: &TailscaleAuthState,
+    peer: &TailscalePeerIdentity,
+) -> Result<Option<TailscalePrincipalConfig>, ()> {
+    let mut matches = tailscale
+        .principals
+        .iter()
+        .filter(|mapping| mapping_matches_peer(mapping, peer));
+    let Some(first) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.any(|mapping| !mapping.same_target(first)) {
+        return Err(());
+    }
+    Ok(Some(first.clone()))
+}
+
+async fn tailscale_request_identity(
+    tailscale: &TailscaleAuthState,
+    headers: &HeaderMap,
+    source: SocketAddr,
+) -> Option<(GatewayRequestIdentity, TailscalePeerIdentity)> {
+    // Tailscale Serve strips caller-supplied identity headers and adds its own
+    // only for tailnet traffic. The backend contract is accepted solely from
+    // loopback and only when the runtime confirmed managed Serve (never
+    // Funnel). Explicit mappings remain mandatory.
+    if tailscale.allow_serve_proxy && source.ip().is_loopback() {
+        let Some(login) = headers
+            .get("tailscale-user-login")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| valid_gateway_identity_component(value))
+        else {
+            return None;
+        };
+        let peer = TailscalePeerIdentity {
+            node_id: String::new(),
+            node_name: None,
+            user_id: None,
+            user_login: Some(login.to_ascii_lowercase()),
+            tags: Vec::new(),
+        };
+        // Serve's documented identity header authenticates a user login but
+        // does not expose the stable user id. Match a login selector directly
+        // under this narrower contract; tag/node/user-id selectors cannot
+        // match Serve traffic.
+        let mut matches = tailscale.principals.iter().filter(|mapping| {
+            mapping
+                .user_login
+                .as_deref()
+                .is_some_and(|expected| expected.eq_ignore_ascii_case(login))
+        });
+        let first = matches.next()?;
+        if matches.any(|mapping| !mapping.same_target(first)) {
+            tracing::error!(
+                tailscale_user_login = %login,
+                "Conflicting Tailscale Serve identity mappings matched one user; passwordless authentication denied"
+            );
+            return None;
+        }
+        let identity = GatewayRequestIdentity::new(
+            first.principal_id.clone(),
+            first.effective_actor_id().to_string(),
+            GatewayAuthSource::TailscaleServe,
+            false,
+        )
+        .with_role(first.role);
+        return Some((identity, peer));
+    }
+
+    // Public/LAN/loopback sources can never enter the daemon-whois path. A
+    // CGNAT-looking address alone is not trusted: the local daemon must return
+    // a current peer record for the exact socket address.
+    if !is_tailscale_ip(&source.ip()) {
+        return None;
+    }
+    let peer = match tailscale.resolver.resolve(source).await {
+        Ok(Some(peer)) if valid_gateway_identity_component(&peer.node_id) => peer,
+        Ok(Some(_)) | Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                source_ip = %source.ip(),
+                error = %error,
+                "Tailscale whois identity resolution failed; bearer authentication remains available"
+            );
+            return None;
+        }
+    };
+    identity_for_tailscale_peer(tailscale, peer, GatewayAuthSource::TailscaleWhois)
+}
+
+fn identity_for_tailscale_peer(
+    tailscale: &TailscaleAuthState,
+    peer: TailscalePeerIdentity,
+    source: GatewayAuthSource,
+) -> Option<(GatewayRequestIdentity, TailscalePeerIdentity)> {
+    let mapping = match mapped_tailscale_principal(tailscale, &peer) {
+        Ok(Some(mapping)) => mapping,
+        Ok(None) => return None,
+        Err(()) => {
+            tracing::error!(
+                tailscale_node_id = %peer.node_id,
+                "Conflicting Tailscale identity mappings matched one peer; passwordless authentication denied"
+            );
+            return None;
+        }
+    };
+    let actor_id = mapping.effective_actor_id().to_string();
+    let role = mapping.role;
+    let identity =
+        GatewayRequestIdentity::new(mapping.principal_id, actor_id, source, false).with_role(role);
+    Some((identity, peer))
 }
 
 /// Auth middleware that validates bearer token from header or query param,
@@ -239,6 +557,36 @@ pub async fn auth_middleware(
                 return authenticate_device_request(&auth, devices, token, request, next).await;
             }
         }
+    }
+
+    // Tailscale is a passwordless fallback, never an override for an explicit
+    // valid bearer/device credential. Every accepted identity is bound to an
+    // operator-supplied mapping and receives the same RBAC gate as tokens.
+    if let Some(tailscale) = auth.tailscale.as_ref()
+        && let Some(source) = request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0)
+        && let Some((identity, peer)) =
+            tailscale_request_identity(tailscale, &headers, source).await
+    {
+        if let Some(denied) = enforce_capability(&request, &identity) {
+            return denied;
+        }
+        tracing::info!(
+            audit_event = "gateway.auth.accepted",
+            auth_mechanism = identity.auth_source.as_str(),
+            principal_id = %identity.principal_id,
+            actor_id = %identity.actor_id,
+            role = identity.role.as_str(),
+            source_ip = %source.ip(),
+            tailscale_node_id = %peer.node_id,
+            tailscale_user_id = peer.user_id.as_deref().unwrap_or(""),
+            tailscale_user_login = peer.user_login.as_deref().unwrap_or(""),
+            "Tailscale identity authentication accepted"
+        );
+        request.extensions_mut().insert(identity);
+        return next.run(request).await;
     }
 
     (StatusCode::UNAUTHORIZED, "Invalid or missing auth token").into_response()
@@ -397,6 +745,7 @@ mod tests {
             store: None,
             devices: None,
             principals: vec![],
+            tailscale: None,
         }
     }
 
@@ -451,6 +800,65 @@ mod tests {
         assert_eq!(
             parse_trusted_proxy_entry("10.0.0.0/8").unwrap(),
             "10.0.0.0/8".parse::<IpNet>().unwrap()
+        );
+    }
+
+    #[test]
+    fn tailscale_address_ranges_are_exact() {
+        assert!(is_tailscale_ip(&"100.64.0.1".parse().unwrap()));
+        assert!(is_tailscale_ip(&"100.127.255.254".parse().unwrap()));
+        assert!(!is_tailscale_ip(&"100.63.255.255".parse().unwrap()));
+        assert!(!is_tailscale_ip(&"100.128.0.1".parse().unwrap()));
+        assert!(is_tailscale_ip(&"fd7a:115c:a1e0::1".parse().unwrap()));
+        assert!(!is_tailscale_ip(&"fd7a:115c:a1e1::1".parse().unwrap()));
+        assert!(!is_tailscale_ip(&"127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn tailscale_mapping_parser_normalizes_and_validates_selectors() {
+        let mappings = parse_tailscale_principals(
+            r#"[
+                {"user_login":" Alice@Example.COM ","principal_id":" alice ","role":"operator"},
+                {"node_id":"1234","principal_id":"builder","actor_id":"node-a"},
+                {"tag":"tag:ci","principal_id":"ci"}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(mappings.len(), 3);
+        assert_eq!(mappings[0].user_login.as_deref(), Some("alice@example.com"));
+        assert_eq!(mappings[0].principal_id, "alice");
+        assert_eq!(mappings[0].role, GatewayRole::Operator);
+        assert_eq!(mappings[1].effective_actor_id(), "node-a");
+        assert_eq!(mappings[2].role, GatewayRole::ReadOnly);
+    }
+
+    #[test]
+    fn tailscale_mapping_parser_fails_closed_on_ambiguity() {
+        assert!(
+            parse_tailscale_principals(
+                r#"[{"user_login":"a@example.com","node_id":"1","principal_id":"a"}]"#
+            )
+            .unwrap_err()
+            .contains("exactly one")
+        );
+        assert!(
+            parse_tailscale_principals(
+                r#"[
+                    {"node_id":"1","principal_id":"a"},
+                    {"node_id":"1","principal_id":"b"}
+                ]"#
+            )
+            .unwrap_err()
+            .contains("duplicate")
+        );
+        assert!(
+            parse_tailscale_principals(r#"[{"tag":"ci","principal_id":"a"}]"#)
+                .unwrap_err()
+                .contains("tag:")
+        );
+        assert!(
+            parse_tailscale_principals(r#"[{"node_id":"1","principal_id":"a","unexpected":true}]"#)
+                .is_err()
         );
     }
 
@@ -515,6 +923,7 @@ mod tests {
                 store: None,
                 devices: None,
                 principals,
+                tailscale: None,
             }
         }
 
@@ -775,6 +1184,300 @@ mod tests {
             // Trusted proxy from loopback → admin → may reach an admin surface.
             let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        struct ToggleTailscaleResolver {
+            active: std::sync::atomic::AtomicBool,
+            peer: TailscalePeerIdentity,
+        }
+
+        #[async_trait::async_trait]
+        impl TailscaleIdentityResolver for ToggleTailscaleResolver {
+            async fn resolve(
+                &self,
+                _source: SocketAddr,
+            ) -> Result<Option<TailscalePeerIdentity>, String> {
+                Ok(self
+                    .active
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    .then(|| self.peer.clone()))
+            }
+        }
+
+        fn test_peer() -> TailscalePeerIdentity {
+            TailscalePeerIdentity {
+                node_id: "node-123".to_string(),
+                node_name: Some("alice-phone".to_string()),
+                user_id: Some("user-456".to_string()),
+                user_login: Some("alice@example.com".to_string()),
+                tags: vec!["tag:staff".to_string()],
+            }
+        }
+
+        fn tailscale_mapping(
+            selector: (&str, &str),
+            principal_id: &str,
+            role: GatewayRole,
+        ) -> TailscalePrincipalConfig {
+            let mut mapping = TailscalePrincipalConfig {
+                user_login: None,
+                user_id: None,
+                node_id: None,
+                tag: None,
+                principal_id: principal_id.to_string(),
+                actor_id: None,
+                role,
+            };
+            match selector.0 {
+                "user_login" => mapping.user_login = Some(selector.1.to_string()),
+                "user_id" => mapping.user_id = Some(selector.1.to_string()),
+                "node_id" => mapping.node_id = Some(selector.1.to_string()),
+                "tag" => mapping.tag = Some(selector.1.to_string()),
+                _ => panic!("unknown test selector"),
+            }
+            mapping
+        }
+
+        async fn echo_tailscale_identity(identity: GatewayRequestIdentity) -> String {
+            format!(
+                "{}:{}:{}:{}",
+                identity.principal_id,
+                identity.actor_id,
+                identity.auth_source.as_str(),
+                identity.role.as_str()
+            )
+        }
+
+        async fn tailscale_request(
+            auth: AuthState,
+            method: Method,
+            path: &str,
+            source: &str,
+            tailscale_login_header: Option<&str>,
+            bearer: Option<&str>,
+        ) -> Response {
+            use axum::extract::ConnectInfo;
+
+            let app = Router::new()
+                .route("/api/chat/history", get(echo_tailscale_identity))
+                .route("/api/chat/send", post(echo_tailscale_identity))
+                .route("/api/settings/save", post(echo_tailscale_identity))
+                .route_layer(from_fn_with_state(auth, auth_middleware));
+            let mut builder = Request::builder().method(method).uri(path);
+            if let Some(login) = tailscale_login_header {
+                builder = builder.header("tailscale-user-login", login);
+            }
+            if let Some(token) = bearer {
+                builder = builder.header("authorization", format!("Bearer {token}"));
+            }
+            let mut request = builder.body(Body::empty()).unwrap();
+            request.extensions_mut().insert(ConnectInfo(
+                source.parse::<SocketAddr>().expect("valid test source"),
+            ));
+            app.oneshot(request).await.unwrap()
+        }
+
+        async fn response_body(response: Response) -> String {
+            String::from_utf8(
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn direct_whois_maps_bound_identity_and_enforces_role() {
+            let resolver = Arc::new(ToggleTailscaleResolver {
+                active: std::sync::atomic::AtomicBool::new(true),
+                peer: test_peer(),
+            });
+            let mut auth = base_auth(vec![]);
+            auth.tailscale = Some(TailscaleAuthState::new(
+                resolver,
+                vec![tailscale_mapping(
+                    ("node_id", "node-123"),
+                    "alice",
+                    GatewayRole::Operator,
+                )],
+                false,
+            ));
+
+            let response = tailscale_request(
+                auth.clone(),
+                Method::POST,
+                "/api/chat/send",
+                "100.64.10.20:50100",
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response_body(response).await,
+                "alice:alice:tailscale_whois:operator"
+            );
+
+            // The mapped Operator remains bound by normal RBAC.
+            let response = tailscale_request(
+                auth,
+                Method::POST,
+                "/api/settings/save",
+                "100.64.10.20:50101",
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+
+        #[tokio::test]
+        async fn serve_headers_are_loopback_only_and_never_enabled_for_funnel() {
+            let inactive = Arc::new(ToggleTailscaleResolver {
+                active: std::sync::atomic::AtomicBool::new(false),
+                peer: test_peer(),
+            });
+            let mapping = tailscale_mapping(
+                ("user_login", "alice@example.com"),
+                "alice",
+                GatewayRole::ReadOnly,
+            );
+            let mut serve_auth = base_auth(vec![]);
+            serve_auth.tailscale = Some(TailscaleAuthState::new(
+                inactive.clone(),
+                vec![mapping.clone()],
+                true,
+            ));
+
+            let accepted = tailscale_request(
+                serve_auth.clone(),
+                Method::GET,
+                "/api/chat/history",
+                "127.0.0.1:50100",
+                Some("Alice@Example.COM"),
+                None,
+            )
+            .await;
+            assert_eq!(accepted.status(), StatusCode::OK);
+            assert_eq!(
+                response_body(accepted).await,
+                "alice:alice:tailscale_serve:read_only"
+            );
+
+            // The same header sent directly from a LAN peer is spoofable and
+            // therefore ignored.
+            let spoofed = tailscale_request(
+                serve_auth,
+                Method::GET,
+                "/api/chat/history",
+                "192.168.1.50:50100",
+                Some("alice@example.com"),
+                None,
+            )
+            .await;
+            assert_eq!(spoofed.status(), StatusCode::UNAUTHORIZED);
+
+            // Funnel/public mode never enables the Serve contract, even when
+            // a public caller supplies the exact identity header.
+            let mut funnel_auth = base_auth(vec![]);
+            funnel_auth.tailscale = Some(TailscaleAuthState::new(inactive, vec![mapping], false));
+            let funnel = tailscale_request(
+                funnel_auth,
+                Method::GET,
+                "/api/chat/history",
+                "127.0.0.1:50101",
+                Some("alice@example.com"),
+                None,
+            )
+            .await;
+            assert_eq!(funnel.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn whois_revocation_is_immediate_and_bearer_fallback_survives() {
+            let resolver = Arc::new(ToggleTailscaleResolver {
+                active: std::sync::atomic::AtomicBool::new(true),
+                peer: test_peer(),
+            });
+            let mut auth = base_auth(vec![]);
+            auth.tailscale = Some(TailscaleAuthState::new(
+                resolver.clone(),
+                vec![tailscale_mapping(
+                    ("user_id", "user-456"),
+                    "alice",
+                    GatewayRole::ReadOnly,
+                )],
+                false,
+            ));
+
+            let before = tailscale_request(
+                auth.clone(),
+                Method::GET,
+                "/api/chat/history",
+                "100.64.10.20:50100",
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(before.status(), StatusCode::OK);
+
+            resolver
+                .active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            let revoked = tailscale_request(
+                auth.clone(),
+                Method::GET,
+                "/api/chat/history",
+                "100.64.10.20:50101",
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+
+            let bearer = tailscale_request(
+                auth,
+                Method::POST,
+                "/api/settings/save",
+                "100.64.10.20:50102",
+                None,
+                Some("admin-token"),
+            )
+            .await;
+            assert_eq!(bearer.status(), StatusCode::OK);
+            assert_eq!(response_body(bearer).await, "root:root:bearer_header:admin");
+        }
+
+        #[tokio::test]
+        async fn conflicting_identity_selectors_fail_closed() {
+            let resolver = Arc::new(ToggleTailscaleResolver {
+                active: std::sync::atomic::AtomicBool::new(true),
+                peer: test_peer(),
+            });
+            let mut auth = base_auth(vec![]);
+            auth.tailscale = Some(TailscaleAuthState::new(
+                resolver,
+                vec![
+                    tailscale_mapping(("node_id", "node-123"), "alice", GatewayRole::Admin),
+                    tailscale_mapping(
+                        ("user_login", "alice@example.com"),
+                        "mallory",
+                        GatewayRole::Admin,
+                    ),
+                ],
+                false,
+            ));
+            let response = tailscale_request(
+                auth,
+                Method::GET,
+                "/api/chat/history",
+                "100.64.10.20:50100",
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
     }
 

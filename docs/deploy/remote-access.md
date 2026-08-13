@@ -25,9 +25,10 @@ Access** to inspect gateway/Tailscale readiness and start either:
   panel requires an explicit confirmation on every start.
 
 Desktop does not accept or store a Tailscale auth key. Install Tailscale and sign
-in through Tailscale itself. Gateway bearer authentication remains mandatory,
-and the credential stays in Desktop's Gateway settings. When Desktop is connected
-to a remote ThinClaw profile, exposure must be configured on that remote host.
+in through Tailscale itself. Gateway bearer authentication remains the default;
+an operator may instead configure the explicit passwordless identity allowlist
+below. When Desktop is connected to a remote ThinClaw profile, exposure and
+identity mapping must be configured on that remote host.
 
 ## Prerequisites By Access Pattern
 
@@ -36,7 +37,7 @@ to a remote ThinClaw profile, exposure must be configured on that remote host.
 | Local-only gateway | ThinClaw running on the same machine, default loopback bind | Tailscale, public DNS, public tunnel |
 | SSH-tunneled WebUI | SSH access to the host, gateway bound to `127.0.0.1`, `GATEWAY_AUTH_TOKEN` | Public inbound port, public HTTPS URL |
 | Private LAN access | Gateway bound to a LAN interface or `0.0.0.0`, `GATEWAY_AUTH_TOKEN`, firewall allowing selected clients | Public tunnel |
-| Tailscale private access | Tailscale installed and authenticated on host/client, gateway reachable on tailnet, `GATEWAY_AUTH_TOKEN` | Tailscale Funnel, public exposure |
+| Tailscale private access | Tailscale installed and authenticated on host/client, gateway reachable on tailnet, plus `GATEWAY_AUTH_TOKEN` or an explicit `GATEWAY_TAILSCALE_PRINCIPALS` mapping | Tailscale Funnel, public exposure |
 | Public webhook tunnel | Public HTTPS tunnel URL, tunnel provider binary/token, webhook-capable channel config | SSH tunnel alone |
 | Reverse proxy public access | Reverse proxy, TLS certificate, DNS, firewall/rate-limit policy, `GATEWAY_AUTH_TOKEN` | Managed tunnel provider |
 
@@ -208,6 +209,25 @@ Then connect from a tailnet device:
 ```text
 http://<tailscale-ip>:3000/?token=<gateway-token>
 ```
+
+For passwordless, RBAC-bound access, map a current Tailscale user, node, or tag:
+
+```bash
+tailscale whois --json <client-tailscale-ip>
+```
+
+```env
+GATEWAY_TAILSCALE_PRINCIPALS='[
+  {"user_id":"5678","principal_id":"alice","role":"operator"}
+]'
+```
+
+With a direct tailnet bind, ThinClaw verifies the source through local
+`tailscale whois` on every request. With a successfully started managed
+tailnet-only Serve tunnel, keep `GATEWAY_HOST=127.0.0.1` and use a
+`user_login` selector; the runtime accepts Tailscale's identity header from
+loopback only. Funnel never permits this passwordless path. Keep the bearer
+token configured as a recovery credential.
 
 ## Webhook Delivery
 
