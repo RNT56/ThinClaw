@@ -489,6 +489,25 @@ fn valid_environment_name(name: &str) -> bool {
         })
 }
 
+/// Environment slots owned by the stdio launcher rather than by an MCP
+/// server configuration. These names are rejected on every platform so a
+/// portable configuration cannot weaken the private home/temp or executable
+/// search-path boundary when it is later used on another OS.
+pub(crate) fn stdio_launcher_owned_environment_name(name: &str) -> bool {
+    [
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "PATH",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+    ]
+    .iter()
+    .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
+
 fn secret_shaped_name(name: &str) -> bool {
     let normalized = name.to_ascii_lowercase();
     [
@@ -520,6 +539,13 @@ fn validate_stdio_environment(
                 reason: format!("Invalid MCP stdio environment name '{key}'"),
             });
         }
+        if stdio_launcher_owned_environment_name(key) {
+            return Err(ConfigError::InvalidConfig {
+                reason: format!(
+                    "MCP stdio environment slot '{key}' is owned by the isolated process launcher"
+                ),
+            });
+        }
         if secret_shaped_name(key) {
             return Err(ConfigError::InvalidConfig {
                 reason: format!(
@@ -541,6 +567,13 @@ fn validate_stdio_environment(
         if !valid_environment_name(key) {
             return Err(ConfigError::InvalidConfig {
                 reason: format!("Invalid MCP stdio secret environment name '{key}'"),
+            });
+        }
+        if stdio_launcher_owned_environment_name(key) {
+            return Err(ConfigError::InvalidConfig {
+                reason: format!(
+                    "MCP stdio secret environment slot '{key}' is owned by the isolated process launcher"
+                ),
             });
         }
         if env.contains_key(key) {
@@ -1146,6 +1179,35 @@ mod tests {
             .env
             .insert("API_KEY".to_string(), "plaintext".to_string());
         assert!(raw_secret.validate().is_err());
+
+        for reserved in [
+            "HOME",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "PATH",
+            "SystemRoot",
+            "WINDIR",
+            "ComSpec",
+        ] {
+            let mut public_override = McpServerConfig::new_stdio("reserved", "server", vec![]);
+            public_override
+                .env
+                .insert(reserved.to_string(), "override".to_string());
+            assert!(
+                public_override.validate().is_err(),
+                "accepted public {reserved}"
+            );
+
+            let mut secret_override = McpServerConfig::new_stdio("reserved", "server", vec![]);
+            secret_override
+                .secret_env
+                .insert(reserved.to_string(), Uuid::new_v4());
+            assert!(
+                secret_override.validate().is_err(),
+                "accepted secret {reserved}"
+            );
+        }
 
         let mut credential_argument = McpServerConfig::new_stdio(
             "argv",

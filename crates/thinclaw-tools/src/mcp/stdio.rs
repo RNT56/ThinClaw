@@ -17,7 +17,9 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
-use super::config::{McpStdioIsolation, McpStdioIsolationMode};
+use super::config::{
+    McpStdioIsolation, McpStdioIsolationMode, stdio_launcher_owned_environment_name,
+};
 use super::protocol::{McpError, McpNotification, McpRequest, McpResponse, McpTransportMessage};
 use crate::execution::OwnedChild;
 use thinclaw_platform::read_bounded_line;
@@ -1197,6 +1199,11 @@ fn validate_spawn_inputs(
                 "MCP stdio environment names must use ASCII letters, digits, and underscores and be at most {MAX_ENVIRONMENT_KEY_BYTES} bytes"
             )));
         }
+        if stdio_launcher_owned_environment_name(key) {
+            return Err(ToolError::InvalidParameters(format!(
+                "MCP stdio environment slot '{key}' is owned by the isolated process launcher"
+            )));
+        }
         if value.contains('\0') {
             return Err(ToolError::InvalidParameters(
                 "MCP stdio environment values cannot contain NUL bytes".to_string(),
@@ -1391,6 +1398,31 @@ mod tests {
         let mut invalid_env = BTreeMap::new();
         invalid_env.insert("BAD-NAME".to_string(), "value".to_string());
         assert!(validate_spawn_inputs("server", "server", &[], &invalid_env, &env).is_err());
+
+        for reserved in [
+            "HOME",
+            "TMPDIR",
+            "TMP",
+            "TEMP",
+            "PATH",
+            "SystemRoot",
+            "WINDIR",
+            "ComSpec",
+        ] {
+            let mut public_override = BTreeMap::new();
+            public_override.insert(reserved.to_string(), "override".to_string());
+            assert!(
+                validate_spawn_inputs("server", "server", &[], &public_override, &env).is_err(),
+                "accepted public {reserved}"
+            );
+
+            let mut secret_override = BTreeMap::new();
+            secret_override.insert(reserved.to_string(), "secret".to_string());
+            assert!(
+                validate_spawn_inputs("server", "server", &[], &env, &secret_override).is_err(),
+                "accepted secret {reserved}"
+            );
+        }
     }
 
     #[test]
