@@ -10634,7 +10634,8 @@ const SETTINGS_SCHEMA = {
     icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 2v20"/><path d="M2 12h20"/><path d="m4.93 4.93 14.14 14.14"/><path d="m19.07 4.93-14.14 14.14"/></svg>',
     fields: [
       { key: 'extensions.user_tools_dir', label: 'User tools dir', type: 'text', desc: 'Canonical operator-trusted user tool directory.' },
-      { key: 'extensions.allow_native_plugins', label: 'Native plugins', type: 'bool', desc: 'Allow unsafe .so/.dylib plugin loading after manifest and allowlist checks.' },
+      { key: 'extensions.allow_native_plugins', label: 'Native plugin admission', type: 'bool', desc: 'Admit signed native plugin manifests; loading also requires the separate unsafe compatibility flag.' },
+      { key: 'extensions.allow_unsafe_in_process_native_plugins', label: 'Unsafe in-process native compatibility', type: 'bool', desc: 'Allow admitted native plugins to load in-process with full host privileges and crash/compromise risk.' },
       { key: 'extensions.require_plugin_signatures', label: 'Require signatures', type: 'bool', desc: 'Require ed25519 signatures for broad plugin manifests.' },
       { key: 'extensions.native_plugin_allowlist_dirs', label: 'Native allowlist dirs', type: 'json', desc: 'JSON array of directories that may contain native plugin libraries.' },
       { key: 'extensions.contribution_manifest_dirs', label: 'Provider manifest dirs', type: 'json', desc: 'JSON array of directories containing host-mediated provider manifests.' },
