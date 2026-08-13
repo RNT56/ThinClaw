@@ -30,6 +30,10 @@ public final class WatchStore {
     /// A transient, human-readable error from the last failed action, if any.
     public private(set) var lastError: String?
 
+    /// Increments whenever local credentials/state are erased. Views use this
+    /// epoch to discard suspended action results and clear their local input.
+    public private(set) var deprovisionRevision: UInt64 = 0
+
     private let proxy: any WatchGatewayProxy
 
     public init(proxy: any WatchGatewayProxy) {
@@ -59,10 +63,25 @@ public final class WatchStore {
 
     /// Pull the latest mirrored snapshot and refresh the route badge.
     public func refresh() async {
+        let revision = deprovisionRevision
         route = proxy.currentRoute()
-        if let bundle = await proxy.refreshSnapshot() {
+        let refreshed = await proxy.refreshSnapshot()
+        guard revision == deprovisionRevision else { return }
+        if let bundle = refreshed {
             self.bundle = bundle
         }
+    }
+
+    /// Clear every in-memory projection when the session delegate erases the
+    /// underlying credential and mirrored files. This also removes transient
+    /// action/Quick Ask state that never reaches disk.
+    public func deprovision() {
+        deprovisionRevision &+= 1
+        bundle = nil
+        route = .queued
+        inFlightApprovalIDs.removeAll()
+        lastAskReceipt = nil
+        lastError = nil
     }
 
     // MARK: - Approvals
@@ -107,6 +126,7 @@ public final class WatchStore {
     }
 
     private func decide(id: String, action: String) async -> DecisionOutcome {
+        let revision = deprovisionRevision
         inFlightApprovalIDs.insert(id)
         defer { inFlightApprovalIDs.remove(id) }
 
@@ -114,6 +134,9 @@ public final class WatchStore {
         // honestly even if reachability flips mid-flight.
         let queued = proxy.currentRoute() == .queued
         let response = await proxy.approve(id: id, action: action)
+        guard revision == deprovisionRevision else {
+            return .failed("Re-provisioning — open ThinClaw on iPhone")
+        }
 
         switch response {
         case .accepted:
@@ -146,9 +169,19 @@ public final class WatchStore {
     /// Send a dictated prompt. Returns the receipt the Ask view renders as a
     /// "sent" / "will send when reachable" confirmation.
     public func quickAsk(_ prompt: String) async -> QuickAskReceipt {
+        let revision = deprovisionRevision
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let queued = proxy.currentRoute() == .queued
         let response = await proxy.quickAsk(prompt: trimmed)
+
+        guard revision == deprovisionRevision else {
+            // Never republish prompt text from a request that crossed a local
+            // wipe boundary.
+            return QuickAskReceipt(
+                generatedAt: .now,
+                text: "",
+                deliveryState: .failed)
+        }
 
         let state: QuickAskReceipt.DeliveryState
         switch response {

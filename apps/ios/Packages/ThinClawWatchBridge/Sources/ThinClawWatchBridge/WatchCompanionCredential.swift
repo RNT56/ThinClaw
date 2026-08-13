@@ -14,6 +14,8 @@
         public var serverFingerprint: String?
         public var instanceID: String
         public var installationID: String
+        public var provisioningGeneration: UInt64
+        public var controlAuthenticationKey: Data
 
         public init(from provisioning: CompanionProvisioning) {
             self.watchToken = provisioning.watchToken
@@ -23,6 +25,8 @@
             self.serverFingerprint = provisioning.serverFingerprint
             self.instanceID = provisioning.instanceID
             self.installationID = provisioning.installationID
+            self.provisioningGeneration = provisioning.provisioningGeneration
+            self.controlAuthenticationKey = provisioning.controlAuthenticationKey
         }
 
         /// The `DeviceCredential` shape the shared connection/policy layers
@@ -61,7 +65,20 @@
         /// The state the watch reports to the phone so it can decide whether to
         /// (re-)provision.
         public var reportedState: CompanionCredentialState {
-            CompanionCredentialState(hasCredential: true, companionDeviceID: companionDeviceID)
+            CompanionCredentialState(
+                hasCredential: true,
+                companionDeviceID: companionDeviceID,
+                provisioningGeneration: provisioningGeneration)
+        }
+
+        /// Control-only material used to verify a wipe. It deliberately omits
+        /// both bearer tokens.
+        public var controlMaterial: WatchControlMaterial {
+            WatchControlMaterial(
+                generation: provisioningGeneration,
+                installationID: installationID,
+                parentDeviceID: parentDeviceID,
+                authenticationKey: controlAuthenticationKey)
         }
     }
 #endif

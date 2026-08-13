@@ -70,6 +70,10 @@ final class AppCoordinator {
             dependencies.onSnapshotsPublished = { [watchProvisioning] status, approvals in
                 watchProvisioning.mirror(status: status, approvals: approvals)
             }
+            dependencies.onWillUnpair = { [watchProvisioning] in
+                await watchProvisioning.deprovisionAndTearDown()
+            }
+            watchProvisioning.resumePendingWipes()
         #endif
         reconcileLifecycle()
     }
@@ -115,8 +119,8 @@ final class AppCoordinator {
         reconcileLifecycle()
         #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
             if !paired {
-                AppLog.watchRelay.debug("Pairing state deprovisioned watch relay")
-                Task { await watchProvisioning.deprovisionAndTearDown() }
+                AppLog.watchRelay.debug("Pairing state retained pending Watch wipe delivery")
+                watchProvisioning.resumePendingWipes()
             }
         #endif
     }

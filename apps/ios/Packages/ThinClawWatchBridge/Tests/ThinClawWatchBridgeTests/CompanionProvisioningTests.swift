@@ -13,7 +13,9 @@ struct CompanionProvisioningTests {
             gatewayURLs: [URL(string: "https://host.local:3443")!],
             serverFingerprint: "fp-base64url",
             instanceID: "inst-xyz",
-            installationID: "install-1")
+            installationID: "install-1",
+            provisioningGeneration: 17,
+            controlAuthenticationKey: Data(repeating: 3, count: 32))
     }
 
     @Test("Provisioning payload round-trips through an application context")
@@ -30,6 +32,8 @@ struct CompanionProvisioningTests {
         #expect(payload.watchToken.hasPrefix("tcd_"))
         #expect(payload.parentDeviceID == "dev-phone-1")
         #expect(payload.companionDeviceID == "dev-watch-1")
+        #expect(payload.provisioningGeneration == 17)
+        #expect(payload.controlAuthenticationKey != Data(payload.watchToken.utf8))
     }
 
     @Test("A context with no provisioning payload decodes to nil")
@@ -62,8 +66,12 @@ struct CompanionCredentialStateTests {
     @Test("A matching credential does not need re-provisioning")
     func matchingCredentialIsStable() {
         let state = CompanionCredentialState(
-            hasCredential: true, companionDeviceID: "dev-watch-1")
-        #expect(!state.needsProvisioning(lastProvisionedDeviceID: "dev-watch-1"))
+            hasCredential: true,
+            companionDeviceID: "dev-watch-1",
+            provisioningGeneration: 3)
+        #expect(
+            !state.needsProvisioning(
+                lastProvisionedDeviceID: "dev-watch-1", expectedGeneration: 3))
     }
 
     @Test("A stale/foreign credential id triggers re-provisioning")
@@ -78,5 +86,24 @@ struct CompanionCredentialStateTests {
         let state = CompanionCredentialState(
             hasCredential: true, companionDeviceID: "dev-watch-1")
         #expect(state.needsProvisioning(lastProvisionedDeviceID: nil))
+    }
+
+    @Test("A legacy or stale generation is re-provisioned")
+    func staleGenerationReprovisioned() {
+        let legacy = CompanionCredentialState(
+            hasCredential: true,
+            companionDeviceID: "dev-watch-1",
+            provisioningGeneration: nil)
+        #expect(
+            legacy.needsProvisioning(
+                lastProvisionedDeviceID: "dev-watch-1", expectedGeneration: 4))
+
+        let stale = CompanionCredentialState(
+            hasCredential: true,
+            companionDeviceID: "dev-watch-1",
+            provisioningGeneration: 3)
+        #expect(
+            stale.needsProvisioning(
+                lastProvisionedDeviceID: "dev-watch-1", expectedGeneration: 4))
     }
 }

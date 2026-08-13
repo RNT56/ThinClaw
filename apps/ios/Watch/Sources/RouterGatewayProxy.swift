@@ -60,12 +60,12 @@
         func approve(id: String, action: String) async -> WatchRelayResponse {
             let outcome = await makeRouter().approve(
                 requestID: id, threadID: nil, action: action)
-            return Self.response(for: outcome)
+            return handleCredentialOutcome(Self.response(for: outcome))
         }
 
         func quickAsk(prompt: String) async -> WatchRelayResponse {
             let outcome = await makeRouter().quickAsk(prompt, threadID: nil)
-            return Self.response(for: outcome)
+            return handleCredentialOutcome(Self.response(for: outcome))
         }
 
         /// Serve the freshest mirrored bundle from the watch App Group. The
@@ -73,9 +73,16 @@
         /// pushing a new mirror, which lands via the session delegate — so the
         /// read here is always from the mirror the phone last wrote.
         func refreshSnapshot() async -> WatchSnapshotBundle? {
-            // Best-effort nudge for a fresh push; ignore the outcome (the mirror
-            // is authoritative and a later push supersedes anything queued).
-            _ = await makeRouter().refreshSnapshot()
+            guard delegate.credential != nil else { return nil }
+            // Best-effort nudge for a fresh push. A revoked response still owns
+            // the credential boundary; otherwise the mirror remains authoritative
+            // and a later push supersedes anything queued.
+            let outcome = await makeRouter().refreshSnapshot()
+            if case .completed(_, .reprovisionRequired) = outcome {
+                delegate.deprovisionRevokedCredential()
+                return nil
+            }
+            guard delegate.credential != nil else { return nil }
             guard let snapshotStore else { return nil }
             let status = try? snapshotStore.load(AgentStatusSnapshot.self)
             let approvals = try? snapshotStore.load(PendingApprovalsSnapshot.self)
@@ -96,6 +103,15 @@
             case .pendingSync:
                 return .failed(reason: "pending-sync")
             }
+        }
+
+        private func handleCredentialOutcome(
+            _ response: WatchRelayResponse
+        ) -> WatchRelayResponse {
+            if response == .reprovisionRequired {
+                delegate.deprovisionRevokedCredential()
+            }
+            return response
         }
     }
 #endif

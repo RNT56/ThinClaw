@@ -27,7 +27,7 @@ struct WatchSnapshotMirrorTests {
     @Test("Both snapshots round-trip through an application context")
     func roundTrips() throws {
         let context = try WatchSnapshotMirror.applicationContext(
-            status: status(), approvals: approvals())
+            status: status(), approvals: approvals(), provisioningGeneration: 12)
 
         let decodedStatus = WatchSnapshotMirror.status(from: context)
         let decodedApprovals = WatchSnapshotMirror.approvals(from: context)
@@ -36,6 +36,7 @@ struct WatchSnapshotMirrorTests {
         #expect(decodedStatus?.unreadCount == 2)
         #expect(decodedApprovals?.approvals.first?.id == "a-1")
         #expect(decodedApprovals?.approvals.first?.effectiveRisk == .low)
+        #expect(WatchSnapshotMirror.provisioningGeneration(from: context) == 12)
     }
 
     @Test("A provisioning-only context yields nil snapshots")
@@ -57,7 +58,7 @@ struct WatchSnapshotMirrorTests {
                     requestedAt: Date(timeIntervalSince1970: 90), risk: nil)
             ])
         let context = try WatchSnapshotMirror.applicationContext(
-            status: status(), approvals: legacy)
+            status: status(), approvals: legacy, provisioningGeneration: 12)
         let back = WatchSnapshotMirror.approvals(from: context)
         #expect(back?.approvals.first?.effectiveRisk == .high)
     }

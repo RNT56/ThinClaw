@@ -14,17 +14,24 @@ import ThinClawSnapshotKit
 public enum WatchSnapshotMirror {
     static let statusKey = "watchAgentStatus"
     static let approvalsKey = "watchPendingApprovals"
+    public static let generationKey = "watchProvisioningGeneration"
 
     /// Build an application-context dictionary carrying both snapshots.
     public static func applicationContext(
         status: AgentStatusSnapshot,
-        approvals: PendingApprovalsSnapshot
+        approvals: PendingApprovalsSnapshot,
+        provisioningGeneration: UInt64
     ) throws -> [String: Any] {
         let encoder = JSONEncoder()
         return [
             statusKey: try encoder.encode(status),
             approvalsKey: try encoder.encode(approvals),
+            generationKey: NSNumber(value: provisioningGeneration),
         ]
+    }
+
+    public static func provisioningGeneration(from context: [String: Any]) -> UInt64? {
+        (context[generationKey] as? NSNumber)?.uint64Value
     }
 
     /// Decode the mirrored status snapshot from a received context, or `nil` if

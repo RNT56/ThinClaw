@@ -38,11 +38,13 @@
         public func provisionIfNeeded(
             watchState: CompanionCredentialState,
             lastProvisionedDeviceID: String?,
-            instanceID: String
+            instanceID: String,
+            controlMaterial: WatchControlMaterial
         ) async throws -> CompanionProvisioning? {
             guard
                 watchState.needsProvisioning(
-                    lastProvisionedDeviceID: lastProvisionedDeviceID)
+                    lastProvisionedDeviceID: lastProvisionedDeviceID,
+                    expectedGeneration: controlMaterial.generation)
             else { return nil }
 
             let created = try await gateway.mintCompanion(name: companionName)
@@ -53,7 +55,9 @@
                 gatewayURLs: parentCredential.gatewayURLs,
                 serverFingerprint: parentCredential.serverFingerprint,
                 instanceID: instanceID,
-                installationID: parentCredential.installationID)
+                installationID: parentCredential.installationID,
+                provisioningGeneration: controlMaterial.generation,
+                controlAuthenticationKey: controlMaterial.authenticationKey)
         }
 
         /// Revoke the watch's companion on the gateway when the phone unpairs (or

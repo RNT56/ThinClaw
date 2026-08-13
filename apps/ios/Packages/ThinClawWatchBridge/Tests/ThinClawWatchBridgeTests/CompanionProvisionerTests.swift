@@ -44,13 +44,22 @@
                 companionName: "Apple Watch")
         }
 
+        private func controlMaterial() -> WatchControlMaterial {
+            WatchControlMaterial(
+                generation: 9,
+                installationID: "install-1",
+                parentDeviceID: "dev-phone-1",
+                authenticationKey: Data(repeating: 4, count: 32))
+        }
+
         @Test("Mints and builds a payload when the watch has no credential")
         func mintsWhenMissing() async throws {
             let gateway = MintGateway()
             let payload = try await provisioner(gateway).provisionIfNeeded(
                 watchState: CompanionCredentialState(hasCredential: false),
                 lastProvisionedDeviceID: nil,
-                instanceID: "inst-1")
+                instanceID: "inst-1",
+                controlMaterial: controlMaterial())
 
             #expect(gateway.mintCount == 1)
             #expect(payload?.watchToken == "tcd_watch_new")
@@ -60,6 +69,8 @@
             #expect(payload?.serverFingerprint == "fp")
             #expect(payload?.instanceID == "inst-1")
             #expect(payload?.installationID == "install-1")
+            #expect(payload?.provisioningGeneration == 9)
+            #expect(payload?.controlAuthenticationKey == Data(repeating: 4, count: 32))
         }
 
         @Test("Skips minting when the watch already holds the current credential")
@@ -67,9 +78,12 @@
             let gateway = MintGateway()
             let payload = try await provisioner(gateway).provisionIfNeeded(
                 watchState: CompanionCredentialState(
-                    hasCredential: true, companionDeviceID: "dev-watch-1"),
+                    hasCredential: true,
+                    companionDeviceID: "dev-watch-1",
+                    provisioningGeneration: 9),
                 lastProvisionedDeviceID: "dev-watch-1",
-                instanceID: "inst-1")
+                instanceID: "inst-1",
+                controlMaterial: controlMaterial())
 
             #expect(payload == nil)
             #expect(gateway.mintCount == 0)
@@ -82,7 +96,8 @@
                 watchState: CompanionCredentialState(
                     hasCredential: true, companionDeviceID: "dev-old"),
                 lastProvisionedDeviceID: "dev-watch-1",
-                instanceID: "inst-1")
+                instanceID: "inst-1",
+                controlMaterial: controlMaterial())
 
             #expect(gateway.mintCount == 1)
             #expect(payload?.companionDeviceID == "dev-watch-1")

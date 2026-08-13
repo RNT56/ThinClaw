@@ -83,6 +83,11 @@ final class AppDependencies {
     /// mirror carries exactly what the widgets show.
     var onSnapshotsPublished: (@MainActor (AgentStatusSnapshot, PendingApprovalsSnapshot) -> Void)?
 
+    /// Platform hook invoked before push removal or parent-device revoke. The
+    /// Watch implementation durably queues its authenticated local wipe here,
+    /// so every unpair/replacement entry point preserves the required ordering.
+    var onWillUnpair: (@MainActor () async -> Void)?
+
     #if canImport(ActivityKit)
         /// The agent-run Live Activity manager, built lazily from the paired
         /// session the first time a thread is observed. Owns at most one activity
@@ -601,6 +606,7 @@ final class AppDependencies {
     /// of the network result, tear down the live session, and flip back to
     /// onboarding.
     func unpair(revokeRemote: Bool = true) async {
+        await onWillUnpair?()
         let credential = (try? DeviceCredential.load(from: keychain)) ?? nil
         if let credential {
             // Clear the push registration first (needs the still-valid token),

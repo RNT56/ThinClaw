@@ -34,8 +34,15 @@ public struct CompanionProvisioning: Codable, Sendable, Equatable {
     public var instanceID: String
     /// Gateway installation id this credential belongs to.
     public var installationID: String
+    /// Monotonic phone-side provisioning generation. Mirrors and control
+    /// commands are accepted only for this generation (or a genuinely newer
+    /// provisioning after a wipe tombstone).
+    public var provisioningGeneration: UInt64
+    /// Dedicated HMAC key for token-free phone→Watch control commands. This is
+    /// neither the phone token nor the Watch companion token.
+    public var controlAuthenticationKey: Data
 
-    public static let currentVersion = 1
+    public static let currentVersion = 2
 
     public init(
         version: Int = CompanionProvisioning.currentVersion,
@@ -45,7 +52,9 @@ public struct CompanionProvisioning: Codable, Sendable, Equatable {
         gatewayURLs: [URL],
         serverFingerprint: String?,
         instanceID: String,
-        installationID: String
+        installationID: String,
+        provisioningGeneration: UInt64,
+        controlAuthenticationKey: Data
     ) {
         self.version = version
         self.watchToken = watchToken
@@ -55,6 +64,8 @@ public struct CompanionProvisioning: Codable, Sendable, Equatable {
         self.serverFingerprint = serverFingerprint
         self.instanceID = instanceID
         self.installationID = installationID
+        self.provisioningGeneration = provisioningGeneration
+        self.controlAuthenticationKey = controlAuthenticationKey
     }
 
     // MARK: - Application-context coding
@@ -92,12 +103,20 @@ public struct CompanionCredentialState: Codable, Sendable, Equatable {
     /// The companion `device_id` the watch believes it holds, if any — lets
     /// the phone detect a stale credential (mismatched parent, revoked id).
     public var companionDeviceID: String?
+    /// Generation of the credential held by the Watch. Nil is a legacy
+    /// credential, which the v2 phone replaces authoritatively.
+    public var provisioningGeneration: UInt64?
 
     public static let contextKey = "companionCredentialState"
 
-    public init(hasCredential: Bool, companionDeviceID: String? = nil) {
+    public init(
+        hasCredential: Bool,
+        companionDeviceID: String? = nil,
+        provisioningGeneration: UInt64? = nil
+    ) {
         self.hasCredential = hasCredential
         self.companionDeviceID = companionDeviceID
+        self.provisioningGeneration = provisioningGeneration
     }
 
     /// Whether the phone should mint/re-mint a companion for this watch given
@@ -107,8 +126,16 @@ public struct CompanionCredentialState: Codable, Sendable, Equatable {
     /// Re-provision when the watch has no credential, or when the watch holds a
     /// credential whose id does not match what the phone last minted (a stale
     /// or foreign credential — e.g. after the phone re-paired to a new gateway).
-    public func needsProvisioning(lastProvisionedDeviceID: String?) -> Bool {
+    public func needsProvisioning(
+        lastProvisionedDeviceID: String?,
+        expectedGeneration: UInt64? = nil
+    ) -> Bool {
         guard hasCredential else { return true }
+        if let expectedGeneration,
+            provisioningGeneration != expectedGeneration
+        {
+            return true
+        }
         guard let expected = lastProvisionedDeviceID else {
             // Watch claims a credential but the phone has no record of minting
             // one (fresh phone install / re-pair): re-mint to be authoritative.

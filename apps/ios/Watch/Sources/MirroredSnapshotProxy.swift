@@ -23,6 +23,7 @@ final class MirroredSnapshotProxy: WatchGatewayProxy {
     /// `nonisolated` so it is usable from the `nonisolated` default-argument
     /// context in ``init(store:)`` under the Swift 6 language mode.
     nonisolated static let watchAppGroupID = "group.com.thinclaw.shared.watch"
+    private nonisolated static let deprovisionedKey = "watch-is-deprovisioned-v1"
 
     private let store: SnapshotStore?
 
@@ -45,6 +46,10 @@ final class MirroredSnapshotProxy: WatchGatewayProxy {
     }
 
     func refreshSnapshot() async -> WatchSnapshotBundle? {
+        guard
+            UserDefaults(suiteName: Self.watchAppGroupID)?.bool(
+                forKey: Self.deprovisionedKey) != true
+        else { return nil }
         guard let store else { return nil }
         let status = try? store.load(AgentStatusSnapshot.self)
         let approvals = try? store.load(PendingApprovalsSnapshot.self)

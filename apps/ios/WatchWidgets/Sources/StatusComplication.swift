@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import ThinClawSnapshotKit
 import WidgetKit
@@ -50,6 +51,7 @@ struct ComplicationProvider: TimelineProvider {
     /// The watch-local App Group that mirrors phone snapshots (matches the
     /// widget + watch entitlements).
     static let watchAppGroupID = "group.com.thinclaw.shared.watch"
+    private static let deprovisionedKey = "watch-is-deprovisioned-v1"
 
     /// Modest scheduled cadence; the bridge triggers `WidgetCenter` reloads on
     /// a fresh mirror for timeliness, so this is only a backstop.
@@ -75,6 +77,13 @@ struct ComplicationProvider: TimelineProvider {
     /// missing file, corrupt, newer schema) degrades to a "no data" entry and
     /// never crashes the extension.
     private static func currentEntry() -> ComplicationEntry {
+        // The Watch app publishes this privacy gate before erasing mirrors. It
+        // prevents a file that survived an I/O failure from resurfacing through
+        // the extension, which cannot inspect the Watch Keychain itself.
+        if UserDefaults(suiteName: watchAppGroupID)?.bool(forKey: deprovisionedKey) == true {
+            return ComplicationEntry(
+                date: .now, phase: nil, pendingCount: 0, isStale: false)
+        }
         let store = SnapshotStore(appGroupID: watchAppGroupID)
         let status = store.flatMap { try? $0.load(AgentStatusSnapshot.self) } ?? nil
         let approvals = store.flatMap { try? $0.load(PendingApprovalsSnapshot.self) } ?? nil

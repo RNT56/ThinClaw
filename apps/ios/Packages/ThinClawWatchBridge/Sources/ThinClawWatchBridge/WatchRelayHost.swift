@@ -30,11 +30,17 @@
         private let responder: WatchRelayResponder
         private let provisioner: CompanionProvisioner
         private let session: WCSession
+        private let controlMaterial: WatchControlMaterial
+        private let onCompanionProvisioned: @MainActor @Sendable (String, UInt64) -> Void
+        private let onWipeAcknowledged: @MainActor @Sendable (WatchWipeAcknowledgement) -> Void
 
         /// The companion device id the phone last minted this run — used to
         /// decide whether the watch's reported credential is stale, and to
         /// deprovision on unpair.
         private var lastProvisionedDeviceID: String?
+        /// Once unpair begins, never mint, mirror, or start another relayed
+        /// action while the explicit companion revoke is in flight.
+        private var isDeprovisioning = false
 
         /// Build a host over the phone's paired credential. `instanceID` is the
         /// gateway instance id captured at pairing (D-X3) — forwarded to the
@@ -44,6 +50,15 @@
             parentCredential: DeviceCredential,
             instanceID: String,
             companionName: String,
+            controlMaterial: WatchControlMaterial,
+            lastProvisionedDeviceID: String? = nil,
+            onCompanionProvisioned: @escaping @MainActor @Sendable (String, UInt64) -> Void = {
+                _, _ in
+            },
+            onWipeAcknowledged:
+                @escaping @MainActor @Sendable (
+                    WatchWipeAcknowledgement
+                ) -> Void = { _ in },
             gateway: (any WatchBridgeGateway)? = nil,
             session: WCSession = .default
         ) {
@@ -56,6 +71,10 @@
                 parentCredential: parentCredential,
                 companionName: companionName)
             self.session = session
+            self.controlMaterial = controlMaterial
+            self.lastProvisionedDeviceID = lastProvisionedDeviceID
+            self.onCompanionProvisioned = onCompanionProvisioned
+            self.onWipeAcknowledged = onWipeAcknowledged
             super.init()
         }
 
@@ -68,10 +87,17 @@
             }
         }
 
+        /// Close the relay/provisioning boundary synchronously before unpair
+        /// starts any asynchronous network revoke.
+        public func beginDeprovisioning() {
+            isDeprovisioning = true
+        }
+
         /// Best-effort deprovision (DELETE the companion) before the app tears
         /// the host down on unpair. The parent-revoke cascade would also cover
         /// this, but an explicit delete keeps a still-paired phone tidy.
         public func deprovisionCompanion() async {
+            beginDeprovisioning()
             guard let deviceID = lastProvisionedDeviceID else { return }
             try? await provisioner.deprovision(companionDeviceID: deviceID)
             lastProvisionedDeviceID = nil
@@ -84,10 +110,12 @@
             status: AgentStatusSnapshot,
             approvals: PendingApprovalsSnapshot
         ) {
-            guard session.activationState == .activated else { return }
+            guard !isDeprovisioning, session.activationState == .activated else { return }
             guard
                 let context = try? WatchSnapshotMirror.applicationContext(
-                    status: status, approvals: approvals)
+                    status: status,
+                    approvals: approvals,
+                    provisioningGeneration: controlMaterial.generation)
             else { return }
             try? session.updateApplicationContext(context)
             // Complications refresh on a separate, budgeted channel. The
@@ -107,15 +135,28 @@
         /// needs one. Merges the provisioning payload into the current app
         /// context so a concurrent snapshot push is not clobbered.
         private func provisionIfNeeded(reportedBy watchState: CompanionCredentialState) {
+            guard !isDeprovisioning else { return }
             Task { @MainActor in
                 do {
+                    guard !isDeprovisioning else { return }
                     guard
                         let payload = try await provisioner.provisionIfNeeded(
                             watchState: watchState,
                             lastProvisionedDeviceID: lastProvisionedDeviceID,
-                            instanceID: instanceID)
+                            instanceID: instanceID,
+                            controlMaterial: controlMaterial)
                     else { return }
+                    guard !isDeprovisioning else {
+                        // A mint already in flight when unpair began must not
+                        // leave a fresh companion behind or publish its token.
+                        try? await provisioner.deprovision(
+                            companionDeviceID: payload.companionDeviceID)
+                        return
+                    }
                     lastProvisionedDeviceID = payload.companionDeviceID
+                    onCompanionProvisioned(
+                        payload.companionDeviceID,
+                        payload.provisioningGeneration)
                     if let context = try? payload.applicationContext() {
                         try? session.updateApplicationContext(context)
                     }
@@ -132,12 +173,25 @@
             message: [String: Any],
             reply: @escaping ([String: Any]) -> Void
         ) {
+            if let acknowledgement = try? WatchWipeAcknowledgement.fromPayload(message) {
+                onWipeAcknowledged(acknowledgement)
+                reply([:])
+                return
+            }
+            guard !isDeprovisioning else {
+                reply((try? WatchRelayResponse.reprovisionRequired.messagePayload()) ?? [:])
+                return
+            }
             guard let envelope = try? WatchRelayEnvelope.fromMessage(message) else {
                 reply((try? WatchRelayResponse.failed(reason: "malformed").messagePayload()) ?? [:])
                 return
             }
             let phoneToken = parentCredential.deviceToken
             Task { @MainActor in
+                guard !isDeprovisioning else {
+                    reply((try? WatchRelayResponse.reprovisionRequired.messagePayload()) ?? [:])
+                    return
+                }
                 let response = await responder.answer(envelope, phoneToken: phoneToken)
                 reply((try? response.messagePayload()) ?? [:])
             }
@@ -188,6 +242,12 @@
             _ session: WCSession,
             didReceiveApplicationContext applicationContext: [String: Any]
         ) {
+            if let acknowledgement = try? WatchWipeAcknowledgement.fromPayload(
+                applicationContext)
+            {
+                onWipeAcknowledged(acknowledgement)
+            }
+            guard !isDeprovisioning else { return }
             // The watch reports its credential state via context so the phone can
             // (re-)provision without a round-trip.
             if let data = applicationContext[CompanionCredentialState.contextKey] as? Data,
@@ -201,11 +261,17 @@
             _ session: WCSession,
             didReceiveUserInfo userInfo: [String: Any] = [:]
         ) {
+            if let acknowledgement = try? WatchWipeAcknowledgement.fromPayload(userInfo) {
+                onWipeAcknowledged(acknowledgement)
+                return
+            }
+            guard !isDeprovisioning else { return }
             // A queued watch RPC arriving via transferUserInfo (no live reply
             // channel). Forward it; the outcome flows back as a snapshot/context.
             guard let envelope = try? WatchRelayEnvelope.fromMessage(userInfo) else { return }
             let phoneToken = parentCredential.deviceToken
             Task { @MainActor in
+                guard !isDeprovisioning else { return }
                 _ = await responder.answer(envelope, phoneToken: phoneToken)
             }
         }

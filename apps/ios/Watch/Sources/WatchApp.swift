@@ -53,6 +53,9 @@ struct ThinClawWatchApp: App {
             delegate.onMirror = { [weak store] in
                 Task { await store?.refresh() }
             }
+            delegate.onDeprovision = { [weak store] in
+                store?.deprovision()
+            }
         }
 
         /// Activate the `WCSession` (idempotent). Called on first appearance.

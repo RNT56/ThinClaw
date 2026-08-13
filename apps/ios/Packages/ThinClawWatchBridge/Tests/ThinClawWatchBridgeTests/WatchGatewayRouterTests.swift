@@ -115,6 +115,22 @@
             #expect(relay.relayedEnvelope == nil)
         }
 
+        @Test("After local wipe, no stale token can relay, go direct, or enter the queue")
+        func wipedCredentialCannotAct() async {
+            let relay = StubRelay(reachable: true, result: .success(.accepted))
+            let direct = StubDirect(reachable: false, result: .success(.accepted))
+            let queue = SpyQueue()
+
+            let outcome = await proxy(
+                relay: relay, direct: direct, queue: queue, token: nil
+            ).approve(requestID: "r", threadID: nil, action: "deny")
+
+            #expect(outcome == .pendingSync)
+            #expect(relay.relayedEnvelope == nil)
+            #expect(!direct.called)
+            #expect(queue.enqueued.isEmpty)
+        }
+
         @Test("refreshSnapshot never queues — it reports pendingSync when offline")
         func snapshotDoesNotQueue() async {
             let relay = StubRelay(reachable: false, result: .success(.accepted))

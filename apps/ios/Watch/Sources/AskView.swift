@@ -17,7 +17,6 @@ struct AskView: View {
 
     @State private var prompt: String = ""
     @State private var isSending = false
-    @State private var receipt: QuickAskReceipt?
 
     private var trimmed: String {
         prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -49,22 +48,27 @@ struct AskView: View {
                 .disabled(trimmed.isEmpty || isSending)
             }
 
-            if let receipt {
+            if let receipt = store.lastAskReceipt {
                 Section {
                     ReceiptView(receipt: receipt)
                 }
             }
         }
         .navigationTitle("Ask")
+        .onChange(of: store.deprovisionRevision) { _, _ in
+            prompt = ""
+            isSending = false
+        }
     }
 
     private func send() {
         guard !trimmed.isEmpty, !isSending else { return }
         isSending = true
+        let revision = store.deprovisionRevision
         Task {
             let result = await store.quickAsk(trimmed)
+            guard revision == store.deprovisionRevision else { return }
             isSending = false
-            receipt = result
             play(for: result.deliveryState)
             if result.deliveryState != .failed {
                 prompt = ""
