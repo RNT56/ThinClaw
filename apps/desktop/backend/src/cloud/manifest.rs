@@ -18,12 +18,22 @@ pub const MAX_ARCHIVE_FILE_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_MANIFEST_FILES: usize = 50_000;
 /// Maximum decrypted JSON size accepted for an archive manifest.
 pub const MAX_MANIFEST_JSON_BYTES: usize = 8 * 1024 * 1024;
+pub const CURRENT_MANIFEST_VERSION: u32 = 2;
 
 /// Top-level archive manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveManifest {
-    /// Manifest format version (currently 1)
+    /// Manifest format version.
     pub version: u32,
+    /// Stable identity shared by every revision of one archive.
+    #[serde(default)]
+    pub archive_id: String,
+    /// Monotonic revision number incremented for every committed mutation.
+    #[serde(default)]
+    pub generation: u64,
+    /// Writer that produced this revision (opaque UUID, not a device name).
+    #[serde(default)]
+    pub writer_id: String,
     /// App version that created this archive
     pub app_version: String,
     /// Database schema migration count
@@ -134,7 +144,10 @@ impl ArchiveManifest {
     /// Create a new empty manifest.
     pub fn new(app_version: String, schema_version: u32, key_id: String) -> Self {
         Self {
-            version: 1,
+            version: CURRENT_MANIFEST_VERSION,
+            archive_id: uuid::Uuid::new_v4().to_string(),
+            generation: 0,
+            writer_id: uuid::Uuid::new_v4().to_string(),
             app_version,
             schema_version,
             created_at_ms: chrono::Utc::now().timestamp_millis(),
@@ -216,11 +229,40 @@ impl ArchiveManifest {
         serde_json::from_slice(data)
     }
 
+    /// Upgrade an authenticated v1 manifest in memory. The upgraded manifest
+    /// is published only through provider-native CAS by the live coordinator.
+    pub fn migrate_to_v2(&mut self, writer_id: &str) -> Result<bool, String> {
+        match self.version {
+            1 => {
+                self.version = CURRENT_MANIFEST_VERSION;
+                self.archive_id = uuid::Uuid::new_v4().to_string();
+                self.generation = 0;
+                self.writer_id = writer_id.to_string();
+                Ok(true)
+            }
+            CURRENT_MANIFEST_VERSION => Ok(false),
+            version => Err(format!("unsupported manifest version {version}")),
+        }
+    }
+
+    pub fn advance_revision(&mut self, writer_id: &str) {
+        self.version = CURRENT_MANIFEST_VERSION;
+        self.generation = self.generation.saturating_add(1);
+        self.writer_id = writer_id.to_string();
+        self.created_at_ms = chrono::Utc::now().timestamp_millis();
+    }
+
     /// Validate all attacker-controlled manifest metadata before any object is
     /// fetched or destination path is created.
     pub fn validate_structure(&self) -> Result<(), String> {
-        if self.version != 1 {
+        if !matches!(self.version, 1 | CURRENT_MANIFEST_VERSION) {
             return Err(format!("unsupported manifest version {}", self.version));
+        }
+        if self.version == CURRENT_MANIFEST_VERSION
+            && (uuid::Uuid::parse_str(&self.archive_id).is_err()
+                || uuid::Uuid::parse_str(&self.writer_id).is_err())
+        {
+            return Err("manifest v2 has an invalid archive or writer identity".to_string());
         }
         if self.encryption.algorithm != "AES-256-GCM"
             || self.encryption.key_derivation != "HKDF-SHA256"
@@ -466,7 +508,7 @@ mod tests {
         let json = manifest.to_json().unwrap();
         let restored = ArchiveManifest::from_json(&json).unwrap();
 
-        assert_eq!(restored.version, 1);
+        assert_eq!(restored.version, CURRENT_MANIFEST_VERSION);
         assert_eq!(restored.files.len(), 2);
         assert_eq!(restored.statistics.total_files, 2);
         assert_eq!(restored.files[0].file_type, FileType::Database);
@@ -560,7 +602,7 @@ mod tests {
         let json = manifest.to_json().unwrap();
         let json_str = String::from_utf8_lossy(&json);
 
-        assert!(json_str.contains("\"version\": 1"));
+        assert!(json_str.contains("\"version\": 2"));
         assert!(json_str.contains("\"app_version\": \"2.5.0\""));
         assert!(json_str.contains("\"schema_version\": 42"));
         assert!(json_str.contains("\"algorithm\": \"AES-256-GCM\""));
@@ -628,7 +670,7 @@ mod tests {
 
         assert!(restored.files.is_empty());
         assert_eq!(restored.statistics.total_files, 0);
-        assert_eq!(restored.version, 1);
+        assert_eq!(restored.version, CURRENT_MANIFEST_VERSION);
     }
 
     #[test]
@@ -679,5 +721,24 @@ mod tests {
 
         let result = ArchiveManifest::from_json(b"{\"version\":1}");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn v1_manifest_migrates_to_v2_without_changing_files() {
+        let mut manifest = ArchiveManifest::new("0.1.0".into(), 1, "key".into());
+        manifest.add_file("object.enc".into(), "document.txt".into(), b"hello", 33);
+        manifest.version = 1;
+        manifest.archive_id.clear();
+        manifest.writer_id.clear();
+        let files = manifest.files.clone();
+        let writer_id = uuid::Uuid::new_v4().to_string();
+
+        assert!(manifest.migrate_to_v2(&writer_id).unwrap());
+        assert_eq!(manifest.version, CURRENT_MANIFEST_VERSION);
+        assert_eq!(manifest.generation, 0);
+        assert_eq!(manifest.writer_id, writer_id);
+        assert_eq!(manifest.files.len(), files.len());
+        assert_eq!(manifest.files[0].sha256, files[0].sha256);
+        manifest.validate_structure().unwrap();
     }
 }

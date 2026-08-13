@@ -15,7 +15,8 @@ const MAX_LIST_ENTRIES: usize = 100_000;
 use super::super::provider::{
     opendal_timestamp_millis, primary_object_root, should_read_legacy_object_root,
     validate_object_key, validate_object_prefix, validate_provider_config, CloudEntry, CloudError,
-    CloudProvider, CloudProviderConfig, CloudStatus, LEGACY_OBJECT_ROOT,
+    CloudProvider, CloudProviderConfig, CloudStatus, CloudSyncCapability, ObjectVersion,
+    VersionedObject, LEGACY_OBJECT_ROOT,
 };
 
 /// S3-compatible storage provider.
@@ -249,6 +250,15 @@ impl CloudProvider for S3Provider {
         })
     }
 
+    fn sync_capability(&self) -> CloudSyncCapability {
+        let capability = self.operator.info().full_capability();
+        if capability.write_with_if_match && capability.write_with_if_not_exists {
+            CloudSyncCapability::StrongCas
+        } else {
+            CloudSyncCapability::BackupOnly
+        }
+    }
+
     async fn put(&self, key: &str, data: &[u8]) -> Result<(), CloudError> {
         validate_object_key(key)?;
         debug!("[cloud/s3] PUT {} ({} bytes)", key, data.len());
@@ -274,6 +284,88 @@ impl CloudProvider for S3Provider {
             }
             Err(e) => Err(e),
         }
+    }
+
+    async fn get_versioned_bounded(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<VersionedObject, CloudError> {
+        validate_object_key(key)?;
+        if self.sync_capability() != CloudSyncCapability::StrongCas {
+            return Err(CloudError::StrongCasUnavailable(self.name().to_string()));
+        }
+        let metadata = self.operator.stat(key).await.map_err(|error| {
+            if error.kind() == opendal::ErrorKind::NotFound {
+                CloudError::NotFound(format!("S3 key not found: '{key}'"))
+            } else {
+                CloudError::DownloadFailed(format!("S3 stat '{key}': {error}"))
+            }
+        })?;
+        if metadata.content_length() > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+            return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+        }
+        let etag = metadata
+            .etag()
+            .ok_or_else(|| CloudError::StrongCasUnavailable(self.name().to_string()))?;
+        let version = ObjectVersion::new(etag)?;
+        let data = self
+            .operator
+            .read_with(key)
+            .if_match(version.as_str())
+            .await
+            .map_err(|error| match error.kind() {
+                opendal::ErrorKind::ConditionNotMatch => CloudError::ArchiveConflict,
+                opendal::ErrorKind::NotFound => {
+                    CloudError::NotFound(format!("S3 key not found: '{key}'"))
+                }
+                _ => CloudError::DownloadFailed(format!("S3 GET '{key}': {error}")),
+            })?;
+        if data.len() > max_bytes {
+            return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+        }
+        Ok(VersionedObject {
+            data: data.to_vec(),
+            version,
+        })
+    }
+
+    async fn put_if_version(
+        &self,
+        key: &str,
+        data: &[u8],
+        expected: Option<&ObjectVersion>,
+    ) -> Result<ObjectVersion, CloudError> {
+        validate_object_key(key)?;
+        if self.sync_capability() != CloudSyncCapability::StrongCas {
+            return Err(CloudError::StrongCasUnavailable(self.name().to_string()));
+        }
+        let result = match expected {
+            Some(version) => {
+                self.operator
+                    .write_with(key, data.to_vec())
+                    .if_match(version.as_str())
+                    .await
+            }
+            None => {
+                self.operator
+                    .write_with(key, data.to_vec())
+                    .if_not_exists(true)
+                    .await
+            }
+        };
+        result.map_err(|error| match error.kind() {
+            opendal::ErrorKind::ConditionNotMatch => CloudError::ArchiveConflict,
+            _ => CloudError::UploadFailed(format!("S3 conditional PUT '{key}': {error}")),
+        })?;
+        let metadata = self.operator.stat(key).await.map_err(|error| {
+            CloudError::UploadFailed(format!("S3 stat after conditional PUT '{key}': {error}"))
+        })?;
+        ObjectVersion::new(
+            metadata
+                .etag()
+                .ok_or_else(|| CloudError::StrongCasUnavailable(self.name().to_string()))?,
+        )
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudError> {

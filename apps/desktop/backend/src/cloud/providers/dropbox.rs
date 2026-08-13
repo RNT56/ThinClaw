@@ -19,6 +19,7 @@ use super::super::oauth::OAuthManager;
 use super::super::provider::{
     bounded_download_body, bounded_error_body, bounded_metadata_json, validate_object_key,
     validate_object_prefix, CloudEntry, CloudError, CloudProvider, CloudStatus,
+    CloudSyncCapability, ObjectVersion, VersionedObject,
 };
 
 /// Dropbox API base URLs.
@@ -56,6 +57,8 @@ struct DropboxFileMetadata {
     tag: String,
     #[serde(default)]
     path_display: String,
+    #[serde(default)]
+    rev: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -463,6 +466,10 @@ impl CloudProvider for DropboxProvider {
         })
     }
 
+    fn sync_capability(&self) -> CloudSyncCapability {
+        CloudSyncCapability::StrongCas
+    }
+
     async fn put(&self, key: &str, data: &[u8]) -> Result<(), CloudError> {
         validate_object_key(key)?;
         let token = self.access_token().await?;
@@ -555,6 +562,122 @@ impl CloudProvider for DropboxProvider {
             }
             Err(error) => Err(error),
         }
+    }
+
+    async fn get_versioned_bounded(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<VersionedObject, CloudError> {
+        validate_object_key(key)?;
+        let token = self.access_token().await?;
+        let path = Self::key_to_path(key);
+        let response = self
+            .client
+            .post(format!("{}/files/get_metadata", API_URL))
+            .bearer_auth(&token)
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({ "path": path }))
+            .send()
+            .await
+            .map_err(|error| CloudError::DownloadFailed(format!("metadata '{key}': {error}")))?;
+        if response.status().as_u16() == 409 {
+            return Err(CloudError::NotFound(key.to_string()));
+        }
+        if response.status().as_u16() == 401 {
+            return Err(CloudError::AuthFailed(
+                "Dropbox rejected the refreshed access token".to_string(),
+            ));
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = bounded_error_body(response).await;
+            return Err(CloudError::DownloadFailed(format!(
+                "metadata '{key}' failed ({status}): {body}"
+            )));
+        }
+        let metadata: DropboxFileMetadata =
+            bounded_metadata_json(response, "parse Dropbox file metadata").await?;
+        if metadata.tag != "file" || metadata.size > max_bytes as u64 {
+            return if metadata.size > max_bytes as u64 {
+                Err(CloudError::ObjectTooLarge { limit: max_bytes })
+            } else {
+                Err(CloudError::DownloadFailed(format!(
+                    "Dropbox object '{key}' is not a file"
+                )))
+            };
+        }
+        let version = ObjectVersion::new(metadata.rev)?;
+        // Address the exact revision so metadata and content cannot race.
+        let data = self
+            .get_from_path(key, format!("rev:{}", version.as_str()), max_bytes)
+            .await?;
+        Ok(VersionedObject { data, version })
+    }
+
+    async fn put_if_version(
+        &self,
+        key: &str,
+        data: &[u8],
+        expected: Option<&ObjectVersion>,
+    ) -> Result<ObjectVersion, CloudError> {
+        validate_object_key(key)?;
+        if data.len() > SIMPLE_UPLOAD_LIMIT {
+            return Err(CloudError::ObjectTooLarge {
+                limit: SIMPLE_UPLOAD_LIMIT,
+            });
+        }
+        let token = self.access_token().await?;
+        self.ensure_parent_folders(&token, key).await?;
+        let mode = match expected {
+            Some(version) => serde_json::json!({
+                ".tag": "update",
+                "update": version.as_str()
+            }),
+            None => serde_json::json!("add"),
+        };
+        let api_arg = serde_json::json!({
+            "path": Self::key_to_path(key),
+            "mode": mode,
+            "autorename": false,
+            "mute": true,
+            "strict_conflict": true
+        });
+        let response = self
+            .client
+            .post(format!("{}/files/upload", CONTENT_URL))
+            .bearer_auth(&token)
+            .header("Dropbox-API-Arg", api_arg.to_string())
+            .header("Content-Type", "application/octet-stream")
+            .body(data.to_vec())
+            .send()
+            .await
+            .map_err(|error| {
+                CloudError::UploadFailed(format!("conditional upload '{key}': {error}"))
+            })?;
+        if response.status().as_u16() == 409 {
+            return Err(CloudError::ArchiveConflict);
+        }
+        if response.status().as_u16() == 401 {
+            return Err(CloudError::AuthFailed(
+                "Dropbox rejected the refreshed access token".to_string(),
+            ));
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = bounded_error_body(response).await;
+            return Err(CloudError::UploadFailed(format!(
+                "conditional upload '{key}' failed ({status}): {body}"
+            )));
+        }
+        let uploaded: DropboxFileMetadata =
+            bounded_metadata_json(response, "parse Dropbox conditional upload result").await?;
+        if uploaded.tag != "file" || uploaded.size != data.len() as u64 {
+            return Err(CloudError::UploadFailed(format!(
+                "Dropbox conditional upload verification failed for '{key}'"
+            )));
+        }
+        ObjectVersion::new(uploaded.rev)
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudError> {

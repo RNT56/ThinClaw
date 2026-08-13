@@ -18,6 +18,7 @@ use super::super::oauth::OAuthManager;
 use super::super::provider::{
     bounded_download_body, bounded_error_body, bounded_metadata_json, validate_object_key,
     validate_object_prefix, CloudEntry, CloudError, CloudProvider, CloudStatus,
+    CloudSyncCapability, ObjectVersion, VersionedObject,
 };
 
 /// Microsoft Graph API base URL.
@@ -60,6 +61,8 @@ struct DriveItem {
     #[serde(default)]
     #[allow(dead_code)]
     folder: Option<DriveItemFolder>,
+    #[serde(default, rename = "eTag")]
+    e_tag: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -512,6 +515,10 @@ impl CloudProvider for OneDriveProvider {
         })
     }
 
+    fn sync_capability(&self) -> CloudSyncCapability {
+        CloudSyncCapability::StrongCas
+    }
+
     async fn put(&self, key: &str, data: &[u8]) -> Result<(), CloudError> {
         validate_object_key(key)?;
         let token = self.access_token().await?;
@@ -602,6 +609,138 @@ impl CloudProvider for OneDriveProvider {
             }
             Err(error) => Err(error),
         }
+    }
+
+    async fn get_versioned_bounded(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<VersionedObject, CloudError> {
+        validate_object_key(key)?;
+        let token = self.access_token().await?;
+        let path = Self::key_to_graph_path(key);
+        let metadata_response = self
+            .client
+            .get(format!("{GRAPH_URL}/{path}?$select=eTag,size,file"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|error| CloudError::DownloadFailed(format!("metadata '{key}': {error}")))?;
+        if metadata_response.status().as_u16() == 404 {
+            return Err(CloudError::NotFound(key.to_string()));
+        }
+        if metadata_response.status().as_u16() == 401 {
+            return Err(CloudError::AuthFailed(
+                "OneDrive rejected the refreshed access token".to_string(),
+            ));
+        }
+        if !metadata_response.status().is_success() {
+            let status = metadata_response.status();
+            let body = bounded_error_body(metadata_response).await;
+            return Err(CloudError::DownloadFailed(format!(
+                "metadata '{key}' failed ({status}): {body}"
+            )));
+        }
+        let item: DriveItem =
+            bounded_metadata_json(metadata_response, "parse OneDrive file metadata").await?;
+        if item.file.is_none() {
+            return Err(CloudError::DownloadFailed(format!(
+                "OneDrive object '{key}' is not a file"
+            )));
+        }
+        if item.size > max_bytes as u64 {
+            return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+        }
+        let version = ObjectVersion::new(item.e_tag)?;
+        let mut response = self
+            .client
+            .get(format!("{GRAPH_URL}/{path}/content"))
+            .bearer_auth(&token)
+            .header(reqwest::header::IF_MATCH, version.as_str())
+            .send()
+            .await
+            .map_err(|error| CloudError::DownloadFailed(format!("download '{key}': {error}")))?;
+        if response.status().as_u16() == 412 {
+            return Err(CloudError::ArchiveConflict);
+        }
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    CloudError::DownloadFailed(
+                        "OneDrive returned a redirect without a location".to_string(),
+                    )
+                })?;
+            validate_onedrive_download_url(location)?;
+            response = self.client.get(location).send().await.map_err(|error| {
+                CloudError::DownloadFailed(format!("download '{key}': {error}"))
+            })?;
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = bounded_error_body(response).await;
+            return Err(CloudError::DownloadFailed(format!(
+                "download '{key}' failed ({status}): {body}"
+            )));
+        }
+        let data = bounded_download_body(response, max_bytes).await?;
+        Ok(VersionedObject { data, version })
+    }
+
+    async fn put_if_version(
+        &self,
+        key: &str,
+        data: &[u8],
+        expected: Option<&ObjectVersion>,
+    ) -> Result<ObjectVersion, CloudError> {
+        validate_object_key(key)?;
+        if data.len() > RESUMABLE_UPLOAD_THRESHOLD {
+            return Err(CloudError::ObjectTooLarge {
+                limit: RESUMABLE_UPLOAD_THRESHOLD,
+            });
+        }
+        let token = self.access_token().await?;
+        self.ensure_parent_folders(&token, key).await?;
+        let mut request = self
+            .client
+            .put(format!(
+                "{GRAPH_URL}/{}/content",
+                Self::key_to_graph_path(key)
+            ))
+            .bearer_auth(&token)
+            .header("Content-Type", "application/octet-stream");
+        request = match expected {
+            Some(version) => request.header(reqwest::header::IF_MATCH, version.as_str()),
+            None => request.header(reqwest::header::IF_NONE_MATCH, "*"),
+        };
+        let response = request.body(data.to_vec()).send().await.map_err(|error| {
+            CloudError::UploadFailed(format!("conditional upload '{key}': {error}"))
+        })?;
+        if matches!(response.status().as_u16(), 409 | 412) {
+            return Err(CloudError::ArchiveConflict);
+        }
+        if response.status().as_u16() == 401 {
+            return Err(CloudError::AuthFailed(
+                "OneDrive rejected the refreshed access token".to_string(),
+            ));
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = bounded_error_body(response).await;
+            return Err(CloudError::UploadFailed(format!(
+                "conditional upload '{key}' failed ({status}): {body}"
+            )));
+        }
+        let item: DriveItem =
+            bounded_metadata_json(response, "parse OneDrive conditional upload result").await?;
+        if item.file.is_none() || item.size != data.len() as u64 {
+            return Err(CloudError::UploadFailed(format!(
+                "OneDrive conditional upload verification failed for '{key}'"
+            )));
+        }
+        ObjectVersion::new(item.e_tag)
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudError> {

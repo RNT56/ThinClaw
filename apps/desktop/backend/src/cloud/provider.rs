@@ -40,6 +40,9 @@ pub enum CloudError {
     #[error("Cloud archive changed on another writer; restart before syncing more changes")]
     ArchiveConflict,
 
+    #[error("{0} does not provide the strong conditional writes required for live sync")]
+    StrongCasUnavailable(String),
+
     #[error("Delete failed: {0}")]
     DeleteFailed(String),
 
@@ -66,6 +69,7 @@ impl CloudError {
                 | CloudError::RateLimited { .. }
                 | CloudError::UploadFailed(_)
                 | CloudError::DownloadFailed(_)
+                | CloudError::ArchiveConflict
         )
     }
 }
@@ -109,6 +113,44 @@ pub struct CloudStatus {
     pub storage_available: Option<u64>,
     /// Human-readable provider name
     pub provider_name: String,
+}
+
+/// Whether a provider may participate in multi-writer live sync.
+///
+/// `BackupOnly` providers can still be used by the one-shot migration and
+/// restore paths, but must never publish a live manifest with a blind PUT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudSyncCapability {
+    BackupOnly,
+    StrongCas,
+}
+
+/// Provider-owned, opaque version token for a single object revision.
+///
+/// Callers must only return this token to the same provider and object key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectVersion(String);
+
+impl ObjectVersion {
+    pub fn new(opaque: impl Into<String>) -> Result<Self, CloudError> {
+        let opaque = opaque.into();
+        if opaque.is_empty() || opaque.len() > 8 * 1024 {
+            return Err(CloudError::Provider(
+                "provider returned an empty or oversized object version token".to_string(),
+            ));
+        }
+        Ok(Self(opaque))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VersionedObject {
+    pub data: Vec<u8>,
+    pub version: ObjectVersion,
 }
 
 /// Cloud provider configuration.
@@ -510,6 +552,12 @@ pub trait CloudProvider: Send + Sync {
     /// Test connectivity and authentication. Returns storage usage info.
     async fn test_connection(&self) -> Result<CloudStatus, CloudError>;
 
+    /// Live sync is opt-in. Providers stay backup-only until they implement
+    /// provider-native, atomic conditional reads/writes below.
+    fn sync_capability(&self) -> CloudSyncCapability {
+        CloudSyncCapability::BackupOnly
+    }
+
     /// Upload a blob to the given key. Overwrites if exists.
     async fn put(&self, key: &str, data: &[u8]) -> Result<(), CloudError>;
 
@@ -519,6 +567,26 @@ pub trait CloudProvider: Send + Sync {
     /// Legacy convenience read with a global defense-in-depth ceiling.
     async fn get(&self, key: &str) -> Result<Vec<u8>, CloudError> {
         self.get_bounded(key, DEFAULT_MAX_CLOUD_OBJECT_BYTES).await
+    }
+
+    /// Read bytes and the provider's opaque version token from one revision.
+    async fn get_versioned_bounded(
+        &self,
+        _key: &str,
+        _max_bytes: usize,
+    ) -> Result<VersionedObject, CloudError> {
+        Err(CloudError::StrongCasUnavailable(self.name().to_string()))
+    }
+
+    /// Atomically replace `key` only when `expected` is still current.
+    /// `None` means create-only (the object must not already exist).
+    async fn put_if_version(
+        &self,
+        _key: &str,
+        _data: &[u8],
+        _expected: Option<&ObjectVersion>,
+    ) -> Result<ObjectVersion, CloudError> {
+        Err(CloudError::StrongCasUnavailable(self.name().to_string()))
     }
 
     /// Delete a blob by key. No-op if not found.
@@ -544,6 +612,69 @@ pub trait CloudProvider: Send + Sync {
     /// Default: 5 GB (S3 single PUT limit).
     fn max_upload_size(&self) -> u64 {
         5 * 1024 * 1024 * 1024 // 5 GB
+    }
+}
+
+/// Exercise the exact provider-native primitives live sync depends on. This
+/// catches S3-compatible/WebDAV-style servers that advertise conditional
+/// operations but silently ignore their preconditions.
+pub async fn verify_strong_cas_conformance(provider: &dyn CloudProvider) -> Result<(), CloudError> {
+    if provider.sync_capability() != CloudSyncCapability::StrongCas {
+        return Err(CloudError::StrongCasUnavailable(provider.name().to_string()));
+    }
+    let key = format!(".sync-cas-probe/{}.bin", uuid::Uuid::new_v4());
+    let first_data = uuid::Uuid::new_v4().as_bytes().to_vec();
+    let second_data = uuid::Uuid::new_v4().as_bytes().to_vec();
+    let result = async {
+        let first = provider.put_if_version(&key, &first_data, None).await?;
+        match provider.put_if_version(&key, b"must-not-overwrite", None).await {
+            Err(CloudError::ArchiveConflict) => {}
+            Err(error) => return Err(error),
+            Ok(_) => {
+                return Err(CloudError::StrongCasUnavailable(format!(
+                    "{} ignored create-only preconditions",
+                    provider.name()
+                )))
+            }
+        }
+        let observed = provider.get_versioned_bounded(&key, 1024).await?;
+        if observed.data != first_data || observed.version != first {
+            return Err(CloudError::StrongCasUnavailable(format!(
+                "{} did not return one atomic object revision",
+                provider.name()
+            )));
+        }
+        let second = provider
+            .put_if_version(&key, &second_data, Some(&first))
+            .await?;
+        match provider
+            .put_if_version(&key, b"stale-must-not-overwrite", Some(&first))
+            .await
+        {
+            Err(CloudError::ArchiveConflict) => {}
+            Err(error) => return Err(error),
+            Ok(_) => {
+                return Err(CloudError::StrongCasUnavailable(format!(
+                    "{} ignored stale-version preconditions",
+                    provider.name()
+                )))
+            }
+        }
+        let observed = provider.get_versioned_bounded(&key, 1024).await?;
+        if observed.data != second_data || observed.version != second {
+            return Err(CloudError::StrongCasUnavailable(format!(
+                "{} did not preserve the conditionally written revision",
+                provider.name()
+            )));
+        }
+        Ok(())
+    }
+    .await;
+    let cleanup = provider.delete(&key).await;
+    match (result, cleanup) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
     }
 }
 

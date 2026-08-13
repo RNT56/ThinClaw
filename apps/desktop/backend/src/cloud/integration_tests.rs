@@ -184,7 +184,10 @@ async fn test_full_encrypt_upload_download_decrypt_roundtrip() {
         encryption::decrypt(&master_key, "manifest.json", &dl_manifest_enc).unwrap();
     let dl_manifest = ArchiveManifest::from_json(&dl_manifest_json).unwrap();
 
-    assert_eq!(dl_manifest.version, 1);
+    assert_eq!(
+        dl_manifest.version,
+        crate::cloud::manifest::CURRENT_MANIFEST_VERSION
+    );
     assert_eq!(dl_manifest.app_version, "0.1.0-test");
     assert_eq!(dl_manifest.schema_version, 5);
     assert_eq!(dl_manifest.files.len(), test_files.len());
