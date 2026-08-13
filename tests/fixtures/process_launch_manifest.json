@@ -3371,8 +3371,12 @@
     },
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
-      "availability": [],
-      "callsite_digest": "aa324c4ee79f6a5519c30f877182b537957da1269f2371a026c5b28d6dd677bb",
+      "availability": [
+        "strict:macos-seatbelt",
+        "strict:linux-bubblewrap",
+        "compatibility:explicit-all-platforms"
+      ],
+      "callsite_digest": "eee51bbac8bd6bc33470ed2fbb052e45919abf9d9cc355b235f8866c9496ce9f",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "tokio",
@@ -3383,7 +3387,7 @@
           "sink": "environment:declared-secret-key"
         }
       ],
-      "cwd_filesystem": "typed_call_site_review",
+      "cwd_filesystem": "launcher_private_with_explicit_roots",
       "environment_schema": "mcp_validated_public_and_source_resolved_secret_environment",
       "exact_environment": [
         "HOME",
@@ -3394,28 +3398,28 @@
       ],
       "executable_policy": "validated_search_path_or_absolute_pinned",
       "execution_policy": "owned_lifecycle",
-      "home_policy": "reviewed_operator_home",
+      "home_policy": "launcher_private",
       "id": "crates.thinclaw-tools.src.mcp.stdio.tokio.101",
       "io_policy": {
-        "bounded": false,
-        "stderr_limit": 0,
-        "stdout_limit": 0
+        "bounded": true,
+        "stderr_limit": 16384,
+        "stdout_limit": 4194304
       },
-      "isolation_policy": "reviewed_direct_host",
+      "isolation_policy": "config_selected_fail_closed",
       "lifetime_policy": {
         "owns_process_tree": true,
         "reap_on_drop": true,
-        "timeout_ms": 0
+        "timeout_ms": 1800000
       },
-      "network_policy": "denied",
+      "network_policy": "config_selected_fail_closed",
       "owner": "crates::thinclaw-tools::src::mcp::stdio",
-      "process_class": "platform_utility",
+      "process_class": "tool_executor",
       "program": "typed_dynamic_expression",
       "proof_id": "process-launch-b319ab09b8ea3e7eb13de34c",
       "rust_module": "thinclaw_tools::mcp::stdio",
       "source": "crates/thinclaw-tools/src/mcp/stdio.rs",
-      "source_line": 144,
-      "temp_policy": "reviewed_system_temp"
+      "source_line": 158,
+      "temp_policy": "launcher_private"
     },
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
