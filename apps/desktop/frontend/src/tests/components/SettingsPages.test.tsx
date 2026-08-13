@@ -86,12 +86,6 @@ vi.mock('../../components/settings/PersonaTab', () => ({
 vi.mock('../../components/settings/PersonalizationTab', () => ({
     PersonalizationTab: () => <div data-testid="personalization-tab">PersonalizationTab</div>,
 }));
-vi.mock('../../components/settings/SlackTab', () => ({
-    SlackTab: () => <div data-testid="slack-tab">SlackTab</div>,
-}));
-vi.mock('../../components/settings/TelegramTab', () => ({
-    TelegramTab: () => <div data-testid="telegram-tab">TelegramTab</div>,
-}));
 vi.mock('../../components/settings/ChatProviderTab', () => ({
     ChatProviderTab: () => <div data-testid="chat-provider-tab">ChatProviderTab</div>,
 }));
@@ -168,14 +162,16 @@ describe('SettingsContent routing', () => {
         await waitFor(() => expect(screen.getByTestId('personalization-tab')).toBeInTheDocument());
     });
 
-    it('renders SlackTab for "thinclaw-slack"', async () => {
+    it('does not mount the destructive legacy Slack editor for its deep link', async () => {
         renderPage('thinclaw-slack');
-        await waitFor(() => expect(screen.getByTestId('slack-tab')).toBeInTheDocument());
+        expect(await screen.findByText('Channel settings moved')).toBeInTheDocument();
+        expect(screen.queryByTestId('slack-tab')).not.toBeInTheDocument();
     });
 
-    it('renders TelegramTab for "thinclaw-telegram"', async () => {
+    it('does not mount the destructive legacy Telegram editor for its deep link', async () => {
         renderPage('thinclaw-telegram');
-        await waitFor(() => expect(screen.getByTestId('telegram-tab')).toBeInTheDocument());
+        expect(await screen.findByText('Channel settings moved')).toBeInTheDocument();
+        expect(screen.queryByTestId('telegram-tab')).not.toBeInTheDocument();
     });
 
     it('renders ChatProviderTab for "inference"', async () => {

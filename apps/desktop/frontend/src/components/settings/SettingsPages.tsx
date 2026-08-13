@@ -2,13 +2,12 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { lazy, Suspense } from 'react';
 import { PersonaTab } from './PersonaTab';
 import { PersonalizationTab } from './PersonalizationTab';
-import { SlackTab } from './SlackTab';
-import { TelegramTab } from './TelegramTab';
 import { ChatProviderTab } from './ChatProviderTab';
 import { SettingsPage } from './SettingsSidebar';
 import { ServerSettings } from './ServerSettings';
 import { TroubleshootingSettings } from './TroubleshootingSettings';
 import { AppearanceSettings } from './AppearanceSettings';
+import { Notice } from '../ui';
 
 // Heavy tabs — code-split so they don't inflate the initial bundle chunk.
 // SecretsTab ~64KB, GatewayTab ~68KB, ModelBrowser ~63KB
@@ -56,8 +55,11 @@ export function SettingsContent({ activePage }: SettingsContentProps) {
                         {activePage === 'server' && <ServerSettings />}
                         {activePage === 'troubleshooting' && <TroubleshootingSettings />}
                         {activePage === 'appearance' && <AppearanceSettings />}
-                        {activePage === 'thinclaw-slack' && <SlackTab />}
-                        {activePage === 'thinclaw-telegram' && <TelegramTab />}
+                        {(activePage === 'thinclaw-slack' || activePage === 'thinclaw-telegram') && (
+                            <Notice tone="warning" title="Channel settings moved">
+                                Slack and Telegram now use the revisioned, redacted Channel Center. Redirecting to Agent Cockpit → Channels → Setup.
+                            </Notice>
+                        )}
                         {activePage === 'thinclaw-gateway' && <Suspense fallback={<TabSkeleton />}><GatewayTab /></Suspense>}
                         {activePage === 'secrets' && <Suspense fallback={<TabSkeleton />}><SecretsTab /></Suspense>}
                         {activePage === 'security' && <Suspense fallback={<TabSkeleton />}><SecurityPosturePanel /></Suspense>}

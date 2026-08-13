@@ -8,8 +8,6 @@ import {
     ShieldAlert,
     Layout,
     Info,
-    MessageSquare,
-    Send,
     Radio,
     KeyRound,
     Plug,
@@ -50,8 +48,6 @@ const NAV_ITEMS = [
     {
         section: "ThinClaw",
         items: [
-            { id: 'thinclaw-slack', label: 'Slack', icon: MessageSquare },
-            { id: 'thinclaw-telegram', label: 'Telegram', icon: Send },
             { id: 'thinclaw-gateway', label: 'Gateway', icon: Radio },
         ]
     },

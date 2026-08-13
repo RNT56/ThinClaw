@@ -15,11 +15,11 @@ function normalizedTone(status: string | null | undefined): StatusTone {
     if (['healthy', 'available', 'ready', 'connected', 'online', 'active', 'completed', 'success', 'applied', 'running'].includes(value)) {
         return value === 'running' || value === 'active' ? 'running' : 'healthy';
     }
-    if (['loading', 'checking', 'connecting'].includes(value)) return 'loading';
-    if (['degraded', 'partial', 'waiting', 'pending', 'restart required', 'restart-required', 'stale'].includes(value)) {
+    if (['loading', 'checking', 'connecting', 'reconnecting'].includes(value)) return 'loading';
+    if (['degraded', 'partial', 'waiting', 'pending', 'draining', 'configured_not_running', 'restart required', 'restart-required', 'stale'].includes(value)) {
         return value === 'stale' ? 'stale' : 'warning';
     }
-    if (['failed', 'error', 'denied', 'disconnected', 'unavailable'].includes(value)) return 'error';
+    if (['failed', 'error', 'denied', 'disconnected', 'unavailable', 'missing_credentials'].includes(value)) return 'error';
     if (['stopped', 'offline', 'disabled', 'inactive'].includes(value)) return 'stopped';
     return 'unknown';
 }

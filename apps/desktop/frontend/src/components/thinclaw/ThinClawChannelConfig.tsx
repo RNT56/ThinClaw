@@ -4,6 +4,8 @@ import { toast } from 'sonner';
 import { thinclawCommands } from '../../lib/generated/thinclaw-commands';
 import { AsyncState, Button, Notice, Surface } from '../ui';
 import { normalizeAgentActionOutcome } from './action-outcome';
+import type { ChannelSettingsSnapshot } from '../../lib/bindings';
+import { ChannelCredentialSettings } from './ChannelCredentialSettings';
 
 interface ConfigOption {
     value: string;
@@ -53,25 +55,48 @@ export function ThinClawChannelConfig() {
     const [notice, setNotice] = useState<string | null>(null);
     const [secretBindingAvailable, setSecretBindingAvailable] = useState(false);
     const [secretBindingReason, setSecretBindingReason] = useState<string | null>(null);
+    const [channelSnapshot, setChannelSnapshot] = useState<ChannelSettingsSnapshot | null>(null);
 
     const load = useCallback(async () => {
         setIsLoading(true);
         setNotice(null);
         try {
-            const data = await thinclawCommands.thinclawChannelConfigSchemas() as ChannelConfigSchemasResponse;
+            const [schemaResult, snapshotResult] = await Promise.allSettled([
+                thinclawCommands.thinclawChannelConfigSchemas() as Promise<ChannelConfigSchemasResponse>,
+                thinclawCommands.thinclawChannelSettingsSnapshot(),
+            ]);
+            const errors: string[] = [];
+            if (snapshotResult.status === 'rejected') {
+                setChannelSnapshot(null);
+                errors.push(snapshotResult.reason instanceof Error ? snapshotResult.reason.message : String(snapshotResult.reason));
+            } else {
+                setChannelSnapshot(snapshotResult.value);
+            }
+            if (schemaResult.status === 'rejected') {
+                errors.push(schemaResult.reason instanceof Error ? schemaResult.reason.message : String(schemaResult.reason));
+                setNotice(errors.join(' '));
+                setSchemas([]);
+                setValues({});
+                return;
+            }
+            const data = schemaResult.value;
             if (data?.available === false) {
-                setNotice(data.reason ?? 'Channel configuration is unavailable in this mode.');
+                errors.push(data.reason ?? 'Channel configuration is unavailable in this mode.');
                 setSchemas([]);
                 setValues({});
             } else {
-                setSchemas(Array.isArray(data?.schemas) ? data.schemas : []);
+                setSchemas(Array.isArray(data?.schemas)
+                    ? data.schemas.filter((schema) => !['slack', 'telegram'].includes(schema.channel_id))
+                    : []);
                 setValues(data?.values ?? {});
                 setSecretBindingAvailable(data?.secret_binding_available === true);
                 setSecretBindingReason(data?.secret_binding_reason ?? null);
             }
+            if (errors.length > 0) setNotice(errors.join(' '));
         } catch (caught) {
             setSchemas([]);
             setValues({});
+            setChannelSnapshot(null);
             setNotice(caught instanceof Error ? caught.message : String(caught));
         } finally {
             setIsLoading(false);
@@ -150,8 +175,12 @@ export function ThinClawChannelConfig() {
 
             {notice && <Notice tone="warning" title="Channel setup needs attention">{notice}</Notice>}
 
+            {channelSnapshot && (
+                <ChannelCredentialSettings snapshot={channelSnapshot} onSnapshot={setChannelSnapshot} />
+            )}
+
             {schemas.length === 0 ? (
-                <AsyncState kind="empty" title="No channels expose a configuration schema" description="A channel appears here only when the selected runtime publishes a supported setup schema." />
+                !channelSnapshot && <AsyncState kind="empty" title="No channels expose a configuration schema" description="A channel appears here only when the selected runtime publishes a supported setup schema." />
             ) : schemas.map((schema) => (
                 <Surface key={schema.channel_id} className="space-y-4 p-5">
                     <div>
