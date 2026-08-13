@@ -1,10 +1,11 @@
 # Extension System
 
-ThinClaw has three extension surfaces, and they do not share the same trust model:
+ThinClaw has several extension surfaces, and they do not share the same trust model:
 
 - **WASM tools**: sandboxed tool modules loaded by ThinClaw
 - **WASM channels**: sandboxed packaged channel modules loaded by ThinClaw
 - **MCP servers**: operator-trusted external processes or remote services connected through the MCP client
+- **Manifest providers**: signed, host-mediated HTTP/JSON memory and context providers
 
 This document is the canonical overview for those boundaries. For the public-facing security summary, see [SECURITY.md](SECURITY.md); for the deeper network model, see [../src/NETWORK_SECURITY.md](../src/NETWORK_SECURITY.md).
 
@@ -16,6 +17,7 @@ This document is the canonical overview for those boundaries. For the public-fac
 | WASM channel | Loaded inside ThinClaw's WASM channel runtime | Sandboxed, host-mediated | registry / channel setup path |
 | Native plugin | Loaded as `.so`/`.dylib` through C ABI JSON v1 | Unsafe, disabled by default, allowlisted, signed | broad plugin manifest |
 | MCP server | External process or remote service | Operator-trusted, not sandboxed | `thinclaw extensions mcp ...` |
+| Manifest memory/context provider | Remote HTTPS JSON service | No extension code in-process; host mediates network, secrets, limits, and lifecycle | broad plugin manifest + settings |
 
 ## Do Not Blur These Flows
 
@@ -66,7 +68,94 @@ Native plugins are the exceptional unsafe path for integrations that cannot fit 
 
 > **Trust caveat — native plugins are NOT sandboxed.** Unlike WASM tools/channels and Docker workers, a native plugin runs **in-process with full host privilege** (it is `dlopen`-ed into the agent). The signature verification, default-off gate, and operator allowlist are the *only* controls — there is no memory/syscall/network isolation. Enable native plugins only for code you fully trust. Gateway-driven install/activate is deliberately **not** exposed (operator-only, local config); see `src/NETWORK_SECURITY.md`.
 
-Broad plugin manifests can contribute tools, channels, memory providers, context providers, and native plugins. Native contributions must declare `abi = "c_abi_json_v1"`, `abiVersion = 1`, an artifact id, and non-zero request/response byte limits.
+Broad plugin manifests can contribute executable WASM tools/channels,
+host-mediated memory/context providers, and native plugins. Native
+contributions must declare `abi = "c_abi_json_v1"`, `abiVersion = 1`, an
+artifact id, and non-zero request/response byte limits. A tool or channel
+without a WASM artifact, or a provider using the old descriptive-only
+`providerType`/`configSchema` shape, fails validation instead of entering the
+registry as a dormant capability.
+
+## Manifest Memory And Context Providers
+
+Provider manifests are discovered only in operator-configured
+`extensions.contribution_manifest_dirs`. This is intentionally separate from
+`extensions.native_plugin_allowlist_dirs`: using a remote provider never opts
+the process into `dlopen`. Manifests are bounded, regular JSON files and still
+follow `require_plugin_signatures` and the trusted manifest key policy.
+
+Selection uses fully-qualified ids so two publishers cannot silently replace
+one another:
+
+```json
+{
+  "extensions": {
+    "contribution_manifest_dirs": ["~/.thinclaw/provider-manifests"],
+    "active_memory_provider": "acme.providers/acme.providers.memory",
+    "active_context_providers": [
+      "acme.providers/acme.providers.project-context"
+    ]
+  }
+}
+```
+
+The schema uses camelCase when serialized as a plugin manifest. Every provider
+id must begin with `<manifest-id>.`; the host then qualifies it as
+`<manifest-id>/<contribution-id>`. A provider must declare:
+
+- permission `contribution.http`;
+- HTTPS `baseUrl` (no embedded credentials, fragments, localhost, private or
+  link-local destinations; DNS results are validated and pinned per request);
+- startup lifecycle, a 100–30,000 ms timeout, a request limit up to 256 KiB,
+  and a response limit up to 1 MiB;
+- relative operation paths beginning with one `/`, without traversal, query,
+  or fragment syntax;
+- `auth: { "type": "none" }` or a host-resolved bearer binding. Bearer use also
+  requires `contribution.secrets`, and the binding must begin with
+  `extension.<manifest-id>.<contribution-id>.`.
+
+The host sends only an opaque `subjectId` plus conversation kind/channel. Raw
+principal and actor ids are not disclosed. Memory recall uses
+`POST <recallPath>` with `{ subjectId, query, limit, conversationKind, channel }`;
+memory persistence uses `POST <storePath>` with
+`{ subjectId, conversationKind, payload }`. Context resolution uses
+`POST <resolvePath>` with `{ subjectId, query, conversationKind, channel }`.
+Health is `GET <healthPath>` and must return `{ "healthy": true }`. Recall and
+context responses are `{ "items": [{ "content": "...", "reference": "..." }] }`.
+Item count and size are bounded, and returned text goes through the normal
+untrusted prompt sanitation and prompt-budget path.
+
+The selected providers are health-checked before activation. A failed provider
+is marked unhealthy with a categorical error code; response bodies, URLs, and
+secret names are not retained in health state. Memory and context providers run
+independently, so one failure cannot block built-in context, another provider,
+or local run logging. Shutdown returns every provider to registered/inactive
+state. Settings are read at invocation boundaries, so a selection change does
+not require a process restart after the manifest is registered.
+
+Runtime integrations can query `ExtensionManager::contribution_provider_statuses`
+for the stable provider id, kind, `registered`/`active`/`unhealthy` state, and
+categorical error code. A failed activation is skipped for that activation
+cycle rather than probed twice; the next cycle may retry it. Replacing a
+manifest replaces its complete memory/context contribution set, so a provider
+removed by an update cannot survive as a stale registered capability. Shutdown
+cancels in-flight secret resolution and HTTP work before resetting status.
+
+### Explicitly deferred surfaces
+
+Schema v1 defines typed declarations for generic auth providers, generic LLM
+providers, and arbitrary inbound HTTP routes so tooling can make an explicit
+decision. They are **not executable** and any manifest declaring them fails
+validation with an `unsupported` error:
+
+| Surface | Decision |
+|---|---|
+| Generic auth provider | Deferred until callback ownership, consent, token refresh/revocation, and secret policy integrate with the host |
+| Generic LLM provider | Deferred until routing, billing, streaming/cancellation, model metadata, and policy integrate with the host |
+| Generic inbound HTTP route | Deferred until gateway authentication, `/extensions/<manifest>/<contribution>` namespace ownership, body/timeout/rate limits, and shutdown integrate with the host |
+
+Subsystem-specific MCP OAuth and channel webhook routes remain supported; they
+do not imply support for these generic surfaces.
 
 ## Installation And Auth Surface
 

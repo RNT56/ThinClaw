@@ -28,7 +28,7 @@ impl ExtensionManager {
     /// Used to gate native-plugin loading against the operator's current
     /// `allow_native_plugins`/signature/allowlist configuration rather than a
     /// stale snapshot.
-    async fn current_extensions_settings(&self) -> crate::settings::ExtensionsSettings {
+    pub(crate) async fn current_extensions_settings(&self) -> crate::settings::ExtensionsSettings {
         if let Some(ref store) = self.store
             && let Ok(map) = store.get_all_settings(&self.user_id).await
         {
@@ -115,6 +115,11 @@ impl ExtensionManager {
                 .await
             {
                 Ok(registration) => {
+                    // A mixed manifest may carry host-mediated providers next
+                    // to its native contribution. Registration alone is not a
+                    // live capability: bind validated providers into the same
+                    // executable runtime used by the non-native scanner.
+                    self.contribution_runtime.register_manifest(&manifest).await;
                     // Default-off: only register native contributions for
                     // activation when the operator opted in. `native_plugins_available`
                     // is empty unless `allow_native_plugins` is true.
@@ -149,10 +154,11 @@ impl ExtensionManager {
                         }
                     }
                 }
-                Err(e) => {
+                Err(_) => {
+                    let manifest_label =
+                        crate::extensions::contribution_runtime::safe_manifest_label(&manifest.id);
                     tracing::warn!(
-                        manifest = %manifest.id,
-                        error = %e,
+                        manifest = %manifest_label,
                         "Plugin manifest failed validation during native scan"
                     );
                 }
@@ -198,6 +204,7 @@ impl ExtensionManager {
                 "Registered native plugin manifests from operator allowlist"
             );
         }
+        self.contribution_runtime.activate_selected(&settings).await;
         registered
     }
 

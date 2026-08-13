@@ -10,7 +10,7 @@ fn default_extensions_user_tools_dir() -> String {
         .to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtensionsSettings {
     #[serde(default = "default_extensions_user_tools_dir")]
     pub user_tools_dir: String,
@@ -24,6 +24,19 @@ pub struct ExtensionsSettings {
     pub trusted_manifest_public_keys: HashMap<String, String>,
     #[serde(default)]
     pub native_plugin_allowlist_dirs: Vec<String>,
+    /// Directories containing signed broad plugin manifests. This scanner is
+    /// separate from the native allowlist: provider manifests never need to
+    /// opt into in-process native code.
+    #[serde(default)]
+    pub contribution_manifest_dirs: Vec<String>,
+    /// Fully-qualified memory provider selection (`manifest/id`). At most one
+    /// contributed memory provider participates in a turn.
+    #[serde(default)]
+    pub active_memory_provider: Option<String>,
+    /// Fully-qualified context provider selections (`manifest/id`). Providers
+    /// are isolated from one another and invoked with bounded concurrency.
+    #[serde(default)]
+    pub active_context_providers: Vec<String>,
 }
 
 impl Default for ExtensionsSettings {
@@ -35,6 +48,9 @@ impl Default for ExtensionsSettings {
             trusted_manifest_keys: Vec::new(),
             trusted_manifest_public_keys: HashMap::new(),
             native_plugin_allowlist_dirs: Vec::new(),
+            contribution_manifest_dirs: Vec::new(),
+            active_memory_provider: None,
+            active_context_providers: Vec::new(),
         }
     }
 }

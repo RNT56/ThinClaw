@@ -1547,6 +1547,7 @@ impl Agent {
         }
         if let Some(manager) = self.extension_manager() {
             manager.stop_mcp_background_tasks().await;
+            manager.stop_contribution_runtime().await;
         }
     }
 

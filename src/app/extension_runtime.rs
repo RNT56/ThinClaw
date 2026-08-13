@@ -357,6 +357,24 @@ impl AppBuilder {
             tools.register_extension_tools(Arc::clone(&manager));
             tracing::info!("Extension manager initialized with in-chat discovery tools");
 
+            // Broad contribution manifests have their own scanner and never
+            // require the native-plugin opt-in. Validation/signature policy is
+            // applied before memory/context providers enter the host-mediated
+            // runtime.
+            let contribution_report = manager.register_contribution_manifests_from_config().await;
+            if !contribution_report.manifests_registered.is_empty() {
+                tracing::info!(
+                    manifests = ?contribution_report.manifests_registered,
+                    "Registered executable extension contribution manifests"
+                );
+            }
+            if !contribution_report.manifests_rejected.is_empty() {
+                tracing::warn!(
+                    rejected = contribution_report.manifests_rejected.len(),
+                    "One or more extension contribution manifests were rejected"
+                );
+            }
+
             // Native dynamic-library plugins are default-off and signature-gated.
             // Register any signed manifests from operator-configured allowlist dirs
             // (no-op unless `allow_native_plugins` is enabled; registration loads no

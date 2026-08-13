@@ -10637,6 +10637,9 @@ const SETTINGS_SCHEMA = {
       { key: 'extensions.allow_native_plugins', label: 'Native plugins', type: 'bool', desc: 'Allow unsafe .so/.dylib plugin loading after manifest and allowlist checks.' },
       { key: 'extensions.require_plugin_signatures', label: 'Require signatures', type: 'bool', desc: 'Require ed25519 signatures for broad plugin manifests.' },
       { key: 'extensions.native_plugin_allowlist_dirs', label: 'Native allowlist dirs', type: 'json', desc: 'JSON array of directories that may contain native plugin libraries.' },
+      { key: 'extensions.contribution_manifest_dirs', label: 'Provider manifest dirs', type: 'json', desc: 'JSON array of directories containing host-mediated provider manifests.' },
+      { key: 'extensions.active_memory_provider', label: 'Active memory provider', type: 'text', desc: 'Fully-qualified manifest/contribution id; leave empty to disable.', nullable: true },
+      { key: 'extensions.active_context_providers', label: 'Active context providers', type: 'json', desc: 'JSON array of fully-qualified manifest/contribution ids (maximum 8).' },
       { key: 'extensions.trusted_manifest_keys', label: 'Trusted key IDs', type: 'json', desc: 'JSON array of trusted plugin manifest key IDs.' },
       { key: 'extensions.trusted_manifest_public_keys', label: 'Trusted public keys', type: 'json', desc: 'JSON object mapping key IDs to hex ed25519 public keys.' },
     ]

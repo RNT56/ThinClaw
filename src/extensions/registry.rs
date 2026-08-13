@@ -203,34 +203,34 @@ impl ExtensionRegistry {
         }
 
         let mut memory_providers_registered = Vec::new();
-        if !manifest.contributions.memory_providers.is_empty() {
-            let mut providers = self.memory_providers.write().await;
-            for provider in &manifest.contributions.memory_providers {
-                upsert_memory_provider(
-                    &mut providers,
-                    RegisteredMemoryProviderContribution {
-                        manifest_id: manifest.id.clone(),
-                        contribution: provider.clone(),
-                    },
-                );
-                memory_providers_registered.push(provider.id.clone());
-            }
+        let mut providers = self.memory_providers.write().await;
+        providers.retain(|provider| provider.manifest_id != manifest.id);
+        for provider in &manifest.contributions.memory_providers {
+            upsert_memory_provider(
+                &mut providers,
+                RegisteredMemoryProviderContribution {
+                    manifest_id: manifest.id.clone(),
+                    contribution: provider.clone(),
+                },
+            );
+            memory_providers_registered.push(provider.id.clone());
         }
+        drop(providers);
 
         let mut context_providers_registered = Vec::new();
-        if !manifest.contributions.context_providers.is_empty() {
-            let mut providers = self.context_providers.write().await;
-            for provider in &manifest.contributions.context_providers {
-                upsert_context_provider(
-                    &mut providers,
-                    RegisteredContextProviderContribution {
-                        manifest_id: manifest.id.clone(),
-                        contribution: provider.clone(),
-                    },
-                );
-                context_providers_registered.push(provider.id.clone());
-            }
+        let mut providers = self.context_providers.write().await;
+        providers.retain(|provider| provider.manifest_id != manifest.id);
+        for provider in &manifest.contributions.context_providers {
+            upsert_context_provider(
+                &mut providers,
+                RegisteredContextProviderContribution {
+                    manifest_id: manifest.id.clone(),
+                    contribution: provider.clone(),
+                },
+            );
+            context_providers_registered.push(provider.id.clone());
         }
+        drop(providers);
 
         Ok(PluginManifestRegistration {
             tools_registered,
@@ -721,10 +721,12 @@ fn builtin_entries() -> Vec<RegistryEntry> {
 #[cfg(test)]
 mod tests {
     use crate::extensions::manifest::{
-        ChannelContribution, ContextProviderContribution, MemoryProviderContribution,
-        NATIVE_PLUGIN_ABI_VERSION, NativePluginAbi, NativePluginContribution,
-        PLUGIN_MANIFEST_SCHEMA_VERSION, PluginArtifact, PluginArtifactKind, PluginContributions,
-        PluginManifest, PluginSignature, ToolContribution,
+        ChannelContribution, ContextProviderContribution, ContextProviderOperations,
+        EXTENSION_HTTP_PERMISSION, ExtensionHttpAuth, HttpJsonProviderRuntime,
+        MemoryProviderContribution, MemoryProviderOperations, NATIVE_PLUGIN_ABI_VERSION,
+        NativePluginAbi, NativePluginContribution, PLUGIN_MANIFEST_SCHEMA_VERSION, PluginArtifact,
+        PluginArtifactKind, PluginContributions, PluginManifest, PluginSignature,
+        ProviderLifecycle, ToolContribution,
     };
     use crate::extensions::registry::{ExtensionRegistry, score_entry};
     use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
@@ -738,7 +740,11 @@ mod tests {
             version: "1.0.0".to_string(),
             publisher: None,
             description: Some("Example manifest contributions".to_string()),
-            permissions: vec!["tools".to_string(), "channels".to_string()],
+            permissions: vec![
+                "tools".to_string(),
+                "channels".to_string(),
+                EXTENSION_HTTP_PERMISSION.to_string(),
+            ],
             contributions: PluginContributions {
                 tools: vec![ToolContribution {
                     id: "plugin.example.echo".to_string(),
@@ -754,13 +760,24 @@ mod tests {
                     id: "plugin.example.memory".to_string(),
                     provider_type: "custom_http".to_string(),
                     config_schema: serde_json::json!({ "type": "object" }),
+                    runtime: Some(test_http_runtime()),
+                    operations: Some(MemoryProviderOperations {
+                        health_path: "/health".to_string(),
+                        recall_path: "/memory/recall".to_string(),
+                        store_path: "/memory/store".to_string(),
+                    }),
                 }],
                 context_providers: vec![ContextProviderContribution {
                     id: "plugin.example.context".to_string(),
                     provider_type: "workspace".to_string(),
                     config_schema: serde_json::json!({ "type": "object" }),
+                    runtime: Some(test_http_runtime()),
+                    operations: Some(ContextProviderOperations {
+                        health_path: "/health".to_string(),
+                        resolve_path: "/context/resolve".to_string(),
+                    }),
                 }],
-                native_plugins: Vec::new(),
+                ..PluginContributions::default()
             },
             artifacts: vec![
                 PluginArtifact {
@@ -781,6 +798,17 @@ mod tests {
                 algorithm: "ed25519".to_string(),
                 signature: "aa".repeat(64),
             }),
+        }
+    }
+
+    fn test_http_runtime() -> HttpJsonProviderRuntime {
+        HttpJsonProviderRuntime {
+            base_url: "https://api.example.com".to_string(),
+            auth: ExtensionHttpAuth::None,
+            timeout_ms: 1_000,
+            max_request_bytes: 16 * 1024,
+            max_response_bytes: 32 * 1024,
+            lifecycle: ProviderLifecycle::Startup,
         }
     }
 
@@ -1016,6 +1044,26 @@ mod tests {
         let context = registry.context_provider_contributions().await;
         assert_eq!(context.len(), 1);
         assert_eq!(context[0].contribution.provider_type, "workspace");
+    }
+
+    #[tokio::test]
+    async fn plugin_manifest_replacement_removes_deleted_provider_contributions() {
+        let registry = ExtensionRegistry::new();
+        let mut manifest = plugin_manifest();
+        registry
+            .register_plugin_manifest_contributions(&manifest, &unsigned_registration_settings())
+            .await
+            .expect("initial manifest registers");
+
+        manifest.contributions.memory_providers.clear();
+        manifest.contributions.context_providers.clear();
+        registry
+            .register_plugin_manifest_contributions(&manifest, &unsigned_registration_settings())
+            .await
+            .expect("replacement manifest registers");
+
+        assert!(registry.memory_provider_contributions().await.is_empty());
+        assert!(registry.context_provider_contributions().await.is_empty());
     }
 
     #[tokio::test]

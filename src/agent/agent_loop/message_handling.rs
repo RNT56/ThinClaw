@@ -481,6 +481,10 @@ impl Agent {
         let agent_name = self.config.name.clone();
         let model_name = self.llm().active_model_name();
         let message = message.clone();
+        let contribution_manager = self.extension_manager().cloned();
+        let contribution_access = message
+            .resolved_identity()
+            .access_context(message.channel.clone());
         // Clone the shared orchestrator handle (cheap: a few `Arc` clones) so
         // the detached task reuses the same `MemoryProviderManager` — and
         // therefore the same readiness cache and pooled HTTP client — instead
@@ -504,7 +508,22 @@ impl Agent {
                 )
                 .await
             {
-                Ok(_artifact) => {}
+                Ok(artifact) => {
+                    if let Some(manager) = contribution_manager.as_ref() {
+                        // The contributed-provider contract receives useful
+                        // turn content, never raw principal/actor/session ids,
+                        // provider metadata, tool arguments, or failure text.
+                        let contribution_payload = serde_json::json!({
+                            "status": artifact.status,
+                            "userMessage": artifact.user_message,
+                            "assistantResponse": artifact.assistant_response,
+                            "completedAt": artifact.completed_at,
+                        });
+                        manager
+                            .sync_contributed_memory(&contribution_access, &contribution_payload)
+                            .await;
+                    }
+                }
                 Err(err) => {
                     tracing::debug!(
                         thread = %thread_id,

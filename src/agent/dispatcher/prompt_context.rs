@@ -348,16 +348,27 @@ impl Agent {
                 provider_system_prompt,
             )
         };
+        let extension_context_fut = async {
+            let Some(manager) = self.extension_manager() else {
+                return crate::extensions::ContributionPromptContext::default();
+            };
+            let access = identity.access_context(message.channel.clone());
+            manager
+                .contributed_prompt_context(&access, &message.content, 6)
+                .await
+        };
         let (
             active_channel_names,
             active_channel_hint,
             linked_recall_block,
             (provider_context, provider_tool_extensions, provider_system_prompt),
+            extension_context,
         ) = tokio::join!(
             self.channels.channel_names(),
             self.channels.formatting_hints_for(&message.channel),
             linked_recall_fut,
             provider_fut,
+            extension_context_fut,
         );
         // Reuse the runtime loaded at the top of this function instead of a
         // second identical DB read (it cannot change mid-preparation).
@@ -423,12 +434,19 @@ impl Agent {
             .map(|ctx| sanitize_prompt_segment("skills_index", render_skill_index_context(&ctx)));
         let active_skill_context = active_skill_context
             .map(|ctx| sanitize_prompt_segment("active_skills", render_active_skill_context(&ctx)));
-        let provider_recall_context = provider_context.as_ref().map(|ctx| {
-            sanitize_prompt_segment(
+        let mut provider_recall_segments = Vec::new();
+        if let Some(ctx) = provider_context.as_ref() {
+            provider_recall_segments.push(sanitize_prompt_segment(
                 "provider_recall",
                 format!("## External Memory Recall\n{}", ctx.rendered_context),
-            )
-        });
+            ));
+        }
+        if let Some(rendered) = extension_context.render() {
+            provider_recall_segments
+                .push(sanitize_prompt_segment("extension_contributions", rendered));
+        }
+        let provider_recall_context =
+            (!provider_recall_segments.is_empty()).then(|| provider_recall_segments.join("\n\n"));
         let linked_recall_context = linked_recall_block.as_ref().map(|block| {
             sanitize_prompt_segment("linked_recall", format!("## Linked Recall\n{block}"))
         });

@@ -852,3 +852,22 @@ webhook_secret_secret = "repo_projects_github_webhook"
         Some("repo_projects_github_webhook")
     );
 }
+
+#[test]
+fn extension_contribution_selection_roundtrips_db_and_toml() {
+    let mut settings = Settings::default();
+    settings.extensions.contribution_manifest_dirs = vec!["/opt/thinclaw/providers".to_string()];
+    settings.extensions.active_memory_provider =
+        Some("acme.providers/acme.providers.memory".to_string());
+    settings.extensions.active_context_providers = vec![
+        "acme.providers/acme.providers.workspace".to_string(),
+        "acme.providers/acme.providers.repository".to_string(),
+    ];
+
+    let restored = Settings::from_db_map(&settings.to_db_map());
+    assert_eq!(restored.extensions, settings.extensions);
+
+    let serialized = toml::to_string(&settings).expect("settings serialize to TOML");
+    let reparsed: Settings = toml::from_str(&serialized).expect("settings parse from TOML");
+    assert_eq!(reparsed.extensions, settings.extensions);
+}
