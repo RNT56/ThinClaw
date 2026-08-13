@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Verify public container entrypoint contract
+        run: scripts/ci/test_docker_entrypoint.sh
       - name: Install Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
@@ -640,8 +642,10 @@ jobs:
       - name: Prepare Compose env
         run: |
           cp deploy/env.example deploy/.env
-          # Override existing keys via sed (avoids duplicates)
-          sed -i 's/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=ci-smoke-token/' deploy/.env
+          gateway_token="$(printf '1%.0s' {1..64})"
+          master_key="$(printf '2%.0s' {1..64})"
+          sed -i "s/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=$gateway_token/" deploy/.env
+          sed -i "s/^SECRETS_MASTER_KEY=.*/SECRETS_MASTER_KEY=$master_key/" deploy/.env
           sed -i 's/^LLM_BACKEND=.*/LLM_BACKEND=ollama/' deploy/.env
           sed -i 's|^LLM_BASE_URL=.*|LLM_BASE_URL=http://127.0.0.1:11434|' deploy/.env
           sed -i 's/^EMBEDDING_ENABLED=.*/EMBEDDING_ENABLED=false/' deploy/.env
@@ -651,63 +655,133 @@ jobs:
           sed -i 's/^ROUTINES_ENABLED=.*/ROUTINES_ENABLED=false/' deploy/.env
           sed -i 's/^BROWSER_DOCKER=.*/BROWSER_DOCKER=never/' deploy/.env
           sed -i 's/^DESKTOP_AUTONOMY_ENABLED=.*/DESKTOP_AUTONOMY_ENABLED=false/' deploy/.env
-          # Append keys that do not exist in env.example
-          echo 'ONBOARD_COMPLETED=true' >> deploy/.env
-          echo 'THINCLAW_ALLOW_ENV_MASTER_KEY=1' >> deploy/.env
-          echo 'SECRETS_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000' >> deploy/.env
           echo 'OLLAMA_BASE_URL=http://127.0.0.1:11434' >> deploy/.env
           echo 'EXPERIMENTS_ENABLED=false' >> deploy/.env
           echo 'BUILDER_ENABLED=false' >> deploy/.env
           echo 'SKILLS_ENABLED=false' >> deploy/.env
 
-          # Create a compose override to neutralize hardcoded environment
-          # values from docker-compose.yml that would override .env entries.
-          printf 'services:\n  thinclaw:\n    command: ["run", "--skip-setup-check"]\n    environment:\n      - HEARTBEAT_ENABLED=false\n      - HEARTBEAT_NOTIFY_CHANNEL=gateway\n      - ROUTINES_ENABLED=false\n      - CLI_ENABLED=false\n      - ONBOARD_COMPLETED=true\n      - THINCLAW_ALLOW_ENV_MASTER_KEY=1\n      - RUST_BACKTRACE=1\n      - RUST_LOG=thinclaw=debug\n' > deploy/docker-compose.override.yml
-
-          echo "=== Final .env (non-comment lines) ==="
-          grep -v '^#' deploy/.env | grep -v '^$' || true
-          echo "=== Compose override ==="
-          cat deploy/docker-compose.override.yml
+          echo "=== Final .env keys (secret values redacted) ==="
+          awk -F= '
+            /^[A-Za-z_][A-Za-z0-9_]*=/ {
+              if ($1 ~ /(TOKEN|KEY|SECRET|PASSWORD)/) print $1 "=[REDACTED]";
+              else print;
+            }
+          ' deploy/.env
+      - name: Validate Compose contracts
+        working-directory: deploy
+        run: |
+          docker compose config --quiet
+          if env -u POSTGRES_PASSWORD docker compose \
+              -f docker-compose.yml -f docker-compose.postgres.yml \
+              config >/tmp/postgres-compose-missing-secret.log 2>&1; then
+            echo "PostgreSQL overlay accepted a missing POSTGRES_PASSWORD" >&2
+            exit 1
+          fi
+          postgres_password="$(printf '3%.0s' {1..64})"
+          POSTGRES_PASSWORD="$postgres_password" docker compose \
+            -f docker-compose.yml -f docker-compose.postgres.yml \
+            config >/tmp/postgres-compose-config.yml
+          grep -q 'DATABASE_BACKEND: postgres' /tmp/postgres-compose-config.yml
+          grep -q 'pgvector/pgvector:pg15@sha256:a20a57d7aa5217a6af0a391ccf69f4a8512406d6c14be08132f801468cc3cc62' \
+            /tmp/postgres-compose-config.yml
       - name: Compose smoke
         working-directory: deploy
         run: |
+          wait_for_health() {
+            for i in $(seq 1 120); do
+              if ! docker compose ps thinclaw --format '{{.State}}' | grep -qi running; then
+                echo "=== CONTAINER IS NOT RUNNING ==="
+                docker compose ps
+                docker compose logs thinclaw
+                return 1
+              fi
+              if curl -fsS http://127.0.0.1:3000/api/health >/dev/null; then
+                echo "Health check passed after $((i * 2)) seconds"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "=== HEALTH CHECK TIMED OUT (240s) ==="
+            docker compose ps
+            docker compose logs thinclaw
+            return 1
+          }
+
           docker compose up -d thinclaw
-          # Show container status and env immediately
-          sleep 5
-          docker compose ps
-          echo "=== Container env ==="
-          docker compose exec -T thinclaw env 2>&1 | grep -E '^(LLM_|GATEWAY_|DATABASE_|LIBSQL_|ONBOARD_|THINCLAW_|HEARTBEAT_|CLI_|SECRETS_|ROUTINES_|RUST_)' || echo "(container not running)"
-          echo "=== Early container logs ==="
-          docker compose logs thinclaw 2>&1 | tail -100
-          echo "=== Polling health endpoint (up to 240s) ==="
-          for i in $(seq 1 120); do
-            # Detect container crash early
-            if ! docker compose ps thinclaw --format '{{.State}}' | grep -qi running; then
-              echo "=== CONTAINER IS NOT RUNNING ==="
-              docker compose ps
-              docker compose logs thinclaw
-              exit 1
-            fi
-            if curl -fsS http://127.0.0.1:3000/api/health; then
-              echo ""
-              echo "=== Health check passed after $((i * 2)) seconds ==="
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "=== HEALTH CHECK TIMED OUT (240s) ==="
-          docker compose ps
-          echo "=== Full container logs ==="
-          docker compose logs thinclaw
-          exit 1
+          wait_for_health
+
+          test "$(docker compose exec -T thinclaw printenv THINCLAW_HOME | tr -d '\r')" = /data/.thinclaw
+          test "$(docker compose exec -T thinclaw printenv WORKSPACE_ROOT | tr -d '\r')" = /workspace
+          docker compose exec -T thinclaw test -s /data/thinclaw.db
+          docker compose exec -T thinclaw sh -c \
+            'touch /data/.thinclaw/compose-state-probe /workspace/compose-workspace-probe'
+          printf '%s\n' 'compose-persistence-secret' | docker compose exec -T thinclaw \
+            thinclaw config secrets set compose_persistence_probe --from-stdin
+
+          container_id="$(docker compose ps -q thinclaw)"
+          test "$(docker inspect -f '{{.HostConfig.Memory}}' "$container_id")" = 2147483648
+          test "$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$container_id")" = 2000000000
+          test "$(docker inspect -f '{{.HostConfig.PidsLimit}}' "$container_id")" = 512
+          test "$(docker inspect -f '{{.HostConfig.LogConfig.Type}}' "$container_id")" = json-file
+          test "$(docker inspect -f '{{index .HostConfig.LogConfig.Config "max-size"}}' "$container_id")" = 10m
+          test "$(docker inspect -f '{{index .HostConfig.LogConfig.Config "max-file"}}' "$container_id")" = 5
+
+          docker compose restart thinclaw
+          wait_for_health
+          docker compose exec -T thinclaw test -f /data/.thinclaw/compose-state-probe
+          docker compose exec -T thinclaw test -f /workspace/compose-workspace-probe
+          docker compose exec -T thinclaw thinclaw config secrets list | grep -q compose_persistence_probe
+
+          docker compose up -d --force-recreate thinclaw
+          wait_for_health
+          docker compose exec -T thinclaw test -f /data/.thinclaw/compose-state-probe
+          docker compose exec -T thinclaw test -f /workspace/compose-workspace-probe
+          docker compose exec -T thinclaw thinclaw config secrets list | grep -q compose_persistence_probe
+
+          # Exercise the real PostgreSQL overlay after the default LibSQL path.
+          # `down` intentionally retains volumes so this also covers the
+          # operator rollback shape; the final cleanup removes CI-only data.
+          docker compose down
+          export POSTGRES_PASSWORD="$(printf '3%.0s' {1..64})"
+          postgres_compose() {
+            docker compose -f docker-compose.yml -f docker-compose.postgres.yml "$@"
+          }
+          postgres_compose up -d
+          wait_for_health
+          postgres_compose exec -T postgres sh -c \
+            'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+          printf '%s\n' 'postgres-persistence-secret' | postgres_compose exec -T thinclaw \
+            thinclaw config secrets set postgres_persistence_probe --from-stdin
+
+          postgres_id="$(postgres_compose ps -q postgres)"
+          test "$(docker inspect -f '{{.HostConfig.Memory}}' "$postgres_id")" = 2147483648
+          test "$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$postgres_id")" = 2000000000
+          test "$(docker inspect -f '{{.HostConfig.PidsLimit}}' "$postgres_id")" = 256
+          test "$(docker inspect -f '{{.HostConfig.LogConfig.Type}}' "$postgres_id")" = json-file
+
+          postgres_compose up -d --force-recreate postgres thinclaw
+          wait_for_health
+          postgres_compose exec -T postgres sh -c \
+            'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+          postgres_compose exec -T thinclaw thinclaw config secrets list | \
+            grep -q postgres_persistence_probe
       - name: Save compose logs
         if: always()
         working-directory: deploy
         run: |
-          docker compose logs thinclaw > /tmp/compose-thinclaw.log 2>&1 || true
-          docker compose ps > /tmp/compose-ps.log 2>&1 || true
-          cat .env > /tmp/compose-env.log 2>&1 || true
-          cat docker-compose.override.yml >> /tmp/compose-env.log 2>&1 || true
+          postgres_password="$(printf '3%.0s' {1..64})"
+          POSTGRES_PASSWORD="$postgres_password" docker compose \
+            -f docker-compose.yml -f docker-compose.postgres.yml \
+            logs > /tmp/compose-thinclaw.log 2>&1 || true
+          POSTGRES_PASSWORD="$postgres_password" docker compose \
+            -f docker-compose.yml -f docker-compose.postgres.yml \
+            ps > /tmp/compose-ps.log 2>&1 || true
+          awk -F= '
+            /^[A-Za-z_][A-Za-z0-9_]*=/ {
+              if ($1 ~ /(TOKEN|KEY|SECRET|PASSWORD)/) print $1 "=[REDACTED]";
+              else print;
+            }
+          ' .env > /tmp/compose-env.log 2>&1 || true
       - name: Upload compose logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -723,7 +797,10 @@ jobs:
         working-directory: deploy
         run: |
           if [ -f .env ]; then
-            docker compose down -v
+            postgres_password="$(printf '3%.0s' {1..64})"
+            POSTGRES_PASSWORD="$postgres_password" docker compose \
+              -f docker-compose.yml -f docker-compose.postgres.yml \
+              down -v --remove-orphans
           fi
 
   linux-docker-multiarch-metadata:

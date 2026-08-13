@@ -203,17 +203,24 @@ Manual Compose path from a repo checkout:
 cd deploy
 cp env.example .env
 sed -i "s/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=$(openssl rand -hex 32)/" .env
+sed -i "s/^SECRETS_MASTER_KEY=.*/SECRETS_MASTER_KEY=$(openssl rand -hex 32)/" .env
 sed -i "s|^THINCLAW_IMAGE=.*|THINCLAW_IMAGE=ghcr.io/rnt56/thinclaw:latest|" .env
+chmod 0600 .env
 
 docker compose pull thinclaw
 docker compose up -d
 curl http://localhost:3000/api/health
 ```
 
-Source-build Compose is available, but it is slower on Pi:
+Source-build Compose is available, but compile the binary on the host before
+packaging it because the deployment Dockerfile is intentionally compile-free:
 
 ```bash
-BUILD_FEATURES=full docker compose up -d --build
+cd ..
+cargo build --locked --release --features full --bin thinclaw
+cp target/release/thinclaw ./thinclaw
+cd deploy
+THINCLAW_IMAGE=thinclaw:local docker compose up -d --build
 ```
 
 For the shared Compose reference, use [docker.md](docker.md).

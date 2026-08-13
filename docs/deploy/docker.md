@@ -14,7 +14,9 @@ Required for Compose:
 - Docker Compose V2 (`docker compose version`)
 - a repo checkout or the `deploy/` assets
 - network access to pull `ghcr.io/rnt56/thinclaw:latest`, unless you build locally
-- a long random `GATEWAY_AUTH_TOKEN`
+- a 32-byte random `GATEWAY_AUTH_TOKEN` encoded as 64 hexadecimal characters
+- a separate, stable 32-byte `SECRETS_MASTER_KEY` encoded as 64 hexadecimal
+  characters; losing it makes encrypted values unreadable
 - `curl` for health checks
 - `openssl` for the token-generation examples, or another secure random-token generator
 - `sed` for the shell snippets shown below
@@ -43,7 +45,7 @@ Linux server notes:
 
 Optional:
 
-- PostgreSQL profile if you want a separately managed database instead of libSQL.
+- PostgreSQL overlay if you want a separately managed database instead of libSQL.
 - systemd wrapper if you want Compose managed by the host service manager.
 - Docker Chromium fallback for browser automation on headless hosts.
 
@@ -55,6 +57,8 @@ From a repo checkout:
 cd deploy
 cp env.example .env
 sed -i "s/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=$(openssl rand -hex 32)/" .env
+sed -i "s/^SECRETS_MASTER_KEY=.*/SECRETS_MASTER_KEY=$(openssl rand -hex 32)/" .env
+chmod 0600 .env
 
 docker compose pull thinclaw
 docker compose up -d
@@ -78,27 +82,36 @@ docker compose restart thinclaw
 docker compose down
 ```
 
-## Image And Build Profile
+The public Compose file is directly bootable: it runs `thinclaw run
+--skip-setup-check`, enables the intentional headless secrets fallback, and
+stores the libSQL database and canonical ThinClaw home in `thinclaw-data`.
+The workspace is stored independently in `thinclaw-workspace`. Keep the same
+`.env` master key when restarting or recreating the container.
+
+## Image And Local Build
 
 The Compose file defaults to:
 
 ```env
 THINCLAW_IMAGE=ghcr.io/rnt56/thinclaw:latest
-BUILD_FEATURES=full
 ```
 
-The deployment Dockerfile intentionally builds the `full` profile by default:
+The deployment Dockerfile packages a prebuilt ThinClaw binary; it does not
+compile Rust in the container. For a locally patched build:
 
 ```bash
-docker build --build-arg BUILD_FEATURES=full -t thinclaw:latest .
-docker run --env-file deploy/.env -p 3000:3000 thinclaw:latest
+cargo build --locked --release --features full --bin thinclaw
+cp target/release/thinclaw ./thinclaw
+docker build --build-arg THINCLAW_BINARY=thinclaw -t thinclaw:local .
+THINCLAW_IMAGE=thinclaw:local docker compose -f deploy/docker-compose.yml up -d
 ```
 
-Use `BUILD_FEATURES=light` only when you want a smaller image without the full
-runtime integrations:
+For a light-profile local image, build that binary on the host first:
 
 ```bash
-docker build --build-arg BUILD_FEATURES=light -t thinclaw:light .
+cargo build --locked --release --features light --bin thinclaw
+cp target/release/thinclaw ./thinclaw
+docker build --build-arg THINCLAW_BINARY=thinclaw -t thinclaw:light .
 ```
 
 ## Raspberry Pi
@@ -118,13 +131,18 @@ guide.
 
 For the full Pi path, use [raspberry-pi-os-lite.md](raspberry-pi-os-lite.md).
 
-## PostgreSQL Profile
+## PostgreSQL Overlay
 
-The Compose file includes an optional PostgreSQL service. It starts only when
-the `postgres` profile is enabled:
+PostgreSQL is deliberately absent from the public libSQL base. Start the pinned
+pgvector overlay only when you choose that database. The password must be a
+separate URL-safe, high-entropy value; the command below generates the exact
+64-hex-character form enforced by the container entrypoint and stores it in the
+private Compose environment for future operator commands:
 
 ```bash
-docker compose --profile postgres up -d
+sed -i "s/^# POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 32)/" .env
+chmod 0600 .env
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
 ```
 
 The default deployment uses libSQL:
@@ -134,11 +152,16 @@ DATABASE_BACKEND=libsql
 LIBSQL_PATH=/data/thinclaw.db
 ```
 
-Use PostgreSQL when you intentionally want a separately managed database:
+The overlay wires the service hostname `postgres`, waits for database health,
+and persists the cluster in `thinclaw-postgres`. It intentionally fails Compose
+configuration when `POSTGRES_PASSWORD` is absent; there is no development
+password fallback. Keep this password stable while the volume exists. Rotate it
+as a coordinated PostgreSQL credential change, never by replacing only `.env`.
 
-```env
-DATABASE_BACKEND=postgres
-DATABASE_URL=postgres://thinclaw:CHANGE_ME@postgres:5432/thinclaw
+To stop the overlay without deleting its volumes:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml down
 ```
 
 ## Environment File
@@ -153,6 +176,9 @@ Set at least:
 
 ```env
 GATEWAY_AUTH_TOKEN=replace-with-a-long-random-token
+SECRETS_MASTER_KEY=replace-with-a-different-64-character-hex-key
+THINCLAW_ALLOW_ENV_MASTER_KEY=1
+ONBOARD_COMPLETED=true
 LLM_BACKEND=openai_compatible
 LLM_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_API_KEY=sk-or-CHANGE_ME
@@ -160,6 +186,11 @@ OPENROUTER_API_KEY=sk-or-CHANGE_ME
 
 For local direct binary installs, copy the same shape to `~/.thinclaw/.env`
 instead of `deploy/.env`.
+
+The public stack also applies configurable defaults of 2 GiB memory, 2 CPUs,
+512 PIDs, and five 10 MiB JSON log files. Override `THINCLAW_MEMORY_LIMIT`,
+`THINCLAW_CPU_LIMIT`, `THINCLAW_PIDS_LIMIT`, `THINCLAW_LOG_MAX_SIZE`, or
+`THINCLAW_LOG_MAX_FILES` in `.env` when the host needs different bounds.
 
 ## systemd Wrapper For Compose
 
@@ -172,8 +203,8 @@ printf '%s\n\n' "$(openssl rand -hex 32)" | \
 ```
 
 That script installs Docker when needed, configures UFW and Fail2ban when
-available, writes `deploy/.env`, starts Compose, and optionally enables the
-systemd wrapper.
+available, writes `deploy/.env`, generates a master key only when no valid one
+already exists, starts Compose, and optionally enables the systemd wrapper.
 
 ## Legacy Service Files
 

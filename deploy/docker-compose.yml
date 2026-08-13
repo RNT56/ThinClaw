@@ -1,83 +1,73 @@
-# ThinClaw Remote Agent — Docker Compose deployment
+# ThinClaw Remote Agent — public LibSQL Docker Compose deployment.
 #
 # Quick start:
 #   cp env.example .env
-#   # Edit .env: set GATEWAY_AUTH_TOKEN and at least one LLM key
+#   sed -i "s/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=$(openssl rand -hex 32)/" .env
+#   sed -i "s/^SECRETS_MASTER_KEY=.*/SECRETS_MASTER_KEY=$(openssl rand -hex 32)/" .env
+#   chmod 0600 .env
 #   docker compose pull thinclaw
 #   docker compose up -d
 #
-# Source-build fallback for local patches (requires pre-built binary):
-#   cargo build --release --features full --bin thinclaw
-#   cp target/release/thinclaw .
-#   docker compose up -d --build
-#
-# Scrappy connects via: http://<server-ip>:3000
-# Auth token: value of GATEWAY_AUTH_TOKEN in .env
+# PostgreSQL is an explicit overlay. See docker-compose.postgres.yml.
 
 services:
   thinclaw:
     image: ${THINCLAW_IMAGE:-ghcr.io/rnt56/thinclaw:latest}
     build:
-      context: ..  # ThinClaw/ directory (one level up from deploy/)
+      context: ..
       dockerfile: Dockerfile
       args:
         THINCLAW_BINARY: ${THINCLAW_BINARY:-thinclaw}
     container_name: thinclaw-remote
+    command: ["run", "--skip-setup-check"]
+    init: true
     restart: unless-stopped
+    stop_grace_period: 30s
     ports:
       - "${GATEWAY_BIND_IP:-127.0.0.1}:${GATEWAY_PORT:-3000}:${GATEWAY_PORT:-3000}"
     env_file:
       - .env
     environment:
-      # Gateway — always bind to all interfaces inside container
-      - GATEWAY_HOST=0.0.0.0
-      - GATEWAY_PORT=${GATEWAY_PORT:-3000}
-      - CLI_ENABLED=false
-      - HEARTBEAT_ENABLED=true
-      - HEARTBEAT_NOTIFY_CHANNEL=gateway
-      # Database
-      - DATABASE_BACKEND=${DATABASE_BACKEND:-libsql}
-      - LIBSQL_PATH=/data/thinclaw.db
+      GATEWAY_ENABLED: "true"
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "${GATEWAY_PORT:-3000}"
+      GATEWAY_AUTH_TOKEN: "${GATEWAY_AUTH_TOKEN:?Generate a 64-character hexadecimal GATEWAY_AUTH_TOKEN}"
+      CLI_ENABLED: "${CLI_ENABLED:-false}"
+      HEARTBEAT_ENABLED: "${HEARTBEAT_ENABLED:-true}"
+      HEARTBEAT_NOTIFY_CHANNEL: "${HEARTBEAT_NOTIFY_CHANNEL:-gateway}"
+      ROUTINES_ENABLED: "${ROUTINES_ENABLED:-true}"
+      ONBOARD_COMPLETED: "true"
+      THINCLAW_RUNTIME_PROFILE: "${THINCLAW_RUNTIME_PROFILE:-pi-os-lite-64}"
+      THINCLAW_HEADLESS: "true"
+      THINCLAW_HOME: /data/.thinclaw
+      WORKSPACE_ROOT: /workspace
+      THINCLAW_ALLOW_ENV_MASTER_KEY: "1"
+      SECRETS_MASTER_KEY: "${SECRETS_MASTER_KEY:?Generate a stable 64-character hexadecimal SECRETS_MASTER_KEY}"
+      DATABASE_BACKEND: libsql
+      LIBSQL_PATH: /data/thinclaw.db
     volumes:
       - thinclaw-data:/data
       - thinclaw-workspace:/workspace
-    depends_on:
-      postgres:
-        condition: service_healthy
-        required: false
     healthcheck:
       test: ["CMD-SHELL", "curl -f \"http://localhost:$${GATEWAY_PORT:-3000}/api/health\""]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 20s
-    networks:
-      - thinclaw-net
-
-  postgres:
-    image: pgvector/pgvector:pg15
-    container_name: thinclaw-postgres
-    restart: unless-stopped
-    profiles:
-      - postgres   # Only started when: docker compose --profile postgres up
-    environment:
-      POSTGRES_DB: thinclaw
-      POSTGRES_USER: ${POSTGRES_USER:-thinclaw}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-thinclaw}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-thinclaw}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    mem_limit: ${THINCLAW_MEMORY_LIMIT:-2g}
+    cpus: ${THINCLAW_CPU_LIMIT:-2.0}
+    pids_limit: ${THINCLAW_PIDS_LIMIT:-512}
+    logging:
+      driver: json-file
+      options:
+        max-size: "${THINCLAW_LOG_MAX_SIZE:-10m}"
+        max-file: "${THINCLAW_LOG_MAX_FILES:-5}"
     networks:
       - thinclaw-net
 
 volumes:
   thinclaw-data:
   thinclaw-workspace:
-  pgdata:
 
 networks:
   thinclaw-net:

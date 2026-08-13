@@ -1,0 +1,48 @@
+# Secure PostgreSQL overlay for deploy/docker-compose.yml.
+#
+# Store a stable URL-safe database password in the private Compose environment:
+#   sed -i "s/^# POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 32)/" .env
+#   chmod 0600 .env
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+
+services:
+  thinclaw:
+    environment:
+      DATABASE_BACKEND: postgres
+      DATABASE_URL: "postgres://${POSTGRES_USER:-thinclaw}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be a URL-safe high-entropy value}@postgres:5432/${POSTGRES_DB:-thinclaw}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be a URL-safe high-entropy value}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: pgvector/pgvector:pg15@sha256:a20a57d7aa5217a6af0a391ccf69f4a8512406d6c14be08132f801468cc3cc62
+    container_name: thinclaw-postgres
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-thinclaw}"
+      POSTGRES_USER: "${POSTGRES_USER:-thinclaw}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be a URL-safe high-entropy value}"
+    volumes:
+      - thinclaw-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    shm_size: ${POSTGRES_SHM_SIZE:-256m}
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-2g}
+    cpus: ${POSTGRES_CPU_LIMIT:-2.0}
+    pids_limit: ${POSTGRES_PIDS_LIMIT:-256}
+    logging:
+      driver: json-file
+      options:
+        max-size: "${POSTGRES_LOG_MAX_SIZE:-10m}"
+        max-file: "${POSTGRES_LOG_MAX_FILES:-5}"
+    networks:
+      - thinclaw-net
+
+volumes:
+  thinclaw-postgres:

@@ -21,7 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The pre-built binary is injected by the CI job (downloaded from artifacts)
 ARG THINCLAW_BINARY=thinclaw
 COPY ${THINCLAW_BINARY} /usr/local/bin/thinclaw
-RUN chmod +x /usr/local/bin/thinclaw
+COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/thinclaw /usr/local/bin/docker-entrypoint.sh
 
 # Copy migrations (these are SQL files, not compiled artifacts)
 COPY migrations /app/migrations
@@ -37,4 +38,5 @@ EXPOSE 3000
 ENV RUST_LOG=thinclaw=info \
     GATEWAY_PORT=3000
 
-ENTRYPOINT ["thinclaw"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["run", "--skip-setup-check"]

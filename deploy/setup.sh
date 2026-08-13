@@ -357,6 +357,24 @@ set_env_value() {
     fi
 }
 
+read_env_value() {
+    local file="$1"
+    local key="$2"
+    local value=""
+
+    [[ -f "$file" ]] || return 1
+    value="$(sed -n "s/^${key}=//p" "$file" | tail -n 1)"
+    [[ -n "$value" ]] || return 1
+    if [[ ${#value} -ge 2 && "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+        value="${value:1:${#value}-2}"
+    fi
+    printf '%s' "$value"
+}
+
+is_hex_32() {
+    [[ "$1" =~ ^[A-Fa-f0-9]{64}$ ]]
+}
+
 wait_for_health() {
     local attempts="${1:-60}"
     local delay="${2:-1}"
@@ -1311,13 +1329,27 @@ if [[ ! -f .env ]]; then
 fi
 
 # Inject the gateway auth token
+MASTER_KEY="$(read_env_value .env SECRETS_MASTER_KEY || true)"
+if ! is_hex_32 "$MASTER_KEY"; then
+    MASTER_KEY="$(generate_hex_32)"
+fi
+
 set_env_value .env GATEWAY_AUTH_TOKEN "$TOKEN"
 set_env_value .env GATEWAY_PORT "$THINCLAW_PORT"
 set_env_value .env THINCLAW_IMAGE "$THINCLAW_IMAGE"
 set_env_value .env GATEWAY_BIND_IP "${TS_IP:-0.0.0.0}"
+set_env_value .env GATEWAY_ENABLED true
+set_env_value .env ONBOARD_COMPLETED true
+set_env_value .env THINCLAW_HEADLESS true
+set_env_value .env THINCLAW_HOME /data/.thinclaw
+set_env_value .env WORKSPACE_ROOT /workspace
+set_env_value .env THINCLAW_ALLOW_ENV_MASTER_KEY 1
+set_env_value .env SECRETS_MASTER_KEY "$MASTER_KEY"
+set_env_value .env DATABASE_BACKEND libsql
+set_env_value .env LIBSQL_PATH /data/thinclaw.db
 chmod 0600 .env
 
-echo "    .env configured with gateway token."
+echo "    .env configured with gateway token and a stable headless master key."
 
 # Start Docker Compose
 echo ""
