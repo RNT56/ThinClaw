@@ -33,6 +33,8 @@ pub mod wasm;
 pub mod watcher;
 pub mod webchat;
 
+pub use agent::WorkspaceMode;
+
 pub use llm::{
     AnthropicDirectConfig, BedrockDirectConfig, GeminiDirectConfig, LlamaCppConfig, LlmBackend,
     LlmConfig, OllamaConfig, OpenAiCompatibleConfig, OpenAiDirectConfig, ReliabilityConfig,

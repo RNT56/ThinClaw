@@ -7,6 +7,45 @@ use thinclaw_types::error::ConfigError;
 
 use crate::helpers::{optional_env, parse_bool_env, parse_option_env, parse_optional_env};
 
+/// Canonical workspace containment policy. Parsing is deliberately closed:
+/// unknown values are configuration errors and can never imply local-host or
+/// full-filesystem execution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum WorkspaceMode {
+    #[default]
+    Sandboxed,
+    Project,
+    Unrestricted,
+}
+
+impl WorkspaceMode {
+    pub fn from_config_value(value: impl AsRef<str>) -> Result<Self, ConfigError> {
+        let value = value.as_ref().trim();
+        if value.is_empty() || value.eq_ignore_ascii_case("sandboxed") {
+            Ok(Self::Sandboxed)
+        } else if value.eq_ignore_ascii_case("project") {
+            Ok(Self::Project)
+        } else if value.eq_ignore_ascii_case("unrestricted") {
+            Ok(Self::Unrestricted)
+        } else {
+            Err(ConfigError::InvalidValue {
+                key: "WORKSPACE_MODE".to_string(),
+                message: format!(
+                    "unsupported mode '{value}' (expected sandboxed, project, or unrestricted)"
+                ),
+            })
+        }
+    }
+
+    pub const fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Sandboxed => "sandboxed",
+            Self::Project => "project",
+            Self::Unrestricted => "unrestricted",
+        }
+    }
+}
+
 /// Per-model thinking override.
 #[derive(Debug, Clone)]
 pub struct ModelThinkingOverride {
@@ -66,7 +105,7 @@ pub struct AgentConfig {
     /// - unrestricted: full filesystem access (Cursor-style)
     /// - sandboxed: file tools confined to workspace_root
     /// - project: shell cwd = workspace_root, but file tools can access anywhere
-    pub workspace_mode: String,
+    pub workspace_mode: WorkspaceMode,
     /// Root directory for sandboxed/project modes. None = user home.
     pub workspace_root: Option<std::path::PathBuf>,
     /// Preferred notification channel for proactive agent messages (boot, bootstrap).
@@ -105,6 +144,8 @@ impl AgentConfig {
                 workspace_mode = "project".to_string();
             }
         }
+
+        let workspace_mode = WorkspaceMode::from_config_value(workspace_mode)?;
 
         Ok(Self {
             name: parse_optional_env("AGENT_NAME", settings.agent.name.clone())?,
@@ -421,6 +462,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workspace_mode_is_typed_and_unknown_values_fail_closed() {
+        assert_eq!(
+            WorkspaceMode::from_config_value("").unwrap(),
+            WorkspaceMode::Sandboxed
+        );
+        assert_eq!(
+            WorkspaceMode::from_config_value(" PROJECT ").unwrap(),
+            WorkspaceMode::Project
+        );
+        assert!(WorkspaceMode::from_config_value("local-host").is_err());
+        assert!(WorkspaceMode::from_config_value("sandoxed").is_err());
+    }
+
+    #[test]
     fn normalize_subagent_transparency_level_accepts_aliases() {
         assert_eq!(
             normalize_subagent_transparency_level("balanced"),
@@ -464,7 +519,7 @@ mod tests {
             subagent_tool_profile: ToolProfile::default(),
             subagent_max_per_principal: 0,
             model_thinking_overrides,
-            workspace_mode: "sandboxed".to_string(),
+            workspace_mode: WorkspaceMode::Sandboxed,
             workspace_root: None,
             notify_channel: None,
             model_guidance_enabled: false,

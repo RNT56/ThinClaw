@@ -311,7 +311,7 @@ async fn run_agent_stdio_smoke() -> anyhow::Result<()> {
             subagent_tool_profile: ToolProfile::ExplicitOnly,
             subagent_max_per_principal: 0,
             model_thinking_overrides: std::collections::HashMap::new(),
-            workspace_mode: "unrestricted".to_string(),
+            workspace_mode: thinclaw_config::WorkspaceMode::Unrestricted,
             workspace_root: None,
             notify_channel: None,
             model_guidance_enabled: false,

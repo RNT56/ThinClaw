@@ -193,37 +193,7 @@ impl NativeChannelActivationPlan {
     }
 }
 
-/// Root-independent workspace mode names understood by the app runtime.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub enum RuntimeWorkspaceMode {
-    Sandboxed,
-    Project,
-    #[default]
-    Unrestricted,
-    Custom(String),
-}
-
-impl RuntimeWorkspaceMode {
-    /// Parses the string mode currently stored in configuration.
-    pub fn from_config_value(value: impl AsRef<str>) -> Self {
-        match value.as_ref() {
-            "sandboxed" => Self::Sandboxed,
-            "project" => Self::Project,
-            "unrestricted" | "" => Self::Unrestricted,
-            other => Self::Custom(other.to_string()),
-        }
-    }
-
-    /// Returns the mode value expected by existing registration policy helpers.
-    pub fn as_config_value(&self) -> &str {
-        match self {
-            Self::Sandboxed => "sandboxed",
-            Self::Project => "project",
-            Self::Unrestricted => "unrestricted",
-            Self::Custom(value) => value.as_str(),
-        }
-    }
-}
+pub use thinclaw_config::WorkspaceMode as RuntimeWorkspaceMode;
 
 /// Filesystem scope implied by a workspace plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -270,7 +240,7 @@ impl WorkspaceDirectoryPlan {
                     scope: WorkspaceFilesystemScope::WorkingDirectory,
                 }
             }
-            RuntimeWorkspaceMode::Unrestricted | RuntimeWorkspaceMode::Custom(_) => Self {
+            RuntimeWorkspaceMode::Unrestricted => Self {
                 base_dir: None,
                 working_dir: None,
                 create_dir: None,
@@ -332,7 +302,6 @@ pub struct ToolRuntimeAssemblyPlan {
 impl ToolRuntimeAssemblyPlan {
     /// Computes root-independent tool registration policy.
     pub fn from_input(input: ToolRuntimeAssemblyInput) -> Self {
-        let mode_value = input.workspace_mode.as_config_value();
         let directory_plan = || {
             WorkspaceDirectoryPlan::for_mode(
                 &input.workspace_mode,
@@ -343,13 +312,13 @@ impl ToolRuntimeAssemblyPlan {
         };
 
         let process_registration = if input.allow_local_tools {
-            process_registration_mode(mode_value)
+            process_registration_mode(input.workspace_mode)
         } else {
             RuntimeExecRegistrationMode::Disabled
         };
 
         let execute_code_registration = if input.allow_local_tools {
-            execute_code_registration_mode(mode_value, input.sandbox_enabled)
+            execute_code_registration_mode(input.workspace_mode, input.sandbox_enabled)
         } else {
             RuntimeExecRegistrationMode::Disabled
         };

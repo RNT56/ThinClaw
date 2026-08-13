@@ -1062,7 +1062,7 @@ impl Agent {
                 let model = self.llm().active_model_name();
                 let workspace_mode = &self.config.workspace_mode;
                 Ok(SubmissionResult::response(
-                    command_catalog::agent_status_text(&model, workspace_mode),
+                    command_catalog::agent_status_text(&model, workspace_mode.as_config_value()),
                 ))
             }
 

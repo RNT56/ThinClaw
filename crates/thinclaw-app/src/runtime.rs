@@ -6,6 +6,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde::Serialize;
+use thinclaw_config::WorkspaceMode;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,21 +16,21 @@ pub enum RuntimeExecRegistrationMode {
     DockerSandbox,
 }
 
-pub fn process_registration_mode(workspace_mode: &str) -> RuntimeExecRegistrationMode {
+pub fn process_registration_mode(workspace_mode: WorkspaceMode) -> RuntimeExecRegistrationMode {
     match workspace_mode {
-        "sandboxed" | "project" => RuntimeExecRegistrationMode::Disabled,
-        _ => RuntimeExecRegistrationMode::LocalHost,
+        WorkspaceMode::Sandboxed | WorkspaceMode::Project => RuntimeExecRegistrationMode::Disabled,
+        WorkspaceMode::Unrestricted => RuntimeExecRegistrationMode::LocalHost,
     }
 }
 
 pub fn execute_code_registration_mode(
-    workspace_mode: &str,
+    workspace_mode: WorkspaceMode,
     sandbox_enabled: bool,
 ) -> RuntimeExecRegistrationMode {
     match workspace_mode {
-        "sandboxed" if sandbox_enabled => RuntimeExecRegistrationMode::DockerSandbox,
-        "sandboxed" | "project" => RuntimeExecRegistrationMode::Disabled,
-        _ => RuntimeExecRegistrationMode::LocalHost,
+        WorkspaceMode::Sandboxed if sandbox_enabled => RuntimeExecRegistrationMode::DockerSandbox,
+        WorkspaceMode::Sandboxed | WorkspaceMode::Project => RuntimeExecRegistrationMode::Disabled,
+        WorkspaceMode::Unrestricted => RuntimeExecRegistrationMode::LocalHost,
     }
 }
 
@@ -426,15 +427,15 @@ mod tests {
     #[test]
     fn restricted_modes_disable_background_processes() {
         assert_eq!(
-            process_registration_mode("sandboxed"),
+            process_registration_mode(WorkspaceMode::Sandboxed),
             RuntimeExecRegistrationMode::Disabled
         );
         assert_eq!(
-            process_registration_mode("project"),
+            process_registration_mode(WorkspaceMode::Project),
             RuntimeExecRegistrationMode::Disabled
         );
         assert_eq!(
-            process_registration_mode("unrestricted"),
+            process_registration_mode(WorkspaceMode::Unrestricted),
             RuntimeExecRegistrationMode::LocalHost
         );
     }
@@ -442,19 +443,19 @@ mod tests {
     #[test]
     fn execute_code_requires_real_isolation_in_restricted_modes() {
         assert_eq!(
-            execute_code_registration_mode("sandboxed", true),
+            execute_code_registration_mode(WorkspaceMode::Sandboxed, true),
             RuntimeExecRegistrationMode::DockerSandbox
         );
         assert_eq!(
-            execute_code_registration_mode("sandboxed", false),
+            execute_code_registration_mode(WorkspaceMode::Sandboxed, false),
             RuntimeExecRegistrationMode::Disabled
         );
         assert_eq!(
-            execute_code_registration_mode("project", true),
+            execute_code_registration_mode(WorkspaceMode::Project, true),
             RuntimeExecRegistrationMode::Disabled
         );
         assert_eq!(
-            execute_code_registration_mode("unrestricted", false),
+            execute_code_registration_mode(WorkspaceMode::Unrestricted, false),
             RuntimeExecRegistrationMode::LocalHost
         );
     }

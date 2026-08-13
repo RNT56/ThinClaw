@@ -54,7 +54,7 @@ pub fn apply_acp_runtime_config(config: &mut Config, plan: AcpRuntimeConfigPlan)
         MainToolProfilePlan::Acp => crate::tools::ToolProfile::Acp,
     };
     if let Some(workspace_mode) = plan.workspace_mode {
-        config.agent.workspace_mode = workspace_mode.as_config_value().to_string();
+        config.agent.workspace_mode = workspace_mode;
     }
     if let Some(workspace_root) = plan.workspace_root {
         config.agent.workspace_root = Some(workspace_root);
@@ -301,9 +301,7 @@ impl AppBuilder {
 
     fn tool_runtime_assembly_plan(&self) -> ToolRuntimeAssemblyPlan {
         ToolRuntimeAssemblyPlan::from_input(ToolRuntimeAssemblyInput {
-            workspace_mode: RuntimeWorkspaceMode::from_config_value(
-                &self.config.agent.workspace_mode,
-            ),
+            workspace_mode: self.config.agent.workspace_mode,
             workspace_root: self.config.agent.workspace_root.clone(),
             sandbox_enabled: self.config.sandbox.enabled,
             allow_local_tools: self.config.agent.allow_local_tools,
@@ -711,7 +709,7 @@ impl AppBuilder {
                     Some(self.config.builder.to_builder_config()),
                     builder_workspace.base_dir,
                     builder_workspace.working_dir,
-                    (self.config.agent.workspace_mode == "sandboxed"
+                    (self.config.agent.workspace_mode == RuntimeWorkspaceMode::Sandboxed
                         && self.config.sandbox.enabled)
                         .then(|| {
                             Arc::new(

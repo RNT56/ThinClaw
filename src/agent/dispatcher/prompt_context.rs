@@ -685,7 +685,7 @@ impl Agent {
             .with_group_chat(is_group_chat)
             .with_active_channels(active_channel_names)
             .with_workspace_mode(
-                &self.config.workspace_mode,
+                self.config.workspace_mode.as_config_value(),
                 self.config
                     .workspace_root
                     .as_ref()
