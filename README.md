@@ -300,7 +300,7 @@ integration is equally isolated.
 | Native Rust | Trusted host runtime | Persistent connections, local-system access, and built-in integrations |
 | WASM tools | Sandboxed and capability-scoped | Hot-reloadable tool components with credential isolation |
 | WASM channels | Sandboxed and capability-scoped | Packaged channel components with explicit host capabilities |
-| MCP servers | Operator-trusted external process or service | External tool ecosystems and services managed outside the sandbox |
+| MCP servers | Strict OS-contained local stdio by default; remote service trust boundary | External tool ecosystems and services with protocol policy preserved |
 | ComfyUI sidecar | Operator-trusted local or cloud media runtime | Image generation, workflow execution, model/node lifecycle actions |
 | Desktop autonomy | Privileged opt-in profile | Host-level app control, UI automation, evidence capture, rollout, and rollback |
 
@@ -309,8 +309,10 @@ Important boundaries:
 - Local data paths, secrets, and policy enforcement live in the trusted host
   runtime.
 - WASM components are sandboxed and capability-scoped.
-- MCP servers, ComfyUI sidecars, tunnels, LLM providers, and external services
-  are real trust boundaries.
+- MCP executables and remote servers remain trust decisions. Local stdio uses
+  fail-closed filesystem/network/process containment by default; the explicit
+  compatibility mode does not. ComfyUI sidecars, tunnels, LLM providers, and
+  external services are also real trust boundaries.
 - Docker remains the portable hard-isolation path for code execution; host-local
   isolation reports its actual backend and capabilities.
 - `desktop_autonomy.profile = "reckless_desktop"` adds host-level app, UI, and
@@ -375,6 +377,7 @@ targeted log filtering, `RUST_LOG=...` still takes precedence.
 | CLI command reference | [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) |
 | LLM provider setup | [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) |
 | Security and trust overview | [docs/SECURITY.md](docs/SECURITY.md) |
+| Extension process isolation | [docs/PROCESS_ISOLATION.md](docs/PROCESS_ISOLATION.md) |
 | Deep network model | [src/NETWORK_SECURITY.md](src/NETWORK_SECURITY.md) |
 | Extensions, WASM, MCP, and registries | [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md) |
 | Channel architecture | [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md) |

@@ -4,9 +4,9 @@ ThinClaw has three extension surfaces, and they do not share the same trust mode
 
 - **WASM tools**: sandboxed tool modules loaded by ThinClaw
 - **WASM channels**: sandboxed packaged channel modules loaded by ThinClaw
-- **MCP servers**: operator-trusted external processes or remote services connected through the MCP client
+- **MCP servers**: external processes or remote services connected through the MCP client; local stdio processes are OS-isolated by default
 
-This document is the canonical overview for those boundaries. For the public-facing security summary, see [SECURITY.md](SECURITY.md); for the deeper network model, see [../src/NETWORK_SECURITY.md](../src/NETWORK_SECURITY.md).
+This document is the canonical overview for those boundaries. For the process threat model, see [PROCESS_ISOLATION.md](PROCESS_ISOLATION.md); for the public-facing security summary, see [SECURITY.md](SECURITY.md); for the deeper network model, see [../src/NETWORK_SECURITY.md](../src/NETWORK_SECURITY.md).
 
 ## The Three Extension Kinds
 
@@ -15,7 +15,7 @@ This document is the canonical overview for those boundaries. For the public-fac
 | WASM tool | Loaded inside ThinClaw's WASM runtime | Sandboxed, host-mediated | `thinclaw extensions tools ...` |
 | WASM channel | Loaded inside ThinClaw's WASM channel runtime | Sandboxed, host-mediated | registry / channel setup path |
 | Native plugin | Loaded as `.so`/`.dylib` through C ABI JSON v1 | Unsafe, disabled by default, allowlisted, signed | broad plugin manifest |
-| MCP server | External process or remote service | Operator-trusted, not sandboxed | `thinclaw extensions mcp ...` |
+| MCP server | External process or remote service | Local stdio: strict OS sandbox by default; HTTP: remote trust boundary | `thinclaw extensions mcp ...` |
 
 ## Do Not Blur These Flows
 
@@ -39,11 +39,20 @@ WASM components are the sandboxed extension path.
 
 ### MCP servers
 
-MCP is not the sandboxed extension path.
+MCP admission and process containment are separate controls:
 
-- MCP servers run as external processes or remote services.
-- They are configured and trusted by the operator.
-- They can still be a great integration path, but they should be described as operator-trusted execution, not as isolated plugins.
+- Signature/registry admission does not apply to an arbitrary local command, so the operator still chooses which server executable and arguments to trust.
+- Local stdio servers default to `stdio_isolation.mode = "strict"`. On macOS this uses Seatbelt; on Linux it requires bubblewrap. Strict startup fails closed if the OS sandbox is unavailable. Windows currently requires the explicit `compatibility` mode.
+- A server loaded from a pre-v3 MCP config is not silently relaunched with changed privileges. Migration records its prior direct-host behavior as `compatibility`, sets `migration_required`, and blocks launch. Resolve it with `thinclaw extensions mcp server isolation <NAME> --strict` (recommended), or explicitly acknowledge the old boundary with `--compatibility`. List/show and the web API expose this state.
+- Strict mode clears ambient environment variables, supplies a private home/temp/current directory, denies network by default, and blocks ambient operator/removable/shared-temp data while preserving system runtime reads plus persisted file `roots_grants`. File roots are read/write because the MCP roots protocol has no access-mode field; non-file roots never become filesystem grants.
+- `stdio_isolation.allow_network = true` deliberately opens network inside the strict filesystem/process sandbox. It is false by default.
+- Descendants inherit the OS sandbox and are owned as one process tree. Exit/crash releases pending calls; shutdown or a request deadline terminates and reaps the tree.
+- `stdio_isolation.mode = "compatibility"` is an explicit unsafe fallback. It retains exact environment construction, private home/temp, request deadlines, and process-tree ownership, but it has direct host filesystem and network access.
+- HTTP MCP servers remain remote trust boundaries; their OAuth, URL, capability, roots, and tool policy are independent of local process containment.
+
+These controls do not make an MCP server trustworthy. Existing MCP capability,
+approval, authentication, secret-source, and tool policies still apply at the
+protocol boundary even when OS containment is active.
 
 ### ComfyUI media generation
 
@@ -57,6 +66,7 @@ tool guide, and security model rather than as an installable extension.
 Native plugins are the exceptional unsafe path for integrations that cannot fit inside WASM.
 
 - `extensions.allow_native_plugins` must be true.
+- `extensions.allow_unsafe_in_process_native_plugins` must also be true. This second flag is the explicit compatibility acceptance for the current in-process host; admission alone never implies acceptance of host crash or compromise.
 - `extensions.require_plugin_signatures` is true by default; native loading verifies signed broad plugin manifests against `extensions.trusted_manifest_public_keys`.
 - dynamic libraries must live under `extensions.native_plugin_allowlist_dirs`.
 - native artifacts can declare a `sha256`; when present it is checked before `libloading` opens the library.
@@ -64,7 +74,7 @@ Native plugins are the exceptional unsafe path for integrations that cannot fit 
 - requests and responses cross the boundary as bounded JSON byte buffers.
 - each invocation is wrapped in `std::panic::catch_unwind`, so a panicking plugin is recorded as a failure rather than unwinding across the FFI boundary and aborting the host.
 
-> **Trust caveat — native plugins are NOT sandboxed.** Unlike WASM tools/channels and Docker workers, a native plugin runs **in-process with full host privilege** (it is `dlopen`-ed into the agent). The signature verification, default-off gate, and operator allowlist are the *only* controls — there is no memory/syscall/network isolation. Enable native plugins only for code you fully trust. Gateway-driven install/activate is deliberately **not** exposed (operator-only, local config); see `src/NETWORK_SECURITY.md`.
+> **Trust caveat — native plugins are NOT sandboxed.** Unlike WASM tools/channels and strict local stdio MCP servers, a native plugin runs **in-process with full host privilege** (it is `dlopen`-ed into the agent). The signature verification, two default-off gates, and operator allowlist are admission controls, not containment: there is no memory/syscall/network isolation, and an abort or fault can terminate ThinClaw. Enable the compatibility flag only for audited code after accepting that risk. Gateway-driven install/activate is deliberately **not** exposed (operator-only, local config); see `src/NETWORK_SECURITY.md`.
 
 Broad plugin manifests can contribute tools, channels, memory providers, context providers, and native plugins. Native contributions must declare `abi = "c_abi_json_v1"`, `abiVersion = 1`, an artifact id, and non-zero request/response byte limits.
 
@@ -126,6 +136,11 @@ direct host-boundary tests and a prebuilt component smoke fixture so this path
 does not depend on `cargo-component` being installed locally.
 
 Roots grants are treated as persisted server policy rather than a one-time startup snapshot. Long-lived MCP clients reload the configured grants when serving `roots/list`, so updated grants are visible to connected servers without requiring a full ThinClaw restart.
+
+For strict local stdio servers, restart the server after changing roots: the
+protocol view refreshes live, while the OS mount/Seatbelt view is fixed at
+process launch. A missing or relative local file root fails strict startup;
+`file://` and absolute paths are canonicalized before being granted.
 
 ## Recommended Reading Order
 

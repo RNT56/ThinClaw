@@ -82,12 +82,13 @@ to inject through a running web runtime.
 - `thinclaw extensions skills`: Inspect, audit, install, update, publish, remove, reload, and assign trust to runtime skills; manage catalogs with `taps`.
 - `thinclaw extensions mcp`: Manage Model Context Protocol (MCP) servers. Grouped into five subcommand families:
   - `thinclaw extensions mcp server`: Manage MCP server registration, activation, and auth.
-    - `add <NAME> [URL] [--command <CMD>] [--args <A,B>] [--env <K=V>] [--secret-env <K=SOURCE_ID>] [--client-id ...] [--auth-url ...] [--token-url ...] [--scopes ...] [--description ...]`: Add a server (HTTP via URL, or stdio via `--command`). Secret-shaped values are rejected from generic `--env`; bind authorized sources with `--secret-env`.
+    - `add <NAME> [URL] [--command <CMD>] [--args <A,B>] [--env <K=V>] [--secret-env <K=SOURCE_ID>] [--stdio-allow-network] [--stdio-request-timeout <SECONDS>] [--stdio-compatibility] [--client-id ...] [--auth-url ...] [--token-url ...] [--scopes ...] [--description ...]`: Add a server (HTTP via URL, or stdio via `--command`). Stdio defaults to fail-closed OS isolation, no network, and a 120-second request deadline. `--stdio-compatibility` explicitly accepts direct-host filesystem/network access. Secret-shaped values are rejected from generic `--env`; bind authorized sources with `--secret-env`.
     - `remove <NAME>`: Remove a server.
     - `list [--verbose]`: Show configured servers.
     - `show <NAME>`: Show a single server's configuration.
     - `auth <NAME> [--user <ID>]`: Authenticate with a server (OAuth flow).
     - `test <NAME> [--user <ID>]`: Test connection to a server.
+    - `isolation <NAME> (--strict|--compatibility) [--allow-network] [--request-timeout <SECONDS>]`: Resolve a legacy migration or deliberately change a stdio server boundary. Strict is recommended and network-denied by default; compatibility explicitly accepts direct-host filesystem/network access.
     - `toggle <NAME> [--enable|--disable]`: Enable or disable a server.
   - `thinclaw extensions mcp resource`: Browse MCP resources from a server.
     - `list`, `read`, `templates`.
