@@ -1801,12 +1801,10 @@ impl AppBuilder {
         // and runs its own browser-side wake path, so this is for headless/remote
         // deployments only.
         //
-        // The default backend is the fully-implemented RMS EnergyDetector, which
-        // detects *that someone is speaking* (voice activity), not the literal
-        // "hey molty" phrase. A true keyword wake word requires the optional
-        // Sherpa-ONNX backend plus a shipped sherpa-onnx-keyword-spotter binary,
-        // an ONNX keyword model, and keywords.txt (none of which the repo ships).
-        // See docs/BUILD_PROFILES.md.
+        // Headless wake is keyword-only. Enabling it also requires an installed
+        // Sherpa-ONNX keyword spotter and explicit model/keyword assets. Missing
+        // assets disable this subsystem with an actionable error; ambient voice
+        // activity is never used as a fallback trigger. See docs/BUILD_PROFILES.md.
         // Construct the voice-wake runtime here (cheap) but start + consume it in
         // the host (`main.rs`) once the channel inject sender exists, so a detected
         // wake word can be transcribed and dispatched into the agent (F-18). Gated
@@ -1822,9 +1820,16 @@ impl AppBuilder {
                 .unwrap_or(false);
 
             if wake_enabled {
-                Some(crate::voice_wake::VoiceWakeRuntime::new(
-                    crate::voice_wake::VoiceWakeConfig::from_env(),
-                ))
+                match crate::voice_wake::VoiceWakeConfig::from_env() {
+                    Ok(config) => Some(crate::voice_wake::VoiceWakeRuntime::new(config)),
+                    Err(error) => {
+                        tracing::error!(
+                            error = %error,
+                            "Headless voice wake is enabled but unavailable; keyword detection will remain off"
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             }

@@ -5,13 +5,12 @@
 //! to enter listening mode.
 //!
 //! Architecture:
-//! - Audio capture: `cpal` crate (behind `voice` feature flag)
-//! - Wake detection: configurable backends:
-//!   - Energy detector — RMS energy-based voice activity detection (implemented)
-//!   - Sherpa-ONNX (`sherpa-rs`) — offline keyword spotting (scaffold)
+//! - Audio capture: `cpal` crate (behind the `voice` feature flag)
+//! - Wake detection: an external Sherpa-ONNX keyword spotter with operator-
+//!   supplied model and keyword assets
 //!
 //! **Feature flag:** Enable `voice` in Cargo.toml for real audio capture.
-//! Without it, the detection loop runs as a polling placeholder.
+//! Without it, the runtime returns an unavailable error and never opens audio.
 //! The `voice` feature is intended for headless/remote mode only;
 //! in desktop mode (Tauri), ThinClaw Desktop owns the microphone.
 //!
@@ -19,179 +18,248 @@
 //! `AppBuilder::build_all` (`src/app.rs`) when the `voice` feature is compiled
 //! in **and** the operator sets `THINCLAW_VOICE_WAKE=1` at runtime. Default off.
 //! The startup code calls [`VoiceWakeRuntime::take_events`], spawns a consumer
-//! task, and calls [`VoiceWakeRuntime::start`]. The consumer logs detections at
-//! the `WakeWordDetected` dispatch seam.
+//! task, and calls [`VoiceWakeRuntime::start`]. The consumer pauses keyword
+//! capture, transcribes the follow-up utterance, and dispatches it to the agent.
 //!
-//! **Wake phrase vs. voice activity:** the default [`WakeBackend::EnergyDetector`]
-//! detects *that someone is speaking*, not the literal "hey thinclaw"/"hey molty"
-//! phrase. A true keyword wake word requires [`WakeBackend::SherpaOnnx`], which
-//! shells out to an external `sherpa-onnx-keyword-spotter` binary and needs an
-//! ONNX keyword model plus a `keywords.txt` file — none of which the repo ships.
-//! The EnergyDetector works with no extra assets.
-//!
-//! **Deferred:** capturing and transcribing the follow-up utterance on wake
-//! (STT capture-on-wake via `talk_mode`) and routing it into the dispatcher is
-//! not yet wired; the consumer task only surfaces the event today.
+//! The subsystem is deliberately keyword-only. It never promotes generic voice
+//! activity to a wake event and it never falls back to an energy detector when
+//! keyword assets are absent. Enabling an incomplete configuration fails closed.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// Voice wake configuration.
 #[derive(Debug, Clone)]
 pub struct VoiceWakeConfig {
     /// Wake word phrase to listen for (default: "hey molty").
     pub wake_word: String,
-    /// Detection sensitivity (0.0 = strict, 1.0 = lenient). Default: 0.5.
-    pub sensitivity: f32,
     /// Audio sample rate in Hz. Default: 16000.
     pub sample_rate: u32,
-    /// Detection backend.
-    pub backend: WakeBackend,
-    /// Minimum energy threshold for voice activity detection.
-    pub energy_threshold: f32,
+    /// Directory containing the encoder, decoder, joiner, and tokens assets.
+    pub model_path: PathBuf,
+    /// Keyword definitions consumed by the keyword spotter.
+    pub keywords_path: PathBuf,
+    /// Encoder ONNX filename, relative to `model_path`.
+    pub encoder_filename: String,
+    /// Decoder ONNX filename, relative to `model_path`.
+    pub decoder_filename: String,
+    /// Joiner ONNX filename, relative to `model_path`.
+    pub joiner_filename: String,
+    /// Minimum time before keyword capture resumes after a handled wake.
+    pub cooldown: Duration,
 }
 
 impl Default for VoiceWakeConfig {
     fn default() -> Self {
         Self {
             wake_word: "hey molty".to_string(),
-            sensitivity: 0.5,
             sample_rate: 16000,
-            backend: WakeBackend::EnergyDetector,
-            energy_threshold: 0.01,
+            model_path: PathBuf::new(),
+            keywords_path: PathBuf::new(),
+            encoder_filename: Self::DEFAULT_ENCODER_FILENAME.to_string(),
+            decoder_filename: Self::DEFAULT_DECODER_FILENAME.to_string(),
+            joiner_filename: Self::DEFAULT_JOINER_FILENAME.to_string(),
+            cooldown: Duration::from_millis(1_500),
         }
     }
 }
 
 impl VoiceWakeConfig {
-    /// Build the config from typed environment overrides, falling back to the
-    /// defaults for any unset/invalid value (F-19). This replaces the previous
-    /// `::default()`-only construction so operators can tune the wake word and
-    /// detector without a code change.
+    pub const DEFAULT_ENCODER_FILENAME: &'static str =
+        "encoder-epoch-12-avg-2-chunk-16-left-64.onnx";
+    pub const DEFAULT_DECODER_FILENAME: &'static str =
+        "decoder-epoch-12-avg-2-chunk-16-left-64.onnx";
+    pub const DEFAULT_JOINER_FILENAME: &'static str = "joiner-epoch-12-avg-2-chunk-16-left-64.onnx";
+
+    /// Build a keyword-only configuration from environment variables.
     ///
-    /// The backend stays [`WakeBackend::EnergyDetector`] here; selecting the
-    /// Sherpa-ONNX keyword backend additionally requires a shipped model and is
-    /// documented future work (see `docs/BUILD_PROFILES.md`).
-    pub fn from_env() -> Self {
+    /// `THINCLAW_VOICE_WAKE_MODEL_DIR` is required whenever voice wake is
+    /// enabled. `THINCLAW_VOICE_WAKE_KEYWORDS_FILE` defaults to
+    /// `<model-dir>/keywords.txt`. Invalid values are rejected instead of being
+    /// silently replaced by a less restrictive detector.
+    pub fn from_env() -> Result<Self, String> {
         let mut cfg = Self::default();
         if let Ok(word) = std::env::var("THINCLAW_VOICE_WAKE_WORD") {
             let word = word.trim();
-            if !word.is_empty() {
-                cfg.wake_word = word.to_string();
+            if word.is_empty() {
+                return Err("THINCLAW_VOICE_WAKE_WORD must not be empty".into());
             }
+            cfg.wake_word = word.to_string();
         }
-        if let Some(v) = parse_env_f32("THINCLAW_VOICE_WAKE_SENSITIVITY") {
-            cfg.sensitivity = v.clamp(0.0, 1.0);
-        }
-        if let Some(v) = parse_env_u32("THINCLAW_VOICE_WAKE_SAMPLE_RATE") {
+        if let Some(v) = parse_env_u32("THINCLAW_VOICE_WAKE_SAMPLE_RATE")? {
+            if !(8_000..=48_000).contains(&v) {
+                return Err(
+                    "THINCLAW_VOICE_WAKE_SAMPLE_RATE must be between 8000 and 48000".into(),
+                );
+            }
             cfg.sample_rate = v;
         }
-        if let Some(v) = parse_env_f32("THINCLAW_VOICE_WAKE_ENERGY_THRESHOLD") {
-            cfg.energy_threshold = v;
+        if let Some(v) = parse_env_u64("THINCLAW_VOICE_WAKE_COOLDOWN_MS")? {
+            if !(500..=10_000).contains(&v) {
+                return Err("THINCLAW_VOICE_WAKE_COOLDOWN_MS must be between 500 and 10000".into());
+            }
+            cfg.cooldown = Duration::from_millis(v);
         }
-        cfg
-    }
-}
-
-fn parse_env_f32(key: &str) -> Option<f32> {
-    std::env::var(key).ok()?.trim().parse().ok()
-}
-
-fn parse_env_u32(key: &str) -> Option<u32> {
-    std::env::var(key).ok()?.trim().parse().ok()
-}
-
-/// Wake word detection backend.
-#[derive(Debug, Clone)]
-pub enum WakeBackend {
-    /// Simple audio energy detector — detects voice activity but not specific words.
-    /// Useful as a fallback when ML models aren't available.
-    EnergyDetector,
-    /// Sherpa-ONNX keyword spotter (requires sherpa-rs dependency).
-    #[allow(dead_code)]
-    SherpaOnnx {
-        /// Path to the model directory.
-        model_path: String,
-        /// Encoder ONNX filename (relative to `model_path`).
-        /// Default: [`WakeBackend::DEFAULT_ENCODER_FILENAME`].
-        encoder_filename: String,
-        /// Decoder ONNX filename (relative to `model_path`).
-        /// Default: [`WakeBackend::DEFAULT_DECODER_FILENAME`].
-        decoder_filename: String,
-        /// Joiner ONNX filename (relative to `model_path`).
-        /// Default: [`WakeBackend::DEFAULT_JOINER_FILENAME`].
-        joiner_filename: String,
-    },
-}
-
-impl WakeBackend {
-    /// Default Sherpa-ONNX encoder model filename.
-    pub const DEFAULT_ENCODER_FILENAME: &'static str =
-        "encoder-epoch-12-avg-2-chunk-16-left-64.onnx";
-
-    /// Default Sherpa-ONNX decoder model filename.
-    pub const DEFAULT_DECODER_FILENAME: &'static str =
-        "decoder-epoch-12-avg-2-chunk-16-left-64.onnx";
-
-    /// Default Sherpa-ONNX joiner model filename.
-    pub const DEFAULT_JOINER_FILENAME: &'static str = "joiner-epoch-12-avg-2-chunk-16-left-64.onnx";
-
-    /// Create a `SherpaOnnx` backend with default model filenames.
-    ///
-    /// Uses the **zipformer-transducer epoch 12** checkpoint filenames as defaults.
-    ///
-    /// For custom filenames, call [`WakeBackend::sherpa_onnx_with_filenames`].
-    ///
-    /// NOTE: When this backend graduates from scaffold to production, these
-    /// defaults should be wirable via `VoiceWakeConfig` / env vars.
-    pub fn sherpa_onnx(model_path: impl Into<String>) -> Self {
-        Self::sherpa_onnx_with_filenames(
-            model_path,
+        cfg.model_path = PathBuf::from(
+            std::env::var("THINCLAW_VOICE_WAKE_MODEL_DIR")
+                .map_err(
+                    |_| "THINCLAW_VOICE_WAKE_MODEL_DIR is required when voice wake is enabled",
+                )?
+                .trim(),
+        );
+        if cfg.model_path.as_os_str().is_empty() {
+            return Err("THINCLAW_VOICE_WAKE_MODEL_DIR must not be empty".into());
+        }
+        cfg.keywords_path = std::env::var("THINCLAW_VOICE_WAKE_KEYWORDS_FILE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| cfg.model_path.join("keywords.txt"));
+        cfg.encoder_filename = env_asset_filename(
+            "THINCLAW_VOICE_WAKE_ENCODER",
             Self::DEFAULT_ENCODER_FILENAME,
+        )?;
+        cfg.decoder_filename = env_asset_filename(
+            "THINCLAW_VOICE_WAKE_DECODER",
             Self::DEFAULT_DECODER_FILENAME,
-            Self::DEFAULT_JOINER_FILENAME,
-        )
+        )?;
+        cfg.joiner_filename =
+            env_asset_filename("THINCLAW_VOICE_WAKE_JOINER", Self::DEFAULT_JOINER_FILENAME)?;
+        cfg.validate()?;
+        Ok(cfg)
     }
 
-    /// Create a `SherpaOnnx` backend with custom model filenames.
-    ///
-    /// Empty/whitespace filenames are replaced with the defaults above.
-    pub fn sherpa_onnx_with_filenames(
-        model_path: impl Into<String>,
-        encoder_filename: impl Into<String>,
-        decoder_filename: impl Into<String>,
-        joiner_filename: impl Into<String>,
-    ) -> Self {
-        Self::SherpaOnnx {
-            model_path: model_path.into(),
-            encoder_filename: Self::normalize_sherpa_filename(
-                encoder_filename.into(),
-                Self::DEFAULT_ENCODER_FILENAME,
-            ),
-            decoder_filename: Self::normalize_sherpa_filename(
-                decoder_filename.into(),
-                Self::DEFAULT_DECODER_FILENAME,
-            ),
-            joiner_filename: Self::normalize_sherpa_filename(
-                joiner_filename.into(),
-                Self::DEFAULT_JOINER_FILENAME,
-            ),
+    /// Validate all keyword assets without opening the microphone.
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_assets()?;
+        if !Self::keyword_spotter_available() {
+            return Err("sherpa-onnx-keyword-spotter is not available in PATH".into());
         }
+        Ok(())
     }
 
-    fn normalize_sherpa_filename(filename: String, default: &'static str) -> String {
-        let trimmed = filename.trim();
-
-        if trimmed.is_empty() {
-            default.to_string()
-        } else {
-            trimmed.to_string()
+    fn validate_assets(&self) -> Result<(), String> {
+        let wake_word = normalize_phrase(&self.wake_word);
+        if wake_word.is_empty() || self.wake_word.chars().any(char::is_control) {
+            return Err("voice wake word must contain printable non-whitespace characters".into());
         }
+        if !self.model_path.is_dir() {
+            return Err(format!(
+                "voice wake model directory is missing: {}",
+                self.model_path.display()
+            ));
+        }
+        for (filename, description) in [
+            (self.encoder_filename.as_str(), "encoder"),
+            (self.decoder_filename.as_str(), "decoder"),
+            (self.joiner_filename.as_str(), "joiner"),
+            ("tokens.txt", "tokens"),
+        ] {
+            validate_asset_filename(filename)?;
+            let path = self.model_path.join(filename);
+            if !path.is_file() {
+                return Err(format!(
+                    "voice wake {description} asset is missing: {}",
+                    path.display()
+                ));
+            }
+        }
+        if !self.keywords_path.is_file() {
+            return Err(format!(
+                "voice wake keywords file is missing: {}",
+                self.keywords_path.display()
+            ));
+        }
+        let keywords = std::fs::read_to_string(&self.keywords_path).map_err(|error| {
+            format!(
+                "failed to read voice wake keywords file {}: {error}",
+                self.keywords_path.display()
+            )
+        })?;
+        if !keywords
+            .lines()
+            .any(|line| keyword_line_matches(line, &wake_word))
+        {
+            return Err(format!(
+                "voice wake phrase {:?} is not present in {}",
+                self.wake_word,
+                self.keywords_path.display()
+            ));
+        }
+        Ok(())
     }
+
+    pub fn keyword_spotter_available() -> bool {
+        thinclaw_platform::find_executable_in_path("sherpa-onnx-keyword-spotter").is_some()
+    }
+}
+
+fn parse_env_u32(key: &str) -> Result<Option<u32>, String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| {
+            value
+                .trim()
+                .parse()
+                .map_err(|error| format!("{key} must be an unsigned integer: {error}"))
+        })
+        .transpose()
+}
+
+fn parse_env_u64(key: &str) -> Result<Option<u64>, String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| {
+            value
+                .trim()
+                .parse()
+                .map_err(|error| format!("{key} must be an unsigned integer: {error}"))
+        })
+        .transpose()
+}
+
+fn env_asset_filename(key: &str, default: &str) -> Result<String, String> {
+    let value = std::env::var(key).unwrap_or_else(|_| default.to_string());
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{key} must not be empty"));
+    }
+    validate_asset_filename(value)?;
+    Ok(value.to_string())
+}
+
+fn validate_asset_filename(filename: &str) -> Result<(), String> {
+    let path = Path::new(filename);
+    if path.components().count() != 1 || filename.chars().any(char::is_control) {
+        return Err(format!(
+            "voice wake asset filename must be a plain filename: {filename:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_phrase(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn keyword_line_matches(line: &str, normalized_wake_word: &str) -> bool {
+    let line = line.split('#').next().unwrap_or_default();
+    normalize_phrase(line).contains(normalized_wake_word)
+}
+
+fn detection_line_matches(line: &str, normalized_wake_word: &str) -> bool {
+    let normalized = normalize_phrase(line);
+    (normalized.contains("keyword_detected") || normalized.contains("keyword detected"))
+        && normalized.contains(normalized_wake_word)
 }
 
 /// Events emitted by the voice wake system.
@@ -204,10 +272,6 @@ pub enum VoiceWakeEvent {
         /// Timestamp of detection.
         timestamp: String,
     },
-    /// Voice activity started (user is speaking).
-    VoiceActivityStart,
-    /// Voice activity ended (silence detected).
-    VoiceActivityEnd,
     /// Error occurred during detection.
     Error { message: String },
     /// System started listening.
@@ -227,6 +291,7 @@ pub struct VoiceWakeRuntime {
     event_rx: Option<mpsc::Receiver<VoiceWakeEvent>>,
     status_tx: watch::Sender<bool>,
     status_rx: watch::Receiver<bool>,
+    task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl VoiceWakeRuntime {
@@ -242,6 +307,7 @@ impl VoiceWakeRuntime {
             event_rx: Some(event_rx),
             status_tx,
             status_rx,
+            task: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -260,30 +326,73 @@ impl VoiceWakeRuntime {
         self.running.load(Ordering::Relaxed)
     }
 
+    /// Cooldown applied before keyword capture resumes after a handled wake.
+    pub fn cooldown(&self) -> Duration {
+        self.config.cooldown
+    }
+
     /// Start listening for the wake word.
     pub async fn start(&self) -> Result<(), String> {
-        if self.running.load(Ordering::Relaxed) {
+        let mut task = self.task.lock().await;
+        if self.running.load(Ordering::Relaxed)
+            || task.as_ref().is_some_and(|handle| !handle.is_finished())
+        {
             return Err("Already running".to_string());
         }
+        if let Some(finished) = task.take() {
+            let _ = finished.await;
+        }
+        self.config.validate()?;
 
         self.running.store(true, Ordering::Relaxed);
-        let _ = self.status_tx.send(true);
-        let _ = self.event_tx.send(VoiceWakeEvent::Started).await;
-
-        tracing::info!(
-            "Voice wake started: listening for '{}' (backend: {:?})",
-            self.config.wake_word,
-            self.config.backend,
-        );
-
-        // Start the detection loop
         let running = self.running.clone();
         let event_tx = self.event_tx.clone();
+        let status_tx = self.status_tx.clone();
         let config = self.config.clone();
+        let (ready_tx, ready_rx) = oneshot::channel();
 
-        tokio::spawn(async move {
-            Self::detection_loop(running, event_tx, config).await;
-        });
+        *task = Some(tokio::spawn(async move {
+            if let Err(message) =
+                Self::detection_loop(running.clone(), event_tx.clone(), config, ready_tx).await
+            {
+                let _ = event_tx.send(VoiceWakeEvent::Error { message }).await;
+            }
+            running.store(false, Ordering::Relaxed);
+            let _ = status_tx.send(false);
+            let _ = event_tx.send(VoiceWakeEvent::Stopped).await;
+        }));
+
+        match ready_rx.await {
+            Ok(Ok(())) if self.running.load(Ordering::Relaxed) => {}
+            Ok(Ok(())) => {
+                if let Some(handle) = task.take() {
+                    let _ = handle.await;
+                }
+                return Err("voice wake stopped while starting".to_string());
+            }
+            Ok(Err(error)) => {
+                if let Some(handle) = task.take() {
+                    let _ = handle.await;
+                }
+                return Err(error);
+            }
+            Err(_) => {
+                self.running.store(false, Ordering::Relaxed);
+                if let Some(handle) = task.take() {
+                    let _ = handle.await;
+                }
+                return Err("voice wake startup task exited before reporting readiness".to_string());
+            }
+        }
+
+        let _ = self.status_tx.send(true);
+        let _ = self.event_tx.send(VoiceWakeEvent::Started).await;
+        tracing::info!(
+            model_path = %self.config.model_path.display(),
+            keywords_path = %self.config.keywords_path.display(),
+            "Voice wake started: listening for '{}' with keyword-only detection",
+            self.config.wake_word,
+        );
 
         Ok(())
     }
@@ -291,193 +400,43 @@ impl VoiceWakeRuntime {
     /// Stop listening.
     pub async fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
-        let _ = self.status_tx.send(false);
-        let _ = self.event_tx.send(VoiceWakeEvent::Stopped).await;
+        if let Some(task) = self.task.lock().await.take() {
+            let _ = task.await;
+        } else {
+            let _ = self.status_tx.send(false);
+        }
         tracing::info!("Voice wake stopped");
     }
 
     /// Main detection loop.
     ///
-    /// When the `voice` feature is enabled, captures audio via `cpal` and
-    /// performs detection using the configured backend. Otherwise, runs as
-    /// a polling placeholder.
+    /// When the `voice` feature is enabled, captures audio via `cpal` and feeds
+    /// it to the configured keyword spotter. There is no VAD fallback.
     async fn detection_loop(
         running: Arc<AtomicBool>,
         event_tx: mpsc::Sender<VoiceWakeEvent>,
         config: VoiceWakeConfig,
-    ) {
+        ready_tx: oneshot::Sender<Result<(), String>>,
+    ) -> Result<(), String> {
         tracing::debug!(
-            "Detection loop started (backend: {:?}, wake_word: {})",
-            config.backend,
+            model_path = %config.model_path.display(),
+            "Keyword detection loop started (wake_word: {})",
             config.wake_word,
         );
 
         #[cfg(feature = "voice")]
         {
-            match &config.backend {
-                WakeBackend::EnergyDetector => {
-                    Self::detection_loop_cpal(running, event_tx, config).await;
-                }
-                WakeBackend::SherpaOnnx {
-                    model_path,
-                    encoder_filename,
-                    decoder_filename,
-                    joiner_filename,
-                } => {
-                    Self::detection_loop_sherpa(
-                        running,
-                        event_tx,
-                        config.clone(),
-                        model_path.clone(),
-                        encoder_filename.clone(),
-                        decoder_filename.clone(),
-                        joiner_filename.clone(),
-                    )
-                    .await;
-                }
-            }
+            Self::detection_loop_sherpa(running, event_tx, config, ready_tx).await
         }
 
         #[cfg(not(feature = "voice"))]
         {
-            // Placeholder: sleep and wait for real audio capture integration.
-            // Enable the `voice` feature flag to use cpal-based audio capture.
-            tracing::info!(
-                "Voice wake running in placeholder mode (enable 'voice' feature for real audio)"
-            );
-            while running.load(Ordering::Relaxed) {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            let _ = event_tx.send(VoiceWakeEvent::Stopped).await;
+            let _ = (running, event_tx, config);
+            let error =
+                "headless voice wake requires a binary built with the voice feature".to_string();
+            let _ = ready_tx.send(Err(error.clone()));
+            Err(error)
         }
-    }
-
-    /// Real audio capture and energy detection using cpal.
-    ///
-    /// The cpal `Stream` type is `!Send`, so audio capture runs on a
-    /// dedicated OS thread (`std::thread::spawn`). RMS energy values are
-    /// sent to the async tokio task via an mpsc channel for processing.
-    #[cfg(feature = "voice")]
-    async fn detection_loop_cpal(
-        running: Arc<AtomicBool>,
-        event_tx: mpsc::Sender<VoiceWakeEvent>,
-        config: VoiceWakeConfig,
-    ) {
-        // Channel for RMS energy values from the audio thread
-        let (energy_tx, mut energy_rx) = mpsc::channel::<f32>(256);
-
-        // Spawn a dedicated OS thread for cpal audio capture.
-        // cpal::Stream is !Send so it must live on a single OS thread.
-        let audio_running = running.clone();
-        let audio_event_tx = event_tx.clone();
-        let audio_handle = std::thread::spawn(move || {
-            use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-
-            let host = cpal::default_host();
-            let device = match host.default_input_device() {
-                Some(d) => d,
-                None => {
-                    let _ = audio_event_tx.try_send(VoiceWakeEvent::Error {
-                        message: "No audio input device found".to_string(),
-                    });
-                    return;
-                }
-            };
-
-            let device_name = device
-                .description()
-                .map(|description| description.name().to_string())
-                .unwrap_or_else(|_| "unknown".to_string());
-            tracing::info!(device = %device_name, "Audio input device selected");
-
-            let stream_config = cpal::StreamConfig {
-                channels: 1,
-                sample_rate: config.sample_rate,
-                buffer_size: cpal::BufferSize::Default,
-            };
-
-            let err_tx = audio_event_tx.clone();
-            let stream = match device.build_input_stream(
-                stream_config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    if data.is_empty() {
-                        return;
-                    }
-                    let sum_sq: f32 = data.iter().map(|s| s * s).sum();
-                    let rms = (sum_sq / data.len() as f32).sqrt();
-                    let _ = energy_tx.try_send(rms);
-                },
-                move |err| {
-                    tracing::error!("Audio stream error: {}", err);
-                    let _ = err_tx.try_send(VoiceWakeEvent::Error {
-                        message: format!("Audio stream error: {}", err),
-                    });
-                },
-                None,
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = audio_event_tx.try_send(VoiceWakeEvent::Error {
-                        message: format!("Failed to build audio stream: {}", e),
-                    });
-                    return;
-                }
-            };
-
-            if let Err(e) = stream.play() {
-                let _ = audio_event_tx.try_send(VoiceWakeEvent::Error {
-                    message: format!("Failed to start audio stream: {}", e),
-                });
-                return;
-            }
-
-            // Keep the stream alive until told to stop
-            while audio_running.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-
-            drop(stream);
-        });
-
-        // Process energy values in the async context (Send-safe)
-        let threshold = config.energy_threshold;
-        let mut voice_active = false;
-        let mut silence_frames: u32 = 0;
-        let silence_debounce: u32 = 3; // ~300ms at ~10 readings/sec
-
-        while running.load(Ordering::Relaxed) {
-            match tokio::time::timeout(Duration::from_millis(200), energy_rx.recv()).await {
-                Ok(Some(rms)) => {
-                    if rms > threshold {
-                        silence_frames = 0;
-                        if !voice_active {
-                            voice_active = true;
-                            let _ = event_tx.send(VoiceWakeEvent::VoiceActivityStart).await;
-                            tracing::trace!(
-                                rms = rms,
-                                threshold = threshold,
-                                "Voice activity started"
-                            );
-                        }
-                    } else if voice_active {
-                        silence_frames += 1;
-                        if silence_frames >= silence_debounce {
-                            voice_active = false;
-                            let _ = event_tx.send(VoiceWakeEvent::VoiceActivityEnd).await;
-                            tracing::trace!(rms = rms, "Voice activity ended");
-                        }
-                    }
-                }
-                Ok(None) => break,  // Channel closed (audio thread exited)
-                Err(_) => continue, // Timeout, keep polling
-            }
-        }
-
-        // Signal the audio thread to stop and wait for it
-        running.store(false, Ordering::Relaxed);
-        let _ = audio_handle.join();
-
-        let _ = event_tx.send(VoiceWakeEvent::Stopped).await;
     }
 
     /// Sherpa-ONNX keyword spotting detection loop.
@@ -490,59 +449,27 @@ impl VoiceWakeRuntime {
     /// 2. **Feed thread** (OS thread): `pcm_rx` → child stdin (f32→i16 PCM)
     /// 3. **Stdout thread** (OS thread): reads child stdout for keyword matches
     ///
-    /// Falls back to energy-based detection when the Sherpa binary or model
-    /// is not available.
+    /// Configuration is validated before the microphone is opened. Any missing
+    /// asset or process failure stops the subsystem instead of falling back to
+    /// generic voice activity.
     #[cfg(feature = "voice")]
     async fn detection_loop_sherpa(
         running: Arc<AtomicBool>,
         event_tx: mpsc::Sender<VoiceWakeEvent>,
         config: VoiceWakeConfig,
-        model_path: String,
-        encoder_filename: String,
-        decoder_filename: String,
-        joiner_filename: String,
-    ) {
+        ready_tx: oneshot::Sender<Result<(), String>>,
+    ) -> Result<(), String> {
         use std::io::Write;
         use std::process::Stdio;
 
-        // Verify the Sherpa binary and model are available.
-        if !Self::sherpa_available() {
-            tracing::warn!(
-                "sherpa-onnx-keyword-spotter not found in PATH; \
-                 falling back to energy-based detection"
-            );
-            return Self::detection_loop_cpal(running, event_tx, config).await;
-        }
-
-        let model_path = model_path.trim().to_string();
-
-        if !std::path::Path::new(&model_path).exists() {
-            tracing::warn!(
-                model_path = %model_path,
-                "Sherpa-ONNX model directory not found; falling back to energy-based detection"
-            );
-            return Self::detection_loop_cpal(running, event_tx, config).await;
-        }
-
-        for (filename, description) in [
-            (encoder_filename.as_str(), "encoder"),
-            (decoder_filename.as_str(), "decoder"),
-            (joiner_filename.as_str(), "joiner"),
-        ] {
-            let file_path = std::path::Path::new(&model_path).join(filename);
-            if !file_path.exists() {
-                tracing::warn!(
-                    model_path = %model_path,
-                    file = %file_path.display(),
-                    component = description,
-                    "Sherpa-ONNX model file missing; falling back to energy-based detection"
-                );
-                return Self::detection_loop_cpal(running, event_tx, config).await;
-            }
+        if let Err(error) = config.validate() {
+            let _ = ready_tx.send(Err(error.clone()));
+            return Err(error);
         }
 
         // PCM audio channel: cpal audio thread → Sherpa feeder thread.
         let (pcm_tx, mut pcm_rx) = mpsc::channel::<Vec<f32>>(128);
+        let (audio_ready_tx, audio_ready_rx) = oneshot::channel();
 
         // --- Thread 1: cpal audio capture ---
         let audio_running = running.clone();
@@ -555,9 +482,12 @@ impl VoiceWakeRuntime {
             let device = match host.default_input_device() {
                 Some(d) => d,
                 None => {
+                    let message = "No audio input device found".to_string();
                     let _ = audio_event_tx.try_send(VoiceWakeEvent::Error {
-                        message: "No audio input device found".to_string(),
+                        message: message.clone(),
                     });
+                    let _ = audio_ready_tx.send(Err(message));
+                    audio_running.store(false, Ordering::Relaxed);
                     return;
                 }
             };
@@ -568,6 +498,8 @@ impl VoiceWakeRuntime {
                 buffer_size: cpal::BufferSize::Default,
             };
 
+            let stream_error_running = audio_running.clone();
+            let stream_error_tx = audio_event_tx.clone();
             let stream = match device.build_input_stream(
                 stream_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -575,86 +507,104 @@ impl VoiceWakeRuntime {
                 },
                 move |err| {
                     tracing::error!("Audio stream error: {}", err);
+                    let _ = stream_error_tx.try_send(VoiceWakeEvent::Error {
+                        message: format!("Audio stream error: {err}"),
+                    });
+                    stream_error_running.store(false, Ordering::Relaxed);
                 },
                 None,
             ) {
                 Ok(s) => s,
                 Err(e) => {
+                    let message = format!("Failed to build audio stream: {e}");
                     let _ = audio_event_tx.try_send(VoiceWakeEvent::Error {
-                        message: format!("Failed to build audio stream: {}", e),
+                        message: message.clone(),
                     });
+                    let _ = audio_ready_tx.send(Err(message));
+                    audio_running.store(false, Ordering::Relaxed);
                     return;
                 }
             };
 
-            let _ = stream.play();
+            if let Err(error) = stream.play() {
+                let message = format!("Failed to start audio stream: {error}");
+                let _ = audio_event_tx.try_send(VoiceWakeEvent::Error {
+                    message: message.clone(),
+                });
+                let _ = audio_ready_tx.send(Err(message));
+                audio_running.store(false, Ordering::Relaxed);
+                return;
+            }
+            let _ = audio_ready_tx.send(Ok(()));
             while audio_running.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             drop(stream);
         });
 
-        // Spawn Sherpa-ONNX keyword spotter subprocess.
-        let keywords_file = std::path::Path::new(&model_path)
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("keywords.txt");
+        match audio_ready_rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                running.store(false, Ordering::Relaxed);
+                let _ = audio_handle.join();
+                let _ = ready_tx.send(Err(error.clone()));
+                return Err(error);
+            }
+            Err(_) => {
+                let error = "audio capture exited before reporting readiness".to_string();
+                running.store(false, Ordering::Relaxed);
+                let _ = audio_handle.join();
+                let _ = ready_tx.send(Err(error.clone()));
+                return Err(error);
+            }
+        }
 
+        // Spawn Sherpa-ONNX keyword spotter subprocess.
+        let encoder_path = config.model_path.join(&config.encoder_filename);
+        let decoder_path = config.model_path.join(&config.decoder_filename);
+        let joiner_path = config.model_path.join(&config.joiner_filename);
+        let tokens_path = config.model_path.join("tokens.txt");
         let mut command = thinclaw_platform::std_process_command!(
             "src.voice_wake.std.101",
             "sherpa-onnx-keyword-spotter"
         );
         command
-            .args([
-                "--encoder",
-                &format!("{}/{}", model_path, encoder_filename),
-                "--decoder",
-                &format!("{}/{}", model_path, decoder_filename),
-                "--joiner",
-                &format!("{}/{}", model_path, joiner_filename),
-                "--tokens",
-                &format!("{}/tokens.txt", model_path),
-                "--keywords-file",
-                &keywords_file.to_string_lossy(),
-                "--provider",
-                "cpu",
-                "--num-threads",
-                "2",
-                "--sample-rate",
-                &sample_rate.to_string(),
-                "--read-stdin",
-            ])
+            .arg("--encoder")
+            .arg(encoder_path)
+            .arg("--decoder")
+            .arg(decoder_path)
+            .arg("--joiner")
+            .arg(joiner_path)
+            .arg("--tokens")
+            .arg(tokens_path)
+            .arg("--keywords-file")
+            .arg(&config.keywords_path)
+            .args(["--provider", "cpu", "--num-threads", "2", "--sample-rate"])
+            .arg(sample_rate.to_string())
+            .arg("--read-stdin")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         let mut child = match thinclaw_platform::OwnedStdChild::spawn(&mut command) {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("Failed to spawn sherpa-onnx: {}", e);
-                let _ = event_tx
-                    .send(VoiceWakeEvent::Error {
-                        message: format!("Sherpa-ONNX spawn failed: {}", e),
-                    })
-                    .await;
+                let error = format!("Sherpa-ONNX spawn failed: {e}");
                 running.store(false, Ordering::Relaxed);
                 let _ = audio_handle.join();
-                return;
+                let _ = ready_tx.send(Err(error.clone()));
+                return Err(error);
             }
         };
 
         let stdin = child.take_stdin();
         let stdout = child.take_stdout();
         let (Some(mut stdin), Some(stdout)) = (stdin, stdout) else {
-            tracing::error!("Sherpa-ONNX did not expose the configured standard streams");
-            let _ = event_tx
-                .send(VoiceWakeEvent::Error {
-                    message: "Sherpa-ONNX standard-stream setup failed".to_string(),
-                })
-                .await;
+            let error = "Sherpa-ONNX standard-stream setup failed".to_string();
             running.store(false, Ordering::Relaxed);
             let _ = child.kill();
             let _ = audio_handle.join();
-            return;
+            let _ = ready_tx.send(Err(error.clone()));
+            return Err(error);
         };
 
         // --- Thread 2: stdin feeder (pcm_rx → child stdin) ---
@@ -683,11 +633,13 @@ impl VoiceWakeRuntime {
         // --- Thread 3: stdout reader (child stdout → wake events) ---
         let stdout_running = running.clone();
         let stdout_event_tx = event_tx.clone();
-        let wake_word = config.wake_word.to_lowercase();
+        let wake_word = normalize_phrase(&config.wake_word);
+        let cooldown = config.cooldown;
         let stdout_handle = std::thread::spawn(move || {
             use std::io::BufRead;
 
             let reader = std::io::BufReader::new(stdout);
+            let mut last_detection: Option<std::time::Instant> = None;
             for line in reader.lines() {
                 if !stdout_running.load(Ordering::Relaxed) {
                     break;
@@ -698,12 +650,11 @@ impl VoiceWakeRuntime {
                     Err(_) => break,
                 };
 
-                // Sherpa-ONNX outputs detected keywords in the format:
-                //   keyword_detected: <keyword> <timestamp>
-                // The exact format varies by version; we check if the line
-                // contains our wake word (case-insensitive).
-                let lower = line.to_lowercase();
-                if lower.contains(&wake_word) || lower.contains("keyword_detected") {
+                let now = std::time::Instant::now();
+                let outside_cooldown =
+                    last_detection.is_none_or(|previous| now.duration_since(previous) >= cooldown);
+                if outside_cooldown && detection_line_matches(&line, &wake_word) {
+                    last_detection = Some(now);
                     tracing::info!(raw_output = %line, "Sherpa-ONNX keyword detection");
                     let _ = stdout_event_tx.blocking_send(VoiceWakeEvent::WakeWordDetected {
                         confidence: 0.9, // Sherpa doesn't always report confidence.
@@ -713,7 +664,17 @@ impl VoiceWakeRuntime {
             }
         });
 
+        if ready_tx.send(Ok(())).is_err() {
+            running.store(false, Ordering::Relaxed);
+            let _ = child.kill();
+            let _ = feed_handle.join();
+            let _ = stdout_handle.join();
+            let _ = audio_handle.join();
+            return Err("voice wake startup was cancelled".to_string());
+        }
+
         // Wait for stop signal or child process exit.
+        let mut process_error = None;
         while running.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -723,11 +684,16 @@ impl VoiceWakeRuntime {
                         exit_code = ?status.code(),
                         "Sherpa-ONNX keyword spotter exited"
                     );
+                    if !status.success() {
+                        process_error = Some(format!(
+                            "Sherpa-ONNX keyword spotter exited with status {status}"
+                        ));
+                    }
                     break;
                 }
                 Ok(None) => continue,
                 Err(e) => {
-                    tracing::error!("Error checking Sherpa process: {}", e);
+                    process_error = Some(format!("error checking Sherpa-ONNX process: {e}"));
                     break;
                 }
             }
@@ -740,12 +706,7 @@ impl VoiceWakeRuntime {
         let _ = stdout_handle.join();
         let _ = audio_handle.join();
 
-        let _ = event_tx.send(VoiceWakeEvent::Stopped).await;
-    }
-
-    /// Check if the Sherpa-ONNX keyword spotter binary is available.
-    pub fn sherpa_available() -> bool {
-        thinclaw_platform::find_executable_in_path("sherpa-onnx-keyword-spotter").is_some()
+        process_error.map_or(Ok(()), Err)
     }
 }
 
@@ -762,12 +723,35 @@ impl std::fmt::Debug for VoiceWakeRuntime {
 mod tests {
     use super::*;
 
+    fn keyword_fixture(keyword_line: &str) -> (tempfile::TempDir, VoiceWakeConfig) {
+        let temp = tempfile::tempdir().unwrap();
+        let model_path = temp.path().join("model");
+        std::fs::create_dir(&model_path).unwrap();
+        for filename in [
+            VoiceWakeConfig::DEFAULT_ENCODER_FILENAME,
+            VoiceWakeConfig::DEFAULT_DECODER_FILENAME,
+            VoiceWakeConfig::DEFAULT_JOINER_FILENAME,
+            "tokens.txt",
+        ] {
+            std::fs::write(model_path.join(filename), b"fixture").unwrap();
+        }
+        let keywords_path = model_path.join("keywords.txt");
+        std::fs::write(&keywords_path, keyword_line).unwrap();
+        let config = VoiceWakeConfig {
+            model_path,
+            keywords_path,
+            ..VoiceWakeConfig::default()
+        };
+        (temp, config)
+    }
+
     #[test]
     fn test_default_config() {
         let config = VoiceWakeConfig::default();
         assert_eq!(config.wake_word, "hey molty");
-        assert_eq!(config.sensitivity, 0.5);
         assert_eq!(config.sample_rate, 16000);
+        assert_eq!(config.cooldown, Duration::from_millis(1_500));
+        assert!(config.model_path.as_os_str().is_empty());
     }
 
     #[test]
@@ -777,31 +761,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_start_stop() {
+    async fn start_fails_closed_without_keyword_assets() {
         let mut runtime = VoiceWakeRuntime::new(VoiceWakeConfig::default());
         let mut events = runtime.take_events().unwrap();
 
-        runtime.start().await.unwrap();
-        assert!(runtime.is_running());
-
-        // Should receive Started event
-        let event = events.recv().await.unwrap();
-        assert!(matches!(event, VoiceWakeEvent::Started));
-
-        runtime.stop().await;
+        let error = runtime.start().await.unwrap_err();
+        assert!(error.contains("model directory"));
         assert!(!runtime.is_running());
-
-        // Should receive Stopped event
-        let event = events.recv().await.unwrap();
-        assert!(matches!(event, VoiceWakeEvent::Stopped));
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
-    #[tokio::test]
-    async fn test_double_start() {
-        let runtime = VoiceWakeRuntime::new(VoiceWakeConfig::default());
-        runtime.start().await.unwrap();
-        assert!(runtime.start().await.is_err());
-        runtime.stop().await;
+    #[test]
+    fn keyword_assets_require_the_configured_phrase() {
+        let (_temp, valid) = keyword_fixture("HEY   MOLTY # configured phrase\n");
+        valid.validate_assets().unwrap();
+
+        let (_temp, invalid) = keyword_fixture("hey another assistant\n");
+        let error = invalid.validate_assets().unwrap_err();
+        assert!(error.contains("is not present"));
+    }
+
+    #[test]
+    fn keyword_asset_filenames_cannot_escape_the_model_directory() {
+        let (_temp, mut config) = keyword_fixture("hey molty\n");
+        config.encoder_filename = "../encoder.onnx".to_string();
+        assert!(
+            config
+                .validate_assets()
+                .unwrap_err()
+                .contains("plain filename")
+        );
+    }
+
+    #[test]
+    fn only_the_configured_keyword_detection_marker_matches() {
+        let wake_word = normalize_phrase("Hey Molty");
+        assert!(detection_line_matches(
+            "keyword_detected: HEY   MOLTY 1.25",
+            &wake_word
+        ));
+        assert!(!detection_line_matches(
+            "voice_activity: hey molty",
+            &wake_word
+        ));
+        assert!(!detection_line_matches(
+            "keyword_detected: hey another assistant",
+            &wake_word
+        ));
+        assert!(!detection_line_matches(
+            "ambient speech hey molty",
+            &wake_word
+        ));
     }
 
     #[test]

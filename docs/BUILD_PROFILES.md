@@ -135,22 +135,35 @@ every aggregate build, CI job, and release artifact. Enable it explicitly
 exercised by `--all-features`. The desktop app owns the microphone and runs its
 own browser-side wake path, so it never needs this feature.
 
-Two switches must both be on for it to do anything:
+The subsystem is keyword-only and fail-closed. Generic voice activity never
+creates a wake event. Build/runtime enablement plus validated keyword assets are
+all required:
 
 1. **Build time:** the `voice` cargo feature (`--features voice` or `--all-features`; not in any aggregate profile).
 2. **Runtime:** set `THINCLAW_VOICE_WAKE=1` (also accepts `true`/`on`). Default
    off — without it the runtime is never constructed.
+3. **Executable:** `sherpa-onnx-keyword-spotter` must be present in `PATH`.
+4. **Model:** set `THINCLAW_VOICE_WAKE_MODEL_DIR` to a directory containing the
+   configured encoder, decoder, joiner, and `tokens.txt` regular files.
+5. **Keyword:** `THINCLAW_VOICE_WAKE_KEYWORDS_FILE` may point to the keyword
+   definitions (default `<model-dir>/keywords.txt`). It must contain the
+   normalized `THINCLAW_VOICE_WAKE_WORD` phrase (default `hey molty`).
 
-When enabled, the runtime starts during app build/startup, spawns a background
-audio-capture thread, and logs detection events. The default backend is the RMS
-**EnergyDetector**, which detects voice *activity* (that someone is speaking) but
-**not** a specific phrase — it works with no extra assets.
+Optional overrides are `THINCLAW_VOICE_WAKE_ENCODER`,
+`THINCLAW_VOICE_WAKE_DECODER`, `THINCLAW_VOICE_WAKE_JOINER`,
+`THINCLAW_VOICE_WAKE_SAMPLE_RATE` (8000–48000), and
+`THINCLAW_VOICE_WAKE_COOLDOWN_MS` (500–10000). Asset filename overrides must be
+plain filenames; paths are rejected.
 
-A true "hey thinclaw" keyword wake word requires the optional **Sherpa-ONNX**
-backend, which shells out to an external `sherpa-onnx-keyword-spotter` binary and
-needs an ONNX keyword model plus a `keywords.txt` file. None of these are shipped
-with ThinClaw; you must install/fetch them yourself. Without them the Sherpa
-backend falls back to the EnergyDetector.
+When a phrase is detected, ThinClaw stops and joins keyword capture before
+opening the follow-up transcription microphone. It resumes keyword capture only
+after transcription and the configured cooldown. Missing/wrong assets, an
+unknown keyword, or keyword-process failure leave voice wake unavailable with an
+actionable startup/runtime error; there is no energy-detector fallback.
+
+ThinClaw does not distribute the executable or model assets. Operators must
+obtain compatible assets from their chosen Sherpa-ONNX distribution and verify
+their provenance before enabling this feature.
 
 On Linux, `voice` requires `libasound2-dev` (ALSA headers) at build time.
 

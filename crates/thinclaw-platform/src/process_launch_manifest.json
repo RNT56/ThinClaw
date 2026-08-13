@@ -7706,7 +7706,7 @@
     {
       "argument_schema": "argv_reviewed_at_typed_call_site",
       "availability": [],
-      "callsite_digest": "625ce02f7f3cff9b046840fb6ac1772639d1bba8111d749dafb4a284b0747db6",
+      "callsite_digest": "98ae5c4f2b0ce768a36ede2f3144546aa6d9c4bee72c2bb68ffe92aacbc2b426",
       "child_environment": "exact_reviewed",
       "classification": "production",
       "constructor": "std",
@@ -7736,7 +7736,7 @@
       "proof_id": "process-launch-00e9f7d1856d2a1d63637519",
       "rust_module": "thinclaw::voice_wake",
       "source": "src/voice_wake.rs",
-      "source_line": 603,
+      "source_line": 567,
       "temp_policy": "reviewed_system_temp"
     },
     {

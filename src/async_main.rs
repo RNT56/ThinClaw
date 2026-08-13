@@ -1073,68 +1073,90 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
     #[cfg(feature = "voice")]
     if let Some(mut wake_runtime) = components.voice_wake.take() {
         if let Some(mut wake_events) = wake_runtime.take_events() {
-            let voice_inject = inject_sender.clone();
-            let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
-            let handle = tokio::spawn(async move {
-                loop {
-                    let event = tokio::select! {
-                        _ = &mut shutdown_rx => {
-                            tracing::debug!("Voice wake event consumer stopped");
-                            break;
-                        }
-                        event = wake_events.recv() => event,
-                    };
-                    let Some(event) = event else {
-                        break;
-                    };
-                    match event {
-                        thinclaw::voice_wake::VoiceWakeEvent::WakeWordDetected {
-                            confidence,
-                            timestamp,
-                        } => {
-                            tracing::info!(
-                                confidence,
-                                timestamp = %timestamp,
-                                "Voice wake word detected — capturing follow-up utterance"
-                            );
-                            match thinclaw::talk_mode::capture_and_transcribe(10, "en", None).await
-                            {
-                                Ok(transcript) if !transcript.trim().is_empty() => {
-                                    let injected = thinclaw::channels::IncomingMessage::new(
-                                        "voice", "default", transcript,
+            match wake_runtime.start().await {
+                Ok(()) => {
+                    tracing::info!("Voice wake runtime started (dispatch routing active)");
+                    let voice_inject = inject_sender.clone();
+                    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+                    let handle = tokio::spawn(async move {
+                        loop {
+                            let event = tokio::select! {
+                                _ = &mut shutdown_rx => {
+                                    tracing::debug!("Voice wake event consumer stopped");
+                                    break;
+                                }
+                                event = wake_events.recv() => event,
+                            };
+                            let Some(event) = event else {
+                                break;
+                            };
+                            match event {
+                                thinclaw::voice_wake::VoiceWakeEvent::WakeWordDetected {
+                                    confidence,
+                                    timestamp,
+                                } => {
+                                    tracing::info!(
+                                        confidence,
+                                        timestamp = %timestamp,
+                                        "Voice wake word detected — pausing keyword capture before transcription"
                                     );
-                                    if voice_inject.send(injected).await.is_err() {
-                                        tracing::warn!(
-                                            "Voice wake inject channel closed; stopping consumer"
+                                    wake_runtime.stop().await;
+                                    let transcription =
+                                        thinclaw::talk_mode::capture_and_transcribe(10, "en", None)
+                                            .await;
+                                    let mut keep_running = true;
+                                    match transcription {
+                                        Ok(transcript) if !transcript.trim().is_empty() => {
+                                            let injected = thinclaw::channels::IncomingMessage::new(
+                                                "voice", "default", transcript,
+                                            );
+                                            if voice_inject.send(injected).await.is_err() {
+                                                tracing::warn!(
+                                                    "Voice wake inject channel closed; stopping consumer"
+                                                );
+                                                keep_running = false;
+                                            }
+                                        }
+                                        Ok(_) => tracing::debug!(
+                                            "Voice wake captured an empty transcript"
+                                        ),
+                                        Err(e) => tracing::warn!(
+                                            error = %e,
+                                            "Voice wake transcription failed"
+                                        ),
+                                    }
+                                    if !keep_running {
+                                        break;
+                                    }
+                                    tokio::time::sleep(wake_runtime.cooldown()).await;
+                                    if let Err(error) = wake_runtime.start().await {
+                                        tracing::error!(
+                                            error = %error,
+                                            "Voice wake could not resume after transcription"
                                         );
                                         break;
                                     }
                                 }
-                                Ok(_) => {
-                                    tracing::debug!("Voice wake captured an empty transcript")
+                                thinclaw::voice_wake::VoiceWakeEvent::Error { message } => {
+                                    tracing::warn!(error = %message, "Voice wake error");
                                 }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "Voice wake transcription failed")
-                                }
+                                other => tracing::debug!(?other, "Voice wake event"),
                             }
                         }
-                        thinclaw::voice_wake::VoiceWakeEvent::Error { message } => {
-                            tracing::warn!(error = %message, "Voice wake error");
-                        }
-                        other => tracing::debug!(?other, "Voice wake event"),
-                    }
+                        wake_runtime.stop().await;
+                        tracing::debug!("Voice wake event consumer exited");
+                    });
+                    maintenance_tasks.push(RuntimeMaintenanceTask {
+                        name: "voice_wake_forwarder",
+                        shutdown_tx,
+                        handle,
+                    });
                 }
-                tracing::debug!("Voice wake event consumer exited");
-            });
-            maintenance_tasks.push(RuntimeMaintenanceTask {
-                name: "voice_wake_forwarder",
-                shutdown_tx,
-                handle,
-            });
-        }
-        match wake_runtime.start().await {
-            Ok(()) => tracing::info!("Voice wake runtime started (dispatch routing active)"),
-            Err(e) => tracing::warn!("Failed to start voice wake runtime: {}", e),
+                Err(error) => tracing::error!(
+                    error = %error,
+                    "Headless voice wake is configured but unavailable"
+                ),
+            }
         }
     }
 
