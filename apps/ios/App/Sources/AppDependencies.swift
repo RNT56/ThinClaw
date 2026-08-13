@@ -45,6 +45,11 @@ final class AppDependencies {
     /// whenever pairing/unpairing changes it.
     private(set) var isPaired: Bool
 
+    /// Monotonic local identity for the currently published pairing. Lifecycle
+    /// reconciliation captures this value so suspended work from an old
+    /// credential cannot publish foreground effects after replacement/unpair.
+    private(set) var pairingGeneration: UInt64
+
     /// The live gateway session, built lazily from the stored credential the
     /// first time it is needed while paired. Nil before pairing (or after
     /// unpair).
@@ -101,6 +106,7 @@ final class AppDependencies {
         self.snapshotService = SnapshotService(
             gatewayInstanceID: existing?.installationID)
         self.isPaired = existing != nil
+        self.pairingGeneration = existing == nil ? 0 : 1
         let enhancedProtection = UserDefaults.standard.bool(
             forKey: PrivacySettingsKey.enhancedProtection)
         UserDefaults(suiteName: WidgetSnapshotAccess.appGroupID)?.set(
@@ -573,15 +579,20 @@ final class AppDependencies {
             keychain: keychain,
             deviceName: Self.defaultDeviceName(),
             onPaired: { [weak self] credential in
-                self?.isPaired = true
-                self?.transcriptStore = Self.defaultTranscriptStore(
+                guard let self else { return }
+                // Prepare every credential-scoped namespace before publishing
+                // `isPaired`; the resulting observation is what asks the app
+                // coordinator to activate the live graph immediately.
+                self.transcriptStore = Self.defaultTranscriptStore(
                     gatewayInstanceID: credential.installationID)
-                self?.snapshotService.useGateway(credential.installationID)
-                if let grdb = self?.transcriptStore as? GRDBTranscriptStore {
+                self.snapshotService.useGateway(credential.installationID)
+                if let grdb = self.transcriptStore as? GRDBTranscriptStore {
                     _ = grdb.applyFileProtection(
                         enhanced: UserDefaults.standard.bool(
                             forKey: PrivacySettingsKey.enhancedProtection))
                 }
+                self.pairingGeneration &+= 1
+                self.isPaired = true
             })
     }
 
@@ -626,6 +637,7 @@ final class AppDependencies {
         await session?.shutdown()
         session = nil
         snapshotService.useGateway(nil)
+        pairingGeneration &+= 1
         isPaired = false
         onboardingStore = nil
     }

@@ -34,9 +34,13 @@ struct ThinClawApp: App {
                 .onOpenURL { coordinator.handleOpenURL($0) }
                 .task {
                     #if canImport(UIKit)
-                        coordinator.configure(appDelegate: appDelegate)
+                        coordinator.configure(
+                            appDelegate: appDelegate,
+                            initialScenePhase: scenePhase)
                     #else
-                        coordinator.configure(appDelegate: nil)
+                        coordinator.configure(
+                            appDelegate: nil,
+                            initialScenePhase: scenePhase)
                     #endif
                 }
                 .alert(

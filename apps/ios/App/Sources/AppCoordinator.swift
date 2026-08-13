@@ -23,6 +23,11 @@ final class AppCoordinator {
     let push: PushCoordinator
     var pendingGatewayReplacementURL: URL?
 
+    @ObservationIgnored private var currentScenePhase: ScenePhase = .inactive
+    @ObservationIgnored private var isConfigured = false
+    @ObservationIgnored private weak var appDelegate: AppDelegate?
+    @ObservationIgnored private var lifecycleReconciler: ForegroundLifecycleReconciler!
+
     #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
         let watchProvisioning: WatchProvisioning
     #endif
@@ -36,9 +41,23 @@ final class AppCoordinator {
         #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
             self.watchProvisioning = WatchProvisioning()
         #endif
+        self.lifecycleReconciler = ForegroundLifecycleReconciler(
+            actions: .init(
+                activate: { [weak dependencies] in
+                    await dependencies?.startSessionIfPaired()
+                },
+                didActivate: { [weak self] in
+                    self?.didActivateCurrentPairing()
+                },
+                deactivate: { [weak dependencies] in
+                    await dependencies?.stopSession()
+                }))
     }
 
-    func configure(appDelegate: AppDelegate?) {
+    func configure(appDelegate: AppDelegate?, initialScenePhase: ScenePhase) {
+        self.appDelegate = appDelegate
+        currentScenePhase = initialScenePhase
+        isConfigured = true
         #if canImport(Security)
             try? DeviceUnlockProbe.provision()
         #endif
@@ -52,6 +71,7 @@ final class AppCoordinator {
                 watchProvisioning.mirror(status: status, approvals: approvals)
             }
         #endif
+        reconcileLifecycle()
     }
 
     func handleOpenURL(_ url: URL) {
@@ -77,39 +97,51 @@ final class AppCoordinator {
     }
 
     func sceneDidChange(to phase: ScenePhase, appDelegate: AppDelegate?) {
-        switch phase {
-        case .active:
-            Task { await dependencies.startSessionIfPaired() }
-            #if canImport(UIKit)
-                if dependencies.isPaired {
-                    appDelegate?.requestPushAuthorizationAndRegister()
-                }
-            #endif
-            #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
-                if dependencies.isPaired {
-                    AppLog.watchRelay.debug("Activating paired watch relay")
-                    watchProvisioning.activateIfPaired()
-                }
-            #endif
-        case .background:
-            Task { await dependencies.stopSession() }
+        self.appDelegate = appDelegate
+        let previousPhase = currentScenePhase
+        currentScenePhase = phase
+        if phase == .background, previousPhase != .background {
             #if canImport(UIKit)
                 BackgroundRefresh.scheduleAppRefresh()
             #endif
-        default:
-            break
         }
+        reconcileLifecycle()
     }
 
     func pairingStateDidChange(_ paired: Bool) {
+        // `isPaired` is the authoritative state. The argument is retained for a
+        // readable SwiftUI observation hook and guarded in debug builds.
+        assert(paired == dependencies.isPaired)
+        reconcileLifecycle()
         #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
-            if paired {
-                AppLog.watchRelay.debug("Pairing state activated watch relay")
-                watchProvisioning.activateIfPaired()
-            } else {
+            if !paired {
                 AppLog.watchRelay.debug("Pairing state deprovisioned watch relay")
                 Task { await watchProvisioning.deprovisionAndTearDown() }
             }
+        #endif
+    }
+
+    /// Coalesce launch, scene, and pairing observations into one ordered desired
+    /// state. The reconciler serialises suspended start/stop operations and
+    /// generation-checks activation before push/Watch effects are published.
+    private func reconcileLifecycle() {
+        let target: ForegroundLifecycleReconciler.Target
+        if isConfigured, currentScenePhase == .active, dependencies.isPaired {
+            target = .active(pairingGeneration: dependencies.pairingGeneration)
+        } else {
+            target = .inactive
+        }
+        lifecycleReconciler.reconcile(to: target)
+    }
+
+    private func didActivateCurrentPairing() {
+        guard currentScenePhase == .active, dependencies.isPaired else { return }
+        #if canImport(UIKit)
+            appDelegate?.requestPushAuthorizationAndRegister()
+        #endif
+        #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
+            AppLog.watchRelay.debug("Activating paired watch relay")
+            watchProvisioning.activateIfPaired()
         #endif
     }
 }
