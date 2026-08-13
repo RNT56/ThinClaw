@@ -1016,7 +1016,7 @@
       "proof_id": "process-launch-400304bf2f7c8783cc99f3da",
       "rust_module": "tauri_app_lib::thinclaw::commands::gateway",
       "source": "apps/desktop/backend/src/thinclaw/commands/gateway.rs",
-      "source_line": 865,
+      "source_line": 853,
       "temp_policy": "reviewed_system_temp"
     },
     {
