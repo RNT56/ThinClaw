@@ -281,11 +281,11 @@ export!(MyTool);
 ## Build Commands
 
 ```bash
-# Install cargo-component (one time)
-cargo install cargo-component
+# Install the repository-pinned cargo-component (one time)
+cargo install cargo-component --version 0.21.1 --locked
 
 # Build the WASM component
-cargo component build --release
+cargo component build --locked --release
 
 # Output: target/wasm32-wasip2/release/my_tool.wasm
 ```

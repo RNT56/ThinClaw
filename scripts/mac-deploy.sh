@@ -92,6 +92,7 @@ INSTALL_PROFILE="${THINCLAW_INSTALL_PROFILE:-full}"
 THINCLAW_VERSION="${THINCLAW_VERSION:-latest}"
 SYSTEM_INSTALL=false
 FEATURES="libsql"
+CARGO_COMPONENT_VERSION="0.21.1" # Must match release/extension-registry.json.
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
@@ -340,13 +341,13 @@ fi
 # ============================================================================
 info "[5/7] Checking cargo-component..."
 
-if cargo component --version &>/dev/null 2>&1; then
-    success "cargo-component already installed"
-else
-    step "Installing cargo-component (WASM extension builder)..."
-    cargo install cargo-component --locked
-    success "cargo-component installed"
+component_version="$CARGO_COMPONENT_VERSION"
+installed_component_version="$(cargo component --version 2>/dev/null | awk '{print $NF}' || true)"
+if [[ "$installed_component_version" != "$component_version" ]]; then
+    step "Installing cargo-component $component_version (WASM extension builder)..."
+    cargo install cargo-component --version "$component_version" --locked --force
 fi
+success "cargo-component $component_version installed"
 
 if [ "$INSTALL_ONLY" = true ]; then
     echo ""

@@ -670,7 +670,7 @@ impl ExtensionManager {
                 .ok_or_else(|| {
                 ExtensionError::InstallFailed(format!(
                     "'{}' requires building from source. Build artifact not found. \
-                         Run `cargo component build --release` in {} first, \
+                         Run `cargo component build --locked --release` in {} first, \
                          or use `thinclaw extensions registry install {}`.",
                     name,
                     resolved_dir.display(),

@@ -18,7 +18,8 @@
 //!   cargo build --release
 //!   cargo build --release --features bundled-wasm   # air-gapped
 //!
-//! Prerequisites: rustup target add wasm32-wasip2, cargo install wasm-tools
+//! Prerequisites: rustup target add wasm32-wasip2, exact cargo-component version
+//! from release/extension-registry.json
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -47,6 +48,30 @@ fn main() {
 fn build_all_wasm_extensions(root: &Path) {
     use std::fs;
 
+    let release_config: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join("release/extension-registry.json"))
+            .expect("bundled-wasm: missing release/extension-registry.json"),
+    )
+    .expect("bundled-wasm: invalid extension registry configuration");
+    let required_component_version = release_config["cargo_component_version"]
+        .as_str()
+        .expect("bundled-wasm: cargo_component_version must be configured");
+    let component_version_output = Command::new("cargo")
+        .args(["component", "--version"])
+        .output()
+        .expect("bundled-wasm: cargo-component is required");
+    let installed_component_version = String::from_utf8_lossy(&component_version_output.stdout)
+        .split_whitespace()
+        .next_back()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        component_version_output.status.success()
+            && installed_component_version == required_component_version,
+        "bundled-wasm: cargo-component {required_component_version} is required, got \
+         {installed_component_version:?}"
+    );
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let bundles_dir = out_dir.join("wasm_bundles");
     // Nested Cargo builds must stay inside the parent build's output tree.
@@ -59,6 +84,7 @@ fn build_all_wasm_extensions(root: &Path) {
     // Rerun if any extension source changes
     println!("cargo:rerun-if-changed=tools-src");
     println!("cargo:rerun-if-changed=channels-src");
+    println!("cargo:rerun-if-changed=release/extension-registry.json");
 
     // Collect all manifests
     let registry_dir = root.join("registry");
@@ -80,22 +106,20 @@ fn build_all_wasm_extensions(root: &Path) {
         manifest_files.sort_by_key(|e| e.file_name());
 
         for entry in manifest_files {
-            let content = match fs::read_to_string(entry.path()) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
+            let content = fs::read_to_string(entry.path()).unwrap_or_else(|error| {
+                panic!(
+                    "bundled-wasm: failed to read {}: {error}",
+                    entry.path().display()
+                )
+            });
 
-            let manifest: serde_json::Value = match serde_json::from_str(&content) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!(
-                        "cargo:warning=Failed to parse {}: {}",
-                        entry.path().display(),
-                        e
-                    );
-                    continue;
-                }
-            };
+            let manifest: serde_json::Value =
+                serde_json::from_str(&content).unwrap_or_else(|error| {
+                    panic!(
+                        "bundled-wasm: failed to parse {}: {error}",
+                        entry.path().display()
+                    )
+                });
 
             let name = manifest["name"].as_str().unwrap_or("").to_string();
             let source_dir = manifest["source"]["dir"].as_str().unwrap_or("").to_string();
@@ -108,18 +132,24 @@ fn build_all_wasm_extensions(root: &Path) {
                 .unwrap_or("")
                 .to_string();
 
-            if name.is_empty() || source_dir.is_empty() || crate_name.is_empty() {
-                continue;
-            }
+            assert!(
+                !name.is_empty()
+                    && !source_dir.is_empty()
+                    && !caps_file.is_empty()
+                    && !crate_name.is_empty(),
+                "bundled-wasm: incomplete registry source metadata in {}",
+                entry.path().display()
+            );
 
             let abs_source_dir = root.join(&source_dir);
-            if !abs_source_dir.is_dir() {
-                eprintln!(
-                    "cargo:warning=bundled-wasm: Source dir '{}' not found for '{}', skipping",
-                    source_dir, name
-                );
-                continue;
-            }
+            assert!(
+                abs_source_dir.is_dir(),
+                "bundled-wasm: source dir '{source_dir}' not found for '{name}'"
+            );
+            assert!(
+                abs_source_dir.join("Cargo.lock").is_file(),
+                "bundled-wasm: committed lockfile missing for '{name}'"
+            );
 
             // Build the WASM component
             eprintln!(
@@ -129,10 +159,10 @@ fn build_all_wasm_extensions(root: &Path) {
 
             let build_ok = Command::new("cargo")
                 .args([
+                    "component",
                     "build",
+                    "--locked",
                     "--release",
-                    "--target",
-                    "wasm32-wasip2",
                     "--manifest-path",
                     abs_source_dir.join("Cargo.toml").to_str().unwrap(),
                 ])
@@ -142,13 +172,10 @@ fn build_all_wasm_extensions(root: &Path) {
                 .map(|s| s.success())
                 .unwrap_or(false);
 
-            if !build_ok {
-                eprintln!(
-                    "cargo:warning=bundled-wasm: Build failed for '{}', skipping",
-                    name
-                );
-                continue;
-            }
+            assert!(
+                build_ok,
+                "bundled-wasm: component build failed for '{name}'"
+            );
 
             // Find the built artifact
             let snake_crate = crate_name.replace('-', "_");
@@ -164,35 +191,27 @@ fn build_all_wasm_extensions(root: &Path) {
                 }
             }
 
-            let wasm_src = match wasm_src {
-                Some(p) => p,
-                None => {
-                    eprintln!(
-                        "cargo:warning=bundled-wasm: No WASM output found for '{}', skipping",
-                        name
-                    );
-                    continue;
-                }
-            };
+            let wasm_src = wasm_src.unwrap_or_else(|| {
+                panic!("bundled-wasm: no WASM component output found for '{name}'")
+            });
 
             // Copy WASM to bundles dir
             let wasm_dst = bundles_dir.join(format!("{}.wasm", name));
-            if let Err(e) = fs::copy(&wasm_src, &wasm_dst) {
-                eprintln!(
-                    "cargo:warning=bundled-wasm: Failed to copy WASM for '{}': {}",
-                    name, e
-                );
-                continue;
-            }
+            fs::copy(&wasm_src, &wasm_dst).unwrap_or_else(|error| {
+                panic!("bundled-wasm: failed to copy WASM for '{name}': {error}")
+            });
 
             // Copy capabilities if present
             let caps_src = abs_source_dir.join(&caps_file);
-            let has_caps = if caps_src.exists() {
-                let caps_dst = bundles_dir.join(format!("{}.capabilities.json", name));
-                fs::copy(&caps_src, &caps_dst).is_ok()
-            } else {
-                false
-            };
+            assert!(
+                caps_src.is_file(),
+                "bundled-wasm: capabilities file missing for '{name}'"
+            );
+            let caps_dst = bundles_dir.join(format!("{}.capabilities.json", name));
+            fs::copy(&caps_src, &caps_dst).unwrap_or_else(|error| {
+                panic!("bundled-wasm: failed to copy capabilities for '{name}': {error}")
+            });
+            let has_caps = true;
 
             entries.push(BundleEntry {
                 name,

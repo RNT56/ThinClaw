@@ -214,6 +214,11 @@ def main() -> int:
                 "path": "apps/desktop/backend/tauri.conf.json",
                 "jsonpath": "$.version",
             },
+            {
+                "type": "json",
+                "path": "release/extension-registry.json",
+                "jsonpath": "$.release_version",
+            },
         ],
     }
     mismatches = [
@@ -228,6 +233,13 @@ def main() -> int:
     if manifest != {".": version}:
         raise SystemExit(
             f"release manifest {manifest!r} must match root Cargo version {version}"
+        )
+    extension_registry = json.loads(
+        (ROOT / "release/extension-registry.json").read_text(encoding="utf-8")
+    )
+    if extension_registry.get("release_version") != version:
+        raise SystemExit(
+            "extension registry release_version must match root Cargo version"
         )
 
     for lockfile in [ROOT / "Cargo.lock", ROOT / "apps/desktop/backend/Cargo.lock"]:
@@ -291,6 +303,11 @@ def main() -> int:
         'gh workflow run release.yml --repo "$GITHUB_REPOSITORY"',
         "-f mode=publish",
         "-f promote_latest=true",
+        "prepare-extension-registry:",
+        "scripts/ci/build_extension_bundles.sh",
+        "scripts/ci/extension_registry.py compare-bundles",
+        "scripts/ci/extension_registry.py prepare",
+        'git push origin "HEAD:$RELEASE_BRANCH"',
     ]
     missing = [item for item in required_workflow_fragments if item not in workflow]
     if missing:
@@ -384,6 +401,11 @@ def main() -> int:
         "promote-stable:",
         "--draft=false --latest=false",
         "refusing to overwrite it",
+        "Legacy extension registry policy is grandfathered only for the exact v0.16.0 backfill.",
+        ".release-control/scripts/ci/extension_registry.py",
+        ".release-control/scripts/ci/build_extension_bundles.sh",
+        "compare-bundles",
+        "verify-bundles",
     ]
     missing_staging = [
         item for item in staged_release_fragments if item not in artifact_workflow
@@ -403,6 +425,10 @@ def main() -> int:
         raise SystemExit(
             "staged core release workflow contains unsafe early publication: "
             + ", ".join(unsafe)
+        )
+    if "update-registry-checksums:" in artifact_workflow:
+        raise SystemExit(
+            "release workflow must not mutate registry metadata after tag creation"
         )
 
     oauth_release_step = "run: bash scripts/ci/configure-google-oauth-build.sh"

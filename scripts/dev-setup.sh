@@ -48,19 +48,20 @@ fi
 
 # 4. Install cargo-component (required for building WASM extensions from source)
 echo "[4/6] Installing cargo-component..."
-if cargo component --version &>/dev/null 2>&1; then
-    echo "  cargo-component already installed"
-else
-    cargo install cargo-component --locked
+component_version="$(python3 scripts/ci/extension_registry.py tool-version)"
+installed_component_version="$(cargo component --version 2>/dev/null | awk '{print $NF}' || true)"
+if [[ "$installed_component_version" != "$component_version" ]]; then
+    cargo install cargo-component --version "$component_version" --locked --force
 fi
+echo "  cargo-component $component_version installed"
 
 # 5. Verify the project compiles
 echo "[5/6] Running cargo check..."
-cargo check
+cargo check --locked
 
 # 6. Run tests using libsql temp DB (no Docker/external DB needed)
 echo "[6/6] Running tests (no external DB required)..."
-cargo test
+cargo test --locked
 
 echo ""
 echo "=== Setup complete ==="

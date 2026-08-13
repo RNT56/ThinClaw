@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "repository": "RNT56/ThinClaw",
+  "release_version": "0.16.0",
+  "strict_from": "v0.16.1",
+  "target": "wasm32-wasip2",
+  "cargo_component_version": "0.21.1",
+  "prepared": null
+}

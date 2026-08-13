@@ -1,14 +1,9 @@
 # Automated dependency updates (refactor backlog D5 — dependency-update automation).
 #
-# Covers the two cargo workspaces that carry the bulk of the dependency surface
-# (the root workspace and the desktop companion backend), the desktop frontend's
-# npm tree, and the CI workflow actions. Minor/patch bumps are grouped into a
-# single PR per ecosystem each week to keep review volume low; majors arrive as
-# individual PRs so breaking changes get focused attention.
-#
-# The standalone WASM channel/tool crates under channels-src/ and tools-src/ are
-# intentionally left out for now — they are low-churn build artifacts and would
-# add a lot of weekly noise; add entries here if any of them starts drifting.
+# Covers every committed Cargo lock graph, the desktop frontend's npm tree, and
+# CI actions. The extension-root section is generated from registry source
+# metadata and verified by scripts/ci/extension_registry.py so a new downloadable
+# package cannot silently escape dependency updates.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -63,3 +58,174 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  # BEGIN GENERATED EXTENSION CARGO ROOTS — scripts/ci/extension_registry.py
+  - package-ecosystem: cargo
+    directory: "/channels-src/dingtalk"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/discord"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/feishu_lark"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/google_chat"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/line"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/matrix"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/mattermost"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/ms_teams"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/qq"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/slack"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/telegram"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/twilio_sms"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/twitch"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/wecom"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/weixin"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/channels-src/whatsapp"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/tools-src/brave-search"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/tools-src/github"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/tools-src/gmail"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/tools-src/google-calendar"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/tools-src/google-docs"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/tools-src/google-drive"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/tools-src/google-sheets"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/tools-src/google-slides"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/tools-src/notion"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/tools-src/okta"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/tools-src/slack"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: cargo
+    directory: "/tools-src/telegram"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  # END GENERATED EXTENSION CARGO ROOTS

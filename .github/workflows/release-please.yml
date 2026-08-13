@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_pr: ${{ steps.release.outputs.pr }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -109,3 +110,86 @@ jobs:
             -f tag="$RELEASE_TAG" \
             -f mode=publish \
             -f promote_latest=true
+
+  prepare-extension-registry:
+    name: Prepare reproducible extension registry in release PR
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_pr != '' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Mint release automation token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - name: Checkout release PR branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ fromJSON(needs.release-please.outputs.release_pr).headBranchName }}
+      - name: Select large isolated build storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          if mountpoint -q /mnt; then
+            build_root=/mnt/thinclaw-extension-release
+            sudo install -d -o "$(id -u)" -g "$(id -g)" "$build_root"
+          else
+            build_root="$RUNNER_TEMP/thinclaw-extension-release"
+            mkdir -p "$build_root"
+          fi
+          echo "EXTENSION_BUILD_ROOT=$build_root" >> "$GITHUB_ENV"
+          df -h "$build_root"
+      - name: Install pinned Rust and WASI target
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+          targets: wasm32-wasip2
+      - name: Install exact component builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 scripts/ci/extension_registry.py tool-version)"
+          cargo install cargo-component --version "$version" --locked
+          [[ "$(cargo component --version | awk '{print $NF}')" == "$version" ]]
+      - name: Build two clean extension bundle sets
+        env:
+          THINCLAW_EXTENSION_BUILD_ONLY: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR="$EXTENSION_BUILD_ROOT/target-first" \
+            scripts/ci/build_extension_bundles.sh "$EXTENSION_BUILD_ROOT/bundles-first"
+          CARGO_TARGET_DIR="$EXTENSION_BUILD_ROOT/target-second" \
+            scripts/ci/build_extension_bundles.sh "$EXTENSION_BUILD_ROOT/bundles-second"
+      - name: Compare clean builds and prepare future-version metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/extension_registry.py compare-bundles \
+            --first "$EXTENSION_BUILD_ROOT/bundles-first" \
+            --second "$EXTENSION_BUILD_ROOT/bundles-second"
+          version="$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)"
+          python3 scripts/ci/extension_registry.py prepare \
+            --tag "v$version" \
+            --bundles "$EXTENSION_BUILD_ROOT/bundles-first"
+          python3 scripts/ci/extension_registry.py check-policy --expected-tag "v$version"
+      - name: Commit prepared metadata to the release PR
+        env:
+          RELEASE_BRANCH: ${{ fromJSON(needs.release-please.outputs.release_pr).headBranchName }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add registry release/extension-registry.json
+          if git diff --cached --quiet; then
+            echo "Extension registry is already prepared for this release."
+            exit 0
+          fi
+          git config user.name "thinclaw-release-app[bot]"
+          git config user.email "thinclaw-release-app[bot]@users.noreply.github.com"
+          git commit -m "chore(release): prepare extension registry"
+          git push origin "HEAD:$RELEASE_BRANCH"

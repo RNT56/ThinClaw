@@ -167,7 +167,7 @@ pub fn build_wasm_component_sync(
     println!("Building WASM component in {}...", source_dir.display());
 
     println!(
-        "  Running: cargo component build{}",
+        "  Running: cargo component build --locked{}",
         if release { " --release" } else { "" }
     );
 
@@ -200,10 +200,18 @@ pub fn build_wasm_component_sync(
 }
 
 async fn run_component_build(source_dir: &Path, release: bool) -> Result<(), WasmBuildError> {
+    const CARGO_COMPONENT_VERSION: &str = "0.21.1";
     const TOOLCHAIN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
     const BUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
     const PROBE_OUTPUT_LIMIT: usize = 64 * 1024;
     const BUILD_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+
+    if !source_dir.join("Cargo.lock").is_file() {
+        return Err(WasmBuildError::Build(format!(
+            "committed Cargo.lock is required in {}",
+            source_dir.display()
+        )));
+    }
 
     let mut check_command =
         thinclaw_platform::tokio_process_command!("src.registry.artifacts.tokio.101", "cargo");
@@ -222,10 +230,22 @@ async fn run_component_build(source_dir: &Path, release: bool) -> Result<(), Was
     if !check.status.success() {
         return Err(WasmBuildError::ToolchainUnavailable);
     }
+    let installed_version = String::from_utf8_lossy(&check.stdout)
+        .split_whitespace()
+        .next_back()
+        .unwrap_or_default()
+        .to_string();
+    if installed_version != CARGO_COMPONENT_VERSION {
+        return Err(WasmBuildError::Build(format!(
+            "cargo-component {CARGO_COMPONENT_VERSION} is required, got {installed_version:?}"
+        )));
+    }
 
     let mut command =
         thinclaw_platform::tokio_process_command!("src.registry.artifacts.tokio.102", "cargo");
-    command.current_dir(source_dir).args(["component", "build"]);
+    command
+        .current_dir(source_dir)
+        .args(["component", "build", "--locked"]);
     if release {
         command.arg("--release");
     }

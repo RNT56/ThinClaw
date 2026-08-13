@@ -43,6 +43,11 @@
           "type": "json",
           "path": "apps/desktop/backend/tauri.conf.json",
           "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "release/extension-registry.json",
+          "jsonpath": "$.release_version"
         }
       ]
     }

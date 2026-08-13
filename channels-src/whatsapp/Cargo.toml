@@ -3,6 +3,7 @@ name = "whatsapp-channel"
 version = "0.1.0"
 edition = "2021"
 description = "WhatsApp Cloud API channel for ThinClaw"
+license = "MIT OR Apache-2.0"
 
 [lib]
 crate-type = ["cdylib"]

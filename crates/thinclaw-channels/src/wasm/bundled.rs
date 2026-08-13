@@ -184,7 +184,7 @@ fn locate_channel_artifacts(name: &str) -> Result<(PathBuf, PathBuf), String> {
          - {} (flat/packaged)\n  \
          - {} (build tree, and other triples)\n  \
          Build it first:\n  \
-         cd {} && cargo component build --release",
+         cd {} && cargo component build --locked --release",
         name,
         flat_wasm.display(),
         expected_build.display(),
@@ -331,7 +331,7 @@ async fn build_channel_artifact(name: &str) -> Result<(), String> {
         "cargo"
     );
     command
-        .args(["component", "build", "--release"])
+        .args(["component", "build", "--locked", "--release"])
         .current_dir(&channel_dir);
     let output = thinclaw_platform::bounded_command_output(
         &mut command,
@@ -342,7 +342,7 @@ async fn build_channel_artifact(name: &str) -> Result<(), String> {
     .await
     .map_err(|error| {
         format!(
-            "failed to execute bounded `cargo component build --release` in {}: {error}",
+            "failed to execute bounded `cargo component build --locked --release` in {}: {error}",
             channel_dir.display()
         )
     })?;
@@ -354,7 +354,7 @@ async fn build_channel_artifact(name: &str) -> Result<(), String> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     Err(format!(
-        "`cargo component build --release` exited with status {} in {}\nstdout:\n{}\nstderr:\n{}",
+        "`cargo component build --locked --release` exited with status {} in {}\nstdout:\n{}\nstderr:\n{}",
         output.status,
         channel_dir.display(),
         stdout.trim(),

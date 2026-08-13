@@ -35,7 +35,7 @@ build_wasm_channel() {
     echo "  🔨 ${name}: cargo build + wasm-tools"
     (
         cd "$dir"
-        cargo build --release --target wasm32-wasip2 2>&1
+        cargo build --locked --release --target wasm32-wasip2 2>&1
 
         local crate_name
         crate_name=$(grep '^name' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/' | tr '-' '_')

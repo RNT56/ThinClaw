@@ -258,8 +258,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config
+      - name: Install pinned bundled-extension toolchain
+        if: matrix.name == 'all-features' || matrix.name == 'delta-bundled-wasm'
+        run: |
+          set -euo pipefail
           rustup target add wasm32-wasip2
-          cargo install wasm-tools --locked
+          version="$(python3 scripts/ci/extension_registry.py tool-version)"
+          cargo install cargo-component --version "$version" --locked
+          [[ "$(cargo component --version | awk '{print $NF}')" == "$version" ]]
       - name: cargo check
         run: cargo check --locked --workspace ${{ matrix.cargo-args }}
       - name: Parser, help, slash, and static-capability contract
@@ -1133,11 +1139,11 @@ jobs:
         with:
           key: channel-crate-${{ matrix.name }}
       - name: Run channel crate tests
-        run: cargo test --manifest-path ${{ matrix.manifest_path }} -- --nocapture
+        run: cargo test --locked --manifest-path ${{ matrix.manifest_path }} -- --nocapture
       - name: Build channel crate for wasm32-wasip2
         # Channels ship as WASM components; a shim that stops compiling to WASM
         # must fail CI even when its host-side unit tests still pass.
-        run: cargo build --manifest-path ${{ matrix.manifest_path }} --release --target wasm32-wasip2
+        run: cargo build --locked --manifest-path ${{ matrix.manifest_path }} --release --target wasm32-wasip2
 
   tool-crates:
     name: "Tool Crate: ${{ matrix.name }}"
@@ -1181,7 +1187,36 @@ jobs:
         with:
           key: tool-crate-${{ matrix.name }}
       - name: Run tool crate tests
-        run: cargo test --manifest-path ${{ matrix.manifest_path }} -- --nocapture
+        run: cargo test --locked --manifest-path ${{ matrix.manifest_path }} -- --nocapture
+
+  extension-dependency-policy:
+    name: Extension dependency and registry policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+      - name: Verify source, lock, Dependabot, and release metadata coverage
+        run: python3 scripts/ci/extension_registry.py check-policy
+      - name: Prove extension lifecycle fails closed
+        run: python3 -m unittest scripts.ci.test_extension_registry
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.19.1 --locked
+      - name: Audit every standalone extension lock graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r manifest; do
+            echo "Auditing $manifest"
+            cargo deny --locked --manifest-path "$manifest" \
+              check advisories licenses bans sources
+          done < <(python3 scripts/ci/extension_registry.py list-manifests)
 
   tests:
     name: Run Tests

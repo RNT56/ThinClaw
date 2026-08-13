@@ -2,7 +2,7 @@
 # Build the Brave Search tool WASM component
 #
 # Prerequisites:
-#   - cargo-component: cargo install cargo-component
+#   - cargo-component: cargo install cargo-component --version 0.21.1 --locked
 #
 # Output:
 #   - brave-search.wasm - WASM component ready for deployment
@@ -15,7 +15,7 @@ cd "$(dirname "$0")"
 echo "Building Brave Search tool WASM component..."
 
 # Build using cargo-component (handles WIT component model automatically)
-cargo component build --release
+cargo component build --locked --release
 
 WASM_PATH="target/wasm32-wasip1/release/brave_search_tool.wasm"
 
@@ -38,4 +38,3 @@ else
     echo "Error: WASM output not found at $WASM_PATH"
     exit 1
 fi
-

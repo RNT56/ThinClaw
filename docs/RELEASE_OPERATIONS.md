@@ -35,6 +35,8 @@ python3 scripts/ci/test_release_control.py
 python3 scripts/ci/check-release-automation.py
 python3 scripts/ci/release_control.py plan \
   --tag v0.16.0 --mode dry-run --root-version 0.16.0
+python3 scripts/ci/extension_registry.py check-policy
+python3 -m unittest scripts.ci.test_extension_registry
 ```
 
 ## Exact v0.16.0 backfill
@@ -63,11 +65,41 @@ Release Please creates a protected release PR and, after merge, a draft release.
 App-authenticated recovery step dispatches the artifact workflow. All outputs build in
 Actions storage before a reviewer can stage the draft. The workflow then:
 
-1. validates the non-Apple asset contract;
-2. uploads only missing assets, comparing existing bytes before reuse;
-3. publishes the immutable versioned container;
-4. publishes the versioned GitHub release without changing latest; and
-5. promotes GitHub/GHCR latest only when explicitly requested and not a prerelease.
+1. builds every extension twice from committed standalone lockfiles in clean target
+   directories and rejects byte drift;
+2. commits future-version URLs, bundle hashes, sizes, and the source digest to the
+   release PR through the scoped Release App;
+3. requires the protected PR CI to audit every standalone graph with cargo-deny;
+4. rebuilds the tagged extension bundles and compares them with the committed hashes;
+5. validates the non-Apple asset contract and uploads only missing, byte-identical
+   assets;
+6. publishes the immutable versioned container and versioned GitHub release without
+   changing latest; and
+7. promotes GitHub/GHCR latest only when explicitly requested and not a prerelease.
+
+`v0.16.0` is the sole legacy exception because its immutable tag predates committed
+tool lockfiles and prepared registry metadata. Its compatibility layer is hard-coded
+to that exact tag. `v0.16.1` is the first strict lifecycle release; missing source,
+lockfile, Dependabot entry, URL, hash, size, or preparation metadata fails before
+publication. Never hand-edit prepared hashes or run a post-release registry update.
+
+To reproduce the release-PR preparation locally without publishing, install the exact
+component builder reported by `extension_registry.py tool-version`, build two isolated
+sets, compare them, and prepare the release version on a clean release branch:
+
+```bash
+version="$(python3 scripts/ci/extension_registry.py tool-version)"
+cargo install cargo-component --version "$version" --locked
+THINCLAW_EXTENSION_BUILD_ONLY=1 CARGO_TARGET_DIR=/tmp/thinclaw-ext-target-1 \
+  scripts/ci/build_extension_bundles.sh /tmp/thinclaw-ext-bundles-1
+THINCLAW_EXTENSION_BUILD_ONLY=1 CARGO_TARGET_DIR=/tmp/thinclaw-ext-target-2 \
+  scripts/ci/build_extension_bundles.sh /tmp/thinclaw-ext-bundles-2
+python3 scripts/ci/extension_registry.py compare-bundles \
+  --first /tmp/thinclaw-ext-bundles-1 --second /tmp/thinclaw-ext-bundles-2
+python3 scripts/ci/extension_registry.py prepare \
+  --tag "v$(awk -F'"' '/^version = "/ {print $2; exit}' Cargo.toml)" \
+  --bundles /tmp/thinclaw-ext-bundles-1
+```
 
 For a failed published version, restore both latest aliases to the recorded prior tag
 and ship a new patch version. Never replace bytes attached to an existing version.

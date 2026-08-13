@@ -12,10 +12,16 @@ Channels are WASM components that handle communication with external messaging p
 channels/                    # Or channels-src/
 └── my-channel/
     ├── Cargo.toml
+    ├── Cargo.lock
     ├── src/
     │   └── lib.rs
     └── my-channel.capabilities.json
 ```
+
+Every registry-backed channel is an independent Cargo root. Commit its `Cargo.lock`,
+add it to `registry/channels`, and regenerate the Dependabot block with
+`python3 scripts/ci/extension_registry.py write-dependabot`. CI and release builds use
+`--locked`; a missing or stale lockfile is a hard failure.
 
 After building, deploy to:
 ```
@@ -352,7 +358,7 @@ To build a specific channel individually:
 
 # Channels without a build.sh (WhatsApp, Discord):
 cd channels-src/whatsapp
-cargo build --release --target wasm32-wasip2
+cargo build --locked --release --target wasm32-wasip2
 wasm-tools component new target/wasm32-wasip2/release/whatsapp_channel.wasm -o whatsapp.wasm 2>/dev/null \
   || cp target/wasm32-wasip2/release/whatsapp_channel.wasm whatsapp.wasm
 wasm-tools strip whatsapp.wasm -o whatsapp.wasm

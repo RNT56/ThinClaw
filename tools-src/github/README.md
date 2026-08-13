@@ -181,7 +181,7 @@ GitHub token not found in secret store. Set it with: thinclaw secret set github_
 
 ```bash
 cd tools-src/github
-cargo build --target wasm32-wasi --release
+cargo build --locked --target wasm32-wasi --release
 ```
 
 ## License

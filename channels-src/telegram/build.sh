@@ -16,7 +16,7 @@ cd "$(dirname "$0")"
 echo "Building Telegram channel WASM component..."
 
 # Build the WASM module
-cargo build --release --target wasm32-wasip2
+cargo build --locked --release --target wasm32-wasip2
 
 # Convert to component model (if not already a component)
 # wasm-tools component new is idempotent on components

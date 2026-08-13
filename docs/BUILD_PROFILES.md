@@ -255,7 +255,7 @@ Linux notes:
 - Raspberry Pi OS Lite 64-bit should use the edge `aarch64-unknown-linux-gnu` release artifact for native installs unless it specifically needs Postgres, local WASM runtime, Docker, browser automation, Nostr, or tunnel features.
 - `--features light,voice` or `--all-features` requires `libasound2-dev`.
 - `--features bedrock` or `--all-features` requires AWS credentials (`AWS_PROFILE` or AWS access keys).
-- `--features bundled-wasm` or `--all-features` requires `rustup target add wasm32-wasip2` and `cargo install wasm-tools --locked`.
+- `--features bundled-wasm` or `--all-features` requires `rustup target add wasm32-wasip2` and the exact `cargo-component` version in `release/extension-registry.json` (currently `cargo install cargo-component --version 0.21.1 --locked`).
 
 ## Raspberry Pi OS Lite 64-Bit Builds
 

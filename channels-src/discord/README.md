@@ -133,7 +133,7 @@ If you see this error:
 
 ```bash
 cd channels-src/discord
-cargo build --target wasm32-wasip2 --release
+cargo build --locked --target wasm32-wasip2 --release
 ```
 
 ## License

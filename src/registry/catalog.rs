@@ -91,7 +91,7 @@ pub enum RegistryError {
         "Cannot install '{name}': no pre-built binary available and cargo-component is not installed.\n\
          Fix options:\n\
          \x20 1. Build with: cargo build --release --features bundled-wasm\n\
-         \x20 2. Install toolchain: cargo install cargo-component\n\
+         \x20 2. Install toolchain: cargo install cargo-component --version 0.21.1 --locked\n\
          \x20 3. Wait for a release with pre-built artifacts"
     )]
     ToolchainMissing { name: String },

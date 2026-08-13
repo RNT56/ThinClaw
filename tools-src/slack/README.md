@@ -19,7 +19,7 @@ A standalone WASM component that provides Slack integration for ThinClaw. This s
 
 2. **cargo-component** for building WASM components:
    ```bash
-   cargo install cargo-component
+   cargo install cargo-component --version 0.21.1 --locked
    ```
 
 3. **Slack Bot Token** with the following OAuth scopes:
@@ -35,7 +35,7 @@ A standalone WASM component that provides Slack integration for ThinClaw. This s
 
 ```bash
 cd tools-src/slack
-cargo component build --release
+cargo component build --locked --release
 ```
 
 The compiled WASM component will be at:
@@ -187,7 +187,7 @@ Use this as a template for creating new WASM tools:
 4. Implement API calls in `src/api.rs`
 5. Update the action dispatch in `src/lib.rs`
 6. Create your `*.capabilities.json` file
-7. Build with `cargo component build --release`
+7. Build with `cargo component build --locked --release`
 
 ### Key Files
 
@@ -230,7 +230,7 @@ The tool has a default rate limit of 50 requests/minute. Wait and retry.
 Ensure you have the WASM target and cargo-component installed:
 ```bash
 rustup target add wasm32-wasip2
-cargo install cargo-component
+cargo install cargo-component --version 0.21.1 --locked
 ```
 
 ## License

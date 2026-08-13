@@ -126,6 +126,12 @@ jobs:
             args+=(--promote-latest)
           fi
           python3 .release-control/scripts/ci/release_control.py "${args[@]}" > release-plan.json
+          if [[ "$RELEASE_TAG" == "v0.16.0" ]]; then
+            echo "Legacy extension registry policy is grandfathered only for the exact v0.16.0 backfill."
+          else
+            python3 .release-control/scripts/ci/extension_registry.py \
+              --repo-root "$GITHUB_WORKSPACE" check-policy --expected-tag "$RELEASE_TAG"
+          fi
           jq -r 'to_entries[] | "\(.key)=\(.value)"' release-plan.json >> "$GITHUB_OUTPUT"
           echo "source_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git diff --exit-code
@@ -229,39 +235,29 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
-      - name: Patch manifests with WASM artifact URLs and checksums
-        if: ${{ needs.plan.outputs.publishing == 'true' }}
+      - name: Apply the exact v0.16.0 registry backfill compatibility layer
+        if: ${{ needs.plan.outputs.tag == 'v0.16.0' }}
         shell: bash
-        env:
-          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
         run: |
-          CHECKSUMS="target/distrib/checksums-wasm.txt"
-          if [ ! -f "$CHECKSUMS" ]; then
-            echo "No checksums.txt found, skipping manifest patching"
-            exit 0
-          fi
-
-          # Derive repo owner/name from GITHUB_REPOSITORY (e.g. "RNT56/ThinClaw")
-          REPO="${GITHUB_REPOSITORY}"
-
-          while IFS= read -r line; do
-            sha256=$(echo "$line" | awk '{print $1}')
-            filename=$(echo "$line" | awk '{print $2}')
-            name=$(echo "$filename" | sed 's/-wasm32-wasip2\.tar\.gz$//')
-            download_url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${filename}"
-
-            # Search all manifests by their internal .name field, not filename
+          set -euo pipefail
+          checksums=target/distrib/checksums-wasm.txt
+          test -s "$checksums"
+          while read -r sha256 filename; do
+            name="${filename%-wasm32-wasip2.tar.gz}"
+            matched=0
             for manifest in registry/tools/*.json registry/channels/*.json; do
-              [ -f "$manifest" ] || continue
-              manifest_name=$(jq -r '.name' "$manifest")
-              if [ "$manifest_name" = "$name" ]; then
-                jq --arg url "$download_url" --arg sha "$sha256" \
-                  '.artifacts["wasm32-wasip2"].url = $url | .artifacts["wasm32-wasip2"].sha256 = $sha' \
-                  "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
-                echo "Patched $manifest (name=$manifest_name): url=$download_url sha256=$sha256"
+              if [[ "$(jq -r '.name' "$manifest")" == "$name" ]]; then
+                jq --arg url "https://github.com/${GITHUB_REPOSITORY}/releases/download/v0.16.0/${filename}" \
+                  --arg sha "$sha256" \
+                  '.artifacts["wasm32-wasip2"] = {url: $url, sha256: $sha}' \
+                  "$manifest" > "${manifest}.tmp"
+                mv "${manifest}.tmp" "$manifest"
+                matched=$((matched + 1))
               fi
             done
-          done < "$CHECKSUMS"
+            [[ "$matched" -eq 1 ]]
+          done < "$checksums"
+          [[ "$(wc -l < "$checksums" | tr -d ' ')" -eq 28 ]]
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
@@ -344,104 +340,83 @@ jobs:
       - plan
     if: ${{ needs.plan.outputs.publishing == 'true' }}
     runs-on: "ubuntu-22.04"
+    timeout-minutes: 90
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           submodules: recursive
           ref: ${{ env.RELEASE_REF }}
-      - name: Install Rust toolchain + wasm target
-        run: |
-          rustup target add wasm32-wasip2
-          cargo install cargo-component --version 0.21.1 --locked
-      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Checkout immutable extension release tooling from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          key: wasm-extensions
-      - name: Build and package WASM extensions
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: .release-control
+      - name: Select large isolated build storage
         shell: bash
         run: |
           set -euo pipefail
+          mountpoint -q /mnt || {
+            echo "The reproducibility job requires the hosted runner's large /mnt volume" >&2
+            exit 1
+          }
+          sudo install -d -o "$(id -u)" -g "$(id -g)" /mnt/thinclaw-extension-release
+          echo "EXTENSION_BUILD_ROOT=/mnt/thinclaw-extension-release" >> "$GITHUB_ENV"
+          df -h /mnt
+      - name: Install Rust toolchain + wasm target
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+          targets: wasm32-wasip2
+      - name: Install exact component builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 .release-control/scripts/ci/extension_registry.py tool-version)"
+          cargo install cargo-component --version "$version" --locked
+          [[ "$(cargo component --version | awk '{print $NF}')" == "$version" ]]
+      - name: Build two clean reproducibility candidates
+        env:
+          THINCLAW_REPO_ROOT: ${{ github.workspace }}
+          THINCLAW_EXTENSION_CHECKER: ${{ github.workspace }}/.release-control/scripts/ci/extension_registry.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_TAG" == "v0.16.0" ]]; then
+            CARGO_TARGET_DIR="$EXTENSION_BUILD_ROOT/target-first" \
+              THINCLAW_LEGACY_UNLOCKED=1 THINCLAW_EXTENSION_BUILD_ONLY=1 \
+              .release-control/scripts/ci/build_extension_bundles.sh \
+              "$EXTENSION_BUILD_ROOT/bundles-first"
+          else
+            CARGO_TARGET_DIR="$EXTENSION_BUILD_ROOT/target-first" \
+              .release-control/scripts/ci/build_extension_bundles.sh \
+              "$EXTENSION_BUILD_ROOT/bundles-first"
+            CARGO_TARGET_DIR="$EXTENSION_BUILD_ROOT/target-second" \
+              .release-control/scripts/ci/build_extension_bundles.sh \
+              "$EXTENSION_BUILD_ROOT/bundles-second"
+          fi
+      - name: Compare clean outputs and committed registry hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_TAG" == "v0.16.0" ]]; then
+            echo "Skipping strict source/hash comparison for the exact legacy v0.16.0 backfill."
+          else
+            python3 .release-control/scripts/ci/extension_registry.py \
+              --repo-root "$GITHUB_WORKSPACE" compare-bundles \
+              --first "$EXTENSION_BUILD_ROOT/bundles-first" \
+              --second "$EXTENSION_BUILD_ROOT/bundles-second"
+            python3 .release-control/scripts/ci/extension_registry.py \
+              --repo-root "$GITHUB_WORKSPACE" verify-bundles \
+              --tag "$RELEASE_TAG" \
+              --bundles "$EXTENSION_BUILD_ROOT/bundles-first"
+          fi
           mkdir -p target/wasm-bundles
-          : > target/wasm-bundles/checksums-wasm.txt
-          manifest_count=0
-          bundle_count=0
-
-          # Process each manifest in registry/tools/ and registry/channels/
-          for manifest in registry/tools/*.json registry/channels/*.json; do
-            [ -f "$manifest" ] || continue
-            manifest_count=$((manifest_count + 1))
-
-            name=$(jq -r '.name' "$manifest")
-            source_dir=$(jq -r '.source.dir' "$manifest")
-            caps_file=$(jq -r '.source.capabilities' "$manifest")
-            crate_name=$(jq -r '.source.crate_name' "$manifest")
-
-            if [ ! -d "$source_dir" ]; then
-              echo "::error::Source dir '$source_dir' not found for '$name'"
-              exit 1
-            fi
-            if [ ! -f "$source_dir/Cargo.toml" ]; then
-              echo "::error::Cargo manifest missing at '$source_dir/Cargo.toml' for '$name'"
-              exit 1
-            fi
-            if [ ! -f "$source_dir/$caps_file" ]; then
-              echo "::error::Capabilities file missing at '$source_dir/$caps_file' for '$name'"
-              exit 1
-            fi
-
-            echo "=== Building $name from $source_dir ==="
-
-            # Build WASM component
-            cargo component build --locked --release --manifest-path "$source_dir/Cargo.toml"
-
-            # Find the built WASM file (Cargo uses underscores in artifact names)
-            wasm_artifact="${crate_name//-/_}"
-            wasm_path=""
-            for target_dir in wasm32-wasip2 wasm32-wasip1 wasm32-wasi; do
-              candidate="$source_dir/target/$target_dir/release/${wasm_artifact}.wasm"
-              if [ -f "$candidate" ]; then
-                wasm_path="$candidate"
-                break
-              fi
-            done
-
-            if [ -z "$wasm_path" ]; then
-              echo "::error::No WASM output found for '$name'"
-              exit 1
-            fi
-
-            # Copy files with standardized names for the archive
-            cp "$wasm_path" "target/wasm-bundles/${name}.wasm"
-            cp "$source_dir/$caps_file" "target/wasm-bundles/${name}.capabilities.json"
-
-            # Create tar.gz bundle
-            bundle="target/wasm-bundles/${name}-wasm32-wasip2.tar.gz"
-            (cd target/wasm-bundles && tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm" "${name}.capabilities.json")
-
-            # Compute SHA256
-            sha256=$(sha256sum "$bundle" | cut -d' ' -f1)
-            echo "$sha256  ${name}-wasm32-wasip2.tar.gz" >> target/wasm-bundles/checksums-wasm.txt
-            bundle_count=$((bundle_count + 1))
-
-            # Clean up intermediate files
-            rm -f "target/wasm-bundles/${name}.wasm" "target/wasm-bundles/${name}.capabilities.json"
-
-            echo "  -> $bundle ($sha256)"
-          done
-
-          if [ "$manifest_count" -eq 0 ]; then
-            echo "::error::No WASM extension manifests found"
-            exit 1
-          fi
-          if [ "$bundle_count" -ne "$manifest_count" ]; then
-            echo "::error::Built $bundle_count WASM bundles for $manifest_count manifests"
-            exit 1
-          fi
-
-          echo "=== WASM bundles built ==="
-          ls -la target/wasm-bundles/
+          cp "$EXTENSION_BUILD_ROOT"/bundles-first/* target/wasm-bundles/
       - name: "Upload WASM bundles"
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -1076,80 +1051,6 @@ jobs:
           latest_digest="$(docker buildx imagetools inspect "$image:latest" | awk '/^Digest:/ {print $2; exit}')"
           [[ -n "$version_digest" && "$version_digest" == "$latest_digest" ]]
           trap - ERR
-
-  # Prepare patched manifest SHA256 checksums as an artifact for follow-up PRs
-  # so release jobs don't fail on protected default branches.
-  update-registry-checksums:
-    needs:
-      - plan
-      - host
-      - build-wasm-extensions
-    if: ${{ always() && needs.host.result == 'success' && needs.build-wasm-extensions.result == 'success' }}
-    runs-on: "ubuntu-22.04"
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ env.RELEASE_REF }}
-      - name: Fetch WASM checksums
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: artifacts-wasm-extensions
-          path: target/wasm-bundles/
-      - name: Patch manifests with artifact URLs and SHA256
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-        run: |
-          CHECKSUMS="target/wasm-bundles/checksums-wasm.txt"
-          if [ ! -f "$CHECKSUMS" ]; then
-            echo "No checksums-wasm.txt found"
-            exit 0
-          fi
-
-          REPO="${GITHUB_REPOSITORY}"
-
-          while IFS= read -r line; do
-            sha256=$(echo "$line" | awk '{print $1}')
-            filename=$(echo "$line" | awk '{print $2}')
-            name=$(echo "$filename" | sed 's/-wasm32-wasip2\.tar\.gz$//')
-            download_url="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${filename}"
-
-            # Search all manifests by their internal .name field, not filename
-            for manifest in registry/tools/*.json registry/channels/*.json; do
-              [ -f "$manifest" ] || continue
-              manifest_name=$(jq -r '.name' "$manifest")
-              if [ "$manifest_name" = "$name" ]; then
-                jq --arg url "$download_url" --arg sha "$sha256" \
-                  '.artifacts["wasm32-wasip2"].url = $url | .artifacts["wasm32-wasip2"].sha256 = $sha' \
-                  "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
-                echo "Patched $manifest (name=$manifest_name): url=$download_url sha256=$sha256"
-              fi
-            done
-          done < "$CHECKSUMS"
-      - name: Package updated manifests
-        id: package-registry
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p target/registry-checksum-updates
-
-          git add registry/
-          if git diff --cached --quiet; then
-            echo "No manifest changes to package"
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-          else
-            git diff --cached --name-only > target/registry-checksum-updates/changed-files.txt
-            tar czf target/registry-checksum-updates/registry-updates.tar.gz registry/
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Upload registry checksum updates
-        if: ${{ steps.package-registry.outputs.has_changes == 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: artifacts-registry-checksum-updates
-          path: target/registry-checksum-updates/*
 
   announce:
     needs:

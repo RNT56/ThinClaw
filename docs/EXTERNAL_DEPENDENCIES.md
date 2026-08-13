@@ -854,7 +854,7 @@ These are only needed if you **compile ThinClaw from source**:
 | Rust 1.94+ | Rust compiler | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` | Same | Install inside WSL for Linux-style builds |
 | wasm32-wasip2 target | WASM compilation | `rustup target add wasm32-wasip2` | Same | Same inside WSL |
 | wasm-tools | WASM component model | `cargo install wasm-tools --locked` | Same | Same inside WSL |
-| cargo-component | Build WASM extensions | `cargo install cargo-component --locked` | Same | Same inside WSL |
+| cargo-component 0.21.1 | Build WASM extensions | `cargo install cargo-component --version 0.21.1 --locked` | Same | Same inside WSL |
 | Git | Clone the repo | Pre-installed or Xcode CLI Tools | `sudo apt install git` or distro equivalent | Git for Windows or Git inside WSL |
 | CA certificates and curl | Fetch installers/dependencies | Built in on most hosts | `sudo apt install ca-certificates curl` or distro equivalent | Built in PowerShell for release installs; install inside WSL for source builds |
 

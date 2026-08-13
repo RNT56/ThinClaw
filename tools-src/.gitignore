@@ -1,2 +1,3 @@
-Cargo.lock
+# Registry-backed tool crates are independent release roots. Commit their
+# lockfiles so CI, cargo-deny, and downloadable bundles resolve the same graph.
 target/
