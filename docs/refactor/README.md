@@ -88,7 +88,8 @@ typed-error and file-size targets.
 `deny.toml` still has `multiple-versions = "warn"`), finishing D1 (the `[workspace.dependencies]`
 table exists and 27/28 crates use it, but `tokio`/`uuid`/`reqwest`/`rand` are not hoisted), the
 `clippy::unwrap_used` panic-prevention lint (still `"allow"`), expanding coverage beyond the
-library target (a measured 38% project floor and 70% changed-line gate are now live), a signed
+library target (a measured 53.2% project floor, 155,404 covered-line floor, dated steps to 60%,
+and 70% changed-line gate are now live), a signed
 desktop release (P3), sub-workspace `cargo-deny` scanning of
 `channels-src/` + `tools-src/`, the `Result<_, String>` → `BridgeError` command migration (B5),
 the remaining A9 one-shot task ownership, and the largest-file < 800 target (A8: largest is now

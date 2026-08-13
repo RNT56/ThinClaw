@@ -36,6 +36,11 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
+Changes that add or exercise Rust branches must also preserve the dated
+project/covered-line ratchet and retire any newly covered debt. See
+[`docs/COVERAGE_RATCHET.md`](docs/COVERAGE_RATCHET.md) for the exact local
+command and the one-way debt-pruning workflow.
+
 If you changed packaged WASM channels or tools, also rebuild the artifacts that depend on them:
 
 ```bash
@@ -80,6 +85,7 @@ Before editing broad docs, check the canonical doc for the subsystem:
 - extensions: `docs/EXTENSION_SYSTEM.md`
 - tools: `src/tools/README.md`
 - security/networking: `src/NETWORK_SECURITY.md`
+- Rust coverage policy: `docs/COVERAGE_RATCHET.md`
 
 ## Dependency and Security Hygiene
 

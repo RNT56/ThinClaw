@@ -5,18 +5,30 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from datetime import date
 import hashlib
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[2]
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 ANSI_GREEN = re.compile(r"\x1b\[(?:[0-9;]*;)?32(?:;[0-9;]*)?m")
 DEBT_RANGE = re.compile(r"^(\d+)(?:-(\d+))?$")
+
+
+class CoverageRatchet(NamedTuple):
+    project_min: float
+    covered_lines_min: int
+    debt_file_max: int
+    debt_line_max: int
+    require_current_debt: bool
+    require_pruned_debt: bool
+    effective_on: date
 
 
 def parse_lcov(path: Path) -> dict[tuple[str, int], int]:
@@ -26,7 +38,10 @@ def parse_lcov(path: Path) -> dict[tuple[str, int], int]:
         if raw_line.startswith("SF:"):
             candidate = Path(raw_line[3:])
             try:
-                source = candidate.resolve().relative_to(ROOT).as_posix()
+                # Do not call resolve() here. Historical CI artifacts often
+                # contain an absolute path that does not exist on the machine
+                # inspecting them; resolving that path can hit slow automounts.
+                source = candidate.relative_to(ROOT).as_posix()
             except ValueError:
                 source = candidate.as_posix()
         elif raw_line.startswith("DA:") and source is not None:
@@ -210,6 +225,85 @@ def load_coverage_debt(path: Path) -> tuple[set[tuple[str, int]], list[str]]:
     return debt, invalidated
 
 
+def coverage_debt_size(path: Path) -> tuple[int, int]:
+    """Return the declared file/line debt without consulting source digests."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("version") != 1 or not isinstance(payload.get("files"), dict):
+        raise ValueError(f"{path} is not a version 1 coverage debt manifest")
+
+    line_count = 0
+    for source, record in payload["files"].items():
+        if not isinstance(source, str) or not isinstance(record, dict):
+            raise ValueError(f"{path} contains an invalid file record")
+        ranges = record.get("uncovered")
+        if not isinstance(ranges, list) or not all(isinstance(value, str) for value in ranges):
+            raise ValueError(f"{path} contains an invalid debt entry for {source}")
+        line_count += len(parse_debt_ranges(ranges))
+    return len(payload["files"]), line_count
+
+
+def load_coverage_ratchet(path: Path, as_of: date) -> CoverageRatchet:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("version") != 1:
+        raise ValueError(f"{path} is not a version 1 coverage ratchet")
+    schedule = payload.get("schedule")
+    debt = payload.get("debt")
+    if not isinstance(schedule, list) or not schedule or not isinstance(debt, dict):
+        raise ValueError(f"{path} must contain a non-empty schedule and debt policy")
+
+    parsed: list[tuple[date, float, int]] = []
+    for entry in schedule:
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path} contains an invalid schedule entry")
+        try:
+            effective_on = date.fromisoformat(entry["effective_on"])
+            project_min = float(entry["project_min"])
+            covered_lines_min = int(entry["covered_lines_min"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"{path} contains an invalid schedule entry") from error
+        if not 0.0 <= project_min <= 100.0 or covered_lines_min < 0:
+            raise ValueError(f"{path} contains an out-of-range schedule entry")
+        parsed.append((effective_on, project_min, covered_lines_min))
+
+    if parsed != sorted(parsed) or len({entry[0] for entry in parsed}) != len(parsed):
+        raise ValueError(f"{path} schedule dates must be unique and increasing")
+    for previous, current in zip(parsed, parsed[1:]):
+        if current[1] < previous[1] or current[2] < previous[2]:
+            raise ValueError(f"{path} schedule thresholds must never decrease")
+    if parsed[-1][1] < 60.0:
+        raise ValueError(f"{path} schedule must reach at least 60% project coverage")
+
+    active = [entry for entry in parsed if entry[0] <= as_of]
+    if not active:
+        raise ValueError(f"{path} has no coverage floor effective on {as_of.isoformat()}")
+
+    try:
+        debt_file_max = int(debt["max_files"])
+        debt_line_max = int(debt["max_lines"])
+        require_current_debt = debt["require_current"]
+        require_pruned_debt = debt["require_pruned"]
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"{path} contains an invalid debt policy") from error
+    if (
+        debt_file_max < 0
+        or debt_line_max < 0
+        or not isinstance(require_current_debt, bool)
+        or not isinstance(require_pruned_debt, bool)
+    ):
+        raise ValueError(f"{path} contains an invalid debt policy")
+
+    effective_on, project_min, covered_lines_min = active[-1]
+    return CoverageRatchet(
+        project_min=project_min,
+        covered_lines_min=covered_lines_min,
+        debt_file_max=debt_file_max,
+        debt_line_max=debt_line_max,
+        require_current_debt=require_current_debt,
+        require_pruned_debt=require_pruned_debt,
+        effective_on=effective_on,
+    )
+
+
 def git_diff(base: str, *, detect_moves: bool) -> str:
     command = ["git"]
     if detect_moves:
@@ -302,38 +396,95 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("lcov", type=Path)
     parser.add_argument("--base", default="")
-    parser.add_argument("--project-min", type=float, default=38.0)
+    parser.add_argument("--project-min", type=float)
     parser.add_argument("--patch-min", type=float, default=70.0)
     parser.add_argument("--debt-baseline", type=Path)
+    parser.add_argument("--ratchet", type=Path)
+    parser.add_argument("--as-of", type=date.fromisoformat, default=date.today())
     args = parser.parse_args()
 
     coverage = parse_lcov(args.lcov)
     project_covered = sum(hits > 0 for hits in coverage.values())
     project_total = len(coverage)
     project_pct = percentage(project_covered, project_total)
+    ratchet: CoverageRatchet | None = None
+    if args.ratchet is not None:
+        try:
+            ratchet = load_coverage_ratchet(args.ratchet, args.as_of)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            print(f"coverage gate failed: invalid ratchet: {error}", file=sys.stderr)
+            return 1
+        print(
+            "Active coverage ratchet: "
+            f"{ratchet.effective_on.isoformat()} "
+            f"({ratchet.project_min:.2f}%, {ratchet.covered_lines_min} covered lines)"
+        )
+        if args.debt_baseline is None:
+            print(
+                "coverage gate failed: the ratchet requires --debt-baseline",
+                file=sys.stderr,
+            )
+            return 1
+    project_min = max(
+        args.project_min if args.project_min is not None else 38.0,
+        ratchet.project_min if ratchet is not None else 0.0,
+    )
     print(
         f"Project line coverage: {project_pct:.2f}% "
-        f"({project_covered}/{project_total}, minimum {args.project_min:.2f}%)"
+        f"({project_covered}/{project_total}, minimum {project_min:.2f}%)"
     )
 
     failures: list[str] = []
-    if project_pct < args.project_min:
+    if project_pct < project_min:
         failures.append(
-            f"project coverage {project_pct:.2f}% is below {args.project_min:.2f}%"
+            f"project coverage {project_pct:.2f}% is below {project_min:.2f}%"
         )
+    if ratchet is not None and project_covered < ratchet.covered_lines_min:
+        failures.append(
+            f"covered line count {project_covered} is below {ratchet.covered_lines_min}"
+        )
+
+    debt: set[tuple[str, int]] = set()
+    invalidated_debt_files: list[str] = []
+    if args.debt_baseline is not None:
+        try:
+            debt, invalidated_debt_files = load_coverage_debt(args.debt_baseline)
+            debt_files, debt_lines = coverage_debt_size(args.debt_baseline)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            print(f"coverage gate failed: invalid debt baseline: {error}", file=sys.stderr)
+            return 1
+        print(f"Coverage debt: {debt_files} files, {debt_lines} lines")
+        print(f"Coverage debt files invalidated by source changes: {len(invalidated_debt_files)}")
+        covered_debt = sorted(line for line in debt if coverage.get(line, 0) > 0)
+        print(f"Covered lines still recorded as debt: {len(covered_debt)}")
+        if ratchet is not None:
+            if debt_files > ratchet.debt_file_max:
+                failures.append(
+                    f"coverage debt file count {debt_files} exceeds {ratchet.debt_file_max}"
+                )
+            if debt_lines > ratchet.debt_line_max:
+                failures.append(
+                    f"coverage debt line count {debt_lines} exceeds {ratchet.debt_line_max}"
+                )
+            if ratchet.require_current_debt and invalidated_debt_files:
+                preview = ", ".join(sorted(invalidated_debt_files)[:20])
+                failures.append(
+                    f"coverage debt contains {len(invalidated_debt_files)} stale digests: "
+                    + preview
+                )
+            if ratchet.require_pruned_debt and covered_debt:
+                preview = ", ".join(
+                    f"{source}:{line_number}" for source, line_number in covered_debt[:20]
+                )
+                failures.append(
+                    f"{len(covered_debt)} covered lines remain baselined as debt; "
+                    f"prune them ({preview})"
+                )
 
     if args.base and set(args.base) != {"0"}:
         changed, moved_count = changed_lines(args.base)
         print(f"Relocated Rust lines excluded from patch coverage: {moved_count}")
         coverable_changed = changed.intersection(coverage)
-        debt: set[tuple[str, int]] = set()
-        invalidated_debt_files: list[str] = []
-        if args.debt_baseline is not None:
-            try:
-                debt, invalidated_debt_files = load_coverage_debt(args.debt_baseline)
-            except (OSError, ValueError, json.JSONDecodeError) as error:
-                print(f"coverage gate failed: invalid debt baseline: {error}", file=sys.stderr)
-                return 1
         baselined = {
             line
             for line in coverable_changed.intersection(debt)
@@ -341,7 +492,6 @@ def main() -> int:
         }
         if args.debt_baseline is not None:
             print(f"Known uncovered-line debt excluded: {len(baselined)}")
-            print(f"Coverage debt files invalidated by source changes: {len(invalidated_debt_files)}")
         eligible_changed = coverable_changed.difference(baselined)
         patch_covered = sum(coverage[line] > 0 for line in eligible_changed)
         patch_total = len(eligible_changed)

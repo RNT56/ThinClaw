@@ -1276,9 +1276,9 @@ jobs:
           PY
           python3 scripts/ci/check-coverage.py coverage.lcov \
             --base "$BASE_REVISION" \
-            --project-min 38 \
             --patch-min 70 \
-            --debt-baseline scripts/ci/coverage-debt.json
+            --debt-baseline scripts/ci/coverage-debt.json \
+            --ratchet scripts/ci/coverage-ratchet.json
       - name: Upload coverage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

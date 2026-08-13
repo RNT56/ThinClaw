@@ -3,8 +3,11 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -126,6 +129,161 @@ diff --git a/src/new.rs b/src/new.rs
                 debt, invalidated = check_coverage.load_coverage_debt(baseline)
                 self.assertEqual(debt, set())
                 self.assertEqual(invalidated, ["src/lib.rs"])
+
+    def test_debt_size_counts_declared_ranges_including_stale_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory) / "coverage-debt.json"
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "files": {
+                            "src/one.rs": {"uncovered": ["1-3", "8"]},
+                            "src/two.rs": {"uncovered": ["4-5"]},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(check_coverage.coverage_debt_size(baseline), (2, 6))
+
+    def test_ratchet_selects_active_floor_and_reaches_sixty_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ratchet = Path(directory) / "coverage-ratchet.json"
+            ratchet.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "schedule": [
+                            {
+                                "effective_on": "2026-01-01",
+                                "project_min": 50,
+                                "covered_lines_min": 100,
+                            },
+                            {
+                                "effective_on": "2026-06-01",
+                                "project_min": 60,
+                                "covered_lines_min": 100,
+                            },
+                        ],
+                        "debt": {
+                            "max_files": 4,
+                            "max_lines": 20,
+                            "require_current": True,
+                            "require_pruned": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            policy = check_coverage.load_coverage_ratchet(
+                ratchet, date.fromisoformat("2026-04-01")
+            )
+            self.assertEqual(policy.project_min, 50)
+            self.assertEqual(policy.covered_lines_min, 100)
+            self.assertEqual(policy.effective_on, date.fromisoformat("2026-01-01"))
+            self.assertTrue(policy.require_current_debt)
+            self.assertTrue(policy.require_pruned_debt)
+
+    def test_ratchet_rejects_decreasing_or_sub_target_schedule(self) -> None:
+        base = {
+            "version": 1,
+            "debt": {
+                "max_files": 0,
+                "max_lines": 0,
+                "require_current": True,
+                "require_pruned": True,
+            },
+        }
+        invalid_schedules = [
+            [
+                {
+                    "effective_on": "2026-01-01",
+                    "project_min": 60,
+                    "covered_lines_min": 100,
+                },
+                {
+                    "effective_on": "2026-02-01",
+                    "project_min": 59,
+                    "covered_lines_min": 100,
+                },
+            ],
+            [
+                {
+                    "effective_on": "2026-01-01",
+                    "project_min": 59,
+                    "covered_lines_min": 100,
+                }
+            ],
+        ]
+        for schedule in invalid_schedules:
+            with self.subTest(schedule=schedule), tempfile.TemporaryDirectory() as directory:
+                ratchet = Path(directory) / "coverage-ratchet.json"
+                ratchet.write_text(
+                    json.dumps({**base, "schedule": schedule}), encoding="utf-8"
+                )
+                with self.assertRaises(ValueError):
+                    check_coverage.load_coverage_ratchet(
+                        ratchet, date.fromisoformat("2026-01-15")
+                    )
+
+    def test_cli_rejects_absolute_covered_line_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report = root / "coverage.lcov"
+            report.write_text(
+                "SF:/fixture/src/lib.rs\nDA:1,1\nend_of_record\n",
+                encoding="utf-8",
+            )
+            ratchet = root / "coverage-ratchet.json"
+            ratchet.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "schedule": [
+                            {
+                                "effective_on": "2026-01-01",
+                                "project_min": 0,
+                                "covered_lines_min": 2,
+                            },
+                            {
+                                "effective_on": "2027-01-01",
+                                "project_min": 60,
+                                "covered_lines_min": 2,
+                            },
+                        ],
+                        "debt": {
+                            "max_files": 0,
+                            "max_lines": 0,
+                            "require_current": True,
+                            "require_pruned": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            debt = root / "coverage-debt.json"
+            debt.write_text(
+                json.dumps({"version": 1, "files": {}}), encoding="utf-8"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    str(report),
+                    "--ratchet",
+                    str(ratchet),
+                    "--debt-baseline",
+                    str(debt),
+                    "--as-of",
+                    "2026-01-01",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("covered line count 1 is below 2", result.stderr)
 
 
 if __name__ == "__main__":

@@ -270,7 +270,7 @@ The desktop formerly failed the root `deny.toml`'s bans/licenses. **Landed:** a 
 
 | ID | Task | Pri | Blocked-by |
 |---|---|---|---|
-| T1 | **[PARTIAL]** Coverage gate is live at the measured 38% project baseline + 70% changed lines; drop `--lib` safely so integration tests count | P1 | — |
+| T1 | **[PARTIAL]** Coverage ratchet is live at 53.2% + 155,404 covered lines + 70% changed lines, with dated steps to 60%; integration targets execute in classified CI lanes, while the LCOV job still needs a safe expansion beyond `--lib` | P1 | — |
 | T2 | MCP lifecycle integration test (handshake/list/call/reconnect) | P1 | — |
 | T3 | Root-cause the Windows-smoke flake; remove the retry mask | P2 | — |
 | T4 | Expand DB contract tests to ≥10/domain (FTS, pgvector, pagination, joins) | P2 | — |

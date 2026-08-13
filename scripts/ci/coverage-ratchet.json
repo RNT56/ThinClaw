@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "baseline": {
+    "source_revision": "06b4cfdeb3c961da6698136af91dc52bded819e1",
+    "measured_at": "2026-08-08",
+    "covered_lines": 155404,
+    "total_lines": 291945,
+    "project_percent": 53.2306,
+    "workflow_run": "https://github.com/RNT56/ThinClaw/actions/runs/31254931581"
+  },
+  "schedule": [
+    {
+      "effective_on": "2026-08-13",
+      "project_min": 53.2,
+      "covered_lines_min": 155404
+    },
+    {
+      "effective_on": "2026-10-01",
+      "project_min": 55.0,
+      "covered_lines_min": 155404
+    },
+    {
+      "effective_on": "2026-12-01",
+      "project_min": 57.5,
+      "covered_lines_min": 155404
+    },
+    {
+      "effective_on": "2027-02-01",
+      "project_min": 60.0,
+      "covered_lines_min": 155404
+    }
+  ],
+  "debt": {
+    "max_files": 443,
+    "max_lines": 29181,
+    "require_current": true,
+    "require_pruned": true
+  }
+}
