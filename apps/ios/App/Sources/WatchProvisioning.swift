@@ -93,9 +93,7 @@
                 resumePendingWipes()
                 return
             }
-            guard let material = try? controlStore.prepare(for: credential),
-                let plan = try? controlStore.beginWipe(for: credential)
-            else {
+            guard let plan = try? controlStore.beginWipe(for: credential) else {
                 // Server-side parent revoke remains authoritative if local
                 // control-state persistence failed, but never retain a relay
                 // host after local unpair.
@@ -116,7 +114,7 @@
                     parentCredential: credential,
                     instanceID: credential.installationID,
                     companionName: Self.companionName,
-                    controlMaterial: material,
+                    controlMaterial: plan.material,
                     lastProvisionedDeviceID: plan.companionDeviceID,
                     onWipeAcknowledged: { [weak self] acknowledgement in
                         self?.accept(acknowledgement)
