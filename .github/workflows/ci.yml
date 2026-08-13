@@ -316,6 +316,9 @@ jobs:
       - name: Audit complete Desktop dependency graph
         working-directory: apps/desktop
         run: npm run audit:all
+      - name: Enforce Desktop dependency security contract
+        working-directory: apps/desktop
+        run: npm run audit:lock
       - name: Clean-machine sidecar setup acceptance
         working-directory: apps/desktop
         run: npm run test:setup:all
