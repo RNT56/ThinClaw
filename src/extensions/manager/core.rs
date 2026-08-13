@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use crate::channels::ChannelManager;
 use crate::channels::wasm::{WasmChannelHostConfig, WasmChannelRouter, WasmChannelRuntime};
 use crate::extensions::clawhub::CatalogCache;
+use crate::extensions::contribution_runtime::ContributionRuntime;
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::native_activation::NativePluginState;
 use crate::extensions::registry::ExtensionRegistry;
@@ -279,7 +280,7 @@ pub(super) fn setup_auth_mode_from_schema(mode: &str, fallback: SetupAuthMode) -
 
 /// Central manager for extension lifecycle operations.
 pub struct ExtensionManager {
-    pub(super) registry: ExtensionRegistry,
+    pub(crate) registry: ExtensionRegistry,
     pub(super) discovery: OnlineDiscovery,
 
     // MCP infrastructure
@@ -340,6 +341,9 @@ pub struct ExtensionManager {
     /// enabled and an operator has placed a signed manifest in an allowlisted
     /// directory.
     pub(super) native_plugins: RwLock<NativePluginState>,
+    /// Host-mediated memory/context providers registered from signed broad
+    /// manifests. This runtime never loads extension code in-process.
+    pub(crate) contribution_runtime: ContributionRuntime,
 }
 
 impl ExtensionManager {
@@ -362,6 +366,7 @@ impl ExtensionManager {
         } else {
             ExtensionRegistry::new_with_catalog(catalog_entries)
         };
+        let contribution_runtime = ContributionRuntime::new(Arc::clone(&secrets), user_id.clone());
         Self {
             registry,
             discovery: OnlineDiscovery::new(),
@@ -391,6 +396,7 @@ impl ExtensionManager {
             catalog_cache: Arc::new(tokio::sync::Mutex::new(CatalogCache::new(3600))),
             lifecycle_audit_hook: RwLock::new(None),
             native_plugins: RwLock::new(NativePluginState::new()),
+            contribution_runtime,
         }
     }
 

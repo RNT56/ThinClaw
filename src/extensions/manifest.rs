@@ -14,6 +14,8 @@ use crate::settings::ExtensionsSettings;
 
 pub const PLUGIN_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 1;
+pub const EXTENSION_HTTP_PERMISSION: &str = "contribution.http";
+pub const EXTENSION_SECRETS_PERMISSION: &str = "contribution.secrets";
 const MAX_PLUGIN_CONTRIBUTIONS: usize = 512;
 const MAX_PLUGIN_ARTIFACTS: usize = 256;
 const MAX_PLUGIN_PERMISSIONS: usize = 128;
@@ -58,7 +60,7 @@ pub struct PluginManifest {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginContributions {
     #[serde(default)]
     pub tools: Vec<ToolContribution>,
@@ -68,6 +70,12 @@ pub struct PluginContributions {
     pub memory_providers: Vec<MemoryProviderContribution>,
     #[serde(default)]
     pub context_providers: Vec<ContextProviderContribution>,
+    #[serde(default)]
+    pub auth_providers: Vec<AuthProviderContribution>,
+    #[serde(default)]
+    pub llm_providers: Vec<LlmProviderContribution>,
+    #[serde(default)]
+    pub http_routes: Vec<HttpRouteContribution>,
     #[serde(default)]
     pub native_plugins: Vec<NativePluginContribution>,
 }
@@ -91,21 +99,191 @@ pub struct ChannelContribution {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MemoryProviderContribution {
     pub id: String,
+    /// Legacy descriptive field. A provider is executable only when `runtime`
+    /// and `operations` are present and pass validation.
+    #[serde(default)]
     pub provider_type: String,
     #[serde(default)]
     pub config_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<HttpJsonProviderRuntime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operations: Option<MemoryProviderOperations>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextProviderContribution {
     pub id: String,
+    /// Legacy descriptive field. A provider is executable only when `runtime`
+    /// and `operations` are present and pass validation.
+    #[serde(default)]
     pub provider_type: String,
     #[serde(default)]
     pub config_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<HttpJsonProviderRuntime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operations: Option<ContextProviderOperations>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HttpJsonProviderRuntime {
+    pub base_url: String,
+    #[serde(default)]
+    pub auth: ExtensionHttpAuth,
+    #[serde(default = "default_extension_http_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_extension_http_max_request_bytes")]
+    pub max_request_bytes: u64,
+    #[serde(default = "default_extension_http_max_response_bytes")]
+    pub max_response_bytes: u64,
+    #[serde(default)]
+    pub lifecycle: ProviderLifecycle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExtensionHttpAuth {
+    #[default]
+    None,
+    BearerSecret {
+        /// Opaque name resolved through the host secrets store. The value must
+        /// remain inside the manifest/contribution namespace.
+        binding: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderLifecycle {
+    /// Selected providers are health-checked and activated during startup.
+    #[default]
+    Startup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MemoryProviderOperations {
+    pub health_path: String,
+    pub recall_path: String,
+    pub store_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextProviderOperations {
+    pub health_path: String,
+    pub resolve_path: String,
+}
+
+/// Typed declarations for surfaces that are deliberately not executable in
+/// manifest schema v1. Their presence is rejected by validation; keeping the
+/// shape explicit prevents clients from treating unknown JSON as a capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthProviderContribution {
+    pub id: String,
+    pub protocol: AuthProviderProtocol,
+    pub binding_namespace: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthProviderProtocol {
+    OAuth2Pkce,
+    ApiKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LlmProviderContribution {
+    pub id: String,
+    pub protocol: LlmProviderProtocol,
+    pub binding_namespace: String,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmProviderProtocol {
+    OpenAiCompatible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HttpRouteContribution {
+    pub id: String,
+    pub route_namespace: String,
+    pub auth: HttpRouteAuth,
+    pub max_body_bytes: u64,
+    pub timeout_ms: u64,
+    pub lifecycle: HttpRouteLifecycle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpRouteAuth {
+    GatewaySession,
+    SignedWebhook,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpRouteLifecycle {
+    AgentRuntime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContributionSurface {
+    MemoryProvider,
+    ContextProvider,
+    AuthProvider,
+    LlmProvider,
+    HttpRoute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum ContributionSupportDecision {
+    Executable { contract: &'static str },
+    Unsupported { reason: &'static str },
+}
+
+pub fn contribution_support(surface: ContributionSurface) -> ContributionSupportDecision {
+    match surface {
+        ContributionSurface::MemoryProvider | ContributionSurface::ContextProvider => {
+            ContributionSupportDecision::Executable {
+                contract: "host_http_json_v1",
+            }
+        }
+        ContributionSurface::AuthProvider => ContributionSupportDecision::Unsupported {
+            reason: "generic auth providers are deferred until host-owned callback, consent, and token lifecycle integration exists",
+        },
+        ContributionSurface::LlmProvider => ContributionSupportDecision::Unsupported {
+            reason: "generic LLM providers are deferred until routing, billing, streaming, and policy integration exists",
+        },
+        ContributionSurface::HttpRoute => ContributionSupportDecision::Unsupported {
+            reason: "generic inbound HTTP routes are deferred until gateway auth, namespace ownership, rate limiting, and shutdown integration exists",
+        },
+    }
+}
+
+fn default_extension_http_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_extension_http_max_request_bytes() -> u64 {
+    256 * 1024
+}
+
+fn default_extension_http_max_response_bytes() -> u64 {
+    512 * 1024
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +371,9 @@ pub fn validate_plugin_manifest(
         .saturating_add(manifest.contributions.channels.len())
         .saturating_add(manifest.contributions.memory_providers.len())
         .saturating_add(manifest.contributions.context_providers.len())
+        .saturating_add(manifest.contributions.auth_providers.len())
+        .saturating_add(manifest.contributions.llm_providers.len())
+        .saturating_add(manifest.contributions.http_routes.len())
         .saturating_add(manifest.contributions.native_plugins.len());
     if contribution_count > MAX_PLUGIN_CONTRIBUTIONS
         || manifest.artifacts.len() > MAX_PLUGIN_ARTIFACTS
@@ -318,6 +499,11 @@ pub fn validate_plugin_manifest(
                 &tool.id,
                 &mut errors,
             );
+        } else {
+            errors.push(format!(
+                "tool contribution '{}' is not executable without wasm_artifact",
+                tool.id
+            ));
         }
     }
 
@@ -340,6 +526,11 @@ pub fn validate_plugin_manifest(
                 &channel.id,
                 &mut errors,
             );
+        } else {
+            errors.push(format!(
+                "channel contribution '{}' is not executable without wasm_artifact",
+                channel.id
+            ));
         }
     }
 
@@ -349,11 +540,33 @@ pub fn validate_plugin_manifest(
                 "memory provider contribution id is required, invalid, or duplicated".to_string(),
             );
         }
-        if !valid_manifest_id(&provider.provider_type) {
-            errors.push(format!(
-                "memory provider contribution '{}' provider_type is required",
+        validate_provider_namespace(manifest, &provider.id, "memory provider", &mut errors);
+        match (&provider.runtime, &provider.operations) {
+            (Some(runtime), Some(operations)) => {
+                validate_http_provider_runtime(manifest, &provider.id, runtime, &mut errors);
+                validate_operation_path(
+                    &provider.id,
+                    "health_path",
+                    &operations.health_path,
+                    &mut errors,
+                );
+                validate_operation_path(
+                    &provider.id,
+                    "recall_path",
+                    &operations.recall_path,
+                    &mut errors,
+                );
+                validate_operation_path(
+                    &provider.id,
+                    "store_path",
+                    &operations.store_path,
+                    &mut errors,
+                );
+            }
+            _ => errors.push(format!(
+                "memory provider contribution '{}' uses the unsupported registration-only contract; runtime and operations are required",
                 provider.id
-            ));
+            )),
         }
     }
 
@@ -363,10 +576,104 @@ pub fn validate_plugin_manifest(
                 "context provider contribution id is required, invalid, or duplicated".to_string(),
             );
         }
-        if !valid_manifest_id(&provider.provider_type) {
-            errors.push(format!(
-                "context provider contribution '{}' provider_type is required",
+        validate_provider_namespace(manifest, &provider.id, "context provider", &mut errors);
+        match (&provider.runtime, &provider.operations) {
+            (Some(runtime), Some(operations)) => {
+                validate_http_provider_runtime(manifest, &provider.id, runtime, &mut errors);
+                validate_operation_path(
+                    &provider.id,
+                    "health_path",
+                    &operations.health_path,
+                    &mut errors,
+                );
+                validate_operation_path(
+                    &provider.id,
+                    "resolve_path",
+                    &operations.resolve_path,
+                    &mut errors,
+                );
+            }
+            _ => errors.push(format!(
+                "context provider contribution '{}' uses the unsupported registration-only contract; runtime and operations are required",
                 provider.id
+            )),
+        }
+    }
+
+    for provider in &manifest.contributions.auth_providers {
+        validate_deferred_contribution_id(
+            manifest,
+            &provider.id,
+            "auth provider",
+            &mut contribution_ids,
+            &mut errors,
+        );
+        if !valid_deferred_secret_namespace(manifest, &provider.id, &provider.binding_namespace) {
+            errors.push(format!(
+                "auth provider contribution '{}' has an invalid secret namespace",
+                provider.id
+            ));
+        }
+        if let ContributionSupportDecision::Unsupported { reason } =
+            contribution_support(ContributionSurface::AuthProvider)
+        {
+            errors.push(format!(
+                "auth provider contribution '{}' is unsupported: {reason}",
+                provider.id
+            ));
+        }
+    }
+
+    for provider in &manifest.contributions.llm_providers {
+        validate_deferred_contribution_id(
+            manifest,
+            &provider.id,
+            "LLM provider",
+            &mut contribution_ids,
+            &mut errors,
+        );
+        if !valid_deferred_secret_namespace(manifest, &provider.id, &provider.binding_namespace)
+            || !(100..=120_000).contains(&provider.timeout_ms)
+        {
+            errors.push(format!(
+                "LLM provider contribution '{}' has invalid secret or timeout boundaries",
+                provider.id
+            ));
+        }
+        if let ContributionSupportDecision::Unsupported { reason } =
+            contribution_support(ContributionSurface::LlmProvider)
+        {
+            errors.push(format!(
+                "LLM provider contribution '{}' is unsupported: {reason}",
+                provider.id
+            ));
+        }
+    }
+
+    for route in &manifest.contributions.http_routes {
+        validate_deferred_contribution_id(
+            manifest,
+            &route.id,
+            "HTTP route",
+            &mut contribution_ids,
+            &mut errors,
+        );
+        let expected_namespace = format!("/extensions/{}/{}", manifest.id, route.id);
+        if route.route_namespace != expected_namespace
+            || !(1..=1024 * 1024).contains(&route.max_body_bytes)
+            || !(100..=30_000).contains(&route.timeout_ms)
+        {
+            errors.push(format!(
+                "HTTP route contribution '{}' violates namespace, body, or timeout boundaries",
+                route.id
+            ));
+        }
+        if let ContributionSupportDecision::Unsupported { reason } =
+            contribution_support(ContributionSurface::HttpRoute)
+        {
+            errors.push(format!(
+                "HTTP route contribution '{}' is unsupported: {reason}",
+                route.id
             ));
         }
     }
@@ -413,6 +720,9 @@ pub fn validate_plugin_manifest(
         && manifest.contributions.channels.is_empty()
         && manifest.contributions.memory_providers.is_empty()
         && manifest.contributions.context_providers.is_empty()
+        && manifest.contributions.auth_providers.is_empty()
+        && manifest.contributions.llm_providers.is_empty()
+        && manifest.contributions.http_routes.is_empty()
         && manifest.contributions.native_plugins.is_empty()
     {
         warnings.push("plugin declares no contributions".to_string());
@@ -422,6 +732,120 @@ pub fn validate_plugin_manifest(
         valid: errors.is_empty(),
         errors,
         warnings,
+    }
+}
+
+fn validate_deferred_contribution_id<'a>(
+    manifest: &PluginManifest,
+    id: &'a str,
+    kind: &str,
+    contribution_ids: &mut HashSet<&'a str>,
+    errors: &mut Vec<String>,
+) {
+    if !valid_manifest_id(id) || !contribution_ids.insert(id) {
+        errors.push(format!("{kind} contribution id is invalid or duplicated"));
+    }
+    validate_provider_namespace(manifest, id, kind, errors);
+}
+
+fn validate_provider_namespace(
+    manifest: &PluginManifest,
+    id: &str,
+    kind: &str,
+    errors: &mut Vec<String>,
+) {
+    let prefix = format!("{}.", manifest.id);
+    if !id.starts_with(&prefix) {
+        errors.push(format!(
+            "{kind} contribution '{id}' must be namespaced under '{}.'",
+            manifest.id
+        ));
+    }
+}
+
+fn valid_deferred_secret_namespace(
+    manifest: &PluginManifest,
+    contribution_id: &str,
+    namespace: &str,
+) -> bool {
+    manifest
+        .permissions
+        .iter()
+        .any(|permission| permission == EXTENSION_SECRETS_PERMISSION)
+        && namespace == format!("extension.{}.{contribution_id}", manifest.id)
+}
+
+fn validate_http_provider_runtime(
+    manifest: &PluginManifest,
+    contribution_id: &str,
+    runtime: &HttpJsonProviderRuntime,
+    errors: &mut Vec<String>,
+) {
+    if !manifest
+        .permissions
+        .iter()
+        .any(|permission| permission == EXTENSION_HTTP_PERMISSION)
+    {
+        errors.push(format!(
+            "provider contribution '{contribution_id}' requires permission '{EXTENSION_HTTP_PERMISSION}'"
+        ));
+    }
+    let options = thinclaw_tools_core::OutboundUrlGuardOptions {
+        require_https: true,
+        upgrade_http_to_https: false,
+        allowlist: Vec::new(),
+    };
+    match thinclaw_tools_core::validate_outbound_url_structure(&runtime.base_url, &options) {
+        Ok(url) if url.query().is_none() => {}
+        Ok(_) => errors.push(format!(
+            "provider contribution '{contribution_id}' has an unsafe base_url: query parameters are not allowed"
+        )),
+        Err(error) => errors.push(format!(
+            "provider contribution '{contribution_id}' has an unsafe base_url: {error}"
+        )),
+    }
+    if !(100..=30_000).contains(&runtime.timeout_ms)
+        || !(1..=256 * 1024).contains(&runtime.max_request_bytes)
+        || !(1..=1024 * 1024).contains(&runtime.max_response_bytes)
+    {
+        errors.push(format!(
+            "provider contribution '{contribution_id}' violates request, response, or timeout limits"
+        ));
+    }
+    if let ExtensionHttpAuth::BearerSecret { binding } = &runtime.auth {
+        let expected_prefix = format!("extension.{}.{contribution_id}.", manifest.id);
+        if !manifest
+            .permissions
+            .iter()
+            .any(|permission| permission == EXTENSION_SECRETS_PERMISSION)
+            || !valid_manifest_text(binding, 256, false)
+            || !binding.starts_with(&expected_prefix)
+        {
+            errors.push(format!(
+                "provider contribution '{contribution_id}' uses a secret outside its declared namespace or without permission '{EXTENSION_SECRETS_PERMISSION}'"
+            ));
+        }
+    }
+}
+
+fn validate_operation_path(
+    contribution_id: &str,
+    field: &str,
+    value: &str,
+    errors: &mut Vec<String>,
+) {
+    if value.is_empty()
+        || value.len() > 2_048
+        || !value.starts_with('/')
+        || value.starts_with("//")
+        || value.contains("..")
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('\0')
+    {
+        errors.push(format!(
+            "provider contribution '{contribution_id}' has an invalid {field}"
+        ));
     }
 }
 
@@ -561,6 +985,17 @@ mod tests {
         }
     }
 
+    fn test_http_runtime() -> HttpJsonProviderRuntime {
+        HttpJsonProviderRuntime {
+            base_url: "https://api.example.com".to_string(),
+            auth: ExtensionHttpAuth::None,
+            timeout_ms: 1_000,
+            max_request_bytes: 16 * 1024,
+            max_response_bytes: 32 * 1024,
+            lifecycle: ProviderLifecycle::Startup,
+        }
+    }
+
     fn sign_manifest(manifest: &mut PluginManifest, key_id: &str, signing_key: &SigningKey) {
         manifest.signature = None;
         let bytes = serde_json::to_vec(manifest).expect("serialize signed payload");
@@ -573,8 +1008,11 @@ mod tests {
     }
 
     #[test]
-    fn broad_plugin_manifest_accepts_all_contribution_kinds() {
+    fn broad_plugin_manifest_accepts_executable_contribution_kinds() {
         let mut manifest = sample_manifest();
+        manifest
+            .permissions
+            .push(EXTENSION_HTTP_PERMISSION.to_string());
         manifest.contributions.channels.push(ChannelContribution {
             id: "example.channel".to_string(),
             name: "Example Channel".to_string(),
@@ -593,6 +1031,12 @@ mod tests {
                 id: "example.memory".to_string(),
                 provider_type: "custom_http".to_string(),
                 config_schema: serde_json::json!({ "type": "object" }),
+                runtime: Some(test_http_runtime()),
+                operations: Some(MemoryProviderOperations {
+                    health_path: "/health".to_string(),
+                    recall_path: "/memory/recall".to_string(),
+                    store_path: "/memory/store".to_string(),
+                }),
             });
         manifest
             .contributions
@@ -601,6 +1045,11 @@ mod tests {
                 id: "example.context".to_string(),
                 provider_type: "workspace".to_string(),
                 config_schema: serde_json::json!({ "type": "object" }),
+                runtime: Some(test_http_runtime()),
+                operations: Some(ContextProviderOperations {
+                    health_path: "/health".to_string(),
+                    resolve_path: "/context/resolve".to_string(),
+                }),
             });
 
         let validation = validate_plugin_manifest(&manifest, &signed_settings());
@@ -655,6 +1104,8 @@ mod tests {
                 id: "".to_string(),
                 provider_type: "".to_string(),
                 config_schema: serde_json::json!({ "type": "object" }),
+                runtime: None,
+                operations: None,
             });
         manifest
             .contributions
@@ -663,6 +1114,8 @@ mod tests {
                 id: "".to_string(),
                 provider_type: "".to_string(),
                 config_schema: serde_json::json!({ "type": "object" }),
+                runtime: None,
+                operations: None,
             });
 
         let validation = validate_plugin_manifest(&manifest, &signed_settings());
@@ -679,6 +1132,131 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("context provider contribution id is required"))
         );
+    }
+
+    #[test]
+    fn registration_only_provider_contract_is_rejected() {
+        let mut manifest = sample_manifest();
+        manifest
+            .contributions
+            .memory_providers
+            .push(MemoryProviderContribution {
+                id: "example.memory".to_string(),
+                provider_type: "custom_http".to_string(),
+                config_schema: serde_json::json!({ "type": "object" }),
+                runtime: None,
+                operations: None,
+            });
+
+        let validation = validate_plugin_manifest(&manifest, &signed_settings());
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| { error.contains("unsupported registration-only contract") })
+        );
+    }
+
+    #[test]
+    fn deferred_generic_surfaces_fail_manifest_validation() {
+        let mut manifest = sample_manifest();
+        manifest
+            .contributions
+            .auth_providers
+            .push(AuthProviderContribution {
+                id: "example.auth".to_string(),
+                protocol: AuthProviderProtocol::OAuth2Pkce,
+                binding_namespace: "example.auth".to_string(),
+            });
+        manifest
+            .contributions
+            .llm_providers
+            .push(LlmProviderContribution {
+                id: "example.llm".to_string(),
+                protocol: LlmProviderProtocol::OpenAiCompatible,
+                binding_namespace: "example.llm".to_string(),
+                timeout_ms: 5_000,
+            });
+        manifest
+            .contributions
+            .http_routes
+            .push(HttpRouteContribution {
+                id: "example.route".to_string(),
+                route_namespace: "/extensions/example/example.route".to_string(),
+                auth: HttpRouteAuth::GatewaySession,
+                max_body_bytes: 64 * 1024,
+                timeout_ms: 5_000,
+                lifecycle: HttpRouteLifecycle::AgentRuntime,
+            });
+
+        let validation = validate_plugin_manifest(&manifest, &signed_settings());
+        assert!(!validation.valid);
+        for surface in ["auth provider", "LLM provider", "HTTP route"] {
+            assert!(
+                validation
+                    .errors
+                    .iter()
+                    .any(|error| { error.contains(surface) && error.contains("unsupported") })
+            );
+        }
+        assert!(matches!(
+            contribution_support(ContributionSurface::MemoryProvider),
+            ContributionSupportDecision::Executable { .. }
+        ));
+        assert!(matches!(
+            contribution_support(ContributionSurface::HttpRoute),
+            ContributionSupportDecision::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn provider_contract_enforces_http_secret_namespace_and_bounds() {
+        let mut manifest = sample_manifest();
+        manifest
+            .permissions
+            .push(EXTENSION_HTTP_PERMISSION.to_string());
+        manifest
+            .permissions
+            .push(EXTENSION_SECRETS_PERMISSION.to_string());
+        let mut runtime = test_http_runtime();
+        runtime.base_url = "http://127.0.0.1/internal".to_string();
+        runtime.timeout_ms = 60_000;
+        runtime.auth = ExtensionHttpAuth::BearerSecret {
+            binding: "other.plugin.token".to_string(),
+        };
+        manifest
+            .contributions
+            .context_providers
+            .push(ContextProviderContribution {
+                id: "example.context".to_string(),
+                provider_type: "host_http_json_v1".to_string(),
+                config_schema: serde_json::Value::Null,
+                runtime: Some(runtime),
+                operations: Some(ContextProviderOperations {
+                    health_path: "https://other.example/health".to_string(),
+                    resolve_path: "/../resolve?token=x".to_string(),
+                }),
+            });
+
+        let validation = validate_plugin_manifest(&manifest, &signed_settings());
+        assert!(!validation.valid);
+        for expected in [
+            "unsafe base_url",
+            "violates request, response, or timeout limits",
+            "outside its declared namespace",
+            "invalid health_path",
+            "invalid resolve_path",
+        ] {
+            assert!(
+                validation
+                    .errors
+                    .iter()
+                    .any(|error| error.contains(expected)),
+                "missing validation error containing {expected:?}: {:?}",
+                validation.errors
+            );
+        }
     }
 
     #[test]

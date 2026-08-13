@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "id": "fixture.providers",
+  "name": "Executable Provider Fixture",
+  "version": "1.0.0",
+  "permissions": ["contribution.http"],
+  "contributions": {
+    "memoryProviders": [
+      {
+        "id": "fixture.providers.memory",
+        "providerType": "host_http_json_v1",
+        "runtime": {
+          "baseUrl": "https://providers.example.com",
+          "auth": { "type": "none" },
+          "timeoutMs": 1000,
+          "maxRequestBytes": 16384,
+          "maxResponseBytes": 32768,
+          "lifecycle": "startup"
+        },
+        "operations": {
+          "healthPath": "/memory/health",
+          "recallPath": "/memory/recall",
+          "storePath": "/memory/store"
+        }
+      }
+    ],
+    "contextProviders": [
+      {
+        "id": "fixture.providers.context",
+        "providerType": "host_http_json_v1",
+        "runtime": {
+          "baseUrl": "https://providers.example.com",
+          "auth": { "type": "none" },
+          "timeoutMs": 1000,
+          "maxRequestBytes": 16384,
+          "maxResponseBytes": 32768,
+          "lifecycle": "startup"
+        },
+        "operations": {
+          "healthPath": "/context/health",
+          "resolvePath": "/context/resolve"
+        }
+      }
+    ]
+  },
+  "artifacts": []
+}
