@@ -56,6 +56,7 @@ pub mod sessions;
 mod setup;
 mod skills;
 pub mod status;
+mod subagents;
 mod tool;
 pub mod trajectory;
 mod update;
@@ -107,6 +108,7 @@ pub use sessions::{SessionCommand, run_sessions_command};
 pub use setup::{SetupAction, SetupCommand};
 pub use skills::{SkillCommand, run_skills_command};
 pub use status::{StatusArgs, run_status_command};
+pub use subagents::{SubagentCommand, run_subagents_command};
 pub use tool::{ToolCommand, run_tool_command};
 pub use trajectory::{TrajectoryCommand, run_trajectory_command};
 pub use update::{UpdateCommand, run_update_command};
@@ -441,6 +443,10 @@ pub enum Command {
     /// Manage agent workspaces (register, list, remove agents)
     #[command(subcommand)]
     Agents(AgentCommand),
+
+    /// Spawn and manage sub-agents in the running runtime
+    #[command(subcommand)]
+    Subagents(SubagentCommand),
 
     /// Deprecated alias for `data conversations`
     #[command(subcommand, hide = true)]

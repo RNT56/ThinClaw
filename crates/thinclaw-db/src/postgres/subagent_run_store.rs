@@ -20,4 +20,21 @@ impl SubagentRunStore for PgBackend {
     async fn list_incomplete_subagent_runs(&self) -> Result<Vec<SubagentRunRecord>, DatabaseError> {
         self.store.list_incomplete_subagent_runs().await
     }
+
+    async fn get_subagent_run(
+        &self,
+        id: Uuid,
+        owner: Option<(&str, &str)>,
+    ) -> Result<Option<SubagentRunRecord>, DatabaseError> {
+        self.store.get_subagent_run(id, owner).await
+    }
+
+    async fn list_subagent_runs(
+        &self,
+        owner: Option<(&str, &str)>,
+        status: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SubagentRunRecord>, DatabaseError> {
+        self.store.list_subagent_runs(owner, status, limit).await
+    }
 }

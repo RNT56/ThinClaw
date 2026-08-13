@@ -155,6 +155,7 @@ impl GatewayChannel {
             prompt_queue: None,
             context_manager: None,
             scheduler: tokio::sync::RwLock::new(None),
+            subagent_executor: Arc::new(std::sync::RwLock::new(None)),
             user_id: config.user_id.clone(),
             actor_id: config
                 .actor_id
@@ -212,6 +213,7 @@ impl GatewayChannel {
             prompt_queue: self.state.prompt_queue.clone(),
             context_manager: self.state.context_manager.clone(),
             scheduler: tokio::sync::RwLock::new(None),
+            subagent_executor: Arc::clone(&self.state.subagent_executor),
             user_id: self.state.user_id.clone(),
             actor_id: self.state.actor_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),

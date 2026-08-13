@@ -61,6 +61,10 @@ The REPL channel supports multi-line input via two continuation mechanisms:
 ## Surface Expectations
 
 - REPL and TUI help/completion are generated from the same executable registry.
+- Terminal `thinclaw subagents spawn|list|status|cancel` is an authenticated
+  control surface for the running runtime's existing sub-agent executor and
+  durable ledger. It is intentionally separate from conversational slash
+  routing and does not create an alternate local executor.
 - `/tools` and `/status` consume a complete sealed capability revision and
   replace it only with a newer whole revision.
 - WebUI settings and copy should refer to `personality_pack`, `agent.name`, and shared skin vocabulary.

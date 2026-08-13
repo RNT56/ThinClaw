@@ -49,10 +49,12 @@ pub use thinclaw_gateway::web::types::{
     SettingsExportResponse, SettingsImportRequest, SettingsListResponse, SkillCatalogSearchResult,
     SkillInfo, SkillInspectRequest, SkillInstallRequest, SkillListResponse, SkillPublishRequest,
     SkillSearchRequest, SkillSearchResponse, SkillTapAddRequest, SkillTapRefreshRequest,
-    SkillTapRemoveRequest, SkillTrustRequest, SseEvent, ThreadCommandRequest,
-    ThreadCommandResponse, ThreadExportQuery, ThreadExportResponse, ThreadInfo, ThreadListResponse,
-    ToggleRequest, ToolCallInfo, ToolInfo, ToolListResponse, TransitionInfo, TreeEntry, TreeQuery,
-    TurnInfo, WsClientMessage, WsServerMessage,
+    SkillTapRemoveRequest, SkillTrustRequest, SseEvent, SubagentCancelApiResponse,
+    SubagentExecutionResult, SubagentRunApiResponse, SubagentRunsApiResponse,
+    SubagentSpawnApiRequest, SubagentSpawnApiResponse, ThreadCommandRequest, ThreadCommandResponse,
+    ThreadExportQuery, ThreadExportResponse, ThreadInfo, ThreadListResponse, ToggleRequest,
+    ToolCallInfo, ToolInfo, ToolListResponse, TransitionInfo, TreeEntry, TreeQuery, TurnInfo,
+    WsClientMessage, WsServerMessage,
 };
 
 // --- Autonomy ---

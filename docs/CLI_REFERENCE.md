@@ -137,6 +137,12 @@ for configuration, local/cloud mode, and workflow security details.
 
 ## Background Work & Operations
 
+- `thinclaw subagents`: Control the running runtime's shared sub-agent executor over the authenticated gateway. These commands never construct a local executor; spawn, cancellation, and status use the same admission policy and durable run ledger as agent tools and Desktop.
+  - `spawn --name <NAME> (--task <OBJECTIVE>|--task-packet <JSON_FILE>) [--tool <NAME>]... [--skill <NAME>]... [--memory-mode provided-context-only|granted-tools-only] [--tool-mode explicit-only] [--skill-mode explicit-only] [--tool-profile standard|restricted|explicit-only] [--system-prompt <TEXT>] [--model <MODEL>] [--timeout-secs <N>] [--parent-thread-id <ID>] [--wait]`: Start a run. The JSON task-packet file is bounded to 1 MiB and uses the existing `SubagentTaskPacket` shape (`objective`, `todos`, `acceptance_criteria`, `constraints`, `provided_context`, `parent_summary`). Without `--wait`, the command returns the durable run ID immediately; use `status` or `list` to observe completion.
+  - `list [--status running|completed|failed|timed_out|cancelled] [--limit <1..500>]`: List owned durable runs newest first, including runs completed before a process restart.
+  - `status <RUN_ID>`: Show one owned durable run.
+  - `cancel <RUN_ID>`: Cooperatively cancel an owned running run. A terminal run returns `not_found_or_already_done`, matching the agent tool contract.
+  - All commands accept `--gateway-url <URL>`. Authentication is resolved from `GATEWAY_AUTH_TOKEN` or gateway configuration. Configured principals are restricted to their exact principal and actor; the historical primary bearer keeps its legacy administrator-wide view. Operators may spawn/cancel and read-only principals may only list/status. `--output-format json|jsonl` emits the standard versioned command envelope.
 - `thinclaw automation routines`: Manage scheduled background routines.
 - `thinclaw labs experiments`: Manage research automation (campaigns, providers, targets).
 - `thinclaw automation projects`: Manage the GitHub repository project supervisor (default off until enabled in settings). See [Repo Project Supervisor](#repo-project-supervisor).

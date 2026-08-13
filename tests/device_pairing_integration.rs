@@ -121,6 +121,7 @@ async fn start_isolated_server() -> (SocketAddr, HomeOverride, Arc<GatewayState>
         prompt_queue: None,
         context_manager: None,
         scheduler: tokio::sync::RwLock::new(None),
+        subagent_executor: Arc::new(std::sync::RwLock::new(None)),
         user_id: "test-user".to_string(),
         actor_id: "test-actor".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),

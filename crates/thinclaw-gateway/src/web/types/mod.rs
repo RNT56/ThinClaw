@@ -19,6 +19,7 @@ mod settings;
 mod skills;
 mod sse;
 mod status;
+mod subagents;
 mod ws;
 
 pub use autonomy::*;
@@ -36,4 +37,5 @@ pub use settings::*;
 pub use skills::*;
 pub use sse::*;
 pub use status::*;
+pub use subagents::*;
 pub use ws::*;

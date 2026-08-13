@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use clap::CommandFactory;
+use clap_complete::{Shell, generate};
 use thinclaw::cli::Cli;
 
 fn leaves(command: &clap::Command, prefix: &[String], output: &mut Vec<String>) {
@@ -58,4 +59,33 @@ fn inventory_contract_is_exact() {
         inventory.last().and_then(|value| value.as_str()),
         Some("INV-95")
     );
+}
+
+#[test]
+fn subagent_commands_are_in_generated_help_and_completion() {
+    let mut root = Cli::command();
+    let root_help = root.render_long_help().to_string();
+    assert!(root_help.contains("subagents"));
+
+    let subagents = root
+        .find_subcommand_mut("subagents")
+        .expect("subagents command");
+    let help = subagents.render_long_help().to_string();
+    for command in ["spawn", "list", "status", "cancel"] {
+        assert!(
+            help.contains(command),
+            "missing {command} from generated help"
+        );
+    }
+
+    for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+        let mut command = Cli::command();
+        let mut completion = Vec::new();
+        generate(shell, &mut command, "thinclaw", &mut completion);
+        let completion = String::from_utf8(completion).expect("UTF-8 completion");
+        assert!(
+            completion.contains("subagents"),
+            "missing subagents from {shell:?} completion"
+        );
+    }
 }

@@ -144,6 +144,9 @@ pub struct GatewayState {
     pub context_manager: Option<Arc<crate::context::ContextManager>>,
     /// Direct-job scheduler, filled once the main agent is constructed.
     pub scheduler: tokio::sync::RwLock<Option<Arc<crate::agent::Scheduler>>>,
+    /// Shared runtime sub-agent executor. The gateway is mounted before the
+    /// agent loop builds it, so this late-bound cell preserves one executor.
+    pub subagent_executor: Arc<std::sync::RwLock<Option<Arc<crate::agent::SubagentExecutor>>>>,
     /// User ID for this gateway.
     pub user_id: String,
     /// Actor ID this gateway session should act as by default.
@@ -214,6 +217,20 @@ pub struct GatewayState {
 }
 
 impl GatewayState {
+    pub fn subagent_executor(&self) -> Option<Arc<crate::agent::SubagentExecutor>> {
+        match self.subagent_executor.read() {
+            Ok(executor) => executor.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    pub fn set_subagent_executor(&self, executor: Option<Arc<crate::agent::SubagentExecutor>>) {
+        match self.subagent_executor.write() {
+            Ok(mut current) => *current = executor,
+            Err(poisoned) => *poisoned.into_inner() = executor,
+        }
+    }
+
     pub fn routine_engine(&self) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
         match self.routine_engine.read() {
             Ok(engine) => engine.clone(),
@@ -229,6 +246,56 @@ impl GatewayState {
             Ok(mut current) => *current = engine,
             Err(poisoned) => *poisoned.into_inner() = engine,
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_gateway_state_with_store(
+    user_id: &str,
+    actor_id: &str,
+    store: Option<Arc<dyn Database>>,
+) -> GatewayState {
+    GatewayState {
+        msg_tx: tokio::sync::RwLock::new(None),
+        sse: SseManager::new(),
+        workspace: None,
+        session_manager: None,
+        log_broadcaster: None,
+        log_level_handle: None,
+        extension_manager: None,
+        tool_registry: None,
+        store,
+        job_manager: None,
+        prompt_queue: None,
+        context_manager: None,
+        scheduler: tokio::sync::RwLock::new(None),
+        subagent_executor: Arc::new(std::sync::RwLock::new(None)),
+        user_id: user_id.to_string(),
+        actor_id: actor_id.to_string(),
+        shutdown_tx: tokio::sync::RwLock::new(None),
+        ws_tracker: None,
+        llm_provider: None,
+        llm_runtime: None,
+        skill_registry: None,
+        skill_catalog: None,
+        skill_remote_hub: None,
+        skill_quarantine: None,
+        chat_rate_limiter: RateLimiter::new(30, 60),
+        pair_complete_rate_limiter: RateLimiter::new(10, 300),
+        registry_entries: Vec::new(),
+        cost_guard: None,
+        cost_tracker: None,
+        metrics_registry: None,
+        response_cache: None,
+        routine_engine: Arc::new(std::sync::RwLock::new(None)),
+        repo_project_supervisor: Arc::new(tokio::sync::RwLock::new(None)),
+        startup_time: std::time::Instant::now(),
+        restart_requested: std::sync::atomic::AtomicBool::new(false),
+        secrets_store: None,
+        channel_manager: None,
+        hooks: None,
+        device_registry: test_device_registry(),
+        pending_approvals: Arc::new(PendingApprovalsStore::in_memory()),
     }
 }
 
@@ -1095,6 +1162,13 @@ pub async fn start_server(
         .route("/api/jobs/{id}/events", get(jobs_events_handler))
         .route("/api/jobs/{id}/files/list", get(job_files_list_handler))
         .route("/api/jobs/{id}/files/read", get(job_files_read_handler))
+        // Sub-agents: authenticated runtime execution and durable ledger.
+        .route(
+            "/api/subagents",
+            get(subagents_list_handler).post(subagents_spawn_handler),
+        )
+        .route("/api/subagents/{id}", get(subagents_status_handler))
+        .route("/api/subagents/{id}/cancel", post(subagents_cancel_handler))
         // Repository projects
         .route(
             "/api/repo-projects",

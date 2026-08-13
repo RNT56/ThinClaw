@@ -51,8 +51,13 @@ const ADMIN_SURFACE_PREFIXES: &[&str] = &[
 /// classifier fail *closed* — a new control-plane route (service restart,
 /// autonomy rollback, code-proposal review, runner creation, pairing approval)
 /// is Admin-only by default rather than silently Operator-accessible.
-const OPERATOR_WRITABLE_PREFIXES: &[&str] =
-    &["/api/chat", "/api/sessions", "/api/memory", "/api/jobs"];
+const OPERATOR_WRITABLE_PREFIXES: &[&str] = &[
+    "/api/chat",
+    "/api/sessions",
+    "/api/memory",
+    "/api/jobs",
+    "/api/subagents",
+];
 
 fn path_matches(path: &str, prefixes: &[&str]) -> bool {
     prefixes
@@ -215,6 +220,8 @@ mod tests {
             "/api/sessions/x",
             "/api/jobs",
             "/api/memory/write",
+            "/api/subagents",
+            "/api/subagents/00000000-0000-0000-0000-000000000000/cancel",
         ] {
             assert_eq!(
                 capability_for_request(&Method::POST, path),

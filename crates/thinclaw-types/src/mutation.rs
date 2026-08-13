@@ -163,6 +163,7 @@ pub fn canonical_cli_leaf_effect(path: &str) -> Result<CliLeafEffect, String> {
     {
         MutationExecutionPolicy::StoppedExclusive
     } else if path == "send"
+        || matches!(path, "subagents spawn" | "subagents cancel")
         || path.starts_with("automation jobs ")
         || path == "automation routines trigger"
         || path == "extensions activate"

@@ -932,6 +932,23 @@ pub trait SubagentRunStore: Send + Sync {
     /// Used at startup to reconcile rows left behind by a crash — see
     /// `reconcile_orphaned_subagent_runs` in `src/agent/subagent_executor.rs`.
     async fn list_incomplete_subagent_runs(&self) -> Result<Vec<SubagentRunRecord>, DatabaseError>;
+
+    /// Fetch one durable run. `owner = None` is the compatibility-only global
+    /// view used by the primary legacy bearer; normal callers pass an exact
+    /// authenticated principal+actor pair.
+    async fn get_subagent_run(
+        &self,
+        id: Uuid,
+        owner: Option<(&str, &str)>,
+    ) -> Result<Option<SubagentRunRecord>, DatabaseError>;
+
+    /// List recent durable runs, including terminal rows, newest first.
+    async fn list_subagent_runs(
+        &self,
+        owner: Option<(&str, &str)>,
+        status: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<SubagentRunRecord>, DatabaseError>;
 }
 
 #[async_trait]

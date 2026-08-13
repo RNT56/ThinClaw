@@ -1124,6 +1124,8 @@ CREATE TABLE IF NOT EXISTS subagent_runs (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     task TEXT NOT NULL,
+    principal_id TEXT,
+    actor_id TEXT,
     status TEXT NOT NULL DEFAULT 'running',
     parent_thread_id TEXT,
     routine_run_id TEXT,
@@ -1134,6 +1136,8 @@ CREATE TABLE IF NOT EXISTS subagent_runs (
 
 CREATE INDEX IF NOT EXISTS idx_subagent_runs_status ON subagent_runs(status);
 CREATE INDEX IF NOT EXISTS idx_subagent_runs_routine_run ON subagent_runs(routine_run_id);
+CREATE INDEX IF NOT EXISTS idx_subagent_runs_owner_spawned
+    ON subagent_runs(principal_id, actor_id, spawned_at DESC);
 
 CREATE TABLE IF NOT EXISTS routine_event_inbox (
     id TEXT PRIMARY KEY,
@@ -1915,6 +1919,22 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         version: 31,
         description: "Index experiment runners by owner",
         sql: "CREATE INDEX IF NOT EXISTS idx_experiment_runner_profiles_owner_updated ON experiment_runner_profiles(owner_user_id, updated_at DESC)",
+    },
+    // ── V33: authenticated sub-agent run ownership ─────────────────────
+    LibsqlColumnUpgrade {
+        version: 33,
+        description: "Add subagent run principal owner",
+        sql: "ALTER TABLE subagent_runs ADD COLUMN principal_id TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 33,
+        description: "Add subagent run actor owner",
+        sql: "ALTER TABLE subagent_runs ADD COLUMN actor_id TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 33,
+        description: "Index subagent runs by owner and spawn time",
+        sql: "CREATE INDEX IF NOT EXISTS idx_subagent_runs_owner_spawned ON subagent_runs(principal_id, actor_id, spawned_at DESC)",
     },
 ];
 

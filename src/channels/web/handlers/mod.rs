@@ -25,6 +25,7 @@ pub mod repo_projects;
 pub mod routines;
 pub mod settings;
 pub mod skills;
+pub mod subagents;
 
 pub(crate) use autonomy::*;
 pub(crate) use channels::*;
@@ -49,3 +50,4 @@ pub(crate) use repo_projects::*;
 pub(crate) use routines::*;
 pub(crate) use settings::*;
 pub(crate) use skills::*;
+pub(crate) use subagents::*;

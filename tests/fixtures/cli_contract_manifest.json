@@ -1646,6 +1646,36 @@
       {
         "effect": {
           "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:subagents cancel",
+        "path": "subagents cancel"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:subagents list",
+        "path": "subagents list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:subagents spawn",
+        "path": "subagents spawn"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:subagents status",
+        "path": "subagents status"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
           "policy": "owned_process_lifecycle"
         },
         "id": "leaf:tui",
@@ -2811,6 +2841,10 @@
         "leaf:setup edit",
         "leaf:setup reset",
         "leaf:status tools",
+        "leaf:subagents cancel",
+        "leaf:subagents list",
+        "leaf:subagents spawn",
+        "leaf:subagents status",
         "leaf:tui",
         "setup-profile:balanced",
         "setup-profile:local-private",

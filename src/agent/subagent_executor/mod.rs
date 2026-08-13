@@ -476,6 +476,10 @@ impl SubagentExecutor {
             .principal_id
             .clone()
             .unwrap_or_else(|| parent_user_id.to_string());
+        let canonical_parent_actor = request
+            .actor_id
+            .clone()
+            .unwrap_or_else(|| canonical_parent_principal.clone());
         let id = Uuid::new_v4();
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let heartbeat_cancel_tx = cancel_tx.clone();
@@ -563,6 +567,8 @@ impl SubagentExecutor {
                 id,
                 request.name.clone(),
                 request.task.clone(),
+                canonical_parent_principal.clone(),
+                canonical_parent_actor,
                 Some(resolved_parent_thread_id.clone()),
                 routine_run_id_for_ledger.clone(),
                 spawned_at,

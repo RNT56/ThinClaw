@@ -57,7 +57,8 @@ pub(crate) const ROUTINE_RUN_COLUMNS: &str = "\
 
 /// Explicit column list for subagent_runs table (matches positional access in `row_to_subagent_run_libsql`).
 pub(crate) const SUBAGENT_RUN_COLUMNS: &str = "\
-    id, name, task, status, parent_thread_id, routine_run_id, spawned_at, completed_at, error";
+    id, name, task, principal_id, actor_id, status, parent_thread_id, routine_run_id, \
+    spawned_at, completed_at, error";
 
 pub(crate) const ROUTINE_EVENT_COLUMNS: &str = "\
     id, principal_id, actor_id, channel, event_type, raw_sender_id, conversation_scope_id, \
@@ -673,12 +674,14 @@ pub(crate) fn row_to_subagent_run_libsql(
         id: get_text(row, 0).parse().unwrap_or_default(),
         name: get_text(row, 1),
         task: get_text(row, 2),
-        status: get_text(row, 3),
-        parent_thread_id: get_opt_text(row, 4),
-        routine_run_id: get_opt_text(row, 5),
-        spawned_at: get_ts(row, 6),
-        completed_at: get_opt_ts(row, 7),
-        error: get_opt_text(row, 8),
+        principal_id: get_opt_text(row, 3),
+        actor_id: get_opt_text(row, 4),
+        status: get_text(row, 5),
+        parent_thread_id: get_opt_text(row, 6),
+        routine_run_id: get_opt_text(row, 7),
+        spawned_at: get_ts(row, 8),
+        completed_at: get_opt_ts(row, 9),
+        error: get_opt_text(row, 10),
     })
 }
 

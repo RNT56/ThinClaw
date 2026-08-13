@@ -1055,6 +1055,7 @@ mod tests {
             prompt_queue: None,
             context_manager: None,
             scheduler: tokio::sync::RwLock::new(None),
+            subagent_executor: Arc::new(std::sync::RwLock::new(None)),
             user_id: "gateway-user".to_string(),
             actor_id: "gateway-actor".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),

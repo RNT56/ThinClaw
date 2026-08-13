@@ -69,11 +69,17 @@ pub const SUBAGENT_RUN_ORPHANED_REASON: &str = "orphaned by restart";
 /// `SubagentExecutor::spawn` (write) and its completion block (update) in
 /// `src/agent/subagent_executor.rs`, plus
 /// `reconcile_orphaned_subagent_runs` for startup recovery.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubagentRunRecord {
     pub id: uuid::Uuid,
     pub name: String,
     pub task: String,
+    /// Authenticated principal that owns this run. `None` is reserved for
+    /// rows created before ownership was added to the ledger.
+    pub principal_id: Option<String>,
+    /// Authenticated actor that owns this run. `None` is reserved for legacy
+    /// rows and is never written by the current executor.
+    pub actor_id: Option<String>,
     pub status: String,
     pub parent_thread_id: Option<String>,
     pub routine_run_id: Option<String>,
@@ -88,6 +94,8 @@ impl SubagentRunRecord {
         id: uuid::Uuid,
         name: impl Into<String>,
         task: impl Into<String>,
+        principal_id: impl Into<String>,
+        actor_id: impl Into<String>,
         parent_thread_id: Option<String>,
         routine_run_id: Option<String>,
         spawned_at: chrono::DateTime<chrono::Utc>,
@@ -96,6 +104,8 @@ impl SubagentRunRecord {
             id,
             name: name.into(),
             task: task.into(),
+            principal_id: Some(principal_id.into()),
+            actor_id: Some(actor_id.into()),
             status: SUBAGENT_RUN_STATUS_RUNNING.to_string(),
             parent_thread_id,
             routine_run_id,
@@ -104,4 +114,19 @@ impl SubagentRunRecord {
             error: None,
         }
     }
+}
+
+pub fn is_subagent_run_status(status: &str) -> bool {
+    matches!(
+        status,
+        SUBAGENT_RUN_STATUS_RUNNING
+            | SUBAGENT_RUN_STATUS_COMPLETED
+            | SUBAGENT_RUN_STATUS_FAILED
+            | SUBAGENT_RUN_STATUS_TIMED_OUT
+            | SUBAGENT_RUN_STATUS_CANCELLED
+    )
+}
+
+pub fn is_terminal_subagent_run_status(status: &str) -> bool {
+    is_subagent_run_status(status) && status != SUBAGENT_RUN_STATUS_RUNNING
 }

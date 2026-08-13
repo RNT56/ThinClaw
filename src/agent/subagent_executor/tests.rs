@@ -423,6 +423,93 @@ async fn completed_subagent_is_marked_completed_and_not_running() {
     assert_eq!(info.status, SubagentStatus::Completed);
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn durable_run_owner_comes_from_canonical_parent_identity() {
+    use crate::db::{Database, SubagentRunStore, libsql::LibSqlBackend};
+
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(
+        LibSqlBackend::new_local(&directory.path().join("owned-subagent.db"))
+            .await
+            .unwrap(),
+    );
+    backend.run_migrations().await.unwrap();
+    let llm = Arc::new(StubLlm::new("done"));
+    let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+        max_output_length: 100_000,
+        injection_check_enabled: false,
+        redact_pii_in_prompts: true,
+        smart_approval_mode: "off".to_string(),
+        external_scanner_mode: "off".to_string(),
+        external_scanner_path: None,
+        external_scanner_require_verified: false,
+        allow_temp_paths: false,
+    }));
+    let (executor, _result_rx) = SubagentExecutor::new(
+        llm,
+        safety,
+        Arc::new(ToolRegistry::new()),
+        Arc::new(ChannelManager::new()),
+        SubagentConfig::default(),
+    );
+    let executor = executor.with_store(backend.clone());
+    let identity = ResolvedIdentity {
+        principal_id: "principal-a".to_string(),
+        actor_id: "actor-a".to_string(),
+        conversation_scope_id: Uuid::new_v4(),
+        conversation_kind: ConversationKind::Direct,
+        raw_sender_id: "actor-a".to_string(),
+        stable_external_conversation_key: "gateway://test".to_string(),
+    };
+    let result = executor
+        .spawn(
+            SubagentSpawnRequest {
+                name: "owner-test".to_string(),
+                task: "finish".to_string(),
+                system_prompt: None,
+                model: None,
+                task_packet: None,
+                memory_mode: None,
+                tool_mode: None,
+                skill_mode: None,
+                tool_profile: None,
+                allowed_tools: None,
+                allowed_skills: None,
+                principal_id: Some("attacker-principal".to_string()),
+                actor_id: Some("attacker-actor".to_string()),
+                agent_workspace_id: None,
+                timeout_secs: Some(5),
+                wait: true,
+            },
+            "gateway",
+            &serde_json::json!({"reinject_result": false}),
+            "delivery-user",
+            Some(&identity),
+            Some("cli:test"),
+        )
+        .await
+        .unwrap();
+
+    let owned = backend
+        .get_subagent_run(result.agent_id, Some(("principal-a", "actor-a")))
+        .await
+        .unwrap()
+        .expect("canonical owner can read the durable row");
+    assert_eq!(owned.principal_id.as_deref(), Some("principal-a"));
+    assert_eq!(owned.actor_id.as_deref(), Some("actor-a"));
+    assert!(
+        backend
+            .get_subagent_run(
+                result.agent_id,
+                Some(("attacker-principal", "attacker-actor"))
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 #[tokio::test]
 async fn wait_for_subagent_is_bounded_when_completion_status_delivery_hangs() {
     use crate::channels::Channel;

@@ -998,6 +998,9 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         executor = executor.with_cost_guard(Arc::clone(&components.cost_guard));
 
         let executor = std::sync::Arc::new(executor);
+        if let Some(state) = gateway_state.as_ref() {
+            state.set_subagent_executor(Some(std::sync::Arc::clone(&executor)));
+        }
         thinclaw::api::experiments::register_experiment_subagent_executor(std::sync::Arc::clone(
             &executor,
         ));
