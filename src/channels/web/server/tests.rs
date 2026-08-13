@@ -11,36 +11,60 @@ fn pending_approval_registry_persists_and_removes_by_thread() {
 
     {
         let store = PendingApprovalsStore::with_path(path.clone());
-        store.lock().expect("approval registry lock").insert(
-            request_id.clone(),
-            thinclaw_gateway::web::types::PendingApprovalEntry {
-                request_id: request_id.clone(),
-                tool_name: "shell".to_string(),
-                description: "Run a command".to_string(),
-                parameters: r#"{"command":"pwd"}"#.to_string(),
-                risk: thinclaw_gateway::web::devices::ApprovalRisk::Low,
-                thread_id: Some(thread_id.clone()),
-                created_at: chrono::Utc::now().to_rfc3339(),
-            },
-        );
+        store
+            .upsert(
+                thinclaw_gateway::web::types::PendingApprovalEntry {
+                    request_id: request_id.clone(),
+                    tool_name: "shell".to_string(),
+                    description: "Run a command".to_string(),
+                    parameters: r#"{"command":"pwd"}"#.to_string(),
+                    risk: thinclaw_gateway::web::devices::ApprovalRisk::Low,
+                    thread_id: Some(thread_id.clone()),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                },
+                PendingApprovalOwner::new("principal", "actor"),
+            )
+            .expect("persist approval");
     }
 
     let reloaded = PendingApprovalsStore::with_path(path.clone());
-    assert!(
-        reloaded
-            .lock()
-            .expect("reloaded approval registry lock")
-            .contains_key(&request_id)
-    );
-    reloaded.remove_for_thread(&thread_id);
+    assert!(reloaded.contains(&request_id));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    reloaded.remove_for_thread(&thread_id).unwrap();
 
     let final_store = PendingApprovalsStore::with_path(path);
+    assert!(!final_store.contains(&request_id));
+}
+
+#[test]
+fn pending_approval_mutation_is_not_visible_when_durable_write_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let parent_file = directory.path().join("not-a-directory");
+    let store = PendingApprovalsStore::with_path(parent_file.join("pending.json"));
+    std::fs::write(&parent_file, b"occupied").unwrap();
+    let entry = PendingApprovalEntry {
+        request_id: "request".to_string(),
+        tool_name: "shell".to_string(),
+        description: "Run a command".to_string(),
+        parameters: "{}".to_string(),
+        risk: thinclaw_gateway::web::devices::ApprovalRisk::Low,
+        thread_id: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+
     assert!(
-        !final_store
-            .lock()
-            .expect("final approval registry lock")
-            .contains_key(&request_id)
+        store
+            .upsert(entry, PendingApprovalOwner::new("alice", "alice"))
+            .is_err()
     );
+    assert!(!store.contains("request"));
 }
 
 #[test]
@@ -50,7 +74,75 @@ fn pending_approval_registry_handles_malformed_storage_conservatively() {
     std::fs::write(&path, b"not-json").expect("seed malformed registry");
 
     let store = PendingApprovalsStore::with_path(path);
-    assert!(store.lock().expect("approval registry lock").is_empty());
+    assert!(store.ensure_ready().is_err());
+}
+
+#[test]
+fn pending_approvals_are_owner_scoped_with_primary_legacy_global_access() {
+    let store = PendingApprovalsStore::in_memory();
+    let entry = |request_id: &str| PendingApprovalEntry {
+        request_id: request_id.to_string(),
+        tool_name: "shell".to_string(),
+        description: "Run a command".to_string(),
+        parameters: "{}".to_string(),
+        risk: thinclaw_gateway::web::devices::ApprovalRisk::Low,
+        thread_id: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    store
+        .upsert(entry("a"), PendingApprovalOwner::new("alice", "alice"))
+        .unwrap();
+    store
+        .upsert(entry("b"), PendingApprovalOwner::new("bob", "bob"))
+        .unwrap();
+
+    let alice =
+        GatewayRequestIdentity::new("alice", "alice", GatewayAuthSource::BearerHeader, false);
+    let bob = GatewayRequestIdentity::new("bob", "bob", GatewayAuthSource::BearerHeader, false);
+    let primary = GatewayRequestIdentity::new(
+        "operator",
+        "operator",
+        GatewayAuthSource::BearerHeader,
+        true,
+    )
+    .with_legacy_primary_binding();
+
+    assert_eq!(store.entries_for(&alice).unwrap().len(), 1);
+    assert!(store.entry_for("b", &alice).unwrap().is_none());
+    assert!(store.entry_for("b", &bob).unwrap().is_some());
+    assert_eq!(store.entries_for(&primary).unwrap().len(), 2);
+}
+
+#[test]
+fn legacy_ownerless_approval_records_are_hidden_and_non_actionable() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("pending-approvals.json");
+    let entry = PendingApprovalEntry {
+        request_id: "legacy".to_string(),
+        tool_name: "shell".to_string(),
+        description: "Run a command".to_string(),
+        parameters: "{}".to_string(),
+        risk: thinclaw_gateway::web::devices::ApprovalRisk::High,
+        thread_id: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&HashMap::from([("legacy", entry)])).unwrap(),
+    )
+    .unwrap();
+    let store = PendingApprovalsStore::with_path(path);
+    let primary = GatewayRequestIdentity::new(
+        "operator",
+        "operator",
+        GatewayAuthSource::BearerHeader,
+        true,
+    )
+    .with_legacy_primary_binding();
+
+    assert_eq!(store.ownerless_count(), 1);
+    assert!(store.entries_for(&primary).unwrap().is_empty());
+    assert!(!store.remove_authorized("legacy", &primary).unwrap());
 }
 
 #[test]
@@ -1009,7 +1101,11 @@ async fn pending_approval_reconciliation_keeps_only_runtime_pending_requests() {
             tool_call_id: "call-1".to_string(),
             context_messages: Vec::new(),
             deferred_tool_calls: Vec::new(),
-            requesting_identity: None,
+            requesting_identity: Some(thinclaw_gateway::web::identity::gateway_identity(
+                "gateway-user",
+                "gateway-user",
+                Some(&active_thread_id.to_string()),
+            )),
             request_channel: "gateway".to_string(),
             request_metadata: serde_json::Value::Null,
         });
@@ -1031,23 +1127,57 @@ async fn pending_approval_reconciliation_keeps_only_runtime_pending_requests() {
         thread_id: Some(thread_id.to_string()),
         created_at: chrono::Utc::now().to_rfc3339(),
     };
-    {
-        let mut approvals = state.pending_approvals.lock().unwrap();
-        approvals.insert(
-            active_request_id.to_string(),
+    state
+        .pending_approvals
+        .upsert(
             entry(active_request_id, active_thread_id),
-        );
-        approvals.insert(
-            resolved_request_id.to_string(),
+            PendingApprovalOwner::new("gateway-user", "gateway-user"),
+        )
+        .unwrap();
+    state
+        .pending_approvals
+        .upsert(
             entry(resolved_request_id, resolved_thread_id),
-        );
-    }
+            PendingApprovalOwner::new("gateway-user", "gateway-user"),
+        )
+        .unwrap();
+    // Simulate a pre-owner store written by an older release. Reconciliation
+    // may backfill only from the authoritative runtime identity.
+    state
+        .pending_approvals
+        .entries
+        .lock()
+        .unwrap()
+        .get_mut(&active_request_id.to_string())
+        .unwrap()
+        .owner = None;
 
     reconcile_pending_approvals(&state).await;
 
-    let approvals = state.pending_approvals.lock().unwrap();
-    assert!(approvals.contains_key(&active_request_id.to_string()));
-    assert!(!approvals.contains_key(&resolved_request_id.to_string()));
+    assert!(
+        state
+            .pending_approvals
+            .contains(&active_request_id.to_string())
+    );
+    assert!(
+        !state
+            .pending_approvals
+            .contains(&resolved_request_id.to_string())
+    );
+    let identity = GatewayRequestIdentity::new(
+        "gateway-user",
+        "gateway-user",
+        GatewayAuthSource::BearerHeader,
+        false,
+    );
+    assert!(
+        state
+            .pending_approvals
+            .entry_for(&active_request_id.to_string(), &identity)
+            .unwrap()
+            .is_some(),
+        "authoritative runtime identity should recover the legacy owner"
+    );
 }
 
 #[tokio::test]

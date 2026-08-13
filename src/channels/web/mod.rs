@@ -468,6 +468,13 @@ impl Channel for GatewayChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
+        self.state
+            .pending_approvals
+            .ensure_ready()
+            .map_err(|error| ChannelError::StartupFailed {
+                name: "gateway".to_string(),
+                reason: format!("pending approval store is unavailable: {error}"),
+            })?;
         let (tx, rx) = mpsc::channel(256);
         *self.state.msg_tx.write().await = Some(tx);
 
@@ -566,7 +573,7 @@ impl Channel for GatewayChannel {
             ref thread_id,
         } = event
         {
-            let mut entry = thinclaw_gateway::web::types::PendingApprovalEntry {
+            let entry = thinclaw_gateway::web::types::PendingApprovalEntry {
                 request_id: request_id.clone(),
                 tool_name: tool_name.clone(),
                 description: description.clone(),
@@ -578,14 +585,32 @@ impl Channel for GatewayChannel {
                 thread_id: thread_id.clone(),
                 created_at: chrono::Utc::now().to_rfc3339(),
             };
-            if let Ok(mut registry) = self.state.pending_approvals.lock() {
-                // Re-broadcasts of the same request must not make it appear
-                // newer in the authoritative oldest-first snapshot.
-                if let Some(existing) = registry.get(request_id) {
-                    entry.created_at.clone_from(&existing.created_at);
-                }
-                registry.insert(entry.request_id.clone(), entry);
-            }
+            let principal_id = metadata
+                .get("principal_id")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| ChannelError::SendFailed {
+                    name: "gateway".to_string(),
+                    reason: "approval status is missing its authenticated principal".to_string(),
+                })?;
+            let actor_id = metadata
+                .get("actor_id")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| ChannelError::SendFailed {
+                    name: "gateway".to_string(),
+                    reason: "approval status is missing its authenticated actor".to_string(),
+                })?;
+            self.state
+                .pending_approvals
+                .upsert(
+                    entry,
+                    server::PendingApprovalOwner::new(principal_id, actor_id),
+                )
+                .map_err(|error| ChannelError::SendFailed {
+                    name: "gateway".to_string(),
+                    reason: format!("failed to durably record approval: {error}"),
+                })?;
         }
 
         match &event {
@@ -594,7 +619,13 @@ impl Channel for GatewayChannel {
                 ..
             }
             | SseEvent::ConversationDeleted { thread_id, .. } => {
-                self.state.pending_approvals.remove_for_thread(thread_id);
+                self.state
+                    .pending_approvals
+                    .remove_for_thread(thread_id)
+                    .map_err(|error| ChannelError::SendFailed {
+                        name: "gateway".to_string(),
+                        reason: format!("failed to durably resolve approval: {error}"),
+                    })?;
             }
             _ => {}
         }
@@ -613,7 +644,13 @@ impl Channel for GatewayChannel {
             // A terminal response means the agent is no longer blocked on an
             // approval in this thread, including decisions made in the TUI or
             // desktop rather than through the mobile HTTP/WS endpoints.
-            self.state.pending_approvals.remove_for_thread(&thread_id);
+            self.state
+                .pending_approvals
+                .remove_for_thread(&thread_id)
+                .map_err(|error| ChannelError::SendFailed {
+                    name: "gateway".to_string(),
+                    reason: format!("failed to durably resolve approval: {error}"),
+                })?;
         }
         self.state.sse.broadcast(SseEvent::Response {
             content: response.content,

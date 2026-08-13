@@ -126,6 +126,28 @@ pub(crate) async fn chat_approval_handler(
 
     let request_id = parse_approval_request_id(&req.request_id)?;
 
+    let (pending, owner) = state
+        .pending_approvals
+        .entry_for(&req.request_id, &request_identity)
+        .map_err(|error| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Pending approval store unavailable: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                "Pending approval request not found".to_string(),
+            )
+        })?;
+    if req.thread_id.is_some() && req.thread_id.as_deref() != pending.thread_id.as_deref() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Pending approval request not found".to_string(),
+        ));
+    }
+
     // Milestone M4 / D-K3 / D-K4: a watch companion may only act on LOW-risk
     // approvals. The watch UI must not surface a high-risk approve action at
     // all, but the gateway enforces the rule server-side so a compromised or
@@ -140,17 +162,9 @@ pub(crate) async fn chat_approval_handler(
         .as_ref()
         .is_some_and(|axum::Extension(ctx)| ctx.is_watch_companion());
     if approved && is_watch_companion {
-        let cached_risk = state
-            .pending_approvals
-            .lock()
-            .ok()
-            .and_then(|cache| cache.get(&req.request_id).map(|entry| entry.risk));
-        // Fail closed: an unknown/absent risk (registry miss — e.g. a stale
-        // request_id) is treated as high-risk and
-        // refused, matching the classifier's own least-privilege default.
         let is_low = matches!(
-            cached_risk,
-            Some(thinclaw_gateway::web::devices::ApprovalRisk::Low)
+            pending.risk,
+            thinclaw_gateway::web::devices::ApprovalRisk::Low
         );
         if !is_low {
             // Generic body: never leak whether the request_id existed or its
@@ -174,19 +188,23 @@ pub(crate) async fn chat_approval_handler(
         )
     })?;
 
-    let request_identity = request_identity_with_overrides(
-        &state,
-        &request_identity,
-        req.user_id.as_deref(),
-        req.actor_id.as_deref(),
-    )
-    .await;
+    // Scoped credentials remain bound. The legacy primary credential may act
+    // globally, but the submitted decision is frozen to the recorded owner so
+    // the agent runtime's identity check still authorizes the exact requester.
+    let request_identity = if request_identity.is_legacy_primary_bearer() {
+        request_identity.with_compat_overrides(
+            Some(owner.principal_id.as_str()),
+            Some(owner.actor_id.as_str()),
+        )
+    } else {
+        request_identity
+    };
     let browser_origin = request_origin_from_headers(&headers);
     let msg = build_gateway_message(
         "gateway",
         &request_identity,
         content,
-        req.thread_id.as_deref(),
+        pending.thread_id.as_deref(),
         browser_origin.as_deref(),
     );
     let msg_id = submit_gateway_message(state.as_ref(), msg)
@@ -196,9 +214,15 @@ pub(crate) async fn chat_approval_handler(
     // Remove only after the agent loop accepted the decision. A transport or
     // submission failure leaves the request pending so another surface can
     // retry. The durable guard persists this mutation atomically.
-    if let Ok(mut approvals) = state.pending_approvals.lock() {
-        approvals.remove(&req.request_id);
-    }
+    state
+        .pending_approvals
+        .remove_authorized(&req.request_id, &request_identity)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to durably resolve approval: {error}"),
+            )
+        })?;
 
     Ok((StatusCode::ACCEPTED, Json(send_message_response(msg_id))))
 }
@@ -220,13 +244,19 @@ pub(crate) async fn chat_approval_handler(
 )]
 pub(crate) async fn chat_approvals_handler(
     State(state): State<Arc<GatewayState>>,
-) -> Json<PendingApprovalsResponse> {
+    request_identity: GatewayRequestIdentity,
+) -> Result<Json<PendingApprovalsResponse>, (StatusCode, String)> {
     crate::channels::web::server::reconcile_pending_approvals(&state).await;
-    let entries = match state.pending_approvals.lock() {
-        Ok(cache) => cache.values().cloned().collect(),
-        Err(_) => Vec::new(),
-    };
-    Json(pending_approvals_response(entries))
+    let entries = state
+        .pending_approvals
+        .entries_for(&request_identity)
+        .map_err(|error| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Pending approval store unavailable: {error}"),
+            )
+        })?;
+    Ok(Json(pending_approvals_response(entries)))
 }
 
 async fn submit_thread_command(
@@ -1056,9 +1086,14 @@ mod tests {
         };
         state
             .pending_approvals
-            .lock()
-            .unwrap()
-            .insert(request_id.to_string(), entry);
+            .upsert(
+                entry,
+                crate::channels::web::server::PendingApprovalOwner::new(
+                    "gateway-user",
+                    "gateway-actor",
+                ),
+            )
+            .unwrap();
     }
 
     fn approval_request(request_id: &str, action: &str) -> ApprovalRequest {
@@ -1103,13 +1138,7 @@ mod tests {
         assert_eq!(err.0, StatusCode::FORBIDDEN);
 
         // The cache entry must survive a rejected decision (we did not submit).
-        assert!(
-            state
-                .pending_approvals
-                .lock()
-                .unwrap()
-                .contains_key(&request_id)
-        );
+        assert!(state.pending_approvals.contains(&request_id));
     }
 
     #[tokio::test]
@@ -1129,7 +1158,7 @@ mod tests {
         )
         .await
         .expect_err("unknown-risk approve from watch must be rejected");
-        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

@@ -338,20 +338,46 @@ async fn handle_client_message(
                 }
             };
 
+            let (pending, owner) = match state
+                .pending_approvals
+                .entry_for(&request_id, request_identity)
+            {
+                Ok(Some(value)) => value,
+                Ok(None) => {
+                    let _ = direct_tx
+                        .send(WsServerMessage::Error {
+                            message: "Pending approval request not found".to_string(),
+                        })
+                        .await;
+                    return;
+                }
+                Err(error) => {
+                    let _ = direct_tx
+                        .send(WsServerMessage::Error {
+                            message: format!("Pending approval store unavailable: {error}"),
+                        })
+                        .await;
+                    return;
+                }
+            };
+            if thread_id.is_some() && thread_id.as_deref() != pending.thread_id.as_deref() {
+                let _ = direct_tx
+                    .send(WsServerMessage::Error {
+                        message: "Pending approval request not found".to_string(),
+                    })
+                    .await;
+                return;
+            }
+
             // D-K4 / D-K3: a watch companion may only approve LOW-risk actions,
             // enforced server-side so a compromised watch client cannot approve
             // a destructive tool over the WebSocket. Mirrors the HTTP
             // `/api/chat/approval` gate; only an approve/always is gated (deny is
             // always allowed) and a registry miss fails closed (treated high-risk).
             if approved && device_ctx.is_some_and(|ctx| ctx.is_watch_companion()) {
-                let cached_risk = state
-                    .pending_approvals
-                    .lock()
-                    .ok()
-                    .and_then(|cache| cache.get(&request_id).map(|entry| entry.risk));
                 let is_low = matches!(
-                    cached_risk,
-                    Some(thinclaw_gateway::web::devices::ApprovalRisk::Low)
+                    pending.risk,
+                    thinclaw_gateway::web::devices::ApprovalRisk::Low
                 );
                 if !is_low {
                     let _ = direct_tx
@@ -392,11 +418,19 @@ async fn handle_client_message(
                 }
             };
 
+            let decision_identity = if request_identity.is_legacy_primary_bearer() {
+                request_identity.with_compat_overrides(
+                    Some(owner.principal_id.as_str()),
+                    Some(owner.actor_id.as_str()),
+                )
+            } else {
+                request_identity.clone()
+            };
             let msg = build_gateway_message(
                 "gateway",
-                request_identity,
+                &decision_identity,
                 content,
-                thread_id.as_deref(),
+                pending.thread_id.as_deref(),
                 browser_origin,
             );
             if let Err(error) = submit_gateway_message(state, msg).await {
@@ -405,10 +439,15 @@ async fn handle_client_message(
                         message: gateway_submission_error(error).1,
                     })
                     .await;
-            } else if let Ok(mut cache) = state.pending_approvals.lock() {
-                // Drain the durable registry so a resolved approval stops
-                // showing as pending (mirrors chat_approval_handler).
-                cache.remove(&request_id);
+            } else if let Err(error) = state
+                .pending_approvals
+                .remove_authorized(&request_id, &decision_identity)
+            {
+                let _ = direct_tx
+                    .send(WsServerMessage::Error {
+                        message: format!("Failed to durably resolve approval: {error}"),
+                    })
+                    .await;
             }
         }
         WsClientMessage::Ping => {
@@ -866,6 +905,11 @@ mod tests {
         let identity = test_request_identity("user1");
 
         let request_id = Uuid::new_v4();
+        seed_pending_approval(
+            &state,
+            &request_id.to_string(),
+            thinclaw_gateway::web::devices::ApprovalRisk::Low,
+        );
         handle_client_message(
             WsClientMessage::Approval {
                 request_id: request_id.to_string(),
@@ -905,9 +949,11 @@ mod tests {
         };
         state
             .pending_approvals
-            .lock()
-            .unwrap()
-            .insert(request_id.to_string(), entry);
+            .upsert(
+                entry,
+                crate::channels::web::server::PendingApprovalOwner::new("user1", "user1"),
+            )
+            .unwrap();
     }
 
     fn watch_companion_ctx() -> DeviceContext {

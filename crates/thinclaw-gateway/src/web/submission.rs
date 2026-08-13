@@ -20,6 +20,7 @@ pub fn build_gateway_message(
         .with_identity(identity.resolved_identity(thread_id));
 
     let mut metadata = serde_json::json!({
+        "principal_id": user_id,
         "actor_id": actor_id,
         "conversation_kind": "direct",
         "gateway_role": identity.role.as_str(),
