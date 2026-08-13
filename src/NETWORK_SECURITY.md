@@ -511,11 +511,22 @@ The `http` tool (`src/tools/builtin/http.rs`) has its own SSRF protections:
 
 ### MCP Client
 
-MCP servers are external processes accessed via HTTP. The MCP client (`src/tools/mcp/client.rs`) uses `reqwest` with a 30-second timeout but has **no SSRF protections** — it connects to whatever URL is configured for the MCP server.
+Runtime MCP servers and Desktop's legacy HTTP Tool Sandbox are separate clients,
+but both apply bounded outbound-network policy. Remote endpoints require HTTPS,
+reject credentials/query/fragment ambiguity, validate the resolved destination,
+pin the accepted addresses into the HTTP client, disable redirects, cap response
+sizes, and enforce deadlines. Explicit loopback HTTP(S) remains available for
+operator-run local development servers.
 
-This is by design: MCP server URLs come from **operator-controlled configuration** (config files, environment variables, or the CLI `tool install` command), not from user input or LLM output. A compromised config file is outside ThinClaw's threat model — it would imply the operator's machine is already compromised.
+The Desktop settings renderer never connects to an operator endpoint directly.
+Its connection test runs behind Tauri through the same `/tools/call` client,
+bearer-auth path, DNS policy, and response limits used during real sandbox tool
+execution. Credential reads are redacted and credential edits use explicit
+Preserve/Replace/Clear semantics.
 
-**Reference:** `src/tools/mcp/client.rs` — `reqwest::Client` builder
+**References:** `src/tools/mcp/client.rs`,
+`apps/desktop/backend/scrappy-mcp-tools/src/client.rs`, and
+`apps/desktop/backend/src/config.rs`
 
 ### Sandbox Domain Allowlists
 

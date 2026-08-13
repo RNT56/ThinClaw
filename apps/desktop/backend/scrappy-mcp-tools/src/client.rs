@@ -14,10 +14,24 @@ const MAX_MCP_ERROR_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Error)]
 pub enum McpError {
-    #[error("HTTP error: {0}")]
-    Http(String),
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error("invalid MCP endpoint: {0}")]
+    InvalidEndpoint(String),
+    #[error("invalid MCP request: {0}")]
+    InvalidRequest(String),
+    #[error("MCP destination denied: {0}")]
+    DestinationDenied(String),
+    #[error("MCP credential rejected")]
+    Unauthorized,
+    #[error("MCP request timed out")]
+    Timeout,
+    #[error("MCP redirect denied")]
+    RedirectDenied,
+    #[error("MCP response exceeds the size limit")]
+    ResponseTooLarge,
+    #[error("malformed MCP response: {0}")]
+    MalformedResponse(String),
+    #[error("MCP network error: {0}")]
+    Network(String),
     #[error("MCP server error: {0}")]
     Server(String),
 }
@@ -101,24 +115,24 @@ impl McpClient {
             || config.base_url.len() > 4_096
             || config.base_url.chars().any(char::is_control)
         {
-            return Err(McpError::Server(
+            return Err(McpError::InvalidEndpoint(
                 "MCP base URL is missing or invalid".into(),
             ));
         }
         let mut base = reqwest::Url::parse(&config.base_url)
-            .map_err(|_| McpError::Server("MCP base URL is invalid".into()))?;
+            .map_err(|_| McpError::InvalidEndpoint("MCP base URL is invalid".into()))?;
         if !base.username().is_empty()
             || base.password().is_some()
             || base.query().is_some()
             || base.fragment().is_some()
         {
-            return Err(McpError::Server(
+            return Err(McpError::InvalidEndpoint(
                 "MCP base URL must not contain credentials, a query, or a fragment".into(),
             ));
         }
         let host = base
             .host_str()
-            .ok_or_else(|| McpError::Server("MCP base URL has no host".into()))?;
+            .ok_or_else(|| McpError::InvalidEndpoint("MCP base URL has no host".into()))?;
         let is_loopback = host.eq_ignore_ascii_case("localhost")
             || host
                 .parse::<std::net::IpAddr>()
@@ -126,7 +140,7 @@ impl McpClient {
         if (is_loopback && !matches!(base.scheme(), "http" | "https"))
             || (!is_loopback && base.scheme() != "https")
         {
-            return Err(McpError::Server(
+            return Err(McpError::InvalidEndpoint(
                 "Remote MCP endpoints require HTTPS; local endpoints require loopback HTTP(S)"
                     .into(),
             ));
@@ -135,7 +149,7 @@ impl McpClient {
             || config.auth_token.len() > 16 * 1024
             || config.auth_token.chars().any(char::is_control)
         {
-            return Err(McpError::Server(
+            return Err(McpError::InvalidRequest(
                 "MCP authentication token is invalid".into(),
             ));
         }
@@ -154,7 +168,7 @@ impl McpClient {
     async fn request_client(&self, url: &reqwest::Url) -> McpResult<reqwest::Client> {
         let host = url
             .host_str()
-            .ok_or_else(|| McpError::Server("MCP endpoint has no host".into()))?;
+            .ok_or_else(|| McpError::InvalidEndpoint("MCP endpoint has no host".into()))?;
         let mut builder = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
@@ -171,7 +185,9 @@ impl McpClient {
             )
             .await
             .map_err(|_| {
-                McpError::Server("MCP endpoint is not a public HTTPS destination".into())
+                McpError::DestinationDenied(
+                    "endpoint is not an allowed public HTTPS destination".into(),
+                )
             })?;
             if !guarded.pinned_addrs.is_empty() {
                 builder = builder.resolve_to_addrs(host, &guarded.pinned_addrs);
@@ -179,12 +195,12 @@ impl McpClient {
         }
         builder
             .build()
-            .map_err(|_| McpError::Http("Could not create MCP HTTP client".into()))
+            .map_err(|_| McpError::Network("could not create the bounded HTTP client".into()))
     }
 
     fn tool_url(&self) -> McpResult<reqwest::Url> {
         let mut url = reqwest::Url::parse(&self.base_url)
-            .map_err(|_| McpError::Server("Stored MCP base URL is invalid".into()))?;
+            .map_err(|_| McpError::InvalidEndpoint("stored MCP base URL is invalid".into()))?;
         let path = format!("{}/tools/call", url.path().trim_end_matches('/'));
         url.set_path(&path);
         Ok(url)
@@ -195,18 +211,20 @@ impl McpClient {
             .content_length()
             .is_some_and(|length| length > u64::try_from(limit).unwrap_or(u64::MAX))
         {
-            return Err(McpError::Server(
-                "MCP response exceeds the size limit".into(),
-            ));
+            return Err(McpError::ResponseTooLarge);
         }
         let mut body = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| McpError::Http("MCP response stream failed".into()))?;
+            let chunk = chunk.map_err(|error| {
+                if error.is_timeout() {
+                    McpError::Timeout
+                } else {
+                    McpError::Network("response stream failed".into())
+                }
+            })?;
             if body.len().saturating_add(chunk.len()) > limit {
-                return Err(McpError::Server(
-                    "MCP response exceeds the size limit".into(),
-                ));
+                return Err(McpError::ResponseTooLarge);
             }
             body.extend_from_slice(&chunk);
         }
@@ -221,7 +239,7 @@ impl McpClient {
         arguments: serde_json::Value,
     ) -> McpResult<T> {
         if tool.is_empty() || tool.len() > 256 || tool.chars().any(char::is_control) {
-            return Err(McpError::Server("MCP tool name is invalid".into()));
+            return Err(McpError::InvalidRequest("MCP tool name is invalid".into()));
         }
         let url = self.tool_url()?;
         debug!(tool, "[mcp-client] calling bounded MCP tool");
@@ -231,9 +249,10 @@ impl McpClient {
             arguments,
         };
 
-        let encoded = serde_json::to_vec(&body)?;
+        let encoded = serde_json::to_vec(&body)
+            .map_err(|_| McpError::InvalidRequest("MCP request is not valid JSON".into()))?;
         if encoded.len() > MAX_MCP_REQUEST_BYTES {
-            return Err(McpError::Server(
+            return Err(McpError::InvalidRequest(
                 "MCP request exceeds the size limit".into(),
             ));
         }
@@ -245,17 +264,21 @@ impl McpClient {
         if !self.auth_token.is_empty() {
             request = request.bearer_auth(&self.auth_token);
         }
-        let resp = request
-            .send()
-            .await
-            .map_err(|_| McpError::Http("MCP request failed".into()))?;
+        let resp = request.send().await.map_err(|error| {
+            if error.is_timeout() {
+                McpError::Timeout
+            } else {
+                McpError::Network("request failed before a response was received".into())
+            }
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
+            if status.is_redirection() {
+                return Err(McpError::RedirectDenied);
+            }
             if matches!(status.as_u16(), 401 | 403) {
-                return Err(McpError::Server(format!(
-                    "MCP server rejected the configured credential (HTTP {status})"
-                )));
+                return Err(McpError::Unauthorized);
             }
             let detail = Self::bounded_body(resp, MAX_MCP_ERROR_BYTES)
                 .await
@@ -273,18 +296,20 @@ impl McpClient {
         }
 
         let body = Self::bounded_body(resp, MAX_MCP_RESPONSE_BYTES).await?;
-        let wrapper: ToolCallResponse = serde_json::from_slice(&body)?;
+        let wrapper: ToolCallResponse = serde_json::from_slice(&body)
+            .map_err(|_| McpError::MalformedResponse("response is not valid tool JSON".into()))?;
 
         if let Some(err) = wrapper.error {
             if err.len() > MAX_MCP_ERROR_BYTES || err.chars().any(char::is_control) {
-                return Err(McpError::Server(
+                return Err(McpError::MalformedResponse(
                     "MCP server returned an invalid error".into(),
                 ));
             }
             return Err(McpError::Server(err));
         }
 
-        let typed: T = serde_json::from_value(wrapper.result)?;
+        let typed: T = serde_json::from_value(wrapper.result)
+            .map_err(|_| McpError::MalformedResponse("tool result has an unexpected shape".into()))?;
         Ok(typed)
     }
 
@@ -306,6 +331,50 @@ impl McpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn serve_once(response: &'static [u8]) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|position| position + 4);
+                if let Some(header_end) = header_end {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(':').and_then(|(name, value)| {
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+            }
+            stream.write_all(response).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (format!("http://{address}"), handle)
+    }
 
     fn config(base_url: &str) -> McpConfig {
         McpConfig {
@@ -352,5 +421,109 @@ mod tests {
             client.tool_url().unwrap().as_str(),
             "https://example.com/mcp/v1/tools/call"
         );
+    }
+
+    #[tokio::test]
+    async fn production_probe_uses_post_tool_protocol_and_bearer_auth() {
+        let body = r#"{"result":{"tools":[{"name":"weather"}]}}"#;
+        let response = Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_boxed_str(),
+        )
+        .as_bytes();
+        let (url, request) = serve_once(response).await;
+        let client = McpClient::new(config(&url)).unwrap();
+        let result = client
+            .call_tool_raw("search_tools", serde_json::json!({ "query": "" }))
+            .await
+            .unwrap();
+        assert_eq!(result["tools"][0]["name"], "weather");
+        let request = request.await.unwrap();
+        assert!(request.starts_with("POST /tools/call HTTP/1.1"));
+        assert!(request.to_lowercase().contains("authorization: bearer very-secret-token"));
+        assert!(request.contains("\"tool\":\"search_tools\""));
+    }
+
+    #[tokio::test]
+    async fn redirects_auth_failures_and_oversized_bodies_are_typed() {
+        for (response, expected) in [
+            (
+                b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .as_slice(),
+                "redirect",
+            ),
+            (
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .as_slice(),
+                "unauthorized",
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\nContent-Length: 9000000\r\nConnection: close\r\n\r\n"
+                    .as_slice(),
+                "oversized",
+            ),
+        ] {
+            let response: &'static [u8] = Box::leak(response.to_vec().into_boxed_slice());
+            let (url, request) = serve_once(response).await;
+            let error = McpClient::new(config(&url))
+                .unwrap()
+                .call_tool_raw("search_tools", serde_json::json!({}))
+                .await
+                .unwrap_err();
+            match expected {
+                "redirect" => assert!(matches!(error, McpError::RedirectDenied)),
+                "unauthorized" => assert!(matches!(error, McpError::Unauthorized)),
+                "oversized" => assert!(matches!(error, McpError::ResponseTooLarge)),
+                _ => unreachable!(),
+            }
+            request.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_responses_and_private_remote_destinations_are_typed() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot-json";
+        let (url, request) = serve_once(response).await;
+        let error = McpClient::new(config(&url))
+            .unwrap()
+            .call_tool_raw("search_tools", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, McpError::MalformedResponse(_)));
+        request.await.unwrap();
+
+        let private = McpClient::new(config("https://10.0.0.1")).unwrap();
+        let error = private
+            .call_tool_raw("search_tools", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, McpError::DestinationDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn bounded_request_deadline_is_reported_as_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+        });
+        let client = McpClient::new(McpConfig {
+            base_url: format!("http://{address}"),
+            auth_token: String::new(),
+            timeout_ms: 1_000,
+        })
+        .unwrap();
+        let error = client
+            .call_tool_raw("search_tools", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, McpError::Timeout));
+        server.abort();
     }
 }

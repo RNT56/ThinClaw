@@ -391,6 +391,25 @@ async updateUserConfig(config: UserConfigPatch) : Promise<Result<null, BridgeErr
     else return { status: "error", error: e  as any };
 }
 },
+async getMcpSandboxSettings() : Promise<McpSandboxSettings> {
+    return await TAURI_INVOKE("get_mcp_sandbox_settings");
+},
+async updateMcpSandboxSettings(update: McpSandboxSettingsUpdate) : Promise<Result<McpSandboxSettings, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_mcp_sandbox_settings", { update }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async testMcpSandboxConnection(draft: McpSandboxConnectionDraft) : Promise<Result<McpSandboxConnectionResult, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("test_mcp_sandbox_connection", { draft }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getHfToken() : Promise<Result<string | null, BridgeError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_hf_token") };
@@ -4164,6 +4183,20 @@ supportedCapabilities?: RuntimeCapability[]; exposurePolicy: RuntimeExposurePoli
  * Manifest validation response
  */
 export type ManifestValidationResponse = { errors: string[]; warnings: string[] }
+/**
+ * Explicit secret edit semantics. Blank strings are rejected; callers must
+ * choose Preserve, Replace, or Clear deliberately.
+ */
+export type McpCredentialMutation = { action: "preserve" } | { action: "replace"; value: string } | { action: "clear" }
+export type McpSandboxConnectionDraft = { base_url: string; credential: McpCredentialMutation }
+export type McpSandboxConnectionResult = { connected: boolean; message: string; failure: McpSandboxTestFailureKind | null; tools: string[]; latency_ms: number }
+/**
+ * Redacted HTTP Tool Sandbox settings exposed to the renderer. Credentials
+ * never cross this read boundary.
+ */
+export type McpSandboxSettings = { revision: number; base_url: string | null; sandbox_enabled: boolean; cache_ttl_secs: number; tool_result_max_chars: number; credential_configured: boolean }
+export type McpSandboxSettingsUpdate = { expected_revision: number; base_url: string | null; sandbox_enabled: boolean; cache_ttl_secs: number; tool_result_max_chars: number; credential: McpCredentialMutation }
+export type McpSandboxTestFailureKind = "invalid_endpoint" | "invalid_credential" | "destination_denied" | "unauthorized" | "timeout" | "redirect_denied" | "response_too_large" | "malformed_response" | "network" | "server"
 /**
  * Memory search response
  */

@@ -152,6 +152,80 @@ pub struct CustomPersona {
     pub instructions: String,
 }
 
+/// Redacted HTTP Tool Sandbox settings exposed to the renderer. Credentials
+/// never cross this read boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct McpSandboxSettings {
+    pub revision: u64,
+    pub base_url: Option<String>,
+    pub sandbox_enabled: bool,
+    pub cache_ttl_secs: u32,
+    pub tool_result_max_chars: u32,
+    pub credential_configured: bool,
+}
+
+/// Explicit secret edit semantics. Blank strings are rejected; callers must
+/// choose Preserve, Replace, or Clear deliberately.
+#[derive(Clone, Deserialize, specta::Type)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum McpCredentialMutation {
+    Preserve,
+    Replace { value: String },
+    Clear,
+}
+
+impl std::fmt::Debug for McpCredentialMutation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Preserve => formatter.write_str("Preserve"),
+            Self::Replace { .. } => formatter.write_str("Replace(<redacted>)"),
+            Self::Clear => formatter.write_str("Clear"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct McpSandboxSettingsUpdate {
+    pub expected_revision: u64,
+    pub base_url: Option<String>,
+    pub sandbox_enabled: bool,
+    pub cache_ttl_secs: u32,
+    pub tool_result_max_chars: u32,
+    pub credential: McpCredentialMutation,
+}
+
+#[derive(Debug, Clone, Deserialize, specta::Type)]
+#[serde(deny_unknown_fields)]
+pub struct McpSandboxConnectionDraft {
+    pub base_url: String,
+    pub credential: McpCredentialMutation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum McpSandboxTestFailureKind {
+    InvalidEndpoint,
+    InvalidCredential,
+    DestinationDenied,
+    Unauthorized,
+    Timeout,
+    RedirectDenied,
+    ResponseTooLarge,
+    MalformedResponse,
+    Network,
+    Server,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct McpSandboxConnectionResult {
+    pub connected: bool,
+    pub message: String,
+    pub failure: Option<McpSandboxTestFailureKind>,
+    pub tools: Vec<String>,
+    pub latency_ms: u64,
+}
+
 #[derive(Clone, Serialize, Deserialize, specta::Type)]
 pub struct UserConfig {
     // --- Web Search & Scraping ---
@@ -657,6 +731,7 @@ fn normalize_user_config(mut config: UserConfig) -> UserConfig {
 pub struct ConfigManager {
     config: Mutex<UserConfig>,
     mcp_auth_token: Mutex<Option<String>>,
+    mcp_settings_revision: Mutex<u64>,
     config_path: PathBuf,
     mutation_lock: Mutex<()>,
 }
@@ -775,6 +850,7 @@ impl ConfigManager {
         Self {
             config: Mutex::new(config),
             mcp_auth_token: Mutex::new(mcp_auth_token),
+            mcp_settings_revision: Mutex::new(1),
             config_path,
             mutation_lock: Mutex::new(()),
         }
@@ -794,6 +870,36 @@ impl ConfigManager {
             .clone()
     }
 
+    fn mcp_settings(&self) -> McpSandboxSettings {
+        let config = self.get_config();
+        let revision = *self
+            .mcp_settings_revision
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let credential_configured = self
+            .mcp_auth_token
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_deref()
+            .is_some_and(|token| !token.is_empty());
+        McpSandboxSettings {
+            revision,
+            base_url: config.mcp_base_url,
+            sandbox_enabled: config.mcp_sandbox_enabled,
+            cache_ttl_secs: config.mcp_cache_ttl_secs,
+            tool_result_max_chars: config.mcp_tool_result_max_chars,
+            credential_configured,
+        }
+    }
+
+    fn bump_mcp_settings_revision(&self) {
+        let mut revision = self
+            .mcp_settings_revision
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *revision = revision.saturating_add(1);
+    }
+
     pub fn save_config(&self, new_config: &UserConfig) -> Result<(), String> {
         let normalized = normalize_user_config(new_config.clone());
         validate_user_config(&normalized)?;
@@ -808,6 +914,7 @@ impl ConfigManager {
     }
 
     pub fn reload(&self) {
+        let before = self.mcp_settings();
         if let Ok(bytes) = thinclaw_platform::read_regular_file_bounded_single_link(
             &self.config_path,
             MAX_USER_CONFIG_BYTES,
@@ -821,10 +928,25 @@ impl ConfigManager {
                         .lock()
                         .unwrap_or_else(|error| error.into_inner()) =
                         crate::thinclaw::config::keychain::get_key(MCP_AUTH_TOKEN_SECRET_KEY);
+                    let after = self.mcp_settings();
+                    if mcp_settings_materially_differ(&before, &after) {
+                        self.bump_mcp_settings_revision();
+                    }
                 }
             }
         }
     }
+}
+
+fn mcp_settings_materially_differ(
+    left: &McpSandboxSettings,
+    right: &McpSandboxSettings,
+) -> bool {
+    left.base_url != right.base_url
+        || left.sandbox_enabled != right.sandbox_enabled
+        || left.cache_ttl_secs != right.cache_ttl_secs
+        || left.tool_result_max_chars != right.tool_result_max_chars
+        || left.credential_configured != right.credential_configured
 }
 
 #[tauri::command]
@@ -896,6 +1018,239 @@ pub fn get_user_config(
 
 #[tauri::command]
 #[specta::specta]
+pub fn get_mcp_sandbox_settings(
+    state: tauri::State<ConfigManager>,
+) -> McpSandboxSettings {
+    state.mcp_settings()
+}
+
+fn invalid_mcp_input(message: impl Into<String>, field: &str) -> crate::thinclaw::bridge::BridgeError {
+    crate::thinclaw::bridge::BridgeError::InvalidInput {
+        message: message.into(),
+        field: Some(field.to_string()),
+    }
+}
+
+fn resolve_mcp_credential(
+    mutation: &McpCredentialMutation,
+    stored: Option<String>,
+) -> Result<(Option<String>, bool), crate::thinclaw::bridge::BridgeError> {
+    match mutation {
+        McpCredentialMutation::Preserve => Ok((stored, false)),
+        McpCredentialMutation::Clear => Ok((None, true)),
+        McpCredentialMutation::Replace { value } => {
+            if value.is_empty() || !valid_legacy_mcp_auth_token(value) {
+                return Err(invalid_mcp_input(
+                    "HTTP Tool Sandbox credential must be non-empty, bounded, and contain no control characters",
+                    "credential",
+                ));
+            }
+            Ok((Some(value.clone()), true))
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum McpSettingsCommitError {
+    Credential,
+    Config(String),
+    Rollback,
+}
+
+fn commit_mcp_settings_with_rollback(
+    credential_write_required: bool,
+    old_token: Option<&str>,
+    next_token: Option<&str>,
+    mut write_credential: impl FnMut(Option<&str>) -> Result<(), String>,
+    write_config: impl FnOnce() -> Result<(), String>,
+) -> Result<(), McpSettingsCommitError> {
+    if credential_write_required && write_credential(next_token).is_err() {
+        return Err(McpSettingsCommitError::Credential);
+    }
+    if let Err(error) = write_config() {
+        if credential_write_required && write_credential(old_token).is_err() {
+            return Err(McpSettingsCommitError::Rollback);
+        }
+        return Err(McpSettingsCommitError::Config(error));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn update_mcp_sandbox_settings(
+    state: tauri::State<ConfigManager>,
+    update: McpSandboxSettingsUpdate,
+) -> Result<McpSandboxSettings, crate::thinclaw::bridge::BridgeError> {
+    let _mutation = state
+        .mutation_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let current_revision = *state
+        .mcp_settings_revision
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if update.expected_revision != current_revision {
+        return Err(crate::thinclaw::bridge::BridgeError::Conflict {
+            message: "HTTP Tool Sandbox settings changed in another window".to_string(),
+            remediation: Some("Reload the settings and apply the edit again".to_string()),
+        });
+    }
+
+    let current = state.get_config();
+    let old_token = state.get_mcp_auth_token();
+    let (next_token, credential_write_required) =
+        resolve_mcp_credential(&update.credential, old_token.clone())?;
+    let mut candidate = current.clone();
+    candidate.mcp_base_url = update.base_url;
+    candidate.mcp_sandbox_enabled = update.sandbox_enabled;
+    candidate.mcp_cache_ttl_secs = update.cache_ttl_secs;
+    candidate.mcp_tool_result_max_chars = update.tool_result_max_chars;
+    validate_user_config(&candidate)
+        .map_err(|message| invalid_mcp_input(message, "mcp_sandbox"))?;
+
+    commit_mcp_settings_with_rollback(
+        credential_write_required,
+        old_token.as_deref(),
+        next_token.as_deref(),
+        |token| {
+            crate::thinclaw::config::keychain::set_key(MCP_AUTH_TOKEN_SECRET_KEY, token)
+        },
+        || state.save_config(&candidate),
+    )
+    .map_err(|error| match error {
+        McpSettingsCommitError::Credential => crate::thinclaw::bridge::BridgeError::Runtime {
+            message: "Could not update the HTTP Tool Sandbox credential securely".to_string(),
+        },
+        McpSettingsCommitError::Config(config_error) => {
+            crate::thinclaw::bridge::BridgeError::Runtime {
+                message: format!("Could not save HTTP Tool Sandbox settings: {config_error}"),
+            }
+        }
+        McpSettingsCommitError::Rollback => crate::thinclaw::bridge::BridgeError::Runtime {
+                message: "The settings write failed and secure credential rollback also failed; restart the app before retrying".to_string(),
+            },
+    })?;
+
+    if credential_write_required {
+        *state
+            .mcp_auth_token
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = next_token;
+    }
+    state.bump_mcp_settings_revision();
+    Ok(state.mcp_settings())
+}
+
+fn mcp_connection_failure(
+    error: thinclaw_desktop_tools::McpError,
+    latency_ms: u64,
+) -> McpSandboxConnectionResult {
+    use thinclaw_desktop_tools::McpError;
+
+    let (failure, message) = match error {
+        McpError::InvalidEndpoint(_) => (
+            McpSandboxTestFailureKind::InvalidEndpoint,
+            "The endpoint URL is invalid",
+        ),
+        McpError::InvalidRequest(_) => (
+            McpSandboxTestFailureKind::InvalidCredential,
+            "The draft credential is invalid",
+        ),
+        McpError::DestinationDenied(_) => (
+            McpSandboxTestFailureKind::DestinationDenied,
+            "The destination is blocked by the outbound network policy",
+        ),
+        McpError::Unauthorized => (
+            McpSandboxTestFailureKind::Unauthorized,
+            "The server rejected the configured credential",
+        ),
+        McpError::Timeout => (
+            McpSandboxTestFailureKind::Timeout,
+            "The bounded connection test timed out",
+        ),
+        McpError::RedirectDenied => (
+            McpSandboxTestFailureKind::RedirectDenied,
+            "The server attempted a redirect, which is not allowed",
+        ),
+        McpError::ResponseTooLarge => (
+            McpSandboxTestFailureKind::ResponseTooLarge,
+            "The server response exceeded the safety limit",
+        ),
+        McpError::MalformedResponse(_) => (
+            McpSandboxTestFailureKind::MalformedResponse,
+            "The server returned malformed tool data",
+        ),
+        McpError::Network(_) => (
+            McpSandboxTestFailureKind::Network,
+            "The server could not be reached",
+        ),
+        McpError::Server(_) => (
+            McpSandboxTestFailureKind::Server,
+            "The server returned an MCP tool error",
+        ),
+    };
+    McpSandboxConnectionResult {
+        connected: false,
+        message: message.to_string(),
+        failure: Some(failure),
+        tools: Vec::new(),
+        latency_ms,
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn test_mcp_sandbox_connection(
+    state: tauri::State<'_, ConfigManager>,
+    draft: McpSandboxConnectionDraft,
+) -> Result<McpSandboxConnectionResult, crate::thinclaw::bridge::BridgeError> {
+    let (token, _) = resolve_mcp_credential(&draft.credential, state.get_mcp_auth_token())?;
+    let client = match thinclaw_desktop_tools::McpClient::new(thinclaw_desktop_tools::McpConfig {
+        base_url: draft.base_url,
+        auth_token: token.unwrap_or_default(),
+        timeout_ms: 8_000,
+    }) {
+        Ok(client) => client,
+        Err(error) => return Ok(mcp_connection_failure(error, 0)),
+    };
+
+    let started = std::time::Instant::now();
+    match thinclaw_desktop_tools::discovery::search_tools(
+        &client,
+        "",
+        thinclaw_desktop_tools::discovery::DetailLevel::Full,
+    )
+    .await
+    {
+        Ok(result) => {
+            let mut tools: Vec<String> = result
+                .tools
+                .unwrap_or_default()
+                .into_iter()
+                .map(|tool| tool.name)
+                .filter(|name| !name.is_empty() && name.len() <= 256)
+                .take(512)
+                .collect();
+            tools.sort_unstable();
+            tools.dedup();
+            Ok(McpSandboxConnectionResult {
+                connected: true,
+                message: "Connected through the production HTTP Tool Sandbox client".to_string(),
+                failure: None,
+                tools,
+                latency_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            })
+        }
+        Err(error) => Ok(mcp_connection_failure(
+            error,
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        )),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn update_user_config(
     state: tauri::State<ConfigManager>,
     config: UserConfigPatch,
@@ -908,6 +1263,21 @@ pub fn update_user_config(
     let patch = patch
         .as_object()
         .ok_or_else(|| "User configuration patch must be an object".to_string())?;
+    if patch.keys().any(|key| {
+        matches!(
+            key.as_str(),
+            "mcp_base_url"
+                | "mcp_sandbox_enabled"
+                | "mcp_cache_ttl_secs"
+                | "mcp_tool_result_max_chars"
+        )
+    }) {
+        return Err(crate::thinclaw::bridge::BridgeError::InvalidInput {
+            message: "HTTP Tool Sandbox settings must use the atomic credential-aware update command"
+                .to_string(),
+            field: Some("mcp_sandbox".to_string()),
+        });
+    }
     let current = state.get_config();
     let mut merged = serde_json::to_value(&current)
         .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
@@ -924,7 +1294,8 @@ pub fn update_user_config(
     let merged: UserConfig = serde_json::from_value(merged)
         .map_err(|error| crate::thinclaw::bridge::BridgeError::from(error.to_string()))?;
     validate_user_config(&normalize_user_config(merged.clone()))?;
-    state.save_config(&merged).map_err(Into::into)
+    state.save_config(&merged).map_err(crate::thinclaw::bridge::BridgeError::from)?;
+    Ok(())
 }
 
 // =============================================================================
@@ -1167,6 +1538,7 @@ mod tests {
         ConfigManager {
             config: Mutex::new(cfg),
             mcp_auth_token: Mutex::new(None),
+            mcp_settings_revision: Mutex::new(1),
             config_path: std::path::PathBuf::from("/tmp/thinclaw_desktop_test_config.json"),
             mutation_lock: Mutex::new(()),
         }
@@ -1188,6 +1560,7 @@ mod tests {
         let mgr = ConfigManager {
             config: Mutex::new(UserConfig::default()),
             mcp_auth_token: Mutex::new(Some("runtime-only".into())),
+            mcp_settings_revision: Mutex::new(1),
             config_path: directory.path().join("user_config.json"),
             mutation_lock: Mutex::new(()),
         };
@@ -1204,6 +1577,104 @@ mod tests {
 
         let persisted = std::fs::read_to_string(&mgr.config_path).unwrap();
         assert!(!persisted.contains("mcp_auth_token"));
+    }
+
+    #[test]
+    fn mcp_settings_are_redacted_and_revisioned() {
+        let mut cfg = UserConfig::default();
+        cfg.mcp_base_url = Some("https://mcp.example.com".into());
+        let mgr = make_manager_from_config(cfg);
+        *mgr.mcp_auth_token.lock().unwrap() = Some("never-serialize-me".into());
+
+        let settings = mgr.mcp_settings();
+        let json = serde_json::to_string(&settings).unwrap();
+        assert_eq!(settings.revision, 1);
+        assert!(settings.credential_configured);
+        assert!(!json.contains("never-serialize-me"));
+        assert!(!json.contains("auth_token"));
+    }
+
+    #[test]
+    fn mcp_credential_edits_are_explicit_and_debug_redacted() {
+        let stored = Some("stored-token".to_string());
+        assert_eq!(
+            resolve_mcp_credential(&McpCredentialMutation::Preserve, stored.clone()).unwrap(),
+            (stored, false)
+        );
+        assert_eq!(
+            resolve_mcp_credential(&McpCredentialMutation::Clear, Some("old".into())).unwrap(),
+            (None, true)
+        );
+        let replace = McpCredentialMutation::Replace {
+            value: "new-secret-token".into(),
+        };
+        assert_eq!(format!("{replace:?}"), "Replace(<redacted>)");
+        assert!(
+            resolve_mcp_credential(
+                &McpCredentialMutation::Replace {
+                    value: String::new(),
+                },
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_config_write_rolls_back_credential() {
+        let writes = std::cell::RefCell::new(Vec::<Option<String>>::new());
+        let result = commit_mcp_settings_with_rollback(
+            true,
+            Some("old-token"),
+            Some("new-token"),
+            |token| {
+                writes.borrow_mut().push(token.map(str::to_string));
+                Ok(())
+            },
+            || Err("disk full".to_string()),
+        );
+        assert_eq!(
+            result,
+            Err(McpSettingsCommitError::Config("disk full".into()))
+        );
+        assert_eq!(
+            writes.into_inner(),
+            vec![Some("new-token".into()), Some("old-token".into())]
+        );
+    }
+
+    #[test]
+    fn rollback_failure_is_never_reported_as_a_clean_config_failure() {
+        let calls = std::cell::Cell::new(0usize);
+        let result = commit_mcp_settings_with_rollback(
+            true,
+            Some("old-token"),
+            Some("new-token"),
+            |_| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    Ok(())
+                } else {
+                    Err("credential store unavailable".into())
+                }
+            },
+            || Err("config write failed".into()),
+        );
+        assert_eq!(result, Err(McpSettingsCommitError::Rollback));
+    }
+
+    #[test]
+    fn mcp_connection_failures_are_typed_without_error_details() {
+        let result = mcp_connection_failure(
+            thinclaw_desktop_tools::McpError::Unauthorized,
+            17,
+        );
+        assert!(!result.connected);
+        assert!(matches!(
+            result.failure,
+            Some(McpSandboxTestFailureKind::Unauthorized)
+        ));
+        assert_eq!(result.latency_ms, 17);
     }
 
     // -------------------------------------------------------------------------

@@ -66,6 +66,9 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::config::open_config_file,
         crate::config::get_user_config,
         crate::config::update_user_config,
+        crate::config::get_mcp_sandbox_settings,
+        crate::config::update_mcp_sandbox_settings,
+        crate::config::test_mcp_sandbox_connection,
         crate::config::get_hf_token,
         // ── Images & Imagine ────────────────────────────────────────────
         crate::images::direct_assets_upload_image,
@@ -745,6 +748,24 @@ mod tests {
         assert!(
             violations.is_empty(),
             "production frontend files must call Rust through commandClient/generated adapters: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn http_tool_sandbox_settings_never_fetch_from_the_renderer() {
+        let settings = include_str!(
+            "../../../frontend/src/components/settings/McpTab.tsx"
+        );
+        assert!(settings.contains("commands.testMcpSandboxConnection("));
+        assert!(settings.contains("commands.updateMcpSandboxSettings("));
+        assert!(settings.contains("commands.getMcpSandboxSettings("));
+        assert!(
+            !settings.contains("fetch("),
+            "packaged WebViews must not probe operator endpoints directly"
+        );
+        assert!(
+            !settings.contains("commands.updateUserConfig("),
+            "MCP settings must use the atomic credential-aware command"
         );
     }
 }

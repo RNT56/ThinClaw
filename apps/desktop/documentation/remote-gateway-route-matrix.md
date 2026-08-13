@@ -34,7 +34,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_learning_evaluate_outcomes` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 | `thinclaw_test_connection` | `RemoteOnly` | Embedded mode returns a typed unavailable reason; connect a remote gateway. |
 
-### Local only (203)
+### Local only (206)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -120,6 +120,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `direct_runtime_stop_engine` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `download_standard_asset` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `get_hf_token` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `get_mcp_sandbox_settings` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `get_model_metadata` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `get_permission_status` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `get_project_documents` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -136,6 +137,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `open_standard_models_folder` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `open_url` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `request_permission` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `test_mcp_sandbox_connection` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_add_agent_profile` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_add_custom_secret` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_agents_list` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -237,6 +239,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_update_sub_agent_status` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_write_agent_workspace_file` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `toggle_spotlight` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `update_mcp_sandbox_settings` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `update_project` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `update_projects_order` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `update_remote_model_catalog` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |

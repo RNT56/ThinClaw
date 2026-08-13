@@ -223,7 +223,7 @@ function ToolChip({ name }: { name: string }) {
 // ─── Main McpTab ──────────────────────────────────────────────────────────────
 
 export function McpTab() {
-    const [config, setConfig] = useState<any>(null);
+    const [settings, setSettings] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
 
@@ -232,6 +232,8 @@ export function McpTab() {
     const [sandboxEnabled, setSandboxEnabled] = useState(false);
     const [cacheTtl, setCacheTtl] = useState(300);
     const [maxResultChars, setMaxResultChars] = useState(5000);
+    const [credentialDraft, setCredentialDraft] = useState('');
+    const [credentialConfigured, setCredentialConfigured] = useState(false);
 
     const [connectionResult, setConnectionResult] = useState<ConnectionResult>({
         status: 'idle',
@@ -254,16 +256,19 @@ export function McpTab() {
 
     // ── Load config ──
     useEffect(() => {
-        commands.getUserConfig().then((cfg: any) => {
-            if (cfg) {
-                setConfig(cfg);
-                setBaseUrl(cfg.mcp_base_url ?? '');
-                setSandboxEnabled(cfg.mcp_sandbox_enabled ?? false);
-                setCacheTtl(cfg.mcp_cache_ttl_secs ?? 300);
-                setMaxResultChars(cfg.mcp_tool_result_max_chars ?? 5000);
-            }
-            setLoading(false);
-        });
+        commands.getMcpSandboxSettings()
+            .then((next: any) => {
+                setSettings(next);
+                setBaseUrl(next.base_url ?? '');
+                setSandboxEnabled(next.sandbox_enabled ?? false);
+                setCacheTtl(next.cache_ttl_secs ?? 300);
+                setMaxResultChars(next.tool_result_max_chars ?? 5000);
+                setCredentialConfigured(next.credential_configured ?? false);
+            })
+            .catch((error) => toast.error('Failed to load HTTP Tool Sandbox settings', {
+                description: String(error),
+            }))
+            .finally(() => setLoading(false));
     }, []);
 
     const refreshMcpServers = useCallback(async () => {
@@ -355,24 +360,31 @@ export function McpTab() {
         }
     };
 
-    // ── Persist helpers ──
-    const persist = useCallback(async (patch: object) => {
-        if (!config) return;
+    // ── Atomic settings + credential persistence ──
+    const persist = useCallback(async (
+        credential: { action: 'preserve' } | { action: 'replace'; value: string } | { action: 'clear' } = { action: 'preserve' },
+    ) => {
+        if (!settings) return;
         setSaving(true);
         try {
-            const next = { ...config, ...patch };
-            setConfig(next);
-            await commands.updateUserConfig(patch);
+            const next = await commands.updateMcpSandboxSettings({
+                expected_revision: settings.revision,
+                base_url: baseUrl.trim() || null,
+                sandbox_enabled: sandboxEnabled,
+                cache_ttl_secs: cacheTtl,
+                tool_result_max_chars: maxResultChars,
+                credential,
+            });
+            setSettings(next);
+            setCredentialConfigured(next.credential_configured);
+            setCredentialDraft('');
+            toast.success('HTTP Tool Sandbox settings saved');
         } catch (e) {
-            toast.error('Failed to save MCP settings', { description: String(e) });
+            toast.error('Failed to save HTTP Tool Sandbox settings', { description: String(e) });
         } finally {
             setSaving(false);
         }
-    }, [config]);
-
-    const handleUrlBlur = () => persist({ mcp_base_url: baseUrl || null });
-    const handleCacheTtlBlur = () => persist({ mcp_cache_ttl_secs: cacheTtl });
-    const handleMaxCharsBlur = () => persist({ mcp_tool_result_max_chars: maxResultChars });
+    }, [settings, baseUrl, sandboxEnabled, cacheTtl, maxResultChars]);
 
     // ── Test Connection ──
     const testConnection = async () => {
@@ -383,43 +395,33 @@ export function McpTab() {
         setConnectionResult({ status: 'testing', message: 'Connecting…' });
         setDiscoveredTools([]);
 
-        const start = Date.now();
         try {
-            // Probe the configured MCP server by requesting its tool list.
-            const toolListUrl = baseUrl.replace(/\/$/, '') + '/tools';
-            const res = await fetch(toolListUrl, {
-                headers: { 'Content-Type': 'application/json' },
-                signal: AbortSignal.timeout(8000),
+            const result = await commands.testMcpSandboxConnection({
+                base_url: baseUrl.trim(),
+                credential: credentialDraft
+                    ? { action: 'replace', value: credentialDraft }
+                    : { action: 'preserve' },
             });
-            const latencyMs = Date.now() - start;
-
-            if (!res.ok) {
+            if (!result.connected) {
                 setConnectionResult({
                     status: 'error',
-                    message: `Server returned ${res.status} ${res.statusText}`,
+                    message: result.message,
                 });
+                toast.error('Connection failed', { description: result.message });
                 return;
             }
-
-            const data = await res.json();
-            const tools: string[] = Array.isArray(data)
-                ? data.map((t: any) => t.name ?? t.id ?? String(t))
-                : Object.keys(data?.tools ?? data ?? {});
-
-            setDiscoveredTools(tools);
+            setDiscoveredTools(result.tools);
             setConnectionResult({
                 status: 'connected',
                 message: 'Connected',
-                toolCount: tools.length,
-                latencyMs,
+                toolCount: result.tools.length,
+                latencyMs: result.latency_ms,
             });
-            toast.success('MCP server reachable', {
-                description: `${tools.length} tool${tools.length !== 1 ? 's' : ''} discovered in ${latencyMs}ms`,
+            toast.success('HTTP Tool Sandbox server reachable', {
+                description: `${result.tools.length} tool${result.tools.length !== 1 ? 's' : ''} discovered in ${result.latency_ms}ms`,
             });
         } catch (err: any) {
-            const msg = err?.name === 'TimeoutError'
-                ? 'Request timed out (8s)'
-                : err?.message ?? 'Connection refused';
+            const msg = err?.message ?? 'Connection test failed';
             setConnectionResult({ status: 'error', message: msg });
             toast.error('Connection failed', { description: msg });
         }
@@ -455,7 +457,7 @@ export function McpTab() {
                             <ShieldCheck className="relative w-4 h-4" />
                         </div>
                         <div className="text-sm">
-                            <span className="font-semibold">MCP Sandbox Active</span>
+                            <span className="font-semibold">HTTP Tool Sandbox Active</span>
                             <span className="opacity-70 ml-2 font-normal">
                                 — Tools and remote skills are enabled for the AI agent
                             </span>
@@ -477,7 +479,7 @@ export function McpTab() {
                 )}
             </AnimatePresence>
 
-            <SectionCard title="ThinClaw MCP Servers" icon={Plug} iconColor="text-emerald-400" iconBg="bg-emerald-500/10">
+            <SectionCard title="Runtime MCP Servers" icon={Plug} iconColor="text-emerald-400" iconBg="bg-emerald-500/10">
                 <div className="space-y-4">
                     <div className="flex items-center justify-between gap-4">
                         <div className="flex flex-wrap gap-2">
@@ -622,10 +624,10 @@ export function McpTab() {
             </SectionCard>
 
             {/* ── Server URL ── */}
-            <SectionCard title="Server Connection" icon={Globe} iconColor="text-blue-400" iconBg="bg-blue-500/10">
+            <SectionCard title="HTTP Tool Sandbox Connection" icon={Globe} iconColor="text-blue-400" iconBg="bg-blue-500/10">
                 <SettingRow
-                    label="Server Base URL"
-                    description="The base URL of your FastAPI MCP server. All tool routes are resolved relative to this endpoint."
+                    label="Legacy Tool API Base URL"
+                    description="This Rhai HTTP Tool Sandbox uses the production /tools/call protocol. It is separate from the runtime MCP servers listed above."
                     badge={
                         hasMcpUrl
                             ? <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">Active</span>
@@ -636,12 +638,38 @@ export function McpTab() {
                         <TextInput
                             value={baseUrl}
                             onChange={setBaseUrl}
-                            onBlur={handleUrlBlur}
                             placeholder="https://api.yourserver.com"
                         />
                         <p className="text-[10px] text-muted-foreground">
                             e.g. <span className="font-mono text-primary/70">http://localhost:8000</span> for local dev
                         </p>
+                    </div>
+                </SettingRow>
+
+                <SettingRow
+                    label="Bearer Credential"
+                    description="Stored only in the OS credential store. Leave blank to preserve the current value."
+                    badge={credentialConfigured
+                        ? <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">Stored</span>
+                        : null}
+                >
+                    <div className="flex flex-col items-end gap-2">
+                        <TextInput
+                            value={credentialDraft}
+                            onChange={setCredentialDraft}
+                            type="password"
+                            placeholder={credentialConfigured ? 'Stored credential (unchanged)' : 'Optional bearer token'}
+                        />
+                        {credentialConfigured && (
+                            <button
+                                type="button"
+                                onClick={() => persist({ action: 'clear' })}
+                                disabled={saving}
+                                className="text-[10px] text-red-400 hover:text-red-300 disabled:opacity-50"
+                            >
+                                Clear stored credential
+                            </button>
+                        )}
                     </div>
                 </SettingRow>
 
@@ -700,10 +728,10 @@ export function McpTab() {
             </SectionCard>
 
             {/* ── Sandbox Control ── */}
-            <SectionCard title="Sandbox Execution" icon={Server} iconColor="text-violet-400" iconBg="bg-violet-500/10">
+            <SectionCard title="HTTP Tool Sandbox Execution" icon={Server} iconColor="text-violet-400" iconBg="bg-violet-500/10">
                 <SettingRow
-                    label="Enable MCP Sandbox"
-                    description="Allows the AI agent to discover and execute tools on your MCP server via Rhai scripts during conversations. Requires a valid Server URL above."
+                    label="Enable HTTP Tool Sandbox"
+                    description="Allows the local agent to discover and execute tools on this legacy Tool API via Rhai scripts. Requires a valid URL above."
                 >
                     <ToggleSwitch
                         checked={sandboxEnabled}
@@ -714,12 +742,6 @@ export function McpTab() {
                                 return;
                             }
                             setSandboxEnabled(val);
-                            await persist({ mcp_sandbox_enabled: val });
-                            if (val) {
-                                toast.success('MCP Sandbox enabled', {
-                                    description: 'The AI agent can now invoke remote tools.',
-                                });
-                            }
                         }}
                     />
                 </SettingRow>
@@ -762,8 +784,6 @@ export function McpTab() {
                             step="30"
                             value={cacheTtl}
                             onChange={(e) => setCacheTtl(Number(e.target.value))}
-                            onMouseUp={handleCacheTtlBlur}
-                            onTouchEnd={handleCacheTtlBlur}
                             className="w-[180px] h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-amber-500"
                         />
                         <span className="text-sm font-bold w-16 text-right tabular-nums">
@@ -792,8 +812,6 @@ export function McpTab() {
                             step="1000"
                             value={maxResultChars}
                             onChange={(e) => setMaxResultChars(Number(e.target.value))}
-                            onMouseUp={handleMaxCharsBlur}
-                            onTouchEnd={handleMaxCharsBlur}
                             className="w-[180px] h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-amber-500"
                         />
                         <span className="text-sm font-bold w-16 text-right tabular-nums">
@@ -804,6 +822,20 @@ export function McpTab() {
                         </span>
                     </div>
                 </SettingRow>
+
+                <div className="pt-4 flex justify-end">
+                    <button
+                        type="button"
+                        onClick={() => persist(credentialDraft
+                            ? { action: 'replace', value: credentialDraft }
+                            : { action: 'preserve' })}
+                        disabled={saving || !settings}
+                        className="inline-flex items-center gap-2 h-9 px-4 rounded-xl text-sm font-medium bg-primary text-primary-foreground disabled:opacity-50"
+                    >
+                        {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        Save HTTP Tool Sandbox
+                    </button>
+                </div>
             </SectionCard>
 
             {/* ── Environment Variable Hint ── */}
