@@ -183,6 +183,19 @@ pub(crate) async fn run_network_relay(forwards: &[String]) -> anyhow::Result<()>
 }
 
 #[cfg(feature = "docker-sandbox")]
+/// Keep a credential-free worker event loop alive for container health tests.
+pub(crate) async fn run_worker_health_loop(active: bool) -> anyhow::Result<()> {
+    loop {
+        if active {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    }
+}
+
+#[cfg(feature = "docker-sandbox")]
 pub(crate) async fn resolve_container_provider_api_key(
     user_id: &str,
     env_key: &str,

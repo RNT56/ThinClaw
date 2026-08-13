@@ -47,6 +47,8 @@ jobs:
           key: nightly-docker-e2e
       - name: Build thinclaw-worker:latest image
         run: docker build -f Dockerfile.worker -t thinclaw-worker:latest .
+      - name: Prove worker event-loop liveness
+        run: scripts/ci/test_worker_image_health.sh thinclaw-worker:latest
       - name: Run Docker sandbox E2E tests
         # Select specific targets (not a blanket `-- --ignored`) so live-desktop
         # and quarantined tests are never invoked. The Claude/Codex bridge smokes

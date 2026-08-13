@@ -1,0 +1,126 @@
+name: Worker Image
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - Dockerfile.worker
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - src/**
+      - crates/**
+      - release/worker-image-lock.json
+      - release/worker-tools/**
+      - scripts/ci/worker_image_contract.py
+      - scripts/ci/test_worker_image_contract.py
+      - scripts/ci/test_worker_image_health.sh
+      - .github/workflows/worker-image.yml
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile.worker
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - src/**
+      - crates/**
+      - release/worker-image-lock.json
+      - release/worker-tools/**
+      - scripts/ci/worker_image_contract.py
+      - scripts/ci/test_worker_image_contract.py
+      - scripts/ci/test_worker_image_health.sh
+      - .github/workflows/worker-image.yml
+
+concurrency:
+  group: worker-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  BUILDX_METADATA_PROVENANCE: max
+
+jobs:
+  validate:
+    name: Immutable worker, liveness, SBOM, provenance, scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate immutable worker inputs
+        run: |
+          python3 scripts/ci/worker_image_contract.py
+          python3 -m unittest scripts.ci.test_worker_image_contract
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Build attestable worker OCI archive
+        id: worker-build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: Dockerfile.worker
+          platforms: linux/amd64
+          push: false
+          provenance: mode=max
+          sbom: true
+          tags: thinclaw-worker:ci
+          outputs: type=oci,dest=${{ runner.temp }}/thinclaw-worker.tar
+          cache-from: type=gha,scope=worker-image-amd64
+          cache-to: type=gha,mode=max,scope=worker-image-amd64
+      - name: Validate provenance and load image
+        env:
+          WORKER_BUILD_METADATA: ${{ steps.worker-build.outputs.metadata }}
+          WORKER_IMAGE_DIGEST: ${{ steps.worker-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/worker-evidence"
+          install -d "$evidence"
+          printf '%s\n' "$WORKER_BUILD_METADATA" > "$evidence/worker-image-build-metadata.json"
+          printf '%s\n' "$WORKER_IMAGE_DIGEST" > "$evidence/worker-image-digest.txt"
+          jq -e '."buildx.build.provenance".materials | length > 0' \
+            "$evidence/worker-image-build-metadata.json"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo
+          skopeo copy --override-os linux --override-arch amd64 \
+            "oci-archive:$RUNNER_TEMP/thinclaw-worker.tar" \
+            docker-daemon:thinclaw-worker:ci
+          docker image inspect thinclaw-worker:ci >/dev/null
+      - name: Prove idle, active, stopped, and recovered liveness
+        run: scripts/ci/test_worker_image_health.sh thinclaw-worker:ci
+      - name: Generate CycloneDX worker SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: thinclaw-worker:ci
+          format: cyclonedx-json
+          output-file: ${{ runner.temp }}/worker-evidence/worker-image.cdx.json
+          syft-version: v1.51.0
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Require non-empty SBOM
+        run: test -s "$RUNNER_TEMP/worker-evidence/worker-image.cdx.json"
+      - name: Gate fix-available high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: thinclaw-worker:ci
+          scanners: vuln
+          vuln-type: os,library
+          severity: "HIGH,CRITICAL"
+          ignore-unfixed: true
+          exit-code: "1"
+          format: sarif
+          output: ${{ runner.temp }}/worker-evidence/worker-image-trivy.sarif
+          version: v0.73.0
+      - name: Upload worker evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: worker-image-evidence
+          path: ${{ runner.temp }}/worker-evidence/
+          if-no-files-found: warn
+          retention-days: 14

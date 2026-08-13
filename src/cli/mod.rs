@@ -560,6 +560,28 @@ pub enum Command {
         forwards: Vec<String>,
     },
 
+    /// Validate the worker event-loop heartbeat (internal use only).
+    #[cfg(feature = "docker-sandbox")]
+    #[command(name = "worker-health", hide = true)]
+    WorkerHealth {
+        /// Maximum accepted heartbeat age in seconds.
+        #[arg(long, default_value = "20")]
+        max_age: u64,
+
+        /// Heartbeat record written by the worker process.
+        #[arg(long, default_value = "/tmp/thinclaw-worker-heartbeat.json")]
+        heartbeat_file: std::path::PathBuf,
+    },
+
+    /// Exercise worker liveness without credentials (image validation only).
+    #[cfg(feature = "docker-sandbox")]
+    #[command(name = "worker-health-loop", hide = true)]
+    WorkerHealthLoop {
+        /// Keep the event loop active instead of sleeping between heartbeats.
+        #[arg(long)]
+        active: bool,
+    },
+
     /// Run as a lease-scoped remote experiment runner (internal/automation use).
     #[command(hide = true)]
     ExperimentRunner {

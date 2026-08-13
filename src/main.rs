@@ -53,7 +53,8 @@ fn runtime_command_intent(command: Option<&Command>) -> RuntimeCommandIntent {
         Some(Command::Worker { .. })
         | Some(Command::ClaudeBridge { .. })
         | Some(Command::CodexBridge { .. })
-        | Some(Command::NetworkRelay { .. }) => RuntimeCommandIntent::WorkerRuntime,
+        | Some(Command::NetworkRelay { .. })
+        | Some(Command::WorkerHealthLoop { .. }) => RuntimeCommandIntent::WorkerRuntime,
         #[cfg(target_os = "windows")]
         Some(Command::WindowsServiceRuntime { .. }) => RuntimeCommandIntent::ServiceRuntime,
         _ => RuntimeCommandIntent::ImmediateCli,

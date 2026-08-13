@@ -1,0 +1,13 @@
+{
+  "name": "thinclaw-worker-tools",
+  "version": "0.16.0",
+  "private": true,
+  "description": "Exact coding CLI inputs for the ThinClaw worker image",
+  "engines": {
+    "node": "22.18.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.229",
+    "@openai/codex": "0.147.0"
+  }
+}

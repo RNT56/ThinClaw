@@ -28,6 +28,7 @@ pub mod api;
 pub mod bridge_common;
 pub mod claude_bridge;
 pub mod codex_bridge;
+pub mod health;
 pub mod proxy_llm;
 pub mod runtime;
 

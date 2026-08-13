@@ -9,7 +9,24 @@
 # The image includes common development tools so workers can build software,
 # run tests, and execute shell commands.
 
-FROM rust:1.94-bookworm AS builder
+FROM node:22.18.0-bookworm-slim@sha256:752ea8a2f758c34002a0461bd9f1cee4f9a3c36d48494586f60ffce1fc708e0e AS worker-tools
+
+WORKDIR /opt/worker-tools
+COPY release/worker-tools/package.json release/worker-tools/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    && case "$(dpkg --print-architecture)" in \
+        amd64) worker_arch=x64 ;; \
+        arm64) worker_arch=arm64 ;; \
+        *) echo "unsupported worker architecture" >&2; exit 1 ;; \
+    esac \
+    && install -m 0755 \
+        "node_modules/@anthropic-ai/claude-code-linux-${worker_arch}/claude" \
+        node_modules/@anthropic-ai/claude-code/bin/claude.exe \
+    && npm cache clean --force
+
+# ---
+
+FROM rust:1.94.0-bookworm@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f AS builder
 
 WORKDIR /build
 COPY . .
@@ -20,39 +37,52 @@ RUN cargo build --release --features docker-sandbox --bin thinclaw
 
 # ---
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 
-# Install curl first (needed to fetch the GitHub CLI GPG key), then add the
-# gh CLI apt repository, then install all remaining dev tools in one layer.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
+# The Debian snapshot fixes the complete apt package universe. Its metadata is
+# verified by the archive keyring already present in the digest-pinned base.
+# Bootstrap TLS trust from the digest-pinned Node stage before contacting it.
+COPY --from=worker-tools /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' \
+        'Types: deb' \
+        'URIs: https://snapshot.debian.org/archive/debian/20260803T000000Z' \
+        'Suites: bookworm' \
+        'Components: main' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        'Check-Valid-Until: no' \
+        '' \
+        'Types: deb' \
+        'URIs: https://snapshot.debian.org/archive/debian-security/20260803T000000Z' \
+        'Suites: bookworm-security' \
+        'Components: main' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        'Check-Valid-Until: no' \
+        > /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+    ca-certificates \
     git \
     build-essential \
     pkg-config \
     libssl-dev \
-    nodejs \
-    npm \
     python3 \
     python3-pip \
     python3-venv \
     gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust toolchain for the sandbox user
+# Copy the exact Rust and Node toolchains and the npm-lock-verified coding CLIs
+# from digest-pinned build stages. No remote bootstrap script runs in the image.
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     CODEX_HOME=/home/sandbox/.codex \
-    PATH=/usr/local/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.94.0 \
-    && chmod -R a+r /usr/local/rustup /usr/local/cargo
-
-# Install container coding CLIs (for claude-bridge and codex-bridge modes)
-RUN npm install -g @anthropic-ai/claude-code@latest @openai/codex@latest
+    PATH=/opt/worker-tools/node_modules/.bin:/usr/local/cargo/bin:$PATH
+COPY --from=builder /usr/local/rustup /usr/local/rustup
+COPY --from=builder /usr/local/cargo /usr/local/cargo
+COPY --from=worker-tools /usr/local/bin/node /usr/local/bin/node
+COPY --from=worker-tools /opt/worker-tools /opt/worker-tools
+RUN chmod -R a+rX /usr/local/rustup /usr/local/cargo /opt/worker-tools
 
 # Copy the binary
 COPY --from=builder /build/target/release/thinclaw /usr/local/bin/thinclaw
@@ -68,18 +98,10 @@ RUN useradd -m -u 1000 -s /bin/bash sandbox \
 USER sandbox
 WORKDIR /workspace
 
-# Health check: the entrypoint script touches a sentinel file on start.
-# If the main process dies, the file is stale; this is sufficient for
-# Docker to mark the container as unhealthy for the orphan reaper.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD test -f /tmp/.thinclaw-alive || exit 1
+# A separate, credential-free process validates the heartbeat emitted by the
+# worker's Tokio event loop. Stopped or wedged workers therefore become stale.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+    CMD ["thinclaw", "worker-health", "--max-age", "20", "--heartbeat-file", "/tmp/thinclaw-worker-heartbeat.json"]
 
-# The orchestrator passes the full command via Docker cmd.
-# The wrapper script touches the sentinel before exec-ing thinclaw.
-COPY --chmod=755 <<'EOF' /usr/local/bin/entrypoint.sh
-#!/bin/bash
-touch /tmp/.thinclaw-alive
-exec thinclaw "$@"
-EOF
-
-ENTRYPOINT ["entrypoint.sh"]
+# The orchestrator passes the worker/bridge/relay subcommand as Docker cmd.
+ENTRYPOINT ["thinclaw"]

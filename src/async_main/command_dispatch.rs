@@ -66,6 +66,50 @@ pub(super) async fn run_terminal_command(
         return Ok(thinclaw::cli::CliDispatch::Handled(outcome));
     }
 
+    #[cfg(feature = "docker-sandbox")]
+    if let Some(Command::WorkerHealth {
+        max_age,
+        heartbeat_file,
+    }) = &cli.command
+    {
+        let outcome = match thinclaw::worker::health::check_worker_health(
+            heartbeat_file,
+            std::time::Duration::from_secs(*max_age),
+        ) {
+            Ok(report) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).map_err(anyhow::Error::from)?
+                );
+                thinclaw::cli::CliOutcome::Success
+            }
+            Err(error) => {
+                eprintln!("worker unhealthy: {error}");
+                thinclaw::cli::CliOutcome::Unhealthy
+            }
+        };
+        return Ok(thinclaw::cli::CliDispatch::Handled(outcome));
+    }
+
+    #[cfg(feature = "docker-sandbox")]
+    let _worker_heartbeat = if matches!(
+        cli.command.as_ref(),
+        Some(
+            Command::Worker { .. }
+                | Command::ClaudeBridge { .. }
+                | Command::CodexBridge { .. }
+                | Command::NetworkRelay { .. }
+                | Command::WorkerHealthLoop { .. }
+        )
+    ) {
+        Some(
+            thinclaw::worker::health::WorkerHeartbeat::start_default()
+                .map_err(anyhow::Error::from)?,
+        )
+    } else {
+        None
+    };
+
     let result = match &cli.command {
         Some(Command::Tool(tool_cmd)) => {
             init_cli_tracing(cli.debug);
@@ -324,6 +368,11 @@ pub(super) async fn run_terminal_command(
         Some(Command::NetworkRelay { forwards }) => {
             init_worker_tracing();
             run_network_relay(forwards).await
+        }
+        #[cfg(feature = "docker-sandbox")]
+        Some(Command::WorkerHealthLoop { active }) => {
+            init_worker_tracing();
+            run_worker_health_loop(*active).await
         }
         Some(Command::Agents(agent_cmd)) => {
             init_cli_tracing(cli.debug);
