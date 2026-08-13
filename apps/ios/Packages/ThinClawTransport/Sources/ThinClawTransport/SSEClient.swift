@@ -15,7 +15,9 @@ public actor SSEClient {
 
     public init() {}
 
-    /// The most recent `id:` value seen, for `Last-Event-ID` on reconnect.
+    /// The most recent `id:` value seen for diagnostics and event folding.
+    /// The gateway stream is live-only, so reconnect recovery uses REST
+    /// reconciliation rather than sending `Last-Event-ID` as a replay promise.
     public var lastEventID: String? {
         parser.lastEventID.isEmpty ? nil : parser.lastEventID
     }

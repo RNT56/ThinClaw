@@ -47,7 +47,7 @@ See the caveats below the table and
 
 | Piece | Status |
 |---|---|
-| `ThinClawTransport` (SSE parser, event decoder, reconnect, `GatewaySession`/`GatewayStream`, reconcile) | ✅ implemented + fixture-tested (100 tests) |
+| `ThinClawTransport` (standardized SSE policy, parser, event decoder, reconnect, `GatewaySession`/`GatewayStream`, REST reconcile) | ✅ implemented + fixture-tested; no WebSocket negotiation/fallback by design |
 | `ThinClawCore` (domain models, chunk coalescer, `ChatTimelineReducer`, `ComposerCooldown`, `SessionsListModel`, `ReconcileResult`, `SnapshotPublisher`/`SnapshotPrivacyPolicy`/`SnapshotStoreSink`) | ✅ implemented + tested (131 tests) |
 | `ThinClawSnapshotKit` (App Group snapshots, Live Activity attributes) | ✅ implemented + tested (13 tests) |
 | `ThinClawLiveActivity` (`RunTracker` reducer + `RunInputClassifier`, `LiveActivityManager` over `ActivityController`/`LiveActivityRegistrar`) | ✅ implemented (M3); pure logic tested on macOS (30 tests); the ActivityKit widget compiles in the `build-app` hard gate |

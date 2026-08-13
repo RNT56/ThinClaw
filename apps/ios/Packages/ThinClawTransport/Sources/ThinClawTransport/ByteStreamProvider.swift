@@ -69,18 +69,20 @@ public protocol ByteStreamProvider: Sendable {
 public struct URLSessionByteStreamProvider: ByteStreamProvider {
     private let baseURL: URL
     private let session: URLSession
+    private let policy: GatewayEventTransportPolicy
 
-    public init(baseURL: URL, session: URLSession) {
+    public init(
+        baseURL: URL,
+        session: URLSession,
+        policy: GatewayEventTransportPolicy = .mobileDefault
+    ) {
         self.baseURL = baseURL
         self.session = session
+        self.policy = policy
     }
 
     public func open(token: String) async throws -> ByteStream {
-        var request = URLRequest(url: baseURL.appending(path: "api/chat/events"))
-        request.httpMethod = "GET"
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        // Header-only auth (MOBILE_SECURITY D-T4/T14) — never `?token=`.
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let request = policy.request(baseURL: baseURL, token: token)
 
         let (bytes, response) = try await session.bytes(for: request)
         if let http = response as? HTTPURLResponse, http.statusCode >= 400 {

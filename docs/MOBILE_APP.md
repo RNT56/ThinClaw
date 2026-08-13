@@ -37,8 +37,12 @@ never an embedded runtime. This is mandated by
 and mirrors how ThinClaw Desktop's remote mode works:
 
 - REST for actions (`POST /api/chat/send`, `/api/chat/approval`, …)
-- SSE (`GET /api/chat/events`) as the primary event stream; the WebSocket
-  endpoint remains available but the mobile client is SSE-primary
+- SSE (`GET /api/chat/events`) is the native client's standardized event
+  transport. `GatewayEventTransportPolicy.mobileDefault` is intentionally the
+  single SSE policy: failures reconnect through the same pinned-session
+  watchdog, and missed events reconcile from REST snapshots because the stream
+  is live-only. The gateway WebSocket remains available for other clients, but
+  iOS does not negotiate or silently fall back to it.
 - Per-device scoped tokens for auth (see below), never the operator's shared
   gateway token
 
