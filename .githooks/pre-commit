@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 scripts/dev_hooks.py run
+fi
+if command -v python >/dev/null 2>&1; then
+    exec python scripts/dev_hooks.py run
+fi
+
+echo "ThinClaw pre-commit: Python 3 is required. Run 'python3 scripts/dev_hooks.py uninstall' to disable this opt-in hook." >&2
+exit 1

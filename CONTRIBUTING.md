@@ -5,6 +5,29 @@ Contributor setup, source-build profiles, and maintainer workflow notes live in
 
 ## Local Checks
 
+ThinClaw provides an opt-in, repository-managed pre-commit hook. It scans the
+staged index for high-confidence credential formats and selects only relevant
+fast checks (Rust formatting/file size, Desktop command/type boundaries, and
+OpenAPI/Swift manifest drift):
+
+```bash
+python3 scripts/dev_hooks.py install
+python3 scripts/dev_hooks.py status
+```
+
+Remove it without deleting files or clobbering a previously configured hook
+path:
+
+```bash
+python3 scripts/dev_hooks.py uninstall
+```
+
+Installation refuses to replace an existing `core.hooksPath` unless `--force`
+is explicit; forced installation records and restores the previous value. A
+reviewed test fixture may suppress one credential finding on the same line with
+`thinclaw-secret-scan: allow`. `git commit --no-verify` remains available for
+emergencies, and CI always reruns the authoritative checks.
+
 Run the Rust checks before opening a PR:
 
 ```bash

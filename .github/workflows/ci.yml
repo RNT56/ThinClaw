@@ -53,6 +53,10 @@ jobs:
         run: python3 scripts/ci/check-process-launches.py
       - name: Check desktop runtime-builder topology and secret boundary
         run: python3 scripts/ci/check-desktop-runtime-builder.py
+      - name: Check tracked files for committed credentials
+        run: python3 scripts/hooks/pre_commit.py --all-tracked --secret-scan-only
+      - name: Test opt-in developer hook logic
+        run: python3 -m unittest scripts.hooks.test_pre_commit
       - name: Check coverage gate accounting
         run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
       - name: Check desktop bridge command boundaries

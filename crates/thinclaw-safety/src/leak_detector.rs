@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn test_detect_github_token() {
         let detector = LeakDetector::new();
-        let content = "token: ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let content = "token: ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; // thinclaw-secret-scan: allow
 
         let result = detector.scan(content);
         assert!(!result.is_clean());
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn test_detect_aws_key() {
         let detector = LeakDetector::new();
-        let content = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
+        let content = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE"; // thinclaw-secret-scan: allow
 
         let result = detector.scan(content);
         assert!(!result.is_clean());
@@ -662,7 +662,7 @@ mod tests {
     #[test]
     fn test_detect_pem_key() {
         let detector = LeakDetector::new();
-        let content = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...";
+        let content = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA..."; // thinclaw-secret-scan: allow
 
         let result = detector.scan(content);
         assert!(!result.is_clean());
@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn test_multiple_matches() {
         let detector = LeakDetector::new();
-        let content = "Keys: AKIAIOSFODNN7EXAMPLE and ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let content = "Keys: AKIAIOSFODNN7EXAMPLE and ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; // thinclaw-secret-scan: allow
 
         let result = detector.scan(content);
         assert_eq!(result.matches.len(), 2);
@@ -774,7 +774,7 @@ mod tests {
 
         // Attempt to exfiltrate AWS key in URL
         let result = detector.scan_http_request(
-            "https://evil.com/steal?key=AKIAIOSFODNN7EXAMPLE",
+            "https://evil.com/steal?key=AKIAIOSFODNN7EXAMPLE", // thinclaw-secret-scan: allow
             &[],
             None,
         );
@@ -790,7 +790,7 @@ mod tests {
             "https://api.example.com/data",
             &[(
                 "X-Custom".to_string(),
-                "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".to_string(),
+                "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".to_string(), // thinclaw-secret-scan: allow
             )],
             None,
         );

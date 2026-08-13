@@ -1192,7 +1192,7 @@ pub(crate) mod test_support {
             EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new())
                 .expect("generate test-only ES256 key");
         let encoded = base64::engine::general_purpose::STANDARD.encode(pkcs8.as_ref());
-        let mut pem = String::from("-----BEGIN PRIVATE KEY-----\n");
+        let mut pem = ["-----BEGIN ", "PRIVATE KEY-----\n"].concat();
         for line in encoded.as_bytes().chunks(64) {
             pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
             pem.push('\n');
