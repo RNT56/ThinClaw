@@ -1198,9 +1198,9 @@ mod tests {
         assert!(
             state
                 .pending_approvals
-                .lock()
+                .entry_for(&request_id, &device_identity())
                 .unwrap()
-                .contains_key(&request_id)
+                .is_some()
         );
     }
 
