@@ -2,35 +2,54 @@ name: Release Please
 
 on:
   workflow_dispatch:
+    inputs:
+      recover_tag:
+        description: Existing draft tag whose core artifact build should be recovered
+        required: false
+        type: string
   push:
     branches:
       - main
 
 permissions:
-  actions: write
-  contents: write
-  issues: write
-  pull-requests: write
+  contents: read
+
+concurrency:
+  group: release-please-main
+  cancel-in-progress: false
 
 jobs:
   release-please:
-    name: Prepare or publish release
+    name: Prepare release PR or recover draft release
     runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
     steps:
-      - name: Prepare release PR or publish merged release
-        id: release
-        # v5.0.0, pinned to its immutable commit.
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
+
+      # A GitHub App token is required because this repository intentionally
+      # keeps the broad "Actions may create and approve pull requests" switch
+      # disabled. App-created release PRs still receive normal protected CI.
+      - name: Mint release automation token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Prepare release PR or create draft release
+        id: release
+        if: inputs.recover_tag == ''
+        continue-on-error: true
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # GitHub starts pull_request workflows for PRs created with GITHUB_TOKEN,
-      # but holds them for maintainer approval. Keep that real PR-associated CI
-      # as the merge gate: a workflow_dispatch run is not attached to the PR
-      # and therefore cannot satisfy required branch-protection checks.
-      - name: Record release PR approval gate
+      - name: Record release PR gate
         if: steps.release.outputs.prs_created == 'true'
         env:
           RELEASE_PR: ${{ steps.release.outputs.pr }}
@@ -43,19 +62,50 @@ jobs:
           {
             echo "### Release PR #$number"
             echo
-            echo "GitHub has created protected CI for \`$branch\` in an approval-required state."
-            echo "A maintainer must review and approve that pending run before the release PR can merge."
-            echo "Do not substitute a manually dispatched CI run; GitHub will not associate it with the PR gate."
+            echo "Protected pull-request CI is running for \`$branch\`."
+            echo "Merge only after its required checks pass."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # A newly-created release event is suppressed for the same reason, so
-      # dispatch the existing artifact pipeline explicitly.
-      - name: Trigger artifact builds for the released tag
-        if: steps.release.outputs.release_created == 'true'
+      - name: Resolve normal or recovery tag
+        id: resolve
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          EXPLICIT_RECOVERY_TAG: ${{ inputs.recover_tag }}
+          CREATED_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_OUTCOME: ${{ steps.release.outcome }}
         run: |
           set -euo pipefail
-          test -n "$RELEASE_TAG"
-          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$RELEASE_TAG"
+          tag="${EXPLICIT_RECOVERY_TAG:-${CREATED_TAG:-}}"
+
+          # Release Please can create a draft and then fail while performing a
+          # later API operation. Recover that exact current-version draft only;
+          # never guess among public or unrelated releases.
+          if [[ -z "$tag" && "$RELEASE_OUTCOME" == "failure" ]]; then
+            expected="v$(jq -r '.["."]' .release-please-manifest.json)"
+            if draft="$(gh release view "$expected" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName 2>/dev/null)" \
+              && [[ "$(jq -r '.isDraft' <<<"$draft")" == "true" ]]; then
+              tag="$expected"
+            fi
+          fi
+
+          if [[ -n "$tag" && ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid core release recovery tag: $tag"
+            exit 1
+          fi
+          if [[ "$RELEASE_OUTCOME" == "failure" && -z "$tag" ]]; then
+            echo "::error::Release Please failed and no exact draft release was recoverable"
+            exit 1
+          fi
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch staged core release
+        if: steps.resolve.outputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f tag="$RELEASE_TAG" \
+            -f mode=publish \
+            -f promote_latest=true

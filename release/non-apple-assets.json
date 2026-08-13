@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "description": "Required public core-release assets. Apple Desktop/iOS artifacts are released independently.",
+  "required_exact": [
+    "thinclaw-aarch64-unknown-linux-gnu.tar.gz",
+    "thinclaw-aarch64-unknown-linux-musl.tar.gz",
+    "thinclaw-x86_64-unknown-linux-gnu.tar.gz",
+    "thinclaw-x86_64-unknown-linux-musl.tar.gz",
+    "thinclaw-x86_64-pc-windows-msvc.tar.gz",
+    "thinclaw-x86_64-pc-windows-msvc.msi",
+    "thinclaw-edge-aarch64-unknown-linux-gnu.tar.gz",
+    "thinclaw-edge-aarch64-unknown-linux-musl.tar.gz",
+    "thinclaw-edge-x86_64-unknown-linux-gnu.tar.gz",
+    "thinclaw-edge-x86_64-unknown-linux-musl.tar.gz",
+    "thinclaw-installer.sh",
+    "thinclaw-installer.ps1",
+    "checksums.txt",
+    "checksums-edge.txt",
+    "release-inventory.json"
+  ],
+  "required_globs": [
+    {
+      "pattern": "*-wasm32-wasip2.tar.gz",
+      "minimum": 28
+    }
+  ],
+  "forbidden_globs": [
+    "*apple-darwin*",
+    "*.app.tar.gz",
+    "*.dmg",
+    "*.pkg",
+    "*.sig",
+    "latest.json"
+  ]
+}

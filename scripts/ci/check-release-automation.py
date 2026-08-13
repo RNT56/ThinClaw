@@ -170,6 +170,8 @@ def main() -> int:
         raise SystemExit("Release Please must manage only the root package")
 
     root = packages["."]
+    if config.get("draft") is not True:
+        raise SystemExit("Release Please must create draft releases for staged publication")
     expected = {
         "release-type": "rust",
         "package-name": "thinclaw",
@@ -275,15 +277,20 @@ def main() -> int:
 
     required_workflow_fragments = [
         f"googleapis/release-please-action@{ACTION_SHA}",
+        "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349",
+        "app-id: ${{ secrets.RELEASE_APP_ID }}",
+        "private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}",
+        "token: ${{ steps.app-token.outputs.token }}",
         "config-file: release-please-config.json",
         "manifest-file: .release-please-manifest.json",
         "if: steps.release.outputs.prs_created == 'true'",
         "RELEASE_PR: ${{ steps.release.outputs.pr }}",
-        "Record release PR approval gate",
-        "A maintainer must review and approve that pending run",
-        "Do not substitute a manually dispatched CI run",
+        "continue-on-error: true",
+        "recover_tag:",
+        "no exact draft release was recoverable",
         'gh workflow run release.yml --repo "$GITHUB_REPOSITORY"',
-        "RELEASE_TAG: ${{ steps.release.outputs.tag_name }}",
+        "-f mode=publish",
+        "-f promote_latest=true",
     ]
     missing = [item for item in required_workflow_fragments if item not in workflow]
     if missing:
@@ -291,6 +298,7 @@ def main() -> int:
 
     forbidden_workflow_fragments = [
         'gh workflow run ci.yml --repo "$GITHUB_REPOSITORY"',
+        "token: ${{ secrets.GITHUB_TOKEN }}",
     ]
     forbidden = [
         item for item in forbidden_workflow_fragments if item in workflow
@@ -311,15 +319,10 @@ def main() -> int:
         "release-please--branches--main--components--thinclaw",
         "HEAD_REPOSITORY",
         "commits/$HEAD_SHA/pulls",
-        "APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}",
-        "APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}",
-        "APPLE_ID: ${{ secrets.APPLE_ID }}",
-        "APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}",
-        "APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}",
-        "TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}",
-        "openssl pkcs12",
-        "rsign encrypted secret key",
-        "minisign encrypted secret key",
+        "RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}",
+        "RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}",
+        "RELEASE_APP_ID must be numeric",
+        "RELEASE_APP_PRIVATE_KEY must be a PEM private key",
         "statuses/$HEAD_SHA",
         "context='Release Credentials'",
     ]
@@ -356,7 +359,7 @@ def main() -> int:
         "flags=.*runtime",
         "context:primary-signature",
         "name: artifacts-desktop-macos",
-        "needs.build-desktop-macos.result == 'success'",
+        "if: ${{ github.event_name == 'workflow_call' }}",
     ]
     missing_desktop = [
         item for item in desktop_release_fragments if item not in desktop_release_contract
@@ -364,6 +367,42 @@ def main() -> int:
     if missing_desktop:
         raise SystemExit(
             "Desktop artifact workflow is missing: " + ", ".join(missing_desktop)
+        )
+
+    staged_release_fragments = [
+        "mode:",
+        "backfill",
+        "dry-run",
+        "environment: release-production",
+        "release/non-apple-assets.json",
+        "scripts/ci/release_control.py assemble",
+        "scripts/ci/stage_release_assets.sh",
+        "push: false",
+        "outputs: type=oci",
+        "publish-container-images:",
+        "publish-release:",
+        "promote-stable:",
+        "--draft=false --latest=false",
+        "refusing to overwrite it",
+    ]
+    missing_staging = [
+        item for item in staged_release_fragments if item not in artifact_workflow
+    ]
+    if missing_staging:
+        raise SystemExit(
+            "staged core release workflow is missing: " + ", ".join(missing_staging)
+        )
+    forbidden_publication = [
+        "--clobber",
+        "push: true",
+        "--steps=upload --steps=release",
+        "needs.build-desktop-macos.result == 'success'",
+    ]
+    unsafe = [item for item in forbidden_publication if item in artifact_workflow]
+    if unsafe:
+        raise SystemExit(
+            "staged core release workflow contains unsafe early publication: "
+            + ", ".join(unsafe)
         )
 
     oauth_release_step = "run: bash scripts/ci/configure-google-oauth-build.sh"
@@ -394,9 +433,9 @@ def main() -> int:
 
     print(
         f"Release automation: root thinclaw v{version}, immutable action, "
-        f"PR-associated protected CI approval, pre-tag credential status, "
+        f"GitHub-App PR automation, recoverable draft staging, "
         f"synchronized Desktop versioning, optional official Google OAuth client, "
-        f"and artifact dispatch, "
+        f"atomic non-Apple publication and immutable artifact dispatch, "
         f"binaries {', '.join(release_binaries)}"
     )
     return 0
