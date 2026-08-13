@@ -96,6 +96,19 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub telegram_owner_id: Option<i64>,
 
+    /// Whether the Telegram channel is operator-enabled.
+    #[serde(default)]
+    pub telegram_enabled: bool,
+
+    /// Telegram direct-message admission policy.
+    #[serde(default)]
+    pub telegram_dm_policy: Option<String>,
+
+    /// Whether Telegram group messages are accepted at all. Existing configs
+    /// predate this switch and therefore retain their prior enabled behavior.
+    #[serde(default = "default_true")]
+    pub telegram_groups_enabled: bool,
+
     /// Telegram progressive message streaming mode (e.g. "edit" or "status").
     #[serde(default)]
     pub telegram_stream_mode: Option<String>,
@@ -147,6 +160,10 @@ pub struct ChannelSettings {
     /// Slack allowed channel/DM IDs (comma-separated, empty = all).
     #[serde(default)]
     pub slack_allow_from: Option<String>,
+
+    /// Slack direct-message admission policy.
+    #[serde(default)]
+    pub slack_dm_policy: Option<String>,
 
     // === Nostr ===
     /// Whether Nostr channel is enabled.
@@ -313,12 +330,16 @@ impl std::fmt::Debug for ChannelSettings {
             .field("voice_call_enabled", &self.voice_call_enabled)
             .field("apns_enabled", &self.apns_enabled)
             .field("browser_push_enabled", &self.browser_push_enabled)
+            .field("telegram_enabled", &self.telegram_enabled)
+            .field("telegram_dm_policy", &self.telegram_dm_policy)
+            .field("telegram_groups_enabled", &self.telegram_groups_enabled)
             .field("discord_enabled", &self.discord_enabled)
             .field(
                 "discord_bot_token",
                 &crate::redaction::RedactedOption(&self.discord_bot_token),
             )
             .field("slack_enabled", &self.slack_enabled)
+            .field("slack_dm_policy", &self.slack_dm_policy)
             .field(
                 "slack_bot_token",
                 &crate::redaction::RedactedOption(&self.slack_bot_token),
@@ -370,7 +391,10 @@ impl Default for ChannelSettings {
             voice_call_enabled: false,
             apns_enabled: false,
             browser_push_enabled: false,
+            telegram_enabled: false,
             telegram_owner_id: None,
+            telegram_dm_policy: None,
+            telegram_groups_enabled: true,
             telegram_stream_mode: None,
             telegram_transport_mode: default_telegram_transport_mode(),
             telegram_subagent_session_mode: default_telegram_subagent_session_mode(),
@@ -383,6 +407,7 @@ impl Default for ChannelSettings {
             slack_bot_token: None,
             slack_app_token: None,
             slack_allow_from: None,
+            slack_dm_policy: None,
             nostr_enabled: false,
             nostr_relays: None,
             nostr_owner_pubkey: None,

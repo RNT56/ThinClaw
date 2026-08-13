@@ -2,6 +2,10 @@
 
 use super::*;
 
+pub(crate) fn group_delivery_allowed(is_private: bool, groups_enabled: bool) -> bool {
+    is_private || groups_enabled
+}
+
 pub(crate) fn should_ignore_update(update_id: i64) -> bool {
     if channel_host::workspace_read(IGNORE_UPDATES_UNTIL_ID_PATH)
         .and_then(|raw| raw.parse::<i64>().ok())
@@ -146,6 +150,18 @@ pub(crate) fn handle_message(message: TelegramMessage) {
 
     // For group chats, only respond if bot was mentioned or respond_to_all is enabled
     if !is_private {
+        let groups_enabled = channel_host::workspace_read(GROUPS_ENABLED_PATH)
+            .as_deref()
+            .unwrap_or("true")
+            == "true";
+        if !group_delivery_allowed(is_private, groups_enabled) {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                "Ignoring group message because Telegram groups are disabled",
+            );
+            return;
+        }
+
         let respond_to_all = channel_host::workspace_read(RESPOND_TO_ALL_GROUP_PATH)
             .as_deref()
             .unwrap_or("false")

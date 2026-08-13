@@ -513,11 +513,15 @@ mod stubs {
         pub tunnel_url: Option<String>,
         pub telegram_tunnel_url: Option<String>,
         pub telegram_owner_id: Option<i64>,
+        pub telegram_dm_policy: String,
+        pub telegram_groups_enabled: bool,
         pub telegram_stream_mode: Option<String>,
         pub telegram_transport_mode: String,
         pub telegram_host_webhook_capable: bool,
         pub telegram_host_transport_reason: Option<String>,
         pub discord_stream_mode: Option<String>,
+        pub slack_dm_policy: String,
+        pub slack_allow_from: Vec<String>,
     }
 
     impl WasmChannelHostConfig {
@@ -526,6 +530,8 @@ mod stubs {
                 tunnel_url: config.tunnel.public_url.clone(),
                 telegram_tunnel_url: None,
                 telegram_owner_id: config.channels.telegram_owner_id,
+                telegram_dm_policy: config.channels.telegram_dm_policy.clone(),
+                telegram_groups_enabled: config.channels.telegram_groups_enabled,
                 telegram_stream_mode: config.channels.telegram_stream_mode.clone(),
                 telegram_transport_mode: config.channels.telegram_transport_mode.clone(),
                 telegram_host_webhook_capable: false,
@@ -533,6 +539,8 @@ mod stubs {
                     "ThinClaw was built without the wasm-runtime feature".to_string(),
                 ),
                 discord_stream_mode: config.channels.discord_stream_mode.clone(),
+                slack_dm_policy: config.channels.slack_dm_policy.clone(),
+                slack_allow_from: config.channels.slack_allow_from.clone(),
             }
         }
     }

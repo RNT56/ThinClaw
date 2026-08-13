@@ -233,22 +233,43 @@ async fn load_channel_setup_status(state: &GatewayState, user_id: &str) -> Chann
         None
     };
 
+    let slack = build_secure_native_lifecycle_setup_status(
+        state.secrets_store.as_ref(),
+        user_id,
+        "SLACK_ENABLED",
+        settings.channels.slack_enabled,
+        true,
+        &[
+            (
+                "bot_token",
+                &["SLACK_BOT_TOKEN"][..],
+                &["slack_bot_token"][..],
+            ),
+            (
+                "signing_secret",
+                &["SLACK_SIGNING_SECRET"][..],
+                &["slack_signing_secret"][..],
+            ),
+        ],
+    )
+    .await;
+    let telegram = build_secure_native_lifecycle_setup_status(
+        state.secrets_store.as_ref(),
+        user_id,
+        "TELEGRAM_ENABLED",
+        settings.channels.telegram_enabled,
+        true,
+        &[(
+            "bot_token",
+            &["TELEGRAM_BOT_TOKEN"][..],
+            &["telegram_bot_token"][..],
+        )],
+    )
+    .await;
+
     ChannelSetupStatus {
-        slack: build_native_lifecycle_setup_status(
-            "SLACK_ENABLED",
-            settings.channels.slack_enabled,
-            true,
-            &[
-                ("bot_token", &["SLACK_BOT_TOKEN"][..]),
-                ("app_token", &["SLACK_APP_TOKEN"][..]),
-            ],
-        ),
-        telegram: build_native_lifecycle_setup_status(
-            "TELEGRAM_ENABLED",
-            settings.channels.telegram_owner_id.is_some(),
-            true,
-            &[("bot_token", &["TELEGRAM_BOT_TOKEN"][..])],
-        ),
+        slack,
+        telegram,
         gmail: build_gmail_setup_status(&settings),
         apple_mail: build_native_lifecycle_setup_status(
             "APPLE_MAIL_ENABLED",
@@ -308,6 +329,43 @@ async fn load_channel_setup_status(state: &GatewayState, user_id: &str) -> Chann
             ],
         ),
     }
+}
+
+async fn build_secure_native_lifecycle_setup_status(
+    secrets_store: Option<&std::sync::Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    user_id: &str,
+    enabled_env: &str,
+    enabled_setting: bool,
+    available: bool,
+    required_fields: &[(&str, &[&str], &[&str])],
+) -> PartialChannelSetupStatus {
+    let enabled = crate::config::helpers::parse_bool_env(enabled_env, enabled_setting)
+        .unwrap_or(enabled_setting);
+    let mut resolved = Vec::with_capacity(required_fields.len());
+    for (field, env_vars, secret_names) in required_fields {
+        let env_present = env_vars.iter().any(|env_var| {
+            crate::config::helpers::optional_env(env_var)
+                .ok()
+                .flatten()
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        let mut secret_present = false;
+        if !env_present && let Some(secrets) = secrets_store {
+            for secret_name in *secret_names {
+                if secrets.exists(user_id, secret_name).await.unwrap_or(false) {
+                    secret_present = true;
+                    break;
+                }
+            }
+        }
+        resolved.push(SetupFieldStatus::new(*field, env_present || secret_present));
+    }
+
+    gateway_build_native_lifecycle_setup_status(NativeLifecycleSetupStatusInput {
+        enabled,
+        available,
+        required_fields: resolved,
+    })
 }
 
 fn build_native_lifecycle_setup_status(
@@ -512,6 +570,65 @@ fn build_nostr_setup_status(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn secure_channel_status_reports_only_redacted_credential_presence() {
+        let crypto = std::sync::Arc::new(
+            crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                "0123456789abcdef0123456789abcdef".to_string(),
+            ))
+            .expect("test crypto"),
+        );
+        let store: std::sync::Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            std::sync::Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
+        store
+            .create(
+                "channel-user",
+                crate::secrets::CreateSecretParams::new("slack_bot_token", "xoxb-private"),
+            )
+            .await
+            .expect("bot token stored");
+
+        let incomplete = super::build_secure_native_lifecycle_setup_status(
+            Some(&store),
+            "channel-user",
+            "THINCLAW_TEST_SECURE_CHANNEL_ENABLED_UNSET",
+            true,
+            true,
+            &[
+                ("bot_token", &[][..], &["slack_bot_token"][..]),
+                ("signing_secret", &[][..], &["slack_signing_secret"][..]),
+            ],
+        )
+        .await;
+        assert!(!incomplete.configured);
+        assert_eq!(incomplete.missing_fields, vec!["signing_secret"]);
+
+        store
+            .create(
+                "channel-user",
+                crate::secrets::CreateSecretParams::new(
+                    "slack_signing_secret",
+                    "private-signing-value",
+                ),
+            )
+            .await
+            .expect("signing secret stored");
+        let ready = super::build_secure_native_lifecycle_setup_status(
+            Some(&store),
+            "channel-user",
+            "THINCLAW_TEST_SECURE_CHANNEL_ENABLED_UNSET",
+            true,
+            true,
+            &[
+                ("bot_token", &[][..], &["slack_bot_token"][..]),
+                ("signing_secret", &[][..], &["slack_signing_secret"][..]),
+            ],
+        )
+        .await;
+        assert!(ready.configured);
+        assert!(ready.missing_fields.is_empty());
+    }
+
     #[test]
     #[cfg(feature = "nostr")]
     fn nostr_status_marks_missing_owner_when_secret_exists() {

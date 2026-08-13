@@ -60,6 +60,9 @@ enum GrantFlag {
     CustomLlm,
     RemoteToken,
     GoogleWorkspace,
+    /// Manifest-scoped channel credentials. Capability allowlists still gate
+    /// which channel may request each value.
+    ChannelCredential,
     Unsupported,
 }
 
@@ -276,6 +279,41 @@ pub const SECRET_POLICIES: &[SecretPolicy] = &[
         env_vars: &["THINCLAW_REMOTE_TOKEN"],
         keychain_key: "remote_token",
         grant: GrantFlag::RemoteToken,
+    },
+    SecretPolicy {
+        thinclaw_names: &["slack_bot_token"],
+        provider_slug: "slack",
+        env_vars: &["SLACK_BOT_TOKEN"],
+        keychain_key: "slack_bot_token",
+        grant: GrantFlag::ChannelCredential,
+    },
+    SecretPolicy {
+        thinclaw_names: &["slack_app_token"],
+        provider_slug: "slack_app",
+        env_vars: &["SLACK_APP_TOKEN"],
+        keychain_key: "slack_app_token",
+        grant: GrantFlag::ChannelCredential,
+    },
+    SecretPolicy {
+        thinclaw_names: &["slack_signing_secret"],
+        provider_slug: "slack_signing",
+        env_vars: &["SLACK_SIGNING_SECRET"],
+        keychain_key: "slack_signing_secret",
+        grant: GrantFlag::ChannelCredential,
+    },
+    SecretPolicy {
+        thinclaw_names: &["telegram_bot_token"],
+        provider_slug: "telegram",
+        env_vars: &["TELEGRAM_BOT_TOKEN"],
+        keychain_key: "telegram_bot_token",
+        grant: GrantFlag::ChannelCredential,
+    },
+    SecretPolicy {
+        thinclaw_names: &["telegram_webhook_secret"],
+        provider_slug: "telegram_webhook",
+        env_vars: &["TELEGRAM_WEBHOOK_SECRET"],
+        keychain_key: "telegram_webhook_secret",
+        grant: GrantFlag::ChannelCredential,
     },
     SecretPolicy {
         thinclaw_names: &["desktop_gateway_auth_token"],
@@ -675,6 +713,7 @@ impl SecretGrantSnapshot {
                 GrantFlag::CustomLlm => self.custom_llm,
                 GrantFlag::RemoteToken => self.remote_token,
                 GrantFlag::GoogleWorkspace => true,
+                GrantFlag::ChannelCredential => true,
                 GrantFlag::Unsupported => false,
             };
         }
@@ -1298,6 +1337,22 @@ mod tests {
         let grants = SecretGrantSnapshot::from_config(&cfg);
         assert!(grants.is_granted("slack"));
         assert!(grants.is_granted("Slack Bot"));
+    }
+
+    #[test]
+    fn channel_credentials_are_runtime_granted_but_remain_manifest_scoped() {
+        let grants = SecretGrantSnapshot::from_config(&test_config());
+        assert!(grants.is_granted("slack_bot_token"));
+        assert!(grants.is_granted("slack_signing_secret"));
+        assert!(grants.is_granted("telegram_bot_token"));
+        assert!(secret_name_allowed_by_patterns(
+            "slack_bot_token",
+            &["slack_*".to_string()],
+        ));
+        assert!(!secret_name_allowed_by_patterns(
+            "telegram_bot_token",
+            &["slack_*".to_string()],
+        ));
     }
 
     #[test]

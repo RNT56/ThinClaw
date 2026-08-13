@@ -15,9 +15,9 @@ const MAX_CONFIG_PATCH_BYTES: usize = 1024 * 1024;
 const MAX_CONFIG_KEY_BYTES: usize = 256;
 const MAX_CONFIG_VALUE_BYTES: usize = 256 * 1024;
 
-struct LocalSettingsContext {
-    store: std::sync::Arc<dyn thinclaw_core::db::Database>,
-    agent: Option<std::sync::Arc<thinclaw_core::agent::Agent>>,
+pub(crate) struct LocalSettingsContext {
+    pub(crate) store: std::sync::Arc<dyn thinclaw_core::db::Database>,
+    pub(crate) agent: Option<std::sync::Arc<thinclaw_core::agent::Agent>>,
 }
 
 #[cfg(feature = "runtime-libsql")]
@@ -49,7 +49,7 @@ async fn open_stopped_settings_store(
     Ok(std::sync::Arc::new(backend))
 }
 
-async fn local_settings_context(
+pub(crate) async fn local_settings_context(
     ironclaw: &ThinClawRuntimeState,
 ) -> Result<LocalSettingsContext, BridgeError> {
     if let Ok(agent) = ironclaw.agent().await {

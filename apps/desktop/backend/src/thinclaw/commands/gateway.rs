@@ -12,8 +12,8 @@
 use tauri::State;
 use tracing::info;
 
-use super::types::*;
 use super::ThinClawManager;
+use super::types::*;
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
 async fn gateway_state_snapshot(
@@ -66,6 +66,8 @@ pub async fn thinclaw_get_status(
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<ThinClawStatus, crate::thinclaw::bridge::BridgeError> {
     let config = state.get_config().await;
+    let (slack_enabled, telegram_enabled) =
+        super::channel_settings::effective_channel_enabled(&state, &ironclaw).await;
 
     let engine_running = ironclaw.is_initialized() || ironclaw.is_remote_mode().await;
     let gateway_state = gateway_state_snapshot(&state, &ironclaw).await;
@@ -135,22 +137,8 @@ pub async fn thinclaw_get_status(
         // ThinClaw runtime status (in-process = always connected when running)
         engine_running,
         engine_connected: engine_running,
-        slack_enabled: config
-            .as_ref()
-            .map(|c| {
-                c.custom_secrets
-                    .iter()
-                    .any(|s| s.id == "slack" && s.granted)
-            })
-            .unwrap_or(false),
-        telegram_enabled: config
-            .as_ref()
-            .map(|c| {
-                c.custom_secrets
-                    .iter()
-                    .any(|s| s.id == "telegram" && s.granted)
-            })
-            .unwrap_or(false),
+        slack_enabled,
+        telegram_enabled,
         custom_secrets: config
             .as_ref()
             .map(|cfg| cfg.custom_secrets.clone())

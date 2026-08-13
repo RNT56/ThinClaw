@@ -205,6 +205,20 @@ fn test_config_without_owner_id() {
     let json = r#"{}"#;
     let config: TelegramConfig = serde_json::from_str(json).unwrap();
     assert_eq!(config.owner_id, None);
+    assert!(config.groups_enabled, "legacy config keeps groups enabled");
+}
+
+#[test]
+fn test_config_can_disable_groups() {
+    let config: TelegramConfig = serde_json::from_str(r#"{"groups_enabled":false}"#).unwrap();
+    assert!(!config.groups_enabled);
+}
+
+#[test]
+fn disabled_groups_drop_group_delivery_without_blocking_private_messages() {
+    assert!(!media::group_delivery_allowed(false, false));
+    assert!(media::group_delivery_allowed(false, true));
+    assert!(media::group_delivery_allowed(true, false));
 }
 
 #[test]

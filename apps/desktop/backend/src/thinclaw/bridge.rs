@@ -417,7 +417,15 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_trigger_bootstrap", RouteMode::LocalOnly),
     ("thinclaw_update_custom_secret", RouteMode::LocalOnly),
     ("thinclaw_update_run", RouteMode::LocalOnly),
+    (
+        "thinclaw_update_slack_channel_settings",
+        RouteMode::LocalOnly,
+    ),
     ("thinclaw_update_sub_agent_status", RouteMode::LocalOnly),
+    (
+        "thinclaw_update_telegram_channel_settings",
+        RouteMode::LocalOnly,
+    ),
     ("thinclaw_write_agent_workspace_file", RouteMode::LocalOnly),
     ("toggle_spotlight", RouteMode::LocalOnly),
     ("update_mcp_sandbox_settings", RouteMode::LocalOnly),
@@ -454,6 +462,10 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_channel_config_schema", RouteMode::LocalAndRemote),
     ("thinclaw_channel_config_schemas", RouteMode::LocalAndRemote),
     ("thinclaw_channel_config_submit", RouteMode::LocalAndRemote),
+    (
+        "thinclaw_channel_settings_snapshot",
+        RouteMode::LocalAndRemote,
+    ),
     ("thinclaw_channel_status_list", RouteMode::LocalAndRemote),
     ("thinclaw_channels_list", RouteMode::LocalAndRemote),
     ("thinclaw_clawhub_install", RouteMode::LocalAndRemote),

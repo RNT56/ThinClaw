@@ -1238,29 +1238,19 @@ pub async fn thinclaw_toggle_local_inference(
 #[specta::specta]
 pub async fn thinclaw_save_slack_config(
     state: State<'_, ThinClawManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     config_input: SlackConfigInput,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    let cfg = state.get_config().await.ok_or("Config not initialized")?;
-
-    let existing_thinclaw_engine = cfg.load_config().ok();
-    let local_llm = existing_thinclaw_engine
-        .as_ref()
-        .and_then(|m| m.get_local_llm_config());
-    let mut thinclaw_engine = existing_thinclaw_engine
-        .unwrap_or_else(|| cfg.generate_config(None, None, local_llm.clone()));
-
-    thinclaw_engine.channels.slack = SlackConfig {
-        enabled: config_input.enabled,
-        bot_token: config_input.bot_token,
-        app_token: config_input.app_token,
-        ..Default::default()
-    };
-
-    cfg.write_config(&thinclaw_engine, local_llm)
-        .map_err(|e| e.to_string())?;
-    info!("Saved Slack config, enabled: {}", config_input.enabled);
-
-    Ok(())
+    super::channel_settings::legacy_save_slack(
+        &state,
+        &secret_store,
+        &ironclaw,
+        config_input.enabled,
+        config_input.bot_token,
+        config_input.app_token,
+    )
+    .await
 }
 
 /// Save Telegram configuration
@@ -1268,37 +1258,20 @@ pub async fn thinclaw_save_slack_config(
 #[specta::specta]
 pub async fn thinclaw_save_telegram_config(
     state: State<'_, ThinClawManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
     config_input: TelegramConfigInput,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    let cfg = state.get_config().await.ok_or("Config not initialized")?;
-
-    let existing_thinclaw_engine = cfg.load_config().ok();
-    let local_llm = existing_thinclaw_engine
-        .as_ref()
-        .and_then(|m| m.get_local_llm_config());
-    let mut thinclaw_engine = existing_thinclaw_engine
-        .unwrap_or_else(|| cfg.generate_config(None, None, local_llm.clone()));
-
-    thinclaw_engine.channels.telegram = TelegramConfig {
-        enabled: config_input.enabled,
-        bot_token: config_input.bot_token,
-        dm_policy: config_input.dm_policy,
-        groups: if config_input.groups_enabled {
-            TelegramGroupsConfig::default()
-        } else {
-            TelegramGroupsConfig {
-                wildcard: TelegramGroupConfig {
-                    require_mention: true,
-                },
-            }
-        },
-    };
-
-    cfg.write_config(&thinclaw_engine, local_llm)
-        .map_err(|e| e.to_string())?;
-    info!("Saved Telegram config, enabled: {}", config_input.enabled);
-
-    Ok(())
+    super::channel_settings::legacy_save_telegram(
+        &state,
+        &secret_store,
+        &ironclaw,
+        config_input.enabled,
+        config_input.bot_token,
+        config_input.dm_policy,
+        config_input.groups_enabled,
+    )
+    .await
 }
 
 /// Save Gateway configuration

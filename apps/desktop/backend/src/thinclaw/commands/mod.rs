@@ -22,6 +22,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use super::config::ThinClawConfig;
 
+mod channel_settings;
 mod gateway;
 mod keys;
 mod remote_provider_config;
@@ -47,6 +48,7 @@ mod skill_repo;
 pub mod types;
 
 // Re-export all public command functions
+pub use channel_settings::*;
 pub use gateway::*;
 pub use keys::*;
 pub use rpc_channel_config::*;
@@ -87,6 +89,9 @@ pub struct ThinClawManager {
     pub(crate) gateway_switch_lock: Mutex<()>,
     /// Non-blocking renderer-visible transition status.
     pub(crate) gateway_transition: RwLock<GatewayTransitionRuntime>,
+    /// Serializes the read/compare/mutate/rollback channel-settings
+    /// transaction across renderer windows and the preserve-safe legacy API.
+    pub(crate) channel_settings_lock: Mutex<()>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -104,6 +109,7 @@ impl ThinClawManager {
             deploy_lock: Mutex::new(()),
             gateway_switch_lock: Mutex::new(()),
             gateway_transition: RwLock::new(GatewayTransitionRuntime::default()),
+            channel_settings_lock: Mutex::new(()),
         }
     }
 

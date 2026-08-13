@@ -16,11 +16,15 @@ pub struct WasmChannelHostConfig {
     pub tunnel_url: Option<String>,
     pub telegram_tunnel_url: Option<String>,
     pub telegram_owner_id: Option<i64>,
+    pub telegram_dm_policy: String,
+    pub telegram_groups_enabled: bool,
     pub telegram_stream_mode: Option<String>,
     pub telegram_transport_mode: String,
     pub telegram_host_webhook_capable: bool,
     pub telegram_host_transport_reason: Option<String>,
     pub discord_stream_mode: Option<String>,
+    pub slack_dm_policy: String,
+    pub slack_allow_from: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,9 +146,13 @@ impl WasmChannelHostConfig {
     pub fn from_runtime_inputs(
         tunnel_url: Option<String>,
         telegram_owner_id: Option<i64>,
+        telegram_dm_policy: String,
+        telegram_groups_enabled: bool,
         telegram_stream_mode: Option<String>,
         telegram_transport_mode: String,
         discord_stream_mode: Option<String>,
+        slack_dm_policy: String,
+        slack_allow_from: Vec<String>,
         tailscale_serve_tailnet_only: bool,
     ) -> Self {
         let host_status =
@@ -160,11 +168,15 @@ impl WasmChannelHostConfig {
             tunnel_url,
             telegram_tunnel_url,
             telegram_owner_id,
+            telegram_dm_policy,
+            telegram_groups_enabled,
             telegram_stream_mode,
             telegram_transport_mode,
             telegram_host_webhook_capable: host_webhook_capable,
             telegram_host_transport_reason: host_status.reason,
             discord_stream_mode,
+            slack_dm_policy,
+            slack_allow_from,
         }
     }
 
@@ -254,6 +266,14 @@ impl WasmChannelHostConfig {
                 if let Some(owner_id) = self.telegram_owner_id {
                     updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
                 }
+                updates.insert(
+                    "dm_policy".to_string(),
+                    serde_json::Value::String(self.telegram_dm_policy.clone()),
+                );
+                updates.insert(
+                    "groups_enabled".to_string(),
+                    serde_json::Value::Bool(self.telegram_groups_enabled),
+                );
 
                 if let Some(ref stream_mode) = self.telegram_stream_mode
                     && !stream_mode.is_empty()
@@ -261,6 +281,22 @@ impl WasmChannelHostConfig {
                     updates.insert(
                         "stream_mode".to_string(),
                         serde_json::Value::String(stream_mode.clone()),
+                    );
+                }
+            }
+            "slack" => {
+                updates.insert(
+                    "dm_policy".to_string(),
+                    serde_json::Value::String(self.slack_dm_policy.clone()),
+                );
+                updates.insert(
+                    "allow_from".to_string(),
+                    serde_json::json!(self.slack_allow_from.clone()),
+                );
+                if let Some(ref tunnel_url) = self.tunnel_url {
+                    updates.insert(
+                        "tunnel_url".to_string(),
+                        serde_json::Value::String(tunnel_url.clone()),
                     );
                 }
             }
@@ -395,11 +431,15 @@ mod tests {
             tunnel_url: Some("https://agent.example.com".to_string()),
             telegram_tunnel_url: Some("https://agent.example.com".to_string()),
             telegram_owner_id: Some(684480568),
+            telegram_dm_policy: "allowlist".to_string(),
+            telegram_groups_enabled: false,
             telegram_stream_mode: Some("streaming".to_string()),
             telegram_transport_mode: "auto".to_string(),
             telegram_host_webhook_capable: true,
             telegram_host_transport_reason: None,
             discord_stream_mode: Some("chunks".to_string()),
+            slack_dm_policy: "pairing".to_string(),
+            slack_allow_from: Vec::new(),
         };
 
         let updates = config.updates_for_channel("telegram", Some("secret-123"));
@@ -435,6 +475,14 @@ mod tests {
             Some("auto")
         );
         assert_eq!(
+            updates.get("dm_policy"),
+            Some(&serde_json::json!("allowlist"))
+        );
+        assert_eq!(
+            updates.get("groups_enabled"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
             updates
                 .get("host_webhook_capable")
                 .and_then(|value| value.as_bool()),
@@ -448,11 +496,15 @@ mod tests {
             tunnel_url: Some("https://agent.example.com".to_string()),
             telegram_tunnel_url: Some("https://agent.example.com".to_string()),
             telegram_owner_id: Some(42),
+            telegram_dm_policy: "pairing".to_string(),
+            telegram_groups_enabled: true,
             telegram_stream_mode: Some("streaming".to_string()),
             telegram_transport_mode: "auto".to_string(),
             telegram_host_webhook_capable: true,
             telegram_host_transport_reason: None,
             discord_stream_mode: Some("chunks".to_string()),
+            slack_dm_policy: "pairing".to_string(),
+            slack_allow_from: Vec::new(),
         };
 
         let updates = config.updates_for_channel("discord", None);
@@ -536,21 +588,25 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_channels_only_get_shared_runtime_values() {
+    fn slack_gets_shared_and_admission_runtime_values() {
         let config = WasmChannelHostConfig {
             tunnel_url: Some("https://agent.example.com".to_string()),
             telegram_tunnel_url: Some("https://agent.example.com".to_string()),
             telegram_owner_id: Some(42),
+            telegram_dm_policy: "pairing".to_string(),
+            telegram_groups_enabled: true,
             telegram_stream_mode: Some("streaming".to_string()),
             telegram_transport_mode: "auto".to_string(),
             telegram_host_webhook_capable: true,
             telegram_host_transport_reason: None,
             discord_stream_mode: Some("chunks".to_string()),
+            slack_dm_policy: "allowlist".to_string(),
+            slack_allow_from: vec!["C123".to_string()],
         };
 
         let updates = config.updates_for_channel("slack", Some("secret-123"));
 
-        assert_eq!(updates.len(), 2);
+        assert_eq!(updates.len(), 4);
         assert_eq!(
             updates.get("tunnel_url").and_then(|value| value.as_str()),
             Some("https://agent.example.com")
@@ -563,6 +619,14 @@ mod tests {
         );
         assert!(!updates.contains_key("owner_id"));
         assert!(!updates.contains_key("stream_mode"));
+        assert_eq!(
+            updates.get("dm_policy"),
+            Some(&serde_json::json!("allowlist"))
+        );
+        assert_eq!(
+            updates.get("allow_from"),
+            Some(&serde_json::json!(["C123"]))
+        );
     }
 
     #[test]
@@ -571,11 +635,15 @@ mod tests {
             tunnel_url: Some("https://agent.example.com".to_string()),
             telegram_tunnel_url: None,
             telegram_owner_id: None,
+            telegram_dm_policy: "pairing".to_string(),
+            telegram_groups_enabled: true,
             telegram_stream_mode: None,
             telegram_transport_mode: "polling".to_string(),
             telegram_host_webhook_capable: true,
             telegram_host_transport_reason: None,
             discord_stream_mode: None,
+            slack_dm_policy: "pairing".to_string(),
+            slack_allow_from: Vec::new(),
         };
 
         let updates = config.updates_for_channel("telegram", None);
@@ -601,11 +669,15 @@ mod tests {
             tunnel_url: Some("https://agent.example.com".to_string()),
             telegram_tunnel_url: Some("https://agent.example.com".to_string()),
             telegram_owner_id: None,
+            telegram_dm_policy: "pairing".to_string(),
+            telegram_groups_enabled: true,
             telegram_stream_mode: None,
             telegram_transport_mode: "auto".to_string(),
             telegram_host_webhook_capable: true,
             telegram_host_transport_reason: None,
             discord_stream_mode: None,
+            slack_dm_policy: "pairing".to_string(),
+            slack_allow_from: Vec::new(),
         };
 
         let updates = config.updates_for_channel("telegram", None);

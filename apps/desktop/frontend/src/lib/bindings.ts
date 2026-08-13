@@ -2819,6 +2819,30 @@ async thinclawChannelConfigSubmit(channelId: string, values: JsonValue) : Promis
     else return { status: "error", error: e  as any };
 }
 },
+async thinclawChannelSettingsSnapshot() : Promise<Result<ChannelSettingsSnapshot, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_channel_settings_snapshot") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawUpdateSlackChannelSettings(update: SlackChannelSettingsUpdate) : Promise<Result<ChannelSettingsMutationResponse, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_update_slack_channel_settings", { update }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async thinclawUpdateTelegramChannelSettings(update: TelegramChannelSettingsUpdate) : Promise<Result<ChannelSettingsMutationResponse, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_update_telegram_channel_settings", { update }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Set the default agent profile.
  */
@@ -3866,6 +3890,9 @@ export type BridgeError =
  * Response cache statistics
  */
 export type CacheStats = { hits: number; misses: number; evictions: number; size_bytes: number; hit_rate: number }
+export type ChannelSecretMutation = { action: "preserve" } | { action: "replace"; value: string } | { action: "clear" }
+export type ChannelSettingsMutationResponse = { snapshot: ChannelSettingsSnapshot; persisted: boolean; applied: boolean; restart_required: boolean; note: string }
+export type ChannelSettingsSnapshot = { available: boolean; editable: boolean; source: string; revision: string; reason: string | null; slack: SlackChannelSettingsSnapshot; telegram: TelegramChannelSettingsSnapshot }
 /**
  * Per-channel status entry with live state
  */
@@ -4467,6 +4494,8 @@ export type SidecarStatus = { chat_running: boolean; embedding_running: boolean;
 /**
  * Slack configuration input
  */
+export type SlackChannelSettingsSnapshot = { enabled: boolean; dm_policy: string; bot_token_configured: boolean; bot_token_migration_required: boolean; app_token_configured: boolean; app_token_migration_required: boolean; signing_secret_configured: boolean; active: boolean; status: string }
+export type SlackChannelSettingsUpdate = { expected_revision: string; enabled: boolean | null; dm_policy: string | null; bot_token: ChannelSecretMutation; app_token: ChannelSecretMutation; signing_secret: ChannelSecretMutation }
 export type SlackConfigInput = { enabled: boolean; bot_token: string | null; app_token: string | null }
 /**
  * Response from spawning a sub-agent session.
@@ -4536,6 +4565,8 @@ export type TAURI_CHANNEL<TSend> = import("@tauri-apps/api/core").Channel<TSend>
 /**
  * Telegram configuration input
  */
+export type TelegramChannelSettingsSnapshot = { enabled: boolean; dm_policy: string; groups_enabled: boolean; require_mention: boolean; bot_token_configured: boolean; bot_token_migration_required: boolean; active: boolean; status: string }
+export type TelegramChannelSettingsUpdate = { expected_revision: string; enabled: boolean | null; dm_policy: string | null; groups_enabled: boolean | null; bot_token: ChannelSecretMutation }
 export type TelegramConfigInput = { enabled: boolean; bot_token: string | null; dm_policy: string; groups_enabled: boolean }
 /**
  * Diagnostic info

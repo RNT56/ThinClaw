@@ -306,6 +306,8 @@ const BOT_USERNAME_PATH: &str = "state/bot_username";
 
 /// Workspace path for persisting respond_to_all_group_messages flag.
 const RESPOND_TO_ALL_GROUP_PATH: &str = "state/respond_to_all_group_messages";
+/// Workspace path for the explicit all-groups admission switch.
+const GROUPS_ENABLED_PATH: &str = "state/groups_enabled";
 
 /// Workspace path for the configured subagent session mode.
 const SUBAGENT_SESSION_MODE_PATH: &str = "state/subagent_session_mode";
@@ -443,6 +445,12 @@ struct TelegramConfig {
     #[serde(default)]
     respond_to_all_group_messages: bool,
 
+    /// Whether group and supergroup messages are accepted at all. This
+    /// defaults to true so configurations written before the switch retain
+    /// their previous behavior.
+    #[serde(default = "default_true")]
+    groups_enabled: bool,
+
     /// Public tunnel URL for webhook mode (injected by host from global settings).
     /// When set and transport_preference allows it, webhook mode is enabled.
     #[serde(default)]
@@ -486,6 +494,10 @@ struct TelegramConfig {
         alias = "channels.telegram_subagent_session_mode"
     )]
     subagent_session_mode: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -688,6 +700,8 @@ impl Guest for TelegramChannel {
             RESPOND_TO_ALL_GROUP_PATH,
             &config.respond_to_all_group_messages.to_string(),
         );
+        let _ =
+            channel_host::workspace_write(GROUPS_ENABLED_PATH, &config.groups_enabled.to_string());
 
         let configured_subagent_mode = config
             .subagent_session_mode

@@ -19,6 +19,15 @@ use super::AuthRequestContext;
 use super::ExtensionManager;
 use super::core::{PendingAuth, lock_wasm_package};
 
+fn operator_enabled_value(value: &serde_json::Value) -> Option<bool> {
+    value.as_bool().or_else(|| {
+        value
+            .as_str()
+            .map(str::trim)
+            .map(|raw| matches!(raw.to_ascii_lowercase().as_str(), "true" | "1"))
+    })
+}
+
 impl ExtensionManager {
     pub(super) async fn check_wasm_tool_auth_status(
         &self,
@@ -548,6 +557,26 @@ impl ExtensionManager {
         name: &str,
     ) -> Result<ActivateResult, ExtensionError> {
         let _operation = self.wasm_operation_lock.lock().await;
+        if let Some(setting_key) = match name {
+            "slack" => Some("channels.slack_enabled"),
+            "telegram" => Some("channels.telegram_enabled"),
+            _ => None,
+        } && let Some(store) = self.store.as_ref()
+        {
+            match store.get_setting(&self.user_id, setting_key).await {
+                Ok(Some(value)) if operator_enabled_value(&value) == Some(false) => {
+                    return Err(ExtensionError::ActivationFailed(format!(
+                        "Channel '{name}' is disabled by the operator settings"
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(ExtensionError::ActivationFailed(format!(
+                        "Could not verify operator enablement for channel '{name}': {error}"
+                    )));
+                }
+            }
+        }
         // Verify runtime infrastructure is available and clone Arcs so we don't
         // hold the RwLock guard across awaits.
         let (channel_runtime, channel_manager, pairing_store, wasm_channel_router, host_config) = {
@@ -676,5 +705,53 @@ impl ExtensionManager {
             tools_loaded: Vec::new(),
             message: format!("Channel '{}' activated and running", name),
         })
+    }
+
+    /// Stop a WASM channel without deleting its installed package. This keeps
+    /// the channel manager, webhook router, and persisted activation index in
+    /// sync when an operator disables a channel through another settings UI.
+    pub async fn deactivate_wasm_channel(&self, name: &str) -> Result<bool, ExtensionError> {
+        Self::validate_extension_name(name)?;
+        let _operation = self.wasm_operation_lock.lock().await;
+        let runtime = self.channel_runtime.read().await.as_ref().map(|runtime| {
+            (
+                Arc::clone(&runtime.channel_manager),
+                Arc::clone(&runtime.wasm_channel_router),
+            )
+        });
+        if let Some((channel_manager, router)) = runtime {
+            channel_manager
+                .hot_remove(name)
+                .await
+                .map_err(|error| ExtensionError::ActivationFailed(error.to_string()))?;
+            router.unregister(name).await;
+        }
+        let removed = self.active_channel_names.write().await.remove(name);
+        self.activation_errors.write().await.remove(name);
+        self.persist_active_channels().await;
+        Ok(removed)
+    }
+}
+
+#[cfg(test)]
+mod operator_enablement_tests {
+    #[test]
+    fn operator_channel_flags_accept_legacy_boolean_encodings() {
+        assert_eq!(
+            super::operator_enabled_value(&serde_json::json!(false)),
+            Some(false)
+        );
+        assert_eq!(
+            super::operator_enabled_value(&serde_json::json!("0")),
+            Some(false)
+        );
+        assert_eq!(
+            super::operator_enabled_value(&serde_json::json!("TRUE")),
+            Some(true)
+        );
+        assert_eq!(
+            super::operator_enabled_value(&serde_json::Value::Null),
+            None
+        );
     }
 }

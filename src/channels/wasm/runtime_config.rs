@@ -30,9 +30,13 @@ impl WasmChannelHostConfig {
         Self::from_core(CoreWasmChannelHostConfig::from_runtime_inputs(
             config.tunnel.public_url.clone(),
             config.channels.telegram_owner_id,
+            config.channels.telegram_dm_policy.clone(),
+            config.channels.telegram_groups_enabled,
             config.channels.telegram_stream_mode.clone(),
             config.channels.telegram_transport_mode.clone(),
             config.channels.discord_stream_mode.clone(),
+            config.channels.slack_dm_policy.clone(),
+            config.channels.slack_allow_from.clone(),
             tailscale_serve_tailnet_only(config.tunnel.provider.as_ref()),
         ))
     }
@@ -104,9 +108,13 @@ mod tests {
         settings.tunnel.provider = Some("tailscale".to_string());
         settings.tunnel.ts_funnel = false;
         settings.channels.telegram_owner_id = Some(684480568);
+        settings.channels.telegram_dm_policy = Some("allowlist".to_string());
+        settings.channels.telegram_groups_enabled = false;
         settings.channels.telegram_stream_mode = Some("streaming".to_string());
         settings.channels.telegram_transport_mode = "auto".to_string();
         settings.channels.discord_stream_mode = Some("chunks".to_string());
+        settings.channels.slack_dm_policy = Some("open".to_string());
+        settings.channels.slack_allow_from = Some("C1,C2".to_string());
 
         let config = crate::config::Config::from_test_settings(&settings)
             .await
@@ -116,9 +124,13 @@ mod tests {
         let core = thinclaw_channels::wasm::WasmChannelHostConfig::from_runtime_inputs(
             Some("https://agent.ts.net".to_string()),
             Some(684480568),
+            "allowlist".to_string(),
+            false,
             Some("streaming".to_string()),
             "auto".to_string(),
             Some("chunks".to_string()),
+            "open".to_string(),
+            vec!["C1".to_string(), "C2".to_string()],
             true,
         );
 

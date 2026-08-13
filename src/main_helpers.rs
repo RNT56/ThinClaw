@@ -384,6 +384,15 @@ pub(crate) async fn setup_wasm_channels(
 
     for loaded in results.loaded {
         let channel_name = loaded.name().to_string();
+        let operator_enabled = match channel_name.as_str() {
+            "slack" => config.channels.slack_enabled,
+            "telegram" => config.channels.telegram_enabled,
+            _ => true,
+        };
+        if !operator_enabled {
+            tracing::info!(channel = %channel_name, "Skipping operator-disabled WASM channel");
+            continue;
+        }
         tracing::info!("Loaded WASM channel: {}", channel_name);
 
         let signature_secret_name = loaded.webhook_secret_name();

@@ -431,11 +431,13 @@ impl ThinClawConfig {
             channels: ChannelsConfig {
                 slack: slack.unwrap_or_default(),
                 telegram: telegram.unwrap_or_default(),
+                extra: serde_json::Map::new(),
             },
             meta: MetaConfig {
                 last_touched_version: THINCLAW_VERSION.into(),
                 last_touched_at: chrono::Utc::now().to_rfc3339(),
             },
+            extra: serde_json::Map::new(),
         }
     }
 

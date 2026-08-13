@@ -564,6 +564,10 @@ pub struct SlackConfig {
     pub dm_policy: String,
     /// Must be an object, not null
     pub channels: serde_json::Value,
+    /// Preserve fields written by newer/older engine builds when Desktop only
+    /// patches the settings it owns.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl std::fmt::Debug for SlackConfig {
@@ -601,6 +605,7 @@ impl Default for SlackConfig {
             app_token: None,
             dm_policy: "pairing".into(),
             channels: serde_json::json!({}),
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -615,6 +620,10 @@ pub struct TelegramConfig {
     pub dm_policy: String,
     #[serde(default)]
     pub groups: TelegramGroupsConfig,
+    /// Preserve fields written by newer/older engine builds when Desktop only
+    /// patches the settings it owns.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl std::fmt::Debug for TelegramConfig {
@@ -639,26 +648,73 @@ impl Default for TelegramConfig {
             bot_token: None,
             dm_policy: "pairing".into(),
             groups: TelegramGroupsConfig::default(),
+            extra: serde_json::Map::new(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramGroupsConfig {
-    #[serde(rename = "*", default)]
-    pub wildcard: TelegramGroupConfig,
+    /// A wildcard entry enables group delivery. An empty object disables it.
+    /// The enclosing `groups` field defaults to an enabled wildcard for old
+    /// configs that omit it. An explicitly present empty object remains
+    /// disabled across serialization round-trips.
+    #[serde(rename = "*", default, skip_serializing_if = "Option::is_none")]
+    pub wildcard: Option<TelegramGroupConfig>,
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramGroupConfig {
     #[serde(rename = "requireMention")]
     pub require_mention: bool,
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Default for TelegramGroupConfig {
     fn default() -> Self {
         Self {
             require_mention: true,
+            extra: serde_json::Map::new(),
+        }
+    }
+}
+
+fn default_telegram_wildcard() -> Option<TelegramGroupConfig> {
+    Some(TelegramGroupConfig::default())
+}
+
+impl Default for TelegramGroupsConfig {
+    fn default() -> Self {
+        Self {
+            wildcard: default_telegram_wildcard(),
+            extra: serde_json::Map::new(),
+        }
+    }
+}
+
+impl TelegramGroupsConfig {
+    pub fn enabled(&self) -> bool {
+        self.wildcard.is_some()
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        if enabled {
+            if self.wildcard.is_none() {
+                self.wildcard = self
+                    .extra
+                    .remove("_disabledWildcard")
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .or_else(|| Some(TelegramGroupConfig::default()));
+            }
+        } else {
+            if let Some(wildcard) = self.wildcard.take() {
+                if let Ok(value) = serde_json::to_value(wildcard) {
+                    self.extra.insert("_disabledWildcard".to_string(), value);
+                }
+            }
         }
     }
 }
@@ -673,6 +729,9 @@ pub struct ThinClawEngineConfig {
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub meta: MetaConfig,
+    /// Preserve top-level fields owned by a different engine version.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl std::fmt::Debug for ThinClawEngineConfig {
@@ -900,8 +959,10 @@ mod debug_redaction_tests {
                     bot_token: Some("telegram-secret".into()),
                     ..TelegramConfig::default()
                 },
+                extra: serde_json::Map::new(),
             },
             meta: MetaConfig::default(),
+            extra: serde_json::Map::new(),
         };
         let engine_debug = format!("{engine:?}");
         for secret in [
@@ -926,8 +987,22 @@ pub struct MdnsConfig {
     pub mode: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelsConfig {
     pub slack: SlackConfig,
     pub telegram: TelegramConfig,
+    /// Preserve channel definitions unknown to this Desktop build.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl std::fmt::Debug for ChannelsConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChannelsConfig")
+            .field("slack", &self.slack)
+            .field("telegram", &self.telegram)
+            .field("additional_channel_count", &self.extra.len())
+            .finish()
+    }
 }

@@ -35,7 +35,11 @@ pub struct ChannelsConfig {
     #[cfg(not(feature = "nostr"))]
     pub nostr: Option<()>,
     pub telegram: Option<TelegramConfig>,
+    /// Operator intent independent of whether credentials resolved at startup.
+    pub telegram_enabled: bool,
     pub slack: Option<SlackChannelConfig>,
+    /// Operator intent independent of whether credentials resolved at startup.
+    pub slack_enabled: bool,
     pub discord: Option<DiscordChannelConfig>,
     pub gmail: Option<GmailChannelConfig>,
     #[cfg(target_os = "macos")]
@@ -50,6 +54,10 @@ pub struct ChannelsConfig {
     pub wasm_channels_enabled: bool,
     /// Telegram owner user ID. When set, the bot only responds to this user.
     pub telegram_owner_id: Option<i64>,
+    /// Telegram direct-message policy injected into the WASM channel.
+    pub telegram_dm_policy: String,
+    /// Whether Telegram group messages are accepted at all.
+    pub telegram_groups_enabled: bool,
     /// Telegram stream mode fallback for Wasm Channel.
     pub telegram_stream_mode: Option<String>,
     /// Telegram transport mode fallback for Wasm Channel.
@@ -58,6 +66,10 @@ pub struct ChannelsConfig {
     pub telegram_subagent_session_mode: String,
     /// Discord stream mode fallback for Wasm Channel.
     pub discord_stream_mode: Option<String>,
+    /// Slack direct-message policy injected into the WASM channel.
+    pub slack_dm_policy: String,
+    /// Slack sender/channel allowlist injected into the WASM channel.
+    pub slack_allow_from: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -315,6 +327,16 @@ impl ChannelsConfig {
             "BROWSER_PUSH_ENABLED",
             settings.channels.browser_push_enabled,
         )?;
+        let telegram = Self::resolve_telegram(settings)?;
+        let telegram_enabled = parse_bool_env(
+            "TELEGRAM_ENABLED",
+            settings.channels.telegram_enabled || telegram.is_some(),
+        )?;
+        let slack = Self::resolve_slack(settings)?;
+        let slack_enabled = parse_bool_env(
+            "SLACK_ENABLED",
+            settings.channels.slack_enabled || slack.is_some(),
+        )?;
 
         Ok(Self {
             cli: CliConfig {
@@ -346,6 +368,13 @@ impl ChannelsConfig {
                     message: format!("must be an integer: {e}"),
                 })?
                 .or(settings.channels.telegram_owner_id),
+            telegram_dm_policy: optional_env("TELEGRAM_DM_POLICY")?
+                .or(settings.channels.telegram_dm_policy.clone())
+                .unwrap_or_else(|| "pairing".to_string()),
+            telegram_groups_enabled: parse_bool_env(
+                "TELEGRAM_GROUPS_ENABLED",
+                settings.channels.telegram_groups_enabled,
+            )?,
             telegram_stream_mode: optional_env("TELEGRAM_STREAM_MODE")?
                 .or(settings.channels.telegram_stream_mode.clone()),
             telegram_transport_mode: normalize_telegram_transport_mode(
@@ -358,8 +387,17 @@ impl ChannelsConfig {
             ),
             discord_stream_mode: optional_env("DISCORD_STREAM_MODE")?
                 .or(settings.channels.discord_stream_mode.clone()),
-            telegram: Self::resolve_telegram(settings)?,
-            slack: Self::resolve_slack(settings)?,
+            slack_dm_policy: optional_env("SLACK_DM_POLICY")?
+                .or(settings.channels.slack_dm_policy.clone())
+                .unwrap_or_else(|| "pairing".to_string()),
+            slack_allow_from: optional_env("SLACK_ALLOW_FROM")?
+                .or(settings.channels.slack_allow_from.clone())
+                .map(|raw| split_channel_list(&raw))
+                .unwrap_or_default(),
+            telegram,
+            telegram_enabled,
+            slack,
+            slack_enabled,
             discord: Self::resolve_discord(settings)?,
             gmail: Self::resolve_gmail()?,
             #[cfg(target_os = "macos")]
@@ -445,7 +483,15 @@ impl ChannelsConfig {
     }
 
     fn resolve_telegram(settings: &Settings) -> Result<Option<TelegramConfig>, ConfigError> {
-        let bot_token = match optional_env("TELEGRAM_BOT_TOKEN")? {
+        let configured_token = optional_env("TELEGRAM_BOT_TOKEN")?;
+        let enabled = parse_bool_env(
+            "TELEGRAM_ENABLED",
+            settings.channels.telegram_enabled || configured_token.is_some(),
+        )?;
+        if !enabled {
+            return Ok(None);
+        }
+        let bot_token = match configured_token {
             Some(t) => SecretString::from(t),
             None => return Ok(None),
         };

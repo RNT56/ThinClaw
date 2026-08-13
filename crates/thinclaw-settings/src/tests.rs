@@ -72,6 +72,39 @@ fn test_db_map_round_trip() {
 }
 
 #[test]
+fn channel_center_settings_round_trip_through_flat_database_keys() {
+    let mut settings = Settings::default();
+    settings.channels.slack_enabled = true;
+    settings.channels.slack_dm_policy = Some("allowlist".to_string());
+    settings.channels.telegram_enabled = true;
+    settings.channels.telegram_dm_policy = Some("open".to_string());
+    settings.channels.telegram_groups_enabled = false;
+
+    let map = settings.to_db_map();
+    assert_eq!(
+        map.get("channels.slack_enabled"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(
+        map.get("channels.telegram_groups_enabled"),
+        Some(&serde_json::json!(false))
+    );
+
+    let restored = Settings::from_db_map(&map);
+    assert!(restored.channels.slack_enabled);
+    assert_eq!(
+        restored.channels.slack_dm_policy.as_deref(),
+        Some("allowlist")
+    );
+    assert!(restored.channels.telegram_enabled);
+    assert_eq!(
+        restored.channels.telegram_dm_policy.as_deref(),
+        Some("open")
+    );
+    assert!(!restored.channels.telegram_groups_enabled);
+}
+
+#[test]
 fn test_get_setting() {
     let settings = Settings::default();
 

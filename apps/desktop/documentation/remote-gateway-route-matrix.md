@@ -236,7 +236,9 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_trigger_bootstrap` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_update_custom_secret` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_update_run` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_update_slack_channel_settings` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_update_sub_agent_status` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
+| `thinclaw_update_telegram_channel_settings` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `thinclaw_write_agent_workspace_file` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `toggle_spotlight` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `update_mcp_sandbox_settings` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
@@ -269,6 +271,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_channel_config_schema` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_channel_config_schemas` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_channel_config_submit` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
+| `thinclaw_channel_settings_snapshot` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_channel_status_list` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_channels_list` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_clawhub_install` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
