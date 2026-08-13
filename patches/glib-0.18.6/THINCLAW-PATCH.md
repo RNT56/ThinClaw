@@ -9,3 +9,8 @@ The source change passes the C out-argument as `&mut p`, closing
 RUSTSEC-2024-0429 / GHSA-wrw7-89jp-8q8g while ThinClaw remains on Tauri's
 GTK3-compatible glib 0.18 line. Remove this patch once Tauri moves its Linux
 stack to glib 0.20 or newer.
+
+The canonical owner, crates.io base checksum/revision, reproducible fork
+fingerprint, review date, security procedure, and executable removal gate live
+in `../manifest.json` and are enforced by
+`scripts/ci/check-vendored-patches.py`.

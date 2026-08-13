@@ -12,3 +12,16 @@ close could surface later as nondeterministic `SQLITE_MISUSE` query failures.
 
 ThinClaw removes the redundant wrapper close, makes explicit disconnects
 idempotent, and tests both repeated disconnects and cloned-handle lifetime.
+
+The upstream defect is tracked by
+[`tursodatabase/libsql#2251`](https://github.com/tursodatabase/libsql/issues/2251)
+and proposed fix
+[`#2261`](https://github.com/tursodatabase/libsql/pull/2261). The local patch
+also tolerates another linked SQLite client having initialized a thread-safe
+runtime first; that compatibility hunk must be reviewed independently of the
+double-close fix.
+
+The canonical owner, crates.io base checksum/revision, reproducible fork
+fingerprint, review date, security procedure, and full removal gate live in
+`../manifest.json` and are enforced by
+`scripts/ci/check-vendored-patches.py`.

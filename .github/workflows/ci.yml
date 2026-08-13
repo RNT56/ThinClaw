@@ -53,6 +53,8 @@ jobs:
         run: python3 scripts/ci/check-process-launches.py
       - name: Check desktop runtime-builder topology and secret boundary
         run: python3 scripts/ci/check-desktop-runtime-builder.py
+      - name: Check vendored Cargo patch ownership and review dates
+        run: python3 scripts/ci/check-vendored-patches.py --verify-upstream
       - name: Check tracked files for committed credentials
         run: python3 scripts/hooks/pre_commit.py --all-tracked --secret-scan-only
       - name: Test opt-in developer hook logic

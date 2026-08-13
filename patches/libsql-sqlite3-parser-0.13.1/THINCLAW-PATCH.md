@@ -8,3 +8,8 @@ The one-line change replaces `str::from_utf8_unchecked` with
 `String::from_utf8_lossy`, closing CVE-2025-47736 / GHSA-8m95-fffc-h4c5.
 Remove this patch once libsql consumes an upstream parser release containing
 that commit.
+
+The canonical owner, crates.io base checksum/revision, reproducible fork
+fingerprint, review date, security procedure, and executable removal gate live
+in `../manifest.json` and are enforced by
+`scripts/ci/check-vendored-patches.py`.

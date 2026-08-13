@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "review_cadence": "Every 45 days and immediately after a matching RustSec advisory or upstream release",
+    "default_owner": "@RNT56",
+    "issue": "https://github.com/RNT56/ThinClaw/issues/373"
+  },
+  "patches": [
+    {
+      "id": "libsql-0.6.0",
+      "package": "libsql",
+      "patched_version": "0.6.0",
+      "local_path": "patches/libsql-0.6.0",
+      "uses": [
+        {"manifest": "Cargo.toml", "package": "libsql"},
+        {"manifest": "apps/desktop/backend/Cargo.toml", "package": "libsql"}
+      ],
+      "owner": "@RNT56",
+      "base": {
+        "source": "crates.io",
+        "version": "0.6.0",
+        "revision": "e90e92b379e9ff9f0d78f718751ad150992dd703",
+        "checksum": "fe18646e4ef8db446bc3e3f5fb96131483203bc5f4998ff149f79a067530c01c"
+      },
+      "rationale": "Backport an idempotent local-connection close, remove the second Drop close, tolerate an already initialized thread-safe SQLite runtime, and retain compiler-compatibility lifetime fixes while ThinClaw remains on libsql 0.6.",
+      "upstream": [
+        {"kind": "issue", "status": "open", "url": "https://github.com/tursodatabase/libsql/issues/2251"},
+        {"kind": "pull-request", "status": "open", "url": "https://github.com/tursodatabase/libsql/pull/2261"}
+      ],
+      "removal_condition": "Move to a stable libsql release that contains the double-close fix and passes ThinClaw's libSQL, Turso-replica, SQLx coexistence, migration, and crash-recovery suites; re-evaluate the SQLite initialization compatibility hunk independently before removal.",
+      "security_update_process": "The owner reviews libsql, libsql-sys, libsql-ffi, parser, and bundled SQLite advisories together; any advisory triggers a clean rebase from the pinned crate, fork-diff regeneration, cargo-deny, libSQL contract tests, and Desktop/headless build checks.",
+      "review_on": "2026-09-15",
+      "diff_sha256": "8508b1cea3e754072dcf1f58421cc181254a4e0935aa425173c13d45718a6938",
+      "changed_paths": ["Cargo.toml", "Cargo.toml.orig", "src/local/connection.rs", "src/local/database.rs", "src/local/impls.rs", "src/local/statement.rs", "src/replication/client.rs", "src/replication/connection.rs", "src/statement.rs", "tests/integration_tests.rs", "tests/template.db", "tests/template.db-wal", "tests/test.db"]
+    },
+    {
+      "id": "libsql-sqlite3-parser-0.13.1",
+      "package": "libsql-sqlite3-parser",
+      "patched_version": "0.13.1",
+      "local_path": "patches/libsql-sqlite3-parser-0.13.1",
+      "uses": [
+        {"manifest": "Cargo.toml", "package": "libsql-sqlite3-parser"},
+        {"manifest": "apps/desktop/backend/Cargo.toml", "package": "libsql-sqlite3-parser"}
+      ],
+      "owner": "@RNT56",
+      "base": {
+        "source": "crates.io",
+        "version": "0.13.0",
+        "revision": "97652c12fe8bb215fe51b5370b46f27c0bc9d6e1",
+        "checksum": "15a90128c708356af8f7d767c9ac2946692c9112b4f74f07b99a01a60680e413"
+      },
+      "rationale": "Backport the upstream invalid-UTF-8 parser fix that removes undefined behavior and closes CVE-2025-47736 while libsql still resolves parser 0.13.",
+      "upstream": [
+        {"kind": "commit", "status": "merged", "url": "https://github.com/gwenn/lemon-rs/commit/14f422a0dc7da2a2a23dcb76235559a6cd9d1647"},
+        {"kind": "advisory", "status": "fixed-upstream", "url": "https://github.com/advisories/GHSA-8m95-fffc-h4c5"}
+      ],
+      "removal_condition": "Use a non-yanked libsql-sqlite3-parser release containing commit 14f422a0, consumed by ThinClaw's selected libsql release, then pass malformed-input parser and database contract tests without the path patch.",
+      "security_update_process": "The owner checks parser and bundled Lemon advisories with every libsql update; a new advisory requires updating this backport from its pinned base, regenerating the fork fingerprint, cargo-deny, and malformed-SQL regression tests.",
+      "review_on": "2026-09-15",
+      "diff_sha256": "ff88ad0b9e7e49b5f2ff49508f199ceeb9dea66324cbe91865223706369e9fb8",
+      "changed_paths": ["Cargo.toml", "Cargo.toml.orig", "README.md", "src/dialect/mod.rs", "src/parser/parse.y", "third_party/lemon/lemon.c"]
+    },
+    {
+      "id": "glib-0.18.6",
+      "package": "glib",
+      "patched_version": "0.18.6",
+      "local_path": "patches/glib-0.18.6",
+      "uses": [
+        {"manifest": "apps/desktop/backend/Cargo.toml", "package": "glib"}
+      ],
+      "owner": "@RNT56",
+      "base": {
+        "source": "crates.io",
+        "version": "0.18.5",
+        "revision": "42b9caf98e03ded086362d9653ca58fe94dc8658",
+        "checksum": "233daaf6e83ae6a12a52055f568f9d7cf4671dabb78ff9560ab6da230ce00ee5"
+      },
+      "rationale": "Backport gtk-rs' VariantStrIter mutable out-parameter fix for RUSTSEC-2024-0429 while Tauri's Linux GTK3 graph remains on glib 0.18.",
+      "upstream": [
+        {"kind": "pull-request", "status": "merged", "url": "https://github.com/gtk-rs/gtk-rs-core/pull/1343"},
+        {"kind": "commit", "status": "merged", "url": "https://github.com/gtk-rs/gtk-rs-core/commit/05dff0ee696f9bcd8617cd48c4b812d046d440cb"},
+        {"kind": "advisory", "status": "fixed-upstream", "url": "https://github.com/advisories/GHSA-wrw7-89jp-8q8g"}
+      ],
+      "removal_condition": "Remove when Tauri's supported Linux dependency graph no longer selects glib 0.18 and its replacement contains gtk-rs PR 1343; verify the x86_64 Linux Desktop build and WebKit/GTK smoke first.",
+      "security_update_process": "The owner reviews the complete Tauri/GTK/WebKit Linux graph on each Tauri update and RustSec alert; patch rebases require cargo-deny plus the pinned Linux Desktop build and sidecar smoke.",
+      "review_on": "2026-09-15",
+      "diff_sha256": "c059fad3d62dd32ad82883bb199adf886adfa91d172c96b2d90b1237b518e059",
+      "changed_paths": ["Cargo.toml", "Cargo.toml.orig", "LICENSE", "src/variant_iter.rs"]
+    },
+    {
+      "id": "glass-pumpkin-1.10.0",
+      "package": "glass_pumpkin",
+      "patched_version": "1.10.0",
+      "local_path": "tools-src/telegram/vendor/glass_pumpkin",
+      "uses": [
+        {"manifest": "tools-src/telegram/Cargo.toml", "package": "glass_pumpkin"}
+      ],
+      "owner": "@RNT56",
+      "base": {
+        "source": "crates.io",
+        "version": "1.10.0",
+        "revision": "8a8e056a9f3e7f13d4cec7af61dc3782b7f73e55",
+        "checksum": "f09b0eef9941bda7cc263c23c3977d437a9aa19abb6a58ed0234d145d9c024bc"
+      },
+      "rationale": "Mirror the source-equivalent, yanked 1.10.0 bridge required by grammers-crypto 0.8: unyanked 1.9 still requires yanked core2 0.4, while grammers 0.8 cannot select glass_pumpkin 2.0. No ThinClaw runtime source hunk is carried.",
+      "upstream": [
+        {"kind": "release", "status": "released", "url": "https://crates.io/crates/glass_pumpkin/1.10.0"},
+        {"kind": "release", "status": "released", "url": "https://crates.io/crates/grammers-crypto/0.10.0"},
+        {"kind": "source", "status": "fixed-upstream", "url": "https://codeberg.org/Lonami/grammers/src/tag/grammers-crypto-v0.10.0/lib/grammers-crypto/Cargo.toml"}
+      ],
+      "removal_condition": "Upgrade the Telegram user-mode tool's grammers family atomically to 0.10 or newer, which selects unyanked glass_pumpkin 2.x, and pass login, SRP 2FA, session persistence, transport, and deterministic WASM bundle tests.",
+      "security_update_process": "The owner treats the mirrored crate as source, not a frozen binary: review glass_pumpkin, core crypto, rand/getrandom, and grammers advisories together; re-download by checksum, require a zero fork diff, then rebuild the Telegram WASM bundle reproducibly.",
+      "review_on": "2026-09-15",
+      "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "changed_paths": []
+    }
+  ]
+}
