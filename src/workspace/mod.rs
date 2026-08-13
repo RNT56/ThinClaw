@@ -45,12 +45,9 @@ pub mod citations;
 mod document;
 mod embeddings;
 pub mod hygiene;
-pub mod lancedb;
-pub mod qmd;
 #[cfg(feature = "postgres")]
 mod repository;
 mod search;
-pub mod sqlite_vec;
 mod workspace_core;
 
 #[cfg(feature = "bedrock")]

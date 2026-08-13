@@ -68,6 +68,21 @@ This preserves rollout consistency and cache observability without making durabl
 
 When context compaction summarizes older turns (automatically or via `/compress`), the generated summary is folded into the post-compaction fragment under a `## Summary of Earlier Conversation` heading, so the model keeps the gist of the dropped turns instead of resuming with no memory of them. The fragment persists in the thread runtime and survives rehydration.
 
+## Workspace Storage Backends
+
+Runtime configuration exposes only workspace stores that implement the complete
+create/upsert/search/delete and persistence contract:
+
+- libSQL for local files and Turso replicas;
+- Postgres when ThinClaw is compiled with the `postgres` feature.
+
+The old sqlite-vec, LanceDB, and QMD modules contained configuration and query
+helpers but no runtime selection, client, persistence implementation, or
+`WorkspaceStore` binding. They were removed instead of being presented as
+partially available storage choices. A future backend must ship the shared
+contract, actionable startup validation, restart/dimension-mismatch tests, and
+real ranking/deletion integration coverage before its types are exported.
+
 ## External Memory Providers
 
 The external memory layer still supports active-provider recall/export flows, but it now also supports:

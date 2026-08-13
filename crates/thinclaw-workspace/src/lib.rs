@@ -6,12 +6,9 @@ pub mod citations;
 pub mod document;
 pub mod embeddings;
 pub mod hygiene;
-pub mod lancedb;
-pub mod qmd;
 #[cfg(feature = "postgres")]
 pub mod repository;
 pub mod search;
-pub mod sqlite_vec;
 pub mod store;
 pub mod workspace_core;
 
