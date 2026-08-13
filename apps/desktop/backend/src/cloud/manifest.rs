@@ -44,6 +44,9 @@ pub struct ArchiveManifest {
     pub encryption: EncryptionMeta,
     /// All files in the archive
     pub files: Vec<ManifestFile>,
+    /// Durable deletion markers used to distinguish delete/edit conflicts.
+    #[serde(default)]
+    pub tombstones: Vec<ManifestTombstone>,
     /// Summary statistics
     pub statistics: ArchiveStatistics,
 }
@@ -75,6 +78,44 @@ pub struct ManifestFile {
     /// File classification
     #[serde(rename = "type")]
     pub file_type: FileType,
+    /// Device-local revision that created this entry.
+    #[serde(default)]
+    pub revision: ManifestRevision,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManifestRevision {
+    pub writer_id: String,
+    pub device_revision: u64,
+    pub base_generation: u64,
+}
+
+impl Default for ManifestRevision {
+    fn default() -> Self {
+        Self {
+            writer_id: "legacy".to_string(),
+            device_revision: 0,
+            base_generation: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestTombstone {
+    pub original_path: String,
+    pub revision: ManifestRevision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestPathState {
+    File {
+        sha256: String,
+        revision: ManifestRevision,
+    },
+    Deleted {
+        revision: ManifestRevision,
+    },
+    Absent,
 }
 
 /// Classification of a file for UI display and progress grouping.
@@ -157,6 +198,7 @@ impl ArchiveManifest {
                 key_id,
             },
             files: Vec::new(),
+            tombstones: Vec::new(),
             statistics: ArchiveStatistics::default(),
         }
     }
@@ -172,6 +214,8 @@ impl ArchiveManifest {
         let sha256 = compute_sha256(original_data);
         let file_type = FileType::from_path(&original_path);
 
+        self.tombstones
+            .retain(|tombstone| tombstone.original_path != original_path);
         self.files.push(ManifestFile {
             key,
             original_path,
@@ -179,6 +223,10 @@ impl ArchiveManifest {
             encrypted_size_bytes: encrypted_size,
             sha256,
             file_type,
+            // Files in a freshly-created or migrated snapshot are a common
+            // baseline, not a device mutation. Live writes replace this with
+            // a durable device revision through `upsert_file_with_revision`.
+            revision: ManifestRevision::default(),
         });
 
         self.recalculate_statistics();
@@ -197,6 +245,32 @@ impl ArchiveManifest {
         self.add_file(key, original_path, original_data, encrypted_size);
     }
 
+    pub fn upsert_file_with_revision(
+        &mut self,
+        key: String,
+        original_path: String,
+        original_data: &[u8],
+        encrypted_size: u64,
+        revision: ManifestRevision,
+    ) {
+        self.files
+            .retain(|file| file.original_path != original_path);
+        self.tombstones
+            .retain(|tombstone| tombstone.original_path != original_path);
+        let sha256 = compute_sha256(original_data);
+        let file_type = FileType::from_path(&original_path);
+        self.files.push(ManifestFile {
+            key,
+            original_path,
+            size_bytes: original_data.len() as u64,
+            encrypted_size_bytes: encrypted_size,
+            sha256,
+            file_type,
+            revision,
+        });
+        self.recalculate_statistics();
+    }
+
     /// Remove a local path and return its previous cloud object key.
     pub fn remove_file(&mut self, original_path: &str) -> Option<String> {
         let index = self
@@ -206,6 +280,44 @@ impl ArchiveManifest {
         let removed = self.files.remove(index);
         self.recalculate_statistics();
         Some(removed.key)
+    }
+
+    pub fn remove_file_with_revision(
+        &mut self,
+        original_path: &str,
+        revision: ManifestRevision,
+    ) -> Option<String> {
+        let removed = self.remove_file(original_path)?;
+        self.tombstones
+            .retain(|tombstone| tombstone.original_path != original_path);
+        self.tombstones.push(ManifestTombstone {
+            original_path: original_path.to_string(),
+            revision,
+        });
+        Some(removed)
+    }
+
+    pub fn path_state(&self, original_path: &str) -> ManifestPathState {
+        if let Some(file) = self
+            .files
+            .iter()
+            .find(|file| file.original_path == original_path)
+        {
+            return ManifestPathState::File {
+                sha256: file.sha256.clone(),
+                revision: file.revision.clone(),
+            };
+        }
+        if let Some(tombstone) = self
+            .tombstones
+            .iter()
+            .find(|tombstone| tombstone.original_path == original_path)
+        {
+            return ManifestPathState::Deleted {
+                revision: tombstone.revision.clone(),
+            };
+        }
+        ManifestPathState::Absent
     }
 
     fn recalculate_statistics(&mut self) {
@@ -235,7 +347,7 @@ impl ArchiveManifest {
         match self.version {
             1 => {
                 self.version = CURRENT_MANIFEST_VERSION;
-                self.archive_id = uuid::Uuid::new_v4().to_string();
+                self.archive_id = stable_v1_archive_id(self);
                 self.generation = 0;
                 self.writer_id = writer_id.to_string();
                 Ok(true)
@@ -276,7 +388,7 @@ impl ArchiveManifest {
         {
             return Err("manifest metadata is empty or exceeds its size limit".to_string());
         }
-        if self.files.len() > MAX_MANIFEST_FILES {
+        if self.files.len().saturating_add(self.tombstones.len()) > MAX_MANIFEST_FILES {
             return Err(format!(
                 "manifest contains more than {MAX_MANIFEST_FILES} files"
             ));
@@ -355,12 +467,39 @@ impl ArchiveManifest {
                     file.original_path
                 ));
             }
+            if self.version == CURRENT_MANIFEST_VERSION {
+                validate_manifest_revision(&file.revision, true)?;
+            }
             total_plaintext = total_plaintext
                 .checked_add(file.size_bytes)
                 .ok_or_else(|| "manifest plaintext size total overflows".to_string())?;
             total_encrypted = total_encrypted
                 .checked_add(file.encrypted_size_bytes)
                 .ok_or_else(|| "manifest encrypted size total overflows".to_string())?;
+        }
+
+        for tombstone in &self.tombstones {
+            validate_manifest_path(&tombstone.original_path)?;
+            if !supported_data_path(&tombstone.original_path)
+                && !matches!(
+                    tombstone.original_path.as_str(),
+                    "thinclaw-runtime.db" | "ironclaw.db"
+                )
+            {
+                return Err(format!(
+                    "manifest tombstone '{}' is outside supported data roots",
+                    tombstone.original_path
+                ));
+            }
+            if !paths.insert(tombstone.original_path.clone()) {
+                return Err(format!(
+                    "manifest path '{}' is both live and deleted",
+                    tombstone.original_path
+                ));
+            }
+            if self.version == CURRENT_MANIFEST_VERSION {
+                validate_manifest_revision(&tombstone.revision, false)?;
+            }
         }
 
         if self.statistics.total_files as usize != self.files.len()
@@ -392,6 +531,43 @@ impl ArchiveManifest {
         }
         groups
     }
+}
+
+fn validate_manifest_revision(
+    revision: &ManifestRevision,
+    allow_legacy: bool,
+) -> Result<(), String> {
+    if allow_legacy
+        && revision.writer_id == "legacy"
+        && revision.device_revision == 0
+        && revision.base_generation == 0
+    {
+        return Ok(());
+    }
+    if uuid::Uuid::parse_str(&revision.writer_id).is_err() || revision.device_revision == 0 {
+        return Err("manifest mutation has an invalid device revision".to_string());
+    }
+    Ok(())
+}
+
+/// Every writer upgrading the same authenticated v1 manifest derives the same
+/// archive identity, so the first CAS conflict can be merged instead of being
+/// mistaken for archive replacement.
+fn stable_v1_archive_id(manifest: &ArchiveManifest) -> String {
+    let mut identity = Sha256::new();
+    identity.update(b"thinclaw-manifest-v1-archive-id\0");
+    identity.update(manifest.schema_version.to_be_bytes());
+    identity.update(manifest.encryption.key_id.as_bytes());
+    let mut files = manifest.files.iter().collect::<Vec<_>>();
+    files.sort_by(|left, right| left.original_path.cmp(&right.original_path));
+    for file in files {
+        identity.update((file.original_path.len() as u64).to_be_bytes());
+        identity.update(file.original_path.as_bytes());
+        identity.update(file.sha256.as_bytes());
+        identity.update(file.size_bytes.to_be_bytes());
+    }
+    let digest: [u8; 32] = identity.finalize().into();
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &digest).to_string()
 }
 
 /// Generate a fresh immutable object key bound to both its logical path and
@@ -740,5 +916,24 @@ mod tests {
         assert_eq!(manifest.files.len(), files.len());
         assert_eq!(manifest.files[0].sha256, files[0].sha256);
         manifest.validate_structure().unwrap();
+    }
+
+    #[test]
+    fn concurrent_v1_migrators_derive_the_same_archive_identity() {
+        let mut first = ArchiveManifest::new("0.1.0".into(), 1, "key".into());
+        first.add_file("object.enc".into(), "document.txt".into(), b"hello", 33);
+        first.version = 1;
+        first.archive_id.clear();
+        first.writer_id.clear();
+        let mut second = first.clone();
+
+        first
+            .migrate_to_v2(&uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        second
+            .migrate_to_v2(&uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        assert_eq!(first.archive_id, second.archive_id);
+        assert_ne!(first.writer_id, second.writer_id);
     }
 }

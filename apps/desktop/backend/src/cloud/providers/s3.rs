@@ -251,7 +251,7 @@ impl CloudProvider for S3Provider {
     }
 
     fn sync_capability(&self) -> CloudSyncCapability {
-        let capability = self.operator.info().full_capability();
+        let capability = self.operator.info().capability();
         if capability.write_with_if_match && capability.write_with_if_not_exists {
             CloudSyncCapability::StrongCas
         } else {
@@ -340,7 +340,7 @@ impl CloudProvider for S3Provider {
         if self.sync_capability() != CloudSyncCapability::StrongCas {
             return Err(CloudError::StrongCasUnavailable(self.name().to_string()));
         }
-        let result = match expected {
+        let metadata = match expected {
             Some(version) => {
                 self.operator
                     .write_with(key, data.to_vec())
@@ -353,13 +353,10 @@ impl CloudProvider for S3Provider {
                     .if_not_exists(true)
                     .await
             }
-        };
-        result.map_err(|error| match error.kind() {
+        }
+        .map_err(|error| match error.kind() {
             opendal::ErrorKind::ConditionNotMatch => CloudError::ArchiveConflict,
             _ => CloudError::UploadFailed(format!("S3 conditional PUT '{key}': {error}")),
-        })?;
-        let metadata = self.operator.stat(key).await.map_err(|error| {
-            CloudError::UploadFailed(format!("S3 stat after conditional PUT '{key}': {error}"))
         })?;
         ObjectVersion::new(
             metadata

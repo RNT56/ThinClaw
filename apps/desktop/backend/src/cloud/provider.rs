@@ -40,6 +40,12 @@ pub enum CloudError {
     #[error("Cloud archive changed on another writer; restart before syncing more changes")]
     ArchiveConflict,
 
+    #[error("Cloud sync conflict for '{path}' at remote generation {remote_generation}")]
+    SyncConflict {
+        path: String,
+        remote_generation: u64,
+    },
+
     #[error("{0} does not provide the strong conditional writes required for live sync")]
     StrongCasUnavailable(String),
 
@@ -620,14 +626,19 @@ pub trait CloudProvider: Send + Sync {
 /// operations but silently ignore their preconditions.
 pub async fn verify_strong_cas_conformance(provider: &dyn CloudProvider) -> Result<(), CloudError> {
     if provider.sync_capability() != CloudSyncCapability::StrongCas {
-        return Err(CloudError::StrongCasUnavailable(provider.name().to_string()));
+        return Err(CloudError::StrongCasUnavailable(
+            provider.name().to_string(),
+        ));
     }
     let key = format!(".sync-cas-probe/{}.bin", uuid::Uuid::new_v4());
     let first_data = uuid::Uuid::new_v4().as_bytes().to_vec();
     let second_data = uuid::Uuid::new_v4().as_bytes().to_vec();
     let result = async {
         let first = provider.put_if_version(&key, &first_data, None).await?;
-        match provider.put_if_version(&key, b"must-not-overwrite", None).await {
+        match provider
+            .put_if_version(&key, b"must-not-overwrite", None)
+            .await
+        {
             Err(CloudError::ArchiveConflict) => {}
             Err(error) => return Err(error),
             Ok(_) => {

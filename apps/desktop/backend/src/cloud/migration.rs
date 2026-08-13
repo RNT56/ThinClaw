@@ -22,7 +22,10 @@ use super::manifest::{
     MAX_ARCHIVE_FILE_BYTES, MAX_MANIFEST_FILES, MAX_MANIFEST_JSON_BYTES,
 };
 use super::progress::{MigrationPhase, ProgressTracker};
-use super::provider::{CloudProvider, CloudProviderConfig};
+use super::provider::{
+    CloudError, CloudProvider, CloudProviderConfig, CloudSyncCapability, ObjectVersion,
+    VersionedObject,
+};
 use super::snapshot;
 use std::sync::Arc;
 
@@ -96,9 +99,11 @@ pub async fn run_to_cloud(
     provider: &dyn CloudProvider,
     master_key: &MasterKey,
     provider_type: &str,
+    activate_cloud_mode: bool,
     migration_id: &str,
     cancel_flag: Arc<RwLock<bool>>,
 ) -> Result<(), String> {
+    validate_migration_id(migration_id)?;
     // ── Phase 1: Pre-flight ──────────────────────────────────────────────
     info!("[cloud/migrate] Phase 1: Pre-flight checks");
 
@@ -110,13 +115,30 @@ pub async fn run_to_cloud(
     if !status.connected {
         return Err("Cloud provider is not connected".into());
     }
+    if activate_cloud_mode {
+        super::provider::verify_strong_cas_conformance(provider)
+            .await
+            .map_err(|error| format!("Strong-CAS verification failed: {error}"))?;
+    }
 
     // Establish the manifest state before uploading any immutable objects.
     // An existing archive must authenticate with this key; blindly replacing
     // an unreadable or concurrently changed archive would destroy its only
     // index even though its objects remain encrypted and intact.
-    let previous_manifest_ciphertext =
-        load_existing_manifest_ciphertext(provider, master_key).await?;
+    let previous_manifest = if activate_cloud_mode {
+        load_existing_versioned_manifest(provider, master_key).await?
+    } else {
+        None
+    };
+    let published_manifest_key = if activate_cloud_mode {
+        MANIFEST_KEY.to_string()
+    } else {
+        format!(
+            "backups/manifests/{:020}-{migration_id}-{}.json.enc",
+            chrono::Utc::now().timestamp_millis(),
+            uuid::Uuid::new_v4()
+        )
+    };
 
     // Collect data files and create database snapshots before fixing progress
     // totals. The previous totals omitted both databases and rejected a valid
@@ -210,6 +232,13 @@ pub async fn run_to_cloud(
     let app_version = env!("CARGO_PKG_VERSION").to_string();
     let key_id = format!("keychain-{}", chrono::Utc::now().timestamp());
     let mut manifest = ArchiveManifest::new(app_version, schema_version, key_id);
+    carry_forward_archive_identity(
+        &mut manifest,
+        previous_manifest
+            .as_ref()
+            .map(|previous| &previous.manifest),
+        migration_id,
+    )?;
 
     // Upload the DB snapshot first (most important)
     check_cancelled(&cancel_flag, &mut tracker).await?;
@@ -368,11 +397,24 @@ pub async fn run_to_cloud(
     let encrypted_manifest = encryption::encrypt(master_key, "manifest.json", &manifest_json)
         .map_err(|e| format!("Manifest encryption failed: {}", e))?;
 
-    ensure_remote_manifest_state(provider, previous_manifest_ciphertext.as_deref()).await?;
-    provider
-        .put(MANIFEST_KEY, &encrypted_manifest)
-        .await
-        .map_err(|e| format!("Manifest upload failed: {}", e))?;
+    let committed_version = if activate_cloud_mode {
+        Some(
+            provider
+                .put_if_version(
+                    &published_manifest_key,
+                    &encrypted_manifest,
+                    previous_manifest.as_ref().map(|manifest| &manifest.version),
+                )
+                .await
+                .map_err(|e| format!("Manifest CAS upload failed: {e}"))?,
+        )
+    } else {
+        // Backup-only providers never touch the shared live manifest. Each
+        // verified backup has a unique immutable key.
+        publish_immutable_backup_manifest(provider, &published_manifest_key, &encrypted_manifest)
+            .await?;
+        None
+    };
 
     // The manifest is the archive commit point. If verification, cancellation,
     // or the local mode transaction fails from here on, restore the previous
@@ -385,13 +427,29 @@ pub async fn run_to_cloud(
         info!("[cloud/migrate] Phase 5: Verify cloud archive");
 
         // Download manifest back to verify
-        let dl_manifest = provider
-            .get_bounded(
-                MANIFEST_KEY,
-                encryption::encrypted_size_limit(MAX_MANIFEST_JSON_BYTES),
-            )
-            .await
-            .map_err(|e| format!("Manifest download for verification failed: {}", e))?;
+        let dl_manifest = if let Some(committed_version) = committed_version.as_ref() {
+            let observed = provider
+                .get_versioned_bounded(
+                    &published_manifest_key,
+                    encryption::encrypted_size_limit(MAX_MANIFEST_JSON_BYTES),
+                )
+                .await
+                .map_err(|e| format!("Manifest download for verification failed: {e}"))?;
+            if &observed.version != committed_version {
+                return Err(
+                    "Cloud archive manifest changed during migration verification".to_string(),
+                );
+            }
+            observed.data
+        } else {
+            provider
+                .get_bounded(
+                    &published_manifest_key,
+                    encryption::encrypted_size_limit(MAX_MANIFEST_JSON_BYTES),
+                )
+                .await
+                .map_err(|e| format!("Backup manifest verification download failed: {e}"))?
+        };
         if dl_manifest != encrypted_manifest {
             return Err("Cloud archive manifest changed during migration verification".to_string());
         }
@@ -472,27 +530,38 @@ pub async fn run_to_cloud(
             manifest.files.len()
         );
 
-        // ── Phase 6: Switch Mode ─────────────────────────────────────────
+        // ── Phase 6: Commit activation or backup completion ──────────────
         tracker.set_phase(MigrationPhase::Cleanup);
-        info!("[cloud/migrate] Phase 6: Switch to cloud mode");
-
-        let mode_json = serde_json::to_string(&super::StorageMode::Cloud {
-            provider_type: provider_type.to_string(),
-            provider_name: status.provider_name.clone(),
-        })
-        .map_err(|error| format!("Failed to serialize cloud mode: {error}"))?;
-        commit_cloud_mode(pool, migration_id, &mode_json).await?;
+        if activate_cloud_mode {
+            info!("[cloud/migrate] Phase 6: Switch to live cloud mode");
+            let mode_json = serde_json::to_string(&super::StorageMode::Cloud {
+                provider_type: provider_type.to_string(),
+                provider_name: status.provider_name.clone(),
+            })
+            .map_err(|error| format!("Failed to serialize cloud mode: {error}"))?;
+            commit_cloud_mode(pool, migration_id, &mode_json).await?;
+        } else {
+            info!("[cloud/migrate] Phase 6: Record backup completion; remain local");
+            commit_backup_completion(pool, migration_id).await?;
+        }
         Ok(())
     }
     .await;
 
     if let Err(error) = activation_result {
-        let rollback = restore_previous_manifest_if_owned(
-            provider,
-            &encrypted_manifest,
-            previous_manifest_ciphertext.as_deref(),
-        )
-        .await;
+        let rollback = match committed_version.as_ref() {
+            Some(committed_version) => {
+                restore_previous_manifest_if_owned(
+                    provider,
+                    committed_version,
+                    previous_manifest.as_ref(),
+                )
+                .await
+            }
+            // An immutable backup remains valid even if recording local
+            // completion failed. It is never a shared pointer to roll back.
+            None => Ok(()),
+        };
         return Err(match rollback {
             Ok(()) => error,
             Err(rollback_error) => {
@@ -514,18 +583,71 @@ pub async fn run_to_cloud(
     Ok(())
 }
 
-async fn load_existing_manifest_ciphertext(
+struct ExistingManifest {
+    ciphertext: Vec<u8>,
+    version: ObjectVersion,
+    manifest: ArchiveManifest,
+}
+
+fn carry_forward_archive_identity(
+    candidate: &mut ArchiveManifest,
+    previous: Option<&ArchiveManifest>,
+    writer_id: &str,
+) -> Result<(), String> {
+    candidate.writer_id = writer_id.to_string();
+    if let Some(previous) = previous {
+        let mut previous_identity = previous.clone();
+        previous_identity
+            .migrate_to_v2(writer_id)
+            .map_err(|error| format!("Existing manifest cannot be upgraded: {error}"))?;
+        candidate.archive_id = previous_identity.archive_id;
+        candidate.generation = previous_identity.generation;
+        candidate.advance_revision(writer_id);
+    }
+    Ok(())
+}
+
+async fn publish_immutable_backup_manifest(
+    provider: &dyn CloudProvider,
+    key: &str,
+    ciphertext: &[u8],
+) -> Result<(), String> {
+    if key == MANIFEST_KEY || !key.starts_with("backups/manifests/") || !key.ends_with(".json.enc")
+    {
+        return Err(
+            "Refusing to publish a backup through the mutable live manifest key".to_string(),
+        );
+    }
+    super::provider::validate_object_key(key)
+        .map_err(|error| format!("Invalid immutable backup manifest key: {error}"))?;
+    if provider
+        .exists(key)
+        .await
+        .map_err(|error| format!("Failed to check immutable backup key: {error}"))?
+    {
+        return Err("Immutable backup manifest key collision; retry the backup".to_string());
+    }
+    provider
+        .put(key, ciphertext)
+        .await
+        .map_err(|error| format!("Backup manifest upload failed: {error}"))
+}
+
+async fn load_existing_versioned_manifest(
     provider: &dyn CloudProvider,
     master_key: &MasterKey,
-) -> Result<Option<Vec<u8>>, String> {
-    let encrypted = match provider
-        .get_bounded(
+) -> Result<Option<ExistingManifest>, String> {
+    let VersionedObject {
+        data: encrypted,
+        version,
+    } = match provider
+        .get_versioned_bounded(
             MANIFEST_KEY,
             encryption::encrypted_size_limit(MAX_MANIFEST_JSON_BYTES),
         )
         .await
     {
-        Ok(encrypted) => encrypted,
+        Ok(versioned) => versioned,
         Err(super::provider::CloudError::NotFound(_)) => return Ok(None),
         Err(error) => {
             return Err(format!(
@@ -547,86 +669,87 @@ async fn load_existing_manifest_ciphertext(
     manifest
         .validate_structure()
         .map_err(|error| format!("Existing cloud archive manifest is invalid: {error}"))?;
-    Ok(Some(encrypted))
-}
-
-async fn ensure_remote_manifest_state(
-    provider: &dyn CloudProvider,
-    expected: Option<&[u8]>,
-) -> Result<(), String> {
-    let current = provider
-        .get_bounded(
-            MANIFEST_KEY,
-            encryption::encrypted_size_limit(MAX_MANIFEST_JSON_BYTES),
-        )
-        .await;
-    match (expected, current) {
-        (None, Err(super::provider::CloudError::NotFound(_))) => Ok(()),
-        (Some(expected), Ok(current)) if current == expected => Ok(()),
-        (None, Ok(_))
-        | (Some(_), Ok(_))
-        | (Some(_), Err(super::provider::CloudError::NotFound(_))) => {
-            Err("Cloud archive manifest changed during migration; restart and retry".to_string())
-        }
-        (_, Err(error)) => Err(format!(
-            "Failed to recheck the cloud archive manifest: {error}"
-        )),
-    }
+    Ok(Some(ExistingManifest {
+        ciphertext: encrypted,
+        version,
+        manifest,
+    }))
 }
 
 async fn restore_previous_manifest_if_owned(
     provider: &dyn CloudProvider,
-    migration_manifest: &[u8],
-    previous_manifest: Option<&[u8]>,
+    migration_version: &ObjectVersion,
+    previous_manifest: Option<&ExistingManifest>,
 ) -> Result<(), String> {
-    let current = provider
-        .get_bounded(
-            MANIFEST_KEY,
-            encryption::encrypted_size_limit(MAX_MANIFEST_JSON_BYTES),
-        )
-        .await
-        .map_err(|error| format!("Failed to inspect manifest before rollback: {error}"))?;
-    if current != migration_manifest {
-        return Err(
-            "remote manifest changed after this migration; refusing to overwrite the newer writer"
-                .to_string(),
-        );
-    }
-
     match previous_manifest {
         Some(previous) => {
-            provider
-                .put(MANIFEST_KEY, previous)
+            let restored_version = provider
+                .put_if_version(MANIFEST_KEY, &previous.ciphertext, Some(migration_version))
                 .await
-                .map_err(|error| format!("Failed to restore previous manifest: {error}"))?;
+                .map_err(|error| format!("Failed to CAS-restore previous manifest: {error}"))?;
             let restored = provider
-                .get_bounded(
+                .get_versioned_bounded(
                     MANIFEST_KEY,
                     encryption::encrypted_size_limit(MAX_MANIFEST_JSON_BYTES),
                 )
                 .await
                 .map_err(|error| format!("Failed to verify restored manifest: {error}"))?;
-            if restored != previous {
+            if restored.version != restored_version || restored.data != previous.ciphertext {
                 return Err("Previous manifest did not remain stable after rollback".to_string());
             }
         }
         None => {
-            provider
-                .delete(MANIFEST_KEY)
-                .await
-                .map_err(|error| format!("Failed to remove new manifest: {error}"))?;
-            match provider.get_bounded(MANIFEST_KEY, 1).await {
-                Err(super::provider::CloudError::NotFound(_)) => {}
-                Ok(_) | Err(super::provider::CloudError::ObjectTooLarge { .. }) => {
-                    return Err("New manifest still exists after rollback".to_string());
-                }
-                Err(error) => {
-                    return Err(format!("Failed to verify manifest removal: {error}"));
-                }
-            }
+            // There is no safe generic conditional delete. Keeping this valid,
+            // encrypted archive is non-destructive; the local mode transaction
+            // remains authoritative and a later migration can replace it by CAS.
         }
     }
     Ok(())
+}
+
+/// Select the authoritative encrypted manifest for a restore. Strong-CAS
+/// providers use the shared live pointer. Backup-only providers publish
+/// immutable, timestamp-prefixed snapshots and restore the newest one.
+pub(crate) async fn find_manifest_for_restore(
+    provider: &dyn CloudProvider,
+) -> Result<Option<(String, Vec<u8>)>, String> {
+    let limit = encryption::encrypted_size_limit(MAX_MANIFEST_JSON_BYTES);
+    if provider.sync_capability() == CloudSyncCapability::StrongCas {
+        return match provider.get_bounded(MANIFEST_KEY, limit).await {
+            Ok(data) => Ok(Some((MANIFEST_KEY.to_string(), data))),
+            Err(CloudError::NotFound(_)) => Ok(None),
+            Err(error) => Err(format!("Manifest download failed: {error}")),
+        };
+    }
+
+    let mut manifests = provider
+        .list("backups/manifests/")
+        .await
+        .map_err(|error| format!("Backup manifest listing failed: {error}"))?
+        .into_iter()
+        .map(|entry| entry.key)
+        .filter(|key| {
+            key.starts_with("backups/manifests/")
+                && key.ends_with(".json.enc")
+                && super::provider::validate_object_key(key).is_ok()
+        })
+        .collect::<Vec<_>>();
+    manifests.sort_unstable();
+    if let Some(key) = manifests.pop() {
+        let data = provider
+            .get_bounded(&key, limit)
+            .await
+            .map_err(|error| format!("Backup manifest download failed: {error}"))?;
+        return Ok(Some((key, data)));
+    }
+
+    // Compatibility fallback for archives created before immutable backup
+    // manifests were introduced.
+    match provider.get_bounded(MANIFEST_KEY, limit).await {
+        Ok(data) => Ok(Some((MANIFEST_KEY.to_string(), data))),
+        Err(CloudError::NotFound(_)) => Ok(None),
+        Err(error) => Err(format!("Manifest download failed: {error}")),
+    }
 }
 
 // ── Cloud → Local ─────────────────────────────────────────────────────────
@@ -665,13 +788,10 @@ pub async fn run_to_local(
     // ── Phase 2: Download + decrypt manifest ─────────────────────────────
     info!("[cloud/restore] Phase 2: Download manifest");
 
-    let encrypted_manifest = provider
-        .get_bounded(
-            MANIFEST_KEY,
-            encryption::encrypted_size_limit(MAX_MANIFEST_JSON_BYTES),
-        )
-        .await
-        .map_err(|e| format!("Manifest download failed: {}", e))?;
+    let (manifest_key, encrypted_manifest) = find_manifest_for_restore(provider)
+        .await?
+        .ok_or_else(|| "No encrypted cloud backup was found".to_string())?;
+    debug!("[cloud/restore] Selected manifest object {manifest_key}");
 
     let manifest_json = encryption::decrypt_bounded(
         master_key,
@@ -1797,6 +1917,25 @@ async fn commit_cloud_mode(pool: &SqlitePool, id: &str, mode_json: &str) -> Resu
         .map_err(|error| format!("Failed to commit cloud mode: {error}"))
 }
 
+/// Mark a verified backup complete without changing the authoritative local
+/// storage mode. Used by providers that cannot pass strong-CAS conformance.
+async fn commit_backup_completion(pool: &SqlitePool, id: &str) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let result = sqlx::query(
+        "UPDATE cloud_migrations SET status = 'completed', completed_at = ?, error = NULL \
+         WHERE id = ? AND status = 'in_progress'",
+    )
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("Failed to record backup completion: {error}"))?;
+    if result.rows_affected() != 1 {
+        return Err("Backup completion did not match one in-progress record".to_string());
+    }
+    Ok(())
+}
+
 /// Record migration failure.
 pub async fn record_migration_failure(
     pool: &SqlitePool,
@@ -1804,11 +1943,19 @@ pub async fn record_migration_failure(
     error: &str,
 ) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
+    // Full diagnostics may contain local paths, remote object keys, or bounded
+    // provider response bodies. Keep them in the caller's redacted log/UI, but
+    // persist only a stable category in the local database.
+    let error_code = if error.eq_ignore_ascii_case("Migration cancelled") {
+        "migration_cancelled"
+    } else {
+        "migration_failed"
+    };
     sqlx::query(
         "UPDATE cloud_migrations SET status = 'failed', completed_at = ?, error = ? WHERE id = ?",
     )
     .bind(now)
-    .bind(error)
+    .bind(error_code)
     .bind(id)
     .execute(pool)
     .await

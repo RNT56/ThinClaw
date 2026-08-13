@@ -16,6 +16,16 @@ export interface CloudStatusResponse {
     last_sync_at: number | null;
     sync_active: boolean;
     sync_error: string | null;
+    sync_health: string;
+    sync_pending_count: number;
+    sync_pending_bytes: number;
+    sync_retrying_count: number;
+    sync_quarantined_count: number;
+    sync_conflict_count: number;
+    sync_cas_capable: boolean;
+    sync_backup_only_reason: string | null;
+    sync_oldest_pending_at: number | null;
+    sync_last_attempt_at: number | null;
     has_recovery_key: boolean;
     migration_in_progress: boolean;
 }

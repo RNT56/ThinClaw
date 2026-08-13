@@ -46,6 +46,7 @@ pub mod manifest;
 pub mod migration;
 pub mod network;
 pub mod oauth;
+pub mod outbox;
 pub mod progress;
 pub mod provider;
 pub mod providers;
@@ -56,7 +57,7 @@ pub mod sync;
 mod integration_tests;
 
 use encryption::MasterKey;
-use provider::{CloudError, CloudProvider, CloudProviderConfig};
+use provider::{CloudError, CloudProvider, CloudProviderConfig, CloudSyncCapability};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -98,8 +99,50 @@ pub struct CloudManagerStatus {
     pub last_sync_at: Option<i64>,
     pub sync_active: bool,
     pub sync_error: Option<String>,
+    pub sync_health: String,
+    pub sync_pending_count: u64,
+    pub sync_pending_bytes: u64,
+    pub sync_retrying_count: u64,
+    pub sync_quarantined_count: u64,
+    pub sync_conflict_count: u64,
+    pub sync_cas_capable: bool,
+    pub sync_backup_only_reason: Option<String>,
+    pub sync_oldest_pending_at: Option<i64>,
+    pub sync_last_attempt_at: Option<i64>,
     pub has_recovery_key: bool,
     pub migration_in_progress: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum CloudSyncHealth {
+    #[default]
+    Disabled,
+    Starting,
+    BackupOnly,
+    Healthy,
+    Backlogged,
+    Retrying,
+    AuthRequired,
+    Conflict,
+    Quarantined,
+    Error,
+}
+
+impl CloudSyncHealth {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Starting => "starting",
+            Self::BackupOnly => "backup_only",
+            Self::Healthy => "healthy",
+            Self::Backlogged => "backlogged",
+            Self::Retrying => "retrying",
+            Self::AuthRequired => "auth_required",
+            Self::Conflict => "conflict",
+            Self::Quarantined => "quarantined",
+            Self::Error => "error",
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -107,6 +150,14 @@ pub(crate) struct CloudSyncTelemetry {
     pub(crate) active: bool,
     pub(crate) last_success_at: Option<i64>,
     pub(crate) last_error: Option<String>,
+    pub(crate) health: CloudSyncHealth,
+    pub(crate) pending_count: u64,
+    pub(crate) pending_bytes: u64,
+    pub(crate) retrying_count: u64,
+    pub(crate) quarantined_count: u64,
+    pub(crate) conflict_count: u64,
+    pub(crate) oldest_pending_at: Option<i64>,
+    pub(crate) last_attempt_at: Option<i64>,
 }
 
 // ── CloudManager ─────────────────────────────────────────────────────────────
@@ -323,6 +374,8 @@ impl CloudManager {
             storage_available,
             has_recovery_key,
             migration_in_progress,
+            sync_cas_capable,
+            sync_backup_only_reason,
             telemetry,
         ) = {
             let inner = self.inner.read().await;
@@ -353,6 +406,17 @@ impl CloudManager {
                     .and_then(|status| status.storage_available),
                 inner.master_key.is_some(),
                 inner.migration_in_progress,
+                inner.provider.as_ref().is_some_and(|provider| {
+                    provider.sync_capability() == CloudSyncCapability::StrongCas
+                }),
+                inner.provider.as_ref().and_then(|provider| {
+                    (provider.sync_capability() == CloudSyncCapability::BackupOnly).then(|| {
+                        format!(
+                            "{} does not expose verified atomic conditional writes; encrypted backup/restore only",
+                            provider.name()
+                        )
+                    })
+                }),
                 inner.sync_telemetry.clone(),
             )
         };
@@ -366,6 +430,16 @@ impl CloudManager {
             last_sync_at: telemetry.last_success_at,
             sync_active: telemetry.active,
             sync_error: telemetry.last_error.clone(),
+            sync_health: telemetry.health.as_str().to_string(),
+            sync_pending_count: telemetry.pending_count,
+            sync_pending_bytes: telemetry.pending_bytes,
+            sync_retrying_count: telemetry.retrying_count,
+            sync_quarantined_count: telemetry.quarantined_count,
+            sync_conflict_count: telemetry.conflict_count,
+            sync_cas_capable,
+            sync_backup_only_reason,
+            sync_oldest_pending_at: telemetry.oldest_pending_at,
+            sync_last_attempt_at: telemetry.last_attempt_at,
             has_recovery_key,
             migration_in_progress,
         }
@@ -571,14 +645,20 @@ impl CloudManager {
         }
     }
 
-    /// Stop the live-sync worker + engine (cancels the engine, drops the upload
-    /// channel so the worker drains and exits, then awaits both tasks).
+    /// Stop the live-sync worker + engine. Pending mutations remain in the
+    /// encrypted SQLite outbox for the next activation.
     pub async fn stop_sync(&self) {
-        let handles = self.inner.write().await.sync_handles.take();
+        let (handles, telemetry) = {
+            let mut inner = self.inner.write().await;
+            (inner.sync_handles.take(), inner.sync_telemetry.clone())
+        };
         if let Some(handles) = handles {
             info!("[cloud] Stopping live sync");
             handles.stop().await;
         }
+        let mut status = telemetry.write().await;
+        status.active = false;
+        status.health = CloudSyncHealth::Disabled;
     }
 
     /// Get the recovery key (base64-encoded master key).
@@ -591,15 +671,58 @@ impl CloudManager {
     }
 
     /// Import a recovery key (for restoring on a new device).
-    pub async fn import_recovery_key(&self, recovery_key: &str) -> Result<(), String> {
-        let key = MasterKey::from_recovery_key(recovery_key)
+    pub async fn import_recovery_key(
+        &self,
+        pool: &SqlitePool,
+        recovery_key: &str,
+    ) -> Result<(), String> {
+        let candidate = MasterKey::from_recovery_key(recovery_key)
             .map_err(|e| format!("Invalid recovery key: {}", e))?;
 
-        encryption::save_master_key_to_keychain(&key)
-            .map_err(|e| format!("Failed to save key to Keychain: {}", e))?;
+        let provider = {
+            let inner = self.inner.read().await;
+            ensure_recovery_key_import_is_safe(&inner, 0)?;
+            inner.provider.clone()
+        };
+
+        let (delivery_rows,): (i64,) = sqlx::query_as(
+            "SELECT \
+                (SELECT COUNT(*) FROM cloud_sync_outbox) + \
+                (SELECT COUNT(*) FROM cloud_sync_quarantine) + \
+                (SELECT COUNT(*) FROM cloud_sync_conflicts)",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|error| format!("Failed to inspect encrypted cloud delivery state: {error}"))?;
+        if delivery_rows != 0 {
+            return Err(
+                "Cannot replace the recovery key while encrypted outbox, quarantine, or conflict records exist"
+                    .to_string(),
+            );
+        }
+
+        if let Some(provider) = provider.as_ref() {
+            if let Some((_manifest_key, encrypted_manifest)) =
+                migration::find_manifest_for_restore(provider.as_ref()).await?
+            {
+                authenticate_manifest_ciphertext(&encrypted_manifest, &candidate)?;
+            }
+        }
 
         let mut inner = self.inner.write().await;
-        inner.master_key = Some(key);
+        ensure_recovery_key_import_is_safe(&inner, delivery_rows)?;
+        let provider_unchanged = match (&provider, &inner.provider) {
+            (None, None) => true,
+            (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
+            _ => false,
+        };
+        if !provider_unchanged {
+            return Err("Cloud provider changed while authenticating the recovery key".to_string());
+        }
+
+        encryption::save_master_key_to_keychain(&candidate)
+            .map_err(|e| format!("Failed to save key to Keychain: {}", e))?;
+        inner.master_key = Some(candidate);
 
         info!("[cloud] Recovery key imported and saved to Keychain");
         Ok(())
@@ -636,7 +759,7 @@ impl CloudManager {
 
         // Mark migration as in-progress + set cancel flag
         let migration_id = uuid::Uuid::new_v4().to_string();
-        let (app_data_dir, provider, master_key, provider_type, cancel_flag) = {
+        let (app_data_dir, provider, master_key, provider_type, activate_cloud_mode, cancel_flag) = {
             let mut inner = self.inner.write().await;
             if inner.migration_in_progress {
                 return Err("Migration already in progress".into());
@@ -654,6 +777,7 @@ impl CloudManager {
                 .as_ref()
                 .map(|c| c.provider_type.clone())
                 .unwrap_or_else(|| "unknown".to_string());
+            let activate_cloud_mode = provider.sync_capability() == CloudSyncCapability::StrongCas;
 
             inner.migration_in_progress = true;
             let flag = Arc::new(RwLock::new(false));
@@ -665,6 +789,7 @@ impl CloudManager {
                 provider,
                 master_key,
                 provider_type,
+                activate_cloud_mode,
                 cancel_flag,
             )
         };
@@ -679,6 +804,7 @@ impl CloudManager {
             provider.as_ref(),
             &master_key,
             &provider_type,
+            activate_cloud_mode,
             &migration_id,
             cancel_flag,
         )
@@ -689,7 +815,7 @@ impl CloudManager {
             let mut inner = self.inner.write().await;
             inner.migration_in_progress = false;
             inner.cancel_flag = None;
-            if result.is_ok() {
+            if result.is_ok() && activate_cloud_mode {
                 let pt = inner
                     .provider_config
                     .as_ref()
@@ -726,7 +852,10 @@ impl CloudManager {
             if inner.migration_in_progress {
                 return Err("Migration already in progress".into());
             }
-            if matches!(&inner.mode, StorageMode::Local) {
+            let can_restore_backup = inner.provider.as_ref().is_some_and(|provider| {
+                provider.sync_capability() == CloudSyncCapability::BackupOnly
+            });
+            if matches!(&inner.mode, StorageMode::Local) && !can_restore_backup {
                 return Err("Already in local mode".into());
             }
         }
@@ -740,7 +869,10 @@ impl CloudManager {
             if inner.migration_in_progress {
                 return Err("Migration already in progress".into());
             }
-            if matches!(&inner.mode, StorageMode::Local) {
+            let can_restore_backup = inner.provider.as_ref().is_some_and(|provider| {
+                provider.sync_capability() == CloudSyncCapability::BackupOnly
+            });
+            if matches!(&inner.mode, StorageMode::Local) && !can_restore_backup {
                 return Err("Already in local mode".into());
             }
 
@@ -876,6 +1008,45 @@ impl CloudManager {
 
         Ok(Some(provider))
     }
+}
+
+fn ensure_recovery_key_import_is_safe(
+    inner: &CloudManagerInner,
+    delivery_rows: i64,
+) -> Result<(), String> {
+    if inner.migration_in_progress {
+        return Err(
+            "Cannot replace the recovery key while a cloud migration is active".to_string(),
+        );
+    }
+    if inner.sync_handles.is_some() || !matches!(inner.mode, StorageMode::Local) {
+        return Err("Cannot replace the recovery key while live cloud sync is active".to_string());
+    }
+    if delivery_rows != 0 {
+        return Err(
+            "Cannot replace the recovery key while encrypted cloud delivery state exists"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn authenticate_manifest_ciphertext(
+    encrypted_manifest: &[u8],
+    candidate: &MasterKey,
+) -> Result<(), String> {
+    let plaintext = encryption::decrypt_bounded(
+        candidate,
+        "manifest.json",
+        encrypted_manifest,
+        manifest::MAX_MANIFEST_JSON_BYTES,
+    )
+    .map_err(|_| "Recovery key does not authenticate the configured cloud archive".to_string())?;
+    let archive = manifest::ArchiveManifest::from_json(&plaintext)
+        .map_err(|_| "Configured cloud archive manifest is invalid".to_string())?;
+    archive
+        .validate_structure()
+        .map_err(|_| "Configured cloud archive manifest is invalid".to_string())
 }
 
 pub(crate) fn save_provider_credentials(config: &CloudProviderConfig) -> Result<(), String> {
@@ -1081,5 +1252,45 @@ mod tests {
             cloud_provider_credential_key(&empty_endpoint, "access_key_id"),
             cloud_provider_credential_key(&no_endpoint, "access_key_id")
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_key_replacement_is_blocked_by_live_or_pending_state() {
+        let manager = CloudManager::new(PathBuf::from("/tmp/thinclaw-recovery-test"));
+        {
+            let mut inner = manager.inner.write().await;
+            inner.migration_in_progress = true;
+            assert!(ensure_recovery_key_import_is_safe(&inner, 0).is_err());
+            inner.migration_in_progress = false;
+            inner.mode = StorageMode::Cloud {
+                provider_type: "test".to_string(),
+                provider_name: "test".to_string(),
+            };
+            assert!(ensure_recovery_key_import_is_safe(&inner, 0).is_err());
+            inner.mode = StorageMode::Local;
+            assert!(ensure_recovery_key_import_is_safe(&inner, 1).is_err());
+            assert!(ensure_recovery_key_import_is_safe(&inner, 0).is_ok());
+        }
+    }
+
+    #[test]
+    fn wrong_recovery_key_fails_archive_authentication_before_key_replacement() {
+        let original = MasterKey::generate();
+        let original_recovery_key = original.to_recovery_key();
+        let candidate = MasterKey::generate();
+        let mut archive =
+            manifest::ArchiveManifest::new("test".to_string(), 1, "test-key".to_string());
+        archive.add_file(
+            "db/thinclaw.db.enc".to_string(),
+            "thinclaw.db".to_string(),
+            b"database",
+            64,
+        );
+        let encrypted =
+            encryption::encrypt(&original, "manifest.json", &archive.to_json().unwrap()).unwrap();
+
+        assert!(authenticate_manifest_ciphertext(&encrypted, &candidate).is_err());
+        assert_eq!(original.to_recovery_key(), original_recovery_key);
+        assert!(authenticate_manifest_ciphertext(&encrypted, &original).is_ok());
     }
 }

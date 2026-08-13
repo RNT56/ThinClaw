@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// Defense-in-depth ceiling for legacy callers that have not selected a
@@ -69,8 +69,8 @@ struct FileStoreInner {
     root: PathBuf,
     /// Current operating mode
     mode: FileStoreMode,
-    /// Channel for queuing cloud uploads (populated in cloud mode)
-    upload_tx: Option<mpsc::Sender<UploadJob>>,
+    /// Durable queue for cloud mutations (populated in cloud mode).
+    upload_queue: Option<Arc<dyn CloudUploadQueue>>,
     /// Cloud download fallback for read-path cache misses (populated in cloud mode)
     download: Option<Arc<dyn CloudDownloader>>,
 }
@@ -92,6 +92,13 @@ pub trait CloudDownloader: Send + Sync {
     ) -> FileStoreResult<Vec<u8>>;
 }
 
+/// Durable sink for cloud mutations. Implementations must not return success
+/// until the encrypted job is committed to persistent storage.
+#[async_trait]
+pub trait CloudUploadQueue: Send + Sync {
+    async fn enqueue(&self, job: UploadJob) -> FileStoreResult<()>;
+}
+
 /// A file queued for background cloud upload.
 #[derive(Debug, Clone)]
 pub struct UploadJob {
@@ -104,7 +111,7 @@ pub struct UploadJob {
 }
 
 /// Upload operation type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UploadOp {
     Put,
     Delete,
@@ -379,7 +386,7 @@ impl FileStore {
             inner: RwLock::new(FileStoreInner {
                 root,
                 mode: FileStoreMode::Local,
-                upload_tx: None,
+                upload_queue: None,
                 download: None,
             }),
         }
@@ -392,15 +399,11 @@ impl FileStore {
         inner.mode = mode;
     }
 
-    /// Set the upload channel for cloud mode.
-    ///
-    /// Call this when switching to cloud mode to enable background uploads.
-    /// The receiving end of the channel should be consumed by an upload worker
-    /// that encrypts + uploads files to the cloud provider.
-    pub async fn set_upload_channel(&self, tx: mpsc::Sender<UploadJob>) {
+    /// Set the durable upload queue for cloud mode.
+    pub async fn set_upload_queue(&self, queue: Arc<dyn CloudUploadQueue>) {
         let mut inner = self.inner.write().await;
-        inner.upload_tx = Some(tx);
-        info!("[file_store] Upload channel connected");
+        inner.upload_queue = Some(queue);
+        info!("[file_store] Durable upload queue connected");
     }
 
     /// Set the cloud download fallback for read-path cache misses.
@@ -418,24 +421,32 @@ impl FileStore {
     /// cloud store during startup or recovery.
     pub async fn configure_cloud_wiring(
         &self,
-        tx: mpsc::Sender<UploadJob>,
+        queue: Arc<dyn CloudUploadQueue>,
         download: Arc<dyn CloudDownloader>,
     ) {
         let mut inner = self.inner.write().await;
-        inner.upload_tx = Some(tx);
+        inner.upload_queue = Some(queue);
         inner.download = Some(download);
         inner.mode = FileStoreMode::Cloud;
         info!("[file_store] Cloud wiring connected; cloud mode active");
     }
 
-    /// Tear down cloud wiring (upload channel + downloader) and return to local
+    /// Tear down cloud wiring (durable queue + downloader) and return to local
     /// pass-through. Used when migrating back to local mode or stopping sync.
     pub async fn clear_cloud_wiring(&self) {
         let mut inner = self.inner.write().await;
         inner.mode = FileStoreMode::Local;
-        inner.upload_tx = None;
+        inner.upload_queue = None;
         inner.download = None;
         info!("[file_store] Cloud wiring cleared; reverted to local mode");
+    }
+
+    /// Keep cloud mode/read fallback but fail writes before local mutation.
+    /// Used while an authenticated cloud restore requires a frozen archive.
+    pub async fn suspend_cloud_uploads(&self) {
+        let mut inner = self.inner.write().await;
+        inner.upload_queue = None;
+        info!("[file_store] Durable upload queue suspended");
     }
 
     /// Get the current operating mode.
@@ -455,30 +466,27 @@ impl FileStore {
     /// In local mode: writes directly to disk.
     /// In cloud mode: writes locally and queues the authoritative upload.
     pub async fn write(&self, relative_path: &str, data: &[u8]) -> FileStoreResult<()> {
-        let (root, full_path, mode, upload_tx) = {
+        let (root, full_path, mode, upload_queue) = {
             let inner = self.inner.read().await;
             (
                 inner.root.clone(),
                 Self::validated_relative_path(&inner.root, relative_path, false)?,
                 inner.mode.clone(),
-                inner.upload_tx.clone(),
+                inner.upload_queue.clone(),
             )
         };
 
-        let upload_permit = if mode == FileStoreMode::Cloud {
+        let upload_queue = if mode == FileStoreMode::Cloud {
             if data.len() > DEFAULT_MAX_FILESTORE_READ_BYTES {
                 return Err(FileStoreError::TooLarge {
                     path: relative_path.to_string(),
                     max_bytes: DEFAULT_MAX_FILESTORE_READ_BYTES,
                 });
             }
-            let tx = upload_tx.ok_or_else(|| {
+            Some(upload_queue.ok_or_else(|| {
                 FileStoreError::CloudUploadFailed(
-                    "cloud upload worker is not configured".to_string(),
+                    "durable cloud outbox is not configured".to_string(),
                 )
-            })?;
-            Some(tx.reserve_owned().await.map_err(|_| {
-                FileStoreError::CloudUploadFailed("cloud upload worker is unavailable".to_string())
             })?)
         } else {
             None
@@ -493,13 +501,13 @@ impl FileStore {
         );
 
         // In cloud mode, queue the file for background upload
-        if let Some(permit) = upload_permit {
+        if let Some(queue) = upload_queue {
             let job = UploadJob {
                 rel_path: relative_path.to_string(),
                 data: data.to_vec(),
                 op: UploadOp::Put,
             };
-            permit.send(job);
+            queue.enqueue(job).await?;
         }
 
         Ok(())
@@ -753,23 +761,20 @@ impl FileStore {
 
     /// Delete a file by relative path.
     pub async fn delete(&self, relative_path: &str) -> FileStoreResult<()> {
-        let (full_path, mode, upload_tx) = {
+        let (full_path, mode, upload_queue) = {
             let inner = self.inner.read().await;
             (
                 Self::validated_relative_path(&inner.root, relative_path, false)?,
                 inner.mode.clone(),
-                inner.upload_tx.clone(),
+                inner.upload_queue.clone(),
             )
         };
 
-        let upload_permit = if mode == FileStoreMode::Cloud {
-            let tx = upload_tx.ok_or_else(|| {
+        let upload_queue = if mode == FileStoreMode::Cloud {
+            Some(upload_queue.ok_or_else(|| {
                 FileStoreError::CloudUploadFailed(
-                    "cloud upload worker is not configured".to_string(),
+                    "durable cloud outbox is not configured".to_string(),
                 )
-            })?;
-            Some(tx.reserve_owned().await.map_err(|_| {
-                FileStoreError::CloudUploadFailed("cloud upload worker is unavailable".to_string())
             })?)
         } else {
             None
@@ -790,13 +795,13 @@ impl FileStore {
         }
 
         // In cloud mode, queue cloud deletion
-        if let Some(permit) = upload_permit {
+        if let Some(queue) = upload_queue {
             let job = UploadJob {
                 rel_path: relative_path.to_string(),
                 data: Vec::new(),
                 op: UploadOp::Delete,
             };
-            permit.send(job);
+            queue.enqueue(job).await?;
         }
 
         Ok(())
@@ -1104,6 +1109,19 @@ mod tests {
         fetched: Mutex<Vec<String>>,
     }
 
+    #[derive(Default)]
+    struct RecordingQueue {
+        jobs: Mutex<Vec<UploadJob>>,
+    }
+
+    #[async_trait]
+    impl CloudUploadQueue for RecordingQueue {
+        async fn enqueue(&self, job: UploadJob) -> FileStoreResult<()> {
+            self.jobs.lock().unwrap().push(job);
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl CloudDownloader for MockDownloader {
         async fn download(
@@ -1365,15 +1383,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileStore::new(tmp.path().to_path_buf());
         store.write("documents/source.txt", b"value").await.unwrap();
-        let (tx, mut rx) = mpsc::channel(4);
-        store.set_upload_channel(tx).await;
+        let queue = Arc::new(RecordingQueue::default());
+        store.set_upload_queue(queue.clone()).await;
         store.set_mode(FileStoreMode::Cloud).await;
 
         store
             .copy("documents/source.txt", "documents/copy.txt")
             .await
             .unwrap();
-        let copied = rx.recv().await.unwrap();
+        let copied = queue.jobs.lock().unwrap().remove(0);
         assert_eq!(copied.rel_path, "documents/copy.txt");
         assert!(matches!(copied.op, UploadOp::Put));
         assert_eq!(copied.data, b"value");
@@ -1382,13 +1400,15 @@ mod tests {
             .rename("documents/copy.txt", "documents/renamed.txt")
             .await
             .unwrap();
-        let put = rx.recv().await.unwrap();
-        let delete = rx.recv().await.unwrap();
+        let mut jobs = queue.jobs.lock().unwrap();
+        let put = jobs.remove(0);
+        let delete = jobs.remove(0);
         assert_eq!(put.rel_path, "documents/renamed.txt");
         assert!(matches!(put.op, UploadOp::Put));
         assert_eq!(put.data, b"value");
         assert_eq!(delete.rel_path, "documents/copy.txt");
         assert!(matches!(delete.op, UploadOp::Delete));
+        drop(jobs);
         assert!(!tmp.path().join("documents/copy.txt").exists());
         assert_eq!(
             tokio::fs::read(tmp.path().join("documents/renamed.txt"))
@@ -1412,8 +1432,8 @@ mod tests {
             .set_len(DEFAULT_MAX_FILESTORE_READ_BYTES as u64 + 1)
             .await
             .unwrap();
-        let (tx, _rx) = mpsc::channel(1);
-        store.set_upload_channel(tx).await;
+        let queue = Arc::new(RecordingQueue::default());
+        store.set_upload_queue(queue).await;
         store.set_mode(FileStoreMode::Cloud).await;
 
         let result = store

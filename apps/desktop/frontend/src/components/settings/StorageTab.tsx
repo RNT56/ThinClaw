@@ -447,24 +447,27 @@ const PROVIDERS = [
         color: 'text-blue-500',
         gradient: 'from-blue-500/20 to-sky-500/10',
         available: true,
+        liveSync: true,
     },
     {
         id: 'icloud',
         name: 'iCloud Drive',
-        description: 'Apple iCloud — native macOS integration, zero config',
+        description: 'Apple iCloud — encrypted backup and restore only',
         icon: Cloud,
         color: 'text-sky-500',
         gradient: 'from-sky-500/20 to-cyan-500/10',
         available: true,
+        liveSync: false,
     },
     {
         id: 'gdrive',
         name: 'Google Drive',
-        description: 'Google Drive via OAuth — free 15 GB tier',
+        description: 'Google Drive via OAuth — encrypted backup and restore only',
         icon: Cloud,
         color: 'text-amber-500',
         gradient: 'from-amber-500/20 to-yellow-500/10',
         available: true,
+        liveSync: false,
     },
     {
         id: 'dropbox',
@@ -474,6 +477,7 @@ const PROVIDERS = [
         color: 'text-blue-600',
         gradient: 'from-blue-600/20 to-indigo-500/10',
         available: true,
+        liveSync: true,
     },
     {
         id: 'onedrive',
@@ -483,24 +487,27 @@ const PROVIDERS = [
         color: 'text-indigo-500',
         gradient: 'from-indigo-500/20 to-purple-500/10',
         available: true,
+        liveSync: true,
     },
     {
         id: 'webdav',
         name: 'WebDAV',
-        description: 'Nextcloud, ownCloud, Synology NAS, or any WebDAV server',
+        description: 'Nextcloud, ownCloud, or NAS — encrypted backup and restore only',
         icon: Globe,
         color: 'text-teal-500',
         gradient: 'from-teal-500/20 to-emerald-500/10',
         available: true,
+        liveSync: false,
     },
     {
         id: 'sftp',
         name: 'SFTP',
-        description: 'Any Linux server, NAS, or cloud VM with SSH access',
+        description: 'SSH storage — encrypted backup and restore only',
         icon: Terminal,
         color: 'text-slate-500',
         gradient: 'from-slate-500/20 to-gray-500/10',
         available: true,
+        liveSync: false,
     },
 ];
 
@@ -555,6 +562,9 @@ export function StorageTab() {
     const [testing, setTesting] = useState(false);
     const [cancelling, setCancelling] = useState(false);
     const [showMigrationDialog, setShowMigrationDialog] = useState(false);
+
+    const syncNeedsAttention = status != null && ['auth_required', 'conflict', 'quarantined', 'error', 'backup_only'].includes(status.sync_health);
+    const syncHealthLabel = status?.sync_health.replace(/_/g, ' ') ?? 'unknown';
 
     // Auto-show migration dialog when migration starts
     useEffect(() => {
@@ -694,7 +704,7 @@ export function StorageTab() {
                                 </h2>
                                 <p className="text-sm text-muted-foreground">
                                     {isCloud
-                                        ? status?.sync_error
+                                        ? syncNeedsAttention
                                             ? `Connected to ${status?.provider_name ?? 'cloud provider'}. Sync needs attention.`
                                             : status?.sync_active
                                                 ? `Connected to ${status?.provider_name ?? 'cloud provider'}. Data is encrypted and syncing.`
@@ -709,12 +719,12 @@ export function StorageTab() {
                             {isCloud && (
                                 <div className={cn(
                                     'flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider border',
-                                    status?.sync_error
+                                    syncNeedsAttention
                                         ? 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20'
                                         : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
                                 )}>
-                                    {status?.sync_error ? <XCircle className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
-                                    {status?.sync_error ? 'Sync Error' : 'End-to-End Encrypted'}
+                                    {syncNeedsAttention ? <XCircle className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
+                                    {syncNeedsAttention ? syncHealthLabel : 'End-to-End Encrypted'}
                                 </div>
                             )}
                             <button
@@ -750,7 +760,37 @@ export function StorageTab() {
                                 </span>
                             </div>
                         )}
+                        {isCloud && status && status.sync_pending_count > 0 && (
+                            <div>
+                                <span className="text-muted-foreground">Pending:</span>
+                                <span className="ml-1.5 font-bold text-foreground">
+                                    {status.sync_pending_count} ({formatBytes(status.sync_pending_bytes)})
+                                    {status.sync_retrying_count > 0 && ` (${status.sync_retrying_count} retrying)`}
+                                </span>
+                            </div>
+                        )}
+                        {isCloud && status && status.sync_quarantined_count > 0 && (
+                            <div>
+                                <span className="text-rose-600 dark:text-rose-400">Quarantined:</span>
+                                <span className="ml-1.5 font-bold text-rose-600 dark:text-rose-400">
+                                    {status.sync_quarantined_count}
+                                </span>
+                            </div>
+                        )}
+                        {isCloud && status && status.sync_conflict_count > 0 && (
+                            <div>
+                                <span className="text-rose-600 dark:text-rose-400">Conflicts:</span>
+                                <span className="ml-1.5 font-bold text-rose-600 dark:text-rose-400">
+                                    {status.sync_conflict_count} (sync paused for affected paths)
+                                </span>
+                            </div>
+                        )}
                     </div>
+                    {status?.sync_backup_only_reason && (
+                        <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs text-amber-700 dark:text-amber-300">
+                            {status.sync_backup_only_reason}
+                        </div>
+                    )}
                     {isCloud && status?.sync_error && (
                         <div className="rounded-xl border border-rose-500/20 bg-rose-500/5 px-4 py-3 text-xs text-rose-600 dark:text-rose-400">
                             {status.sync_error}
@@ -804,6 +844,11 @@ export function StorageTab() {
                                             {!p.available && (
                                                 <span className="ml-auto text-[9px] font-bold uppercase bg-muted/50 text-muted-foreground px-2 py-0.5 rounded">
                                                     Coming Soon
+                                                </span>
+                                            )}
+                                            {p.available && !p.liveSync && (
+                                                <span className="ml-auto text-[9px] font-bold uppercase bg-amber-500/10 text-amber-600 dark:text-amber-400 px-2 py-0.5 rounded">
+                                                    Backup only
                                                 </span>
                                             )}
                                         </div>
@@ -879,7 +924,9 @@ export function StorageTab() {
                                                     hover:-translate-y-px transition-all"
                                             >
                                                 <Upload className="w-4 h-4" />
-                                                Migrate to Cloud
+                                                {PROVIDERS.find(provider => provider.id === selectedProvider)?.liveSync
+                                                    ? 'Migrate to Cloud'
+                                                    : 'Create Encrypted Backup'}
                                             </button>
                                         )}
                                     </div>
@@ -889,6 +936,25 @@ export function StorageTab() {
                     </motion.div>
                 )}
             </AnimatePresence>
+
+            {isLocal && status?.provider_connected && !status.sync_cas_capable && (
+                <div className="p-6 rounded-2xl border border-amber-500/20 bg-amber-500/5 shadow-xs space-y-4">
+                    <div>
+                        <h3 className="font-bold text-base">Restore Encrypted Backup</h3>
+                        <p className="text-xs text-muted-foreground mt-1">
+                            Authenticate and stage the newest immutable backup from {status.provider_name ?? 'this provider'}.
+                            The app restarts only after every file has been verified.
+                        </p>
+                    </div>
+                    <button
+                        onClick={handleMigrateToLocal}
+                        className="h-11 px-5 rounded-xl bg-amber-600 text-white font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 hover:bg-amber-500 transition-colors"
+                    >
+                        <Download className="w-4 h-4" />
+                        Restore Latest Backup
+                    </button>
+                </div>
+            )}
 
             {/* ── Migrate Back to Local ────────────────────────────────── */}
             {isCloud && (

@@ -1,5 +1,9 @@
 use super::*;
+use crate::cloud::provider::{CloudEntry, CloudStatus};
+use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 fn pending_file(original_path: &str, data: &[u8]) -> PendingRestoreFile {
     PendingRestoreFile {
@@ -342,4 +346,293 @@ async fn committed_restore_never_reinstates_backups_during_cleanup_recovery() {
     assert_eq!(tokio::fs::read(&database_path).await.unwrap(), new_database);
     assert_eq!(tokio::fs::read(&document_path).await.unwrap(), new_document);
     assert!(!staging_dir.exists());
+}
+
+#[derive(Clone)]
+struct CasTestProvider {
+    capability: CloudSyncCapability,
+    state: Arc<Mutex<CasTestState>>,
+}
+
+#[derive(Default)]
+struct CasTestState {
+    objects: HashMap<String, (Vec<u8>, u64)>,
+    next_version: u64,
+}
+
+impl CasTestProvider {
+    fn new(capability: CloudSyncCapability) -> Self {
+        Self {
+            capability,
+            state: Arc::new(Mutex::new(CasTestState::default())),
+        }
+    }
+}
+
+#[async_trait]
+impl CloudProvider for CasTestProvider {
+    fn name(&self) -> &str {
+        "migration-test"
+    }
+
+    async fn test_connection(&self) -> Result<CloudStatus, CloudError> {
+        Ok(CloudStatus {
+            connected: true,
+            storage_used: 0,
+            storage_available: None,
+            provider_name: self.name().to_string(),
+        })
+    }
+
+    fn sync_capability(&self) -> CloudSyncCapability {
+        self.capability
+    }
+
+    async fn put(&self, key: &str, data: &[u8]) -> Result<(), CloudError> {
+        let mut state = self.state.lock().unwrap();
+        state.next_version += 1;
+        let version = state.next_version;
+        state
+            .objects
+            .insert(key.to_string(), (data.to_vec(), version));
+        Ok(())
+    }
+
+    async fn get_bounded(&self, key: &str, max_bytes: usize) -> Result<Vec<u8>, CloudError> {
+        let state = self.state.lock().unwrap();
+        let data = state
+            .objects
+            .get(key)
+            .map(|(data, _)| data)
+            .ok_or_else(|| CloudError::NotFound(key.to_string()))?;
+        if data.len() > max_bytes {
+            return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+        }
+        Ok(data.clone())
+    }
+
+    async fn get_versioned_bounded(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<VersionedObject, CloudError> {
+        let state = self.state.lock().unwrap();
+        let (data, version) = state
+            .objects
+            .get(key)
+            .ok_or_else(|| CloudError::NotFound(key.to_string()))?;
+        if data.len() > max_bytes {
+            return Err(CloudError::ObjectTooLarge { limit: max_bytes });
+        }
+        Ok(VersionedObject {
+            data: data.clone(),
+            version: ObjectVersion::new(version.to_string())?,
+        })
+    }
+
+    async fn put_if_version(
+        &self,
+        key: &str,
+        data: &[u8],
+        expected: Option<&ObjectVersion>,
+    ) -> Result<ObjectVersion, CloudError> {
+        let mut state = self.state.lock().unwrap();
+        let current = state.objects.get(key).map(|(_, version)| *version);
+        let matches = match (current, expected) {
+            (None, None) => true,
+            (Some(current), Some(expected)) => current.to_string() == expected.as_str(),
+            _ => false,
+        };
+        if !matches {
+            return Err(CloudError::ArchiveConflict);
+        }
+        state.next_version += 1;
+        let version = state.next_version;
+        state
+            .objects
+            .insert(key.to_string(), (data.to_vec(), version));
+        ObjectVersion::new(version.to_string())
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), CloudError> {
+        self.state.lock().unwrap().objects.remove(key);
+        Ok(())
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<CloudEntry>, CloudError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .objects
+            .iter()
+            .filter(|(key, _)| key.starts_with(prefix))
+            .map(|(key, (data, _))| CloudEntry {
+                key: key.clone(),
+                size: data.len() as u64,
+                last_modified: 0,
+                checksum: None,
+            })
+            .collect())
+    }
+
+    async fn usage(&self) -> Result<u64, CloudError> {
+        Ok(0)
+    }
+}
+
+fn test_manifest() -> ArchiveManifest {
+    let mut manifest = ArchiveManifest::new("test".to_string(), 1, "test-key".to_string());
+    manifest.add_file(
+        "db/thinclaw.db.enc".to_string(),
+        "thinclaw.db".to_string(),
+        b"database",
+        64,
+    );
+    manifest
+}
+
+#[test]
+fn concurrent_v1_migrators_derive_one_archive_identity() {
+    let mut legacy = test_manifest();
+    legacy.version = 1;
+    legacy.archive_id.clear();
+    legacy.writer_id.clear();
+    legacy.generation = 0;
+    let first_writer = uuid::Uuid::new_v4().to_string();
+    let second_writer = uuid::Uuid::new_v4().to_string();
+    let mut first = test_manifest();
+    let mut second = test_manifest();
+
+    carry_forward_archive_identity(&mut first, Some(&legacy), &first_writer).unwrap();
+    carry_forward_archive_identity(&mut second, Some(&legacy), &second_writer).unwrap();
+
+    assert_eq!(first.archive_id, second.archive_id);
+    assert_eq!(first.generation, 1);
+    assert_eq!(second.generation, 1);
+    assert_ne!(first.writer_id, second.writer_id);
+}
+
+#[tokio::test]
+async fn rollback_requires_the_migration_owned_version() {
+    let provider = CasTestProvider::new(CloudSyncCapability::StrongCas);
+    let previous_bytes = b"previous".to_vec();
+    let previous_version = provider
+        .put_if_version(MANIFEST_KEY, &previous_bytes, None)
+        .await
+        .unwrap();
+    let previous = ExistingManifest {
+        ciphertext: previous_bytes.clone(),
+        version: previous_version.clone(),
+        manifest: test_manifest(),
+    };
+    let migration_version = provider
+        .put_if_version(MANIFEST_KEY, b"migration", Some(&previous_version))
+        .await
+        .unwrap();
+    let competing_version = provider
+        .put_if_version(MANIFEST_KEY, b"competing", Some(&migration_version))
+        .await
+        .unwrap();
+
+    assert!(
+        restore_previous_manifest_if_owned(&provider, &migration_version, Some(&previous))
+            .await
+            .is_err()
+    );
+    let observed = provider
+        .get_versioned_bounded(MANIFEST_KEY, 1024)
+        .await
+        .unwrap();
+    assert_eq!(observed.data, b"competing");
+    assert_eq!(observed.version, competing_version);
+}
+
+#[tokio::test]
+async fn concurrent_migration_cannot_blindly_overwrite_the_winner() {
+    let provider = CasTestProvider::new(CloudSyncCapability::StrongCas);
+    let initial = provider
+        .put_if_version(MANIFEST_KEY, b"initial", None)
+        .await
+        .unwrap();
+    let winner = provider
+        .put_if_version(MANIFEST_KEY, b"winner", Some(&initial))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        provider
+            .put_if_version(MANIFEST_KEY, b"stale-migrator", Some(&initial))
+            .await,
+        Err(CloudError::ArchiveConflict)
+    ));
+    let observed = provider
+        .get_versioned_bounded(MANIFEST_KEY, 1024)
+        .await
+        .unwrap();
+    assert_eq!(observed.data, b"winner");
+    assert_eq!(observed.version, winner);
+}
+
+#[tokio::test]
+async fn owned_migration_revision_can_be_rolled_back_by_cas() {
+    let provider = CasTestProvider::new(CloudSyncCapability::StrongCas);
+    let previous_bytes = b"previous".to_vec();
+    let previous_version = provider
+        .put_if_version(MANIFEST_KEY, &previous_bytes, None)
+        .await
+        .unwrap();
+    let previous = ExistingManifest {
+        ciphertext: previous_bytes.clone(),
+        version: previous_version.clone(),
+        manifest: test_manifest(),
+    };
+    let migration_version = provider
+        .put_if_version(MANIFEST_KEY, b"migration", Some(&previous_version))
+        .await
+        .unwrap();
+
+    restore_previous_manifest_if_owned(&provider, &migration_version, Some(&previous))
+        .await
+        .unwrap();
+    assert_eq!(provider.get(MANIFEST_KEY).await.unwrap(), previous_bytes);
+}
+
+#[tokio::test]
+async fn backup_restore_selects_latest_immutable_manifest_without_shared_pointer() {
+    let provider = CasTestProvider::new(CloudSyncCapability::BackupOnly);
+    provider.put(MANIFEST_KEY, b"legacy-shared").await.unwrap();
+    provider
+        .put(
+            "backups/manifests/00000000000000000001-old.json.enc",
+            b"old-backup",
+        )
+        .await
+        .unwrap();
+    provider
+        .put(
+            "backups/manifests/00000000000000000002-new.json.enc",
+            b"new-backup",
+        )
+        .await
+        .unwrap();
+
+    let (key, data) = find_manifest_for_restore(&provider).await.unwrap().unwrap();
+    assert_eq!(key, "backups/manifests/00000000000000000002-new.json.enc");
+    assert_eq!(data, b"new-backup");
+    assert_eq!(provider.get(MANIFEST_KEY).await.unwrap(), b"legacy-shared");
+}
+
+#[tokio::test]
+async fn backup_publication_refuses_the_mutable_live_manifest_key() {
+    let provider = CasTestProvider::new(CloudSyncCapability::BackupOnly);
+    assert!(
+        publish_immutable_backup_manifest(&provider, MANIFEST_KEY, b"backup")
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        provider.get(MANIFEST_KEY).await,
+        Err(CloudError::NotFound(_))
+    ));
 }

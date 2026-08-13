@@ -24,6 +24,18 @@ pub struct CloudStatusResponse {
     pub last_sync_at: Option<i64>,
     pub sync_active: bool,
     pub sync_error: Option<String>,
+    pub sync_health: String,
+    pub sync_pending_count: f64,
+    pub sync_pending_bytes: f64,
+    pub sync_retrying_count: f64,
+    pub sync_quarantined_count: f64,
+    pub sync_conflict_count: f64,
+    pub sync_cas_capable: bool,
+    pub sync_backup_only_reason: Option<String>,
+    #[specta(type = Option<f64>)]
+    pub sync_oldest_pending_at: Option<i64>,
+    #[specta(type = Option<f64>)]
+    pub sync_last_attempt_at: Option<i64>,
     pub has_recovery_key: bool,
     pub migration_in_progress: bool,
 }
@@ -42,6 +54,16 @@ impl From<CloudManagerStatus> for CloudStatusResponse {
             last_sync_at: s.last_sync_at,
             sync_active: s.sync_active,
             sync_error: s.sync_error,
+            sync_health: s.sync_health,
+            sync_pending_count: s.sync_pending_count as f64,
+            sync_pending_bytes: s.sync_pending_bytes as f64,
+            sync_retrying_count: s.sync_retrying_count as f64,
+            sync_quarantined_count: s.sync_quarantined_count as f64,
+            sync_conflict_count: s.sync_conflict_count as f64,
+            sync_cas_capable: s.sync_cas_capable,
+            sync_backup_only_reason: s.sync_backup_only_reason,
+            sync_oldest_pending_at: s.sync_oldest_pending_at,
+            sync_last_attempt_at: s.sync_last_attempt_at,
             has_recovery_key: s.has_recovery_key,
             migration_in_progress: s.migration_in_progress,
         }
@@ -395,6 +417,13 @@ pub async fn cloud_migrate_to_cloud(
     info!("[cloud] Frontend requested: migrate to cloud");
     cloud.migrate_to_cloud(app.clone(), &db).await?;
 
+    // A strong-CAS provider enters cloud mode. Backup-only providers remain
+    // local after publishing and verifying the encrypted archive.
+    if !cloud.is_cloud_mode().await {
+        info!("[cloud] Encrypted backup completed; local mode remains authoritative");
+        return Ok(());
+    }
+
     // Migration succeeded → the manager is now in cloud mode. Activate the live
     // upload worker + sync engine + read-path download fallback so new writes
     // actually reach the cloud and a fresh device can pull them back.
@@ -431,18 +460,26 @@ pub async fn cloud_migrate_to_local(
 
     info!("[cloud] Frontend requested: migrate to local");
     // Freeze the cloud upload worker before reading the archive so it cannot
-    // mutate objects underneath manifest verification. The FileStore retains
-    // the disconnected sender, causing writes to fail before local mutation.
-    cloud.stop_sync().await;
+    // mutate objects underneath manifest verification. Remove the queue from
+    // FileStore so writes fail before local mutation while the restore runs.
+    let was_cloud_mode = cloud.is_cloud_mode().await;
+    if was_cloud_mode {
+        cloud.stop_sync().await;
+    }
+    let file_store = app.state::<crate::file_store::FileStore>();
+    if was_cloud_mode {
+        file_store.suspend_cloud_uploads().await;
+    }
     if let Err(error) = cloud.migrate_to_local(app.clone(), &db).await {
-        let file_store = app.state::<crate::file_store::FileStore>();
-        match super::live_sync::start_live_sync(&file_store, &cloud, &db).await {
-            Ok(handles) => cloud.install_sync_handles(handles).await,
-            Err(restart_error) => {
-                return Err(format!(
-                    "{error}; additionally failed to resume cloud sync: {restart_error}"
-                )
-                .into());
+        if was_cloud_mode {
+            match super::live_sync::start_live_sync(&file_store, &cloud, &db).await {
+                Ok(handles) => cloud.install_sync_handles(handles).await,
+                Err(restart_error) => {
+                    return Err(format!(
+                        "{error}; additionally failed to resume cloud sync: {restart_error}"
+                    )
+                    .into());
+                }
             }
         }
         return Err(crate::thinclaw::bridge::BridgeError::Runtime { message: error });
@@ -475,9 +512,10 @@ pub async fn cloud_get_recovery_key(
 #[specta::specta]
 pub async fn cloud_import_recovery_key(
     cloud: State<'_, CloudManager>,
+    db: State<'_, sqlx::SqlitePool>,
     recovery_key: String,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
-    Ok(cloud.import_recovery_key(&recovery_key).await?)
+    Ok(cloud.import_recovery_key(&db, &recovery_key).await?)
 }
 
 /// Get storage breakdown by category (for the progress bar UI).
