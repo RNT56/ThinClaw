@@ -2,6 +2,105 @@
 
 use super::*;
 
+/// Run runtime-adjacent commands that may either continue into agent startup
+/// or complete after an interactive setup/canary workflow.
+pub(super) async fn prepare_runtime_entry(
+    cli: &Cli,
+    mut runtime_entry_mode: thinclaw::app::RuntimeEntryMode,
+) -> anyhow::Result<Option<thinclaw::app::RuntimeEntryMode>> {
+    match &cli.command {
+        Some(Command::Setup(setup)) => {
+            #[cfg(any(feature = "postgres", feature = "libsql"))]
+            {
+                let guide_topic = match setup.action.as_ref() {
+                    Some(thinclaw::cli::SetupAction::Edit { topic }) => Some(*topic),
+                    None => None,
+                    Some(thinclaw::cli::SetupAction::Reset(_)) => {
+                        unreachable!("setup reset is handled by immediate dispatch")
+                    }
+                };
+                let config = thinclaw::setup::SetupConfig {
+                    skip_auth: setup.skip_provider_auth || setup.legacy_skip_auth,
+                    channels_only: false,
+                    guide_topic,
+                    ui_mode: setup.ui,
+                    profile: setup.profile,
+                    mode: setup.mode.into(),
+                    invocation: thinclaw_app::SetupInvocation {
+                        kind: thinclaw_app::SetupInvocationKind::Explicit,
+                        continuation: if setup.run {
+                            thinclaw_app::SetupContinuation::Run
+                        } else {
+                            thinclaw_app::SetupContinuation::Exit
+                        },
+                    },
+                };
+                let mut wizard = SetupWizard::with_config(config);
+                wizard.run().await?;
+                if wizard.should_continue_to_runtime() {
+                    runtime_entry_mode =
+                        runtime_entry_mode_from_setup_continuation(wizard.continuation());
+                } else {
+                    return Ok(None);
+                }
+            }
+            #[cfg(not(any(feature = "postgres", feature = "libsql")))]
+            {
+                let _ = setup;
+                anyhow::bail!("setup requires the 'postgres' or 'libsql' feature");
+            }
+        }
+        Some(Command::Onboard {
+            skip_auth,
+            channels_only,
+            guide,
+            ui,
+            profile,
+        }) => {
+            #[cfg(any(feature = "postgres", feature = "libsql"))]
+            {
+                let config = setup_config_for_onboard_command(
+                    *skip_auth,
+                    *channels_only,
+                    *guide,
+                    *ui,
+                    *profile,
+                );
+                let mut wizard = SetupWizard::with_config(config);
+                wizard.run().await?;
+                if wizard.should_continue_to_runtime() {
+                    runtime_entry_mode =
+                        runtime_entry_mode_from_setup_continuation(wizard.continuation());
+                } else {
+                    return Ok(None);
+                }
+            }
+            #[cfg(not(any(feature = "postgres", feature = "libsql")))]
+            {
+                let _ = (skip_auth, channels_only, guide, ui, profile);
+                eprintln!("Onboarding wizard requires the 'postgres' or 'libsql' feature.");
+                return Ok(None);
+            }
+        }
+        Some(Command::AutonomyShadowCanary { manifest }) => {
+            init_cli_tracing(cli.debug);
+            let report = thinclaw::desktop_autonomy::run_shadow_canary_entrypoint(manifest)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!(
+                "{}",
+                serde_json::to_string(&report)
+                    .map_err(|e| anyhow::anyhow!("failed to encode canary report: {}", e))?
+            );
+            return Ok(None);
+        }
+        None | Some(Command::Run(_) | Command::Tui(_) | Command::Ask { .. }) => {}
+        _ => unreachable!("terminal command should have been dispatched"),
+    }
+
+    Ok(Some(runtime_entry_mode))
+}
+
 pub(super) async fn run_terminal_command(
     cli: &Cli,
     context: &thinclaw::cli::CliContext,
