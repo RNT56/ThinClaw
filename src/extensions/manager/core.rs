@@ -336,8 +336,9 @@ pub struct ExtensionManager {
         RwLock<Option<Arc<crate::extensions::lifecycle_hooks::AuditLogHook>>>,
     /// Native dynamic-library plugin state (registered manifests, loaded
     /// runtimes, health). Strictly opt-in and default-off: nothing here loads
-    /// native code unless `extensions.allow_native_plugins` is enabled and an
-    /// operator has placed a signed manifest in an allowlisted directory.
+    /// native code unless admission and unsafe in-process compatibility are
+    /// enabled and an operator has placed a signed manifest in an allowlisted
+    /// directory.
     pub(super) native_plugins: RwLock<NativePluginState>,
 }
 

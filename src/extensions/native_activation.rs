@@ -2,15 +2,18 @@
 //!
 //! # Security model
 //!
-//! Native plugins are the **operator-only**, opt-in, NON-sandboxed extension
-//! path. They run in-process with full host privileges (this is the deliberate
-//! trade for native performance). The entire pipeline is gated so that **no
-//! native code is ever loaded unless an operator explicitly opts in**:
+//! Native plugins are the **operator-only** compatibility extension path. They
+//! currently run in-process with full host privileges. The entire pipeline is
+//! gated so that **no native code is ever loaded unless an operator explicitly
+//! accepts both admission and unsafe in-process compatibility**:
 //!
 //! - **Default-off.** Nothing here loads a library unless
 //!   `extensions.allow_native_plugins` is `true`. This module never
 //!   auto-discovers or auto-loads anything on its own; the manager only feeds it
 //!   manifests an operator placed in an allowlisted directory.
+//! - **Compatibility gate.** In-process loading additionally requires
+//!   `extensions.allow_unsafe_in_process_native_plugins=true`. Admission alone
+//!   is never interpreted as accepting crash/compromise of the ThinClaw host.
 //! - **Signature-before-load.** [`NativePluginRuntime::load`] performs manifest
 //!   validation, ed25519 signature verification (when
 //!   `require_plugin_signatures` is `true`, the default), ABI/version checks,
@@ -119,7 +122,8 @@ impl NativePluginState {
     /// load is delegated to [`NativePluginRuntime::load`], which runs every
     /// signature/ABI/allowlist/hash gate **before** opening the library. The
     /// `settings` passed here are the live extension settings; if
-    /// `allow_native_plugins` is `false`, `load` refuses before any `dlopen`.
+    /// either native admission or unsafe compatibility is false, `load`
+    /// refuses before any `dlopen`.
     pub fn activate(
         &mut self,
         contribution_id: &str,
@@ -129,6 +133,12 @@ impl NativePluginState {
         if !settings.allow_native_plugins {
             return Err(ExtensionError::ActivationFailed(
                 "native plugins are disabled; set extensions.allow_native_plugins=true to enable"
+                    .to_string(),
+            ));
+        }
+        if !settings.allow_unsafe_in_process_native_plugins {
+            return Err(ExtensionError::ActivationFailed(
+                "native plugins currently require unsafe in-process compatibility; set extensions.allow_unsafe_in_process_native_plugins=true only after accepting that plugin crashes or compromise can terminate ThinClaw"
                     .to_string(),
             ));
         }
@@ -170,7 +180,7 @@ impl NativePluginState {
             // never be advertised as registered tool identities.
             tools_loaded: Vec::new(),
             message: format!(
-                "Native plugin '{contribution_id}' loaded (in-process, full host privileges). \
+                "Native plugin '{contribution_id}' loaded (explicit unsafe in-process compatibility, full host privileges). \
                  Signature, ABI, allowlist, and hash checks passed before load."
             ),
         })
@@ -310,12 +320,32 @@ mod tests {
         state.register(registered(native_manifest("libmissing.dylib")));
         let settings = ExtensionsSettings::default();
         assert!(!settings.allow_native_plugins);
+        assert!(!settings.allow_unsafe_in_process_native_plugins);
         let err = state
             .activate("native.echo", &settings)
             .expect_err("default settings must refuse activation");
         assert!(matches!(err, ExtensionError::ActivationFailed(_)));
         assert!(err.to_string().contains("allow_native_plugins"));
         // Nothing was loaded.
+        assert!(!state.is_loaded("native.echo"));
+    }
+
+    #[test]
+    fn native_admission_does_not_accept_in_process_compatibility() {
+        let mut state = NativePluginState::new();
+        state.register(registered(native_manifest("libmissing.dylib")));
+        let settings = ExtensionsSettings {
+            allow_native_plugins: true,
+            ..ExtensionsSettings::default()
+        };
+
+        let err = state
+            .activate("native.echo", &settings)
+            .expect_err("admission alone must never reach dlopen");
+        assert!(
+            err.to_string()
+                .contains("allow_unsafe_in_process_native_plugins")
+        );
         assert!(!state.is_loaded("native.echo"));
     }
 
@@ -332,6 +362,7 @@ mod tests {
         state.register(registered(manifest));
         let settings = ExtensionsSettings {
             allow_native_plugins: true,
+            allow_unsafe_in_process_native_plugins: true,
             require_plugin_signatures: true,
             trusted_manifest_keys: vec!["test-key".to_string()],
             ..ExtensionsSettings::default()
@@ -350,6 +381,7 @@ mod tests {
         let mut state = NativePluginState::new();
         let settings = ExtensionsSettings {
             allow_native_plugins: true,
+            allow_unsafe_in_process_native_plugins: true,
             require_plugin_signatures: false,
             ..ExtensionsSettings::default()
         };

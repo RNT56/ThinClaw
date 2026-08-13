@@ -1,8 +1,8 @@
 //! Native dynamic-library plugins (operator-only, default-off).
 //!
 //! SECURITY MODEL (see also `native_activation.rs` and `native.rs`):
-//!   * Default-off: nothing here loads native code unless
-//!     `extensions.allow_native_plugins` is explicitly true.
+//!   * Default-off: nothing here loads native code unless both native admission
+//!     and unsafe in-process compatibility are explicitly accepted.
 //!   * No auto-discovery/auto-load: a manifest is only registered when the
 //!     operator places a signed manifest in an allowlisted directory and a
 //!     scan is invoked. Registration loads NO code.
@@ -26,8 +26,8 @@ impl ExtensionManager {
     /// Load the live extension settings (DB-backed if available, else file).
     ///
     /// Used to gate native-plugin loading against the operator's current
-    /// `allow_native_plugins`/signature/allowlist configuration rather than a
-    /// stale snapshot.
+    /// admission/unsafe-compatibility/signature/allowlist configuration rather
+    /// than a stale snapshot.
     async fn current_extensions_settings(&self) -> crate::settings::ExtensionsSettings {
         if let Some(ref store) = self.store
             && let Ok(map) = store.get_all_settings(&self.user_id).await
@@ -205,7 +205,8 @@ impl ExtensionManager {
     ///
     /// Delegates to [`NativePluginState::activate`], which calls the unsafe
     /// `NativePluginRuntime::load`. Every trust gate runs inside `load` BEFORE
-    /// any `dlopen`; if `allow_native_plugins` is off, load refuses first.
+    /// any `dlopen`; admission and unsafe compatibility are rechecked by the
+    /// loader itself.
     pub(super) async fn activate_native_plugin(
         &self,
         name: &str,

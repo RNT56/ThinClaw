@@ -54,8 +54,9 @@ pub enum ExtensionKind {
     /// tools/channels they run **in-process with full host privileges** and are
     /// NOT sandboxed. They are only ever loaded after the signature/ABI/allowlist/
     /// SHA-256 gates in [`native::NativePluginRuntime::load`] pass, and only when
-    /// `extensions.allow_native_plugins` is explicitly enabled. They are not
-    /// surfaced to the agent-facing tool install surface.
+    /// native admission and
+    /// `extensions.allow_unsafe_in_process_native_plugins` are explicitly
+    /// enabled. They are not surfaced to the agent-facing tool install surface.
     NativePlugin,
 }
 

@@ -85,6 +85,11 @@ impl NativePluginRuntime {
         if !settings.allow_native_plugins {
             bail!("native plugin loading requires extensions.allow_native_plugins=true");
         }
+        if !settings.allow_unsafe_in_process_native_plugins {
+            bail!(
+                "native plugin loading requires explicit unsafe compatibility via extensions.allow_unsafe_in_process_native_plugins=true"
+            );
+        }
         let validation = validate_plugin_manifest(manifest, settings);
         if !validation.valid {
             bail!(
@@ -371,12 +376,31 @@ mod tests {
     }
 
     #[test]
+    fn native_loading_requires_separate_unsafe_compatibility_opt_in() {
+        let manifest = native_manifest("libmissing.dylib", None);
+        let contribution = manifest.contributions.native_plugins.first().unwrap();
+        let settings = ExtensionsSettings {
+            allow_native_plugins: true,
+            ..ExtensionsSettings::default()
+        };
+        let err = unsafe {
+            NativePluginRuntime::load(&manifest, contribution, Path::new("."), &settings)
+        }
+        .expect_err("native admission alone must not load in-process code");
+        assert!(
+            err.to_string()
+                .contains("allow_unsafe_in_process_native_plugins")
+        );
+    }
+
+    #[test]
     fn native_loading_rejects_missing_manifest_signature_when_required() {
         let mut manifest = native_manifest("libmissing.dylib", None);
         manifest.signature = None;
         let contribution = manifest.contributions.native_plugins.first().unwrap();
         let settings = ExtensionsSettings {
             allow_native_plugins: true,
+            allow_unsafe_in_process_native_plugins: true,
             require_plugin_signatures: true,
             trusted_manifest_keys: vec!["test-key".to_string()],
             ..ExtensionsSettings::default()
@@ -395,6 +419,7 @@ mod tests {
         let contribution = manifest.contributions.native_plugins.first().unwrap();
         let settings = ExtensionsSettings {
             allow_native_plugins: true,
+            allow_unsafe_in_process_native_plugins: true,
             require_plugin_signatures: true,
             trusted_manifest_keys: vec!["different-key".to_string()],
             ..ExtensionsSettings::default()
@@ -414,6 +439,7 @@ mod tests {
         let contribution = manifest.contributions.native_plugins.first().unwrap();
         let settings = ExtensionsSettings {
             allow_native_plugins: true,
+            allow_unsafe_in_process_native_plugins: true,
             require_plugin_signatures: false,
             ..ExtensionsSettings::default()
         };
@@ -459,6 +485,7 @@ mod tests {
         fs::write(&lib, b"not a real library").expect("write");
         let mut settings = ExtensionsSettings {
             allow_native_plugins: true,
+            allow_unsafe_in_process_native_plugins: true,
             require_plugin_signatures: false,
             ..ExtensionsSettings::default()
         };
@@ -480,6 +507,7 @@ mod tests {
         let contribution = manifest.contributions.native_plugins.first().unwrap();
         let settings = ExtensionsSettings {
             allow_native_plugins: true,
+            allow_unsafe_in_process_native_plugins: true,
             require_plugin_signatures: false,
             native_plugin_allowlist_dirs: vec![dir.path().display().to_string()],
             ..ExtensionsSettings::default()
@@ -498,6 +526,7 @@ mod tests {
         let contribution = manifest.contributions.native_plugins.first().unwrap();
         let settings = ExtensionsSettings {
             allow_native_plugins: true,
+            allow_unsafe_in_process_native_plugins: true,
             require_plugin_signatures: false,
             native_plugin_allowlist_dirs: vec![dir.path().display().to_string()],
             ..ExtensionsSettings::default()
@@ -570,6 +599,7 @@ int thinclaw_native_plugin_invoke_v1(
         let contribution = manifest.contributions.native_plugins.first().unwrap();
         let settings = ExtensionsSettings {
             allow_native_plugins: true,
+            allow_unsafe_in_process_native_plugins: true,
             require_plugin_signatures: false,
             native_plugin_allowlist_dirs: vec![dir.path().display().to_string()],
             ..ExtensionsSettings::default()

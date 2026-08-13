@@ -453,7 +453,7 @@ impl ExtensionManager {
                     name: id.clone(),
                     kind: ExtensionKind::NativePlugin,
                     description: Some(
-                        "Native dynamic-library plugin (in-process, full host privileges)"
+                        "Native dynamic-library plugin (explicit unsafe in-process compatibility, full host privileges)"
                             .to_string(),
                     ),
                     url: None,
