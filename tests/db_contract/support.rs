@@ -19,6 +19,18 @@ pub(crate) fn unique_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
 }
 
+fn unavailable(message: impl std::fmt::Display) -> Option<ContractDb> {
+    if std::env::var("THINCLAW_REQUIRE_CONTRACT_DB")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        panic!("required contract database is unavailable: {message}");
+    }
+    eprintln!("skipping db contract test: {message}");
+    None
+}
+
 pub(crate) async fn contract_db_or_skip() -> Option<ContractDb> {
     let serial_guard = CONTRACT_DB_TEST_LOCK.clone().lock_owned().await;
     let backend = std::env::var("DATABASE_BACKEND").unwrap_or_else(|_| {
@@ -32,10 +44,7 @@ pub(crate) async fn contract_db_or_skip() -> Option<ContractDb> {
     match backend.as_str() {
         "postgres" => connect_postgres(serial_guard).await,
         "libsql" => connect_libsql(serial_guard).await,
-        other => {
-            eprintln!("skipping db contract test: unsupported DATABASE_BACKEND={other}");
-            None
-        }
+        other => unavailable(format!("unsupported DATABASE_BACKEND={other}")),
     }
 }
 
@@ -43,19 +52,20 @@ pub(crate) async fn contract_db_or_skip() -> Option<ContractDb> {
 async fn connect_libsql(serial_guard: OwnedMutexGuard<()>) -> Option<ContractDb> {
     use thinclaw::db::libsql::LibSqlBackend;
 
-    let dir = tempfile::tempdir().ok()?;
+    let dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(err) => return unavailable(format!("cannot create libsql tempdir: {err}")),
+    };
     let path = dir.path().join("contract.db");
     let backend = match LibSqlBackend::new_local(&path).await {
         Ok(backend) => backend,
         Err(err) => {
-            eprintln!("skipping db contract test: libsql open failed: {err}");
-            return None;
+            return unavailable(format!("libsql open failed: {err}"));
         }
     };
 
     if let Err(err) = backend.run_migrations().await {
-        eprintln!("skipping db contract test: libsql migrations failed: {err}");
-        return None;
+        return unavailable(format!("libsql migrations failed: {err}"));
     }
 
     Some(ContractDb {
@@ -69,8 +79,7 @@ async fn connect_libsql(serial_guard: OwnedMutexGuard<()>) -> Option<ContractDb>
 
 #[cfg(not(feature = "libsql"))]
 async fn connect_libsql(_serial_guard: OwnedMutexGuard<()>) -> Option<ContractDb> {
-    eprintln!("skipping db contract test: binary was built without libsql feature");
-    None
+    unavailable("binary was built without libsql feature")
 }
 
 #[cfg(feature = "postgres")]
@@ -81,24 +90,17 @@ async fn connect_postgres(serial_guard: OwnedMutexGuard<()>) -> Option<ContractD
 
     let base_url = match std::env::var("DATABASE_URL") {
         Ok(url) => url,
-        Err(_) => {
-            eprintln!("skipping db contract test: DATABASE_URL is not set");
-            return None;
-        }
+        Err(_) => return unavailable("DATABASE_URL is not set"),
     };
 
     let schema = format!("contract_{}", Uuid::new_v4().simple());
     if let Err(err) = create_postgres_schema(&base_url, &schema).await {
-        eprintln!("skipping db contract test: cannot create schema {schema}: {err}");
-        return None;
+        return unavailable(format!("cannot create schema {schema}: {err}"));
     }
 
     let isolated_url = match postgres_url_with_search_path(&base_url, &schema) {
         Ok(url) => url,
-        Err(err) => {
-            eprintln!("skipping db contract test: cannot build postgres URL: {err}");
-            return None;
-        }
+        Err(err) => return unavailable(format!("cannot build postgres URL: {err}")),
     };
 
     let config = DatabaseConfig {
@@ -112,15 +114,11 @@ async fn connect_postgres(serial_guard: OwnedMutexGuard<()>) -> Option<ContractD
 
     let backend = match PgBackend::new(&config).await {
         Ok(backend) => backend,
-        Err(err) => {
-            eprintln!("skipping db contract test: postgres connect failed: {err}");
-            return None;
-        }
+        Err(err) => return unavailable(format!("postgres connect failed: {err}")),
     };
 
     if let Err(err) = backend.run_migrations().await {
-        eprintln!("skipping db contract test: postgres migrations failed: {err}");
-        return None;
+        return unavailable(format!("postgres migrations failed: {err}"));
     }
 
     Some(ContractDb {
@@ -134,8 +132,7 @@ async fn connect_postgres(serial_guard: OwnedMutexGuard<()>) -> Option<ContractD
 
 #[cfg(not(feature = "postgres"))]
 async fn connect_postgres(_serial_guard: OwnedMutexGuard<()>) -> Option<ContractDb> {
-    eprintln!("skipping db contract test: binary was built without postgres feature");
-    None
+    unavailable("binary was built without postgres feature")
 }
 
 #[cfg(feature = "postgres")]

@@ -6,31 +6,43 @@
 
 use std::sync::Arc;
 
+use thinclaw::db::{Database as _, postgres::PgBackend};
 use thinclaw::workspace::{MockEmbeddings, SearchConfig, Workspace, paths};
 
-fn get_pool() -> deadpool_postgres::Pool {
+fn postgres_required() -> bool {
+    std::env::var("THINCLAW_REQUIRE_POSTGRES_INTEGRATION")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
+fn postgres_unavailable(message: impl std::fmt::Display) -> Option<deadpool_postgres::Pool> {
+    if postgres_required() {
+        panic!("required PostgreSQL integration dependency is unavailable: {message}");
+    }
+    eprintln!("skipping workspace integration: {message}");
+    None
+}
+
+async fn get_pool() -> Option<deadpool_postgres::Pool> {
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://localhost/thinclaw_test".to_string());
 
     let config: tokio_postgres::Config = database_url.parse().expect("Invalid DATABASE_URL");
 
     let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    deadpool_postgres::Pool::builder(mgr)
+    let pool = deadpool_postgres::Pool::builder(mgr)
         .max_size(4)
         .build()
-        .expect("Failed to create pool")
-}
-
-/// Try to get a connection, returning None if Postgres is unreachable.
-/// Tests call this to skip gracefully in CI where no database is available.
-async fn try_connect(pool: &deadpool_postgres::Pool) -> Option<()> {
-    match pool.get().await {
-        Ok(_) => Some(()),
-        Err(e) => {
-            eprintln!("skipping: database unavailable ({e})");
-            None
-        }
+        .expect("Failed to create pool");
+    if let Err(error) = pool.get().await {
+        return postgres_unavailable(format!("database connection failed: {error}"));
     }
+    let backend = PgBackend::from_pool(pool.clone());
+    if let Err(error) = backend.run_migrations().await {
+        return postgres_unavailable(format!("database migrations failed: {error}"));
+    }
+    Some(pool)
 }
 
 async fn cleanup_user(pool: &deadpool_postgres::Pool, user_id: &str) {
@@ -45,10 +57,9 @@ async fn cleanup_user(pool: &deadpool_postgres::Pool, user_id: &str) {
 
 #[tokio::test]
 async fn test_workspace_write_and_read() {
-    let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
+    let Some(pool) = get_pool().await else {
         return;
-    }
+    };
     let user_id = "test_write_read";
     cleanup_user(&pool, user_id).await;
 
@@ -73,10 +84,9 @@ async fn test_workspace_write_and_read() {
 
 #[tokio::test]
 async fn test_workspace_append() {
-    let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
+    let Some(pool) = get_pool().await else {
         return;
-    }
+    };
     let user_id = "test_append";
     cleanup_user(&pool, user_id).await;
 
@@ -103,10 +113,9 @@ async fn test_workspace_append() {
 
 #[tokio::test]
 async fn test_workspace_nested_paths() {
-    let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
+    let Some(pool) = get_pool().await else {
         return;
-    }
+    };
     let user_id = "test_nested";
     cleanup_user(&pool, user_id).await;
 
@@ -151,10 +160,9 @@ async fn test_workspace_nested_paths() {
 
 #[tokio::test]
 async fn test_workspace_delete() {
-    let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
+    let Some(pool) = get_pool().await else {
         return;
-    }
+    };
     let user_id = "test_delete";
     cleanup_user(&pool, user_id).await;
 
@@ -178,10 +186,9 @@ async fn test_workspace_delete() {
 
 #[tokio::test]
 async fn test_workspace_memory_operations() {
-    let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
+    let Some(pool) = get_pool().await else {
         return;
-    }
+    };
     let user_id = "test_memory_ops";
     cleanup_user(&pool, user_id).await;
 
@@ -209,10 +216,9 @@ async fn test_workspace_memory_operations() {
 
 #[tokio::test]
 async fn test_workspace_daily_log() {
-    let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
+    let Some(pool) = get_pool().await else {
         return;
-    }
+    };
     let user_id = "test_daily_log";
     cleanup_user(&pool, user_id).await;
 
@@ -238,10 +244,9 @@ async fn test_workspace_daily_log() {
 
 #[tokio::test]
 async fn test_workspace_fts_search() {
-    let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
+    let Some(pool) = get_pool().await else {
         return;
-    }
+    };
     let user_id = "test_fts_search";
     cleanup_user(&pool, user_id).await;
 
@@ -299,10 +304,9 @@ async fn test_workspace_fts_search() {
 
 #[tokio::test]
 async fn test_workspace_hybrid_search_with_mock_embeddings() {
-    let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
+    let Some(pool) = get_pool().await else {
         return;
-    }
+    };
     let user_id = "test_hybrid_search";
     cleanup_user(&pool, user_id).await;
 
@@ -341,10 +345,9 @@ async fn test_workspace_hybrid_search_with_mock_embeddings() {
 
 #[tokio::test]
 async fn test_workspace_list_all() {
-    let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
+    let Some(pool) = get_pool().await else {
         return;
-    }
+    };
     let user_id = "test_list_all";
     cleanup_user(&pool, user_id).await;
 
@@ -369,10 +372,9 @@ async fn test_workspace_list_all() {
 
 #[tokio::test]
 async fn test_workspace_system_prompt_separates_user_profile_from_trusted_instructions() {
-    let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
+    let Some(pool) = get_pool().await else {
         return;
-    }
+    };
     let temp_home = tempfile::tempdir().expect("temp home");
     let previous_home = std::env::var_os("THINCLAW_HOME");
     unsafe {

@@ -97,6 +97,80 @@ jobs:
       - name: Audit dependencies
         run: cargo deny check
 
+  openapi-contract-drift:
+    name: Rust to OpenAPI contract drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: openapi-contract-drift
+      - name: Check authoritative Rust OpenAPI snapshot
+        run: >-
+          cargo run --locked --no-default-features --features edge
+          --example export-openapi -- check
+      - name: Prove both generated-contract drift boundaries fail closed
+        run: python3 -m unittest scripts.ci.test_contract_drift
+
+  workspace-integration-tests:
+    name: Execute classified workspace integration targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    env:
+      DATABASE_BACKEND: libsql
+      THINCLAW_REQUIRE_CONTRACT_DB: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Require large integration build storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          mountpoint -q /mnt || {
+            echo "The integration job requires the hosted runner's large /mnt volume" >&2
+            exit 1
+          }
+          sudo install -d -o "$(id -u)" -g "$(id -g)" /mnt/thinclaw-integration-target
+          echo "CARGO_TARGET_DIR=/mnt/thinclaw-integration-target" >> "$GITHUB_ENV"
+          df -h /mnt
+      - name: Free runner disk before full integration link
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker system prune -af || true
+          df -h /mnt
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: workspace-integration-execution
+          save-if: false
+      - name: Verify complete integration target classification
+        run: python3 scripts/ci/integration_test_gate.py check
+      - name: Execute every hermetic integration target
+        timeout-minutes: 60
+        run: python3 scripts/ci/integration_test_gate.py run
+      - name: Require Chrome for browser integration
+        run: command -v google-chrome-stable
+      - name: Execute browser-provisioned integration target
+        env:
+          THINCLAW_REQUIRE_BROWSER_INTEGRATION: "1"
+        run: >-
+          cargo test --locked --features full
+          --test web_gateway_ui_browser_integration
+          -- --nocapture --test-threads=1
+
   # ── Per-profile compilation checks ──────────────────────────────────
   # Verifies that every supported build profile compiles, passes clippy,
   # and compiles tests.  The "light" profile (default) is what users get
@@ -922,6 +996,7 @@ jobs:
       - name: Run libSQL contract tests
         env:
           DATABASE_BACKEND: libsql
+          THINCLAW_REQUIRE_CONTRACT_DB: "1"
         run: cargo test --locked --test db_contract --no-default-features --features libsql -- --nocapture
 
   db-contract-postgres:
@@ -944,6 +1019,7 @@ jobs:
     env:
       DATABASE_BACKEND: postgres
       DATABASE_URL: postgres://thinclaw:thinclaw@localhost:5432/thinclaw_test
+      THINCLAW_REQUIRE_CONTRACT_DB: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -958,6 +1034,13 @@ jobs:
         run: PGPASSWORD=thinclaw psql -h localhost -U thinclaw -d thinclaw_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
       - name: Run postgres contract tests
         run: cargo test --locked --test db_contract --no-default-features --features postgres -- --nocapture --test-threads=1
+      - name: Run migrated PostgreSQL workspace integration tests
+        env:
+          THINCLAW_REQUIRE_POSTGRES_INTEGRATION: "1"
+        run: >-
+          cargo test --locked --test workspace_integration
+          --no-default-features --features postgres
+          -- --nocapture --test-threads=1
       - name: PostgreSQL parser and static capability contract
         run: cargo test --locked --test cli_surface_contract --no-default-features --features postgres
 

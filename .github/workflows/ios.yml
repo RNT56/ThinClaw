@@ -6,6 +6,7 @@ on:
     paths:
       - "apps/ios/**"
       - "clients/openapi/**"
+      - "scripts/ci/contract_drift.py"
       - ".github/workflows/ios.yml"
     # Tag pushes matching ios-v* trigger the TestFlight archive job below.
     # (The path filter above does not apply to tag pushes.)
@@ -15,6 +16,7 @@ on:
     paths:
       - "apps/ios/**"
       - "clients/openapi/**"
+      - "scripts/ci/contract_drift.py"
       - ".github/workflows/ios.yml"
 
 permissions:

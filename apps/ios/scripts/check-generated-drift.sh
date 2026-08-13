@@ -5,12 +5,10 @@ set -euo pipefail
 
 IOS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GEN_DIR="$IOS_ROOT/Packages/ThinClawAPI/Sources/ThinClawAPI/Generated"
+REPO_ROOT="$(cd "$IOS_ROOT/../.." && pwd)"
+CONTRACT_CHECKER="$REPO_ROOT/scripts/ci/contract_drift.py"
 
-# Grace period: until the first generation lands, only READMEs live here.
-if ! ls "$GEN_DIR"/*.swift >/dev/null 2>&1; then
-    echo "no generated sources yet — skipping drift check (generation lands with M1)"
-    exit 0
-fi
+python3 "$CONTRACT_CHECKER" check-swift
 
 "$IOS_ROOT/scripts/generate-api.sh"
 
@@ -20,6 +18,7 @@ fi
 # this check — they are reviewed as normal source, not regenerated.
 GENERATED_PATHS=(
     "Packages/ThinClawAPI/openapi/openapi.json"
+    "Packages/ThinClawAPI/openapi/generated-client-manifest.json"
     "Packages/ThinClawAPI/Sources/ThinClawAPI/Generated"
 )
 if ! git -C "$IOS_ROOT" diff --quiet -- "${GENERATED_PATHS[@]}"; then

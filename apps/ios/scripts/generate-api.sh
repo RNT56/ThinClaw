@@ -13,6 +13,7 @@ SPEC_SRC="$REPO_ROOT/clients/openapi/thinclaw-gateway.openapi.json"
 SPEC_DST="$IOS_ROOT/Packages/ThinClawAPI/openapi/openapi.json"
 GEN_DIR="$IOS_ROOT/Packages/ThinClawAPI/Sources/ThinClawAPI/Generated"
 CONFIG="$IOS_ROOT/Packages/ThinClawAPI/openapi/openapi-generator-config.yaml"
+CONTRACT_CHECKER="$REPO_ROOT/scripts/ci/contract_drift.py"
 
 if [[ ! -f "$SPEC_SRC" ]]; then
     echo "error: missing $SPEC_SRC — run 'cargo run --example export-openapi -- generate' at the repo root" >&2
@@ -35,6 +36,12 @@ if command -v mise >/dev/null 2>&1; then
     # The committed config selects modes (types+client), access level, naming
     # strategy, and the REST-only operation filter — keep those in the config,
     # not on the command line, so generation stays reproducible.
+    EXPECTED_GENERATOR_VERSION="$(python3 "$CONTRACT_CHECKER" generator-version)"
+    ACTUAL_GENERATOR_PATH="$(cd "$IOS_ROOT" && mise which swift-openapi-generator)"
+    if [[ "$ACTUAL_GENERATOR_PATH" != */"$EXPECTED_GENERATOR_VERSION"/bin/swift-openapi-generator ]]; then
+        echo "error: expected swift-openapi-generator $EXPECTED_GENERATOR_VERSION, got $ACTUAL_GENERATOR_PATH" >&2
+        exit 1
+    fi
     (cd "$IOS_ROOT" && mise exec -- swift-openapi-generator generate \
         --config "$CONFIG" \
         --output-directory "$GEN_DIR" \
@@ -60,5 +67,14 @@ for f in "$GEN_DIR"/*.swift; do
         mv "$tmp" "$f"
     fi
 done
+
+for required in Client.swift Types.swift; do
+    if [[ ! -s "$GEN_DIR/$required" ]]; then
+        echo "error: generator did not create required output $GEN_DIR/$required" >&2
+        exit 1
+    fi
+done
+
+python3 "$CONTRACT_CHECKER" write-swift-manifest
 
 echo "regenerated $GEN_DIR from $(basename "$SPEC_SRC")"

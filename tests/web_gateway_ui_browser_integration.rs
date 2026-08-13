@@ -29,6 +29,21 @@ use crate::db_contract::support::contract_db_or_skip;
 const AUTH_TOKEN: &str = "test-browser-ui-token";
 const UI_TIMEOUT: Duration = Duration::from_secs(20);
 
+fn browser_required() -> bool {
+    std::env::var("THINCLAW_REQUIRE_BROWSER_INTEGRATION")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
+fn browser_unavailable<T>(message: impl std::fmt::Display) -> Option<T> {
+    if browser_required() {
+        panic!("required browser integration dependency is unavailable: {message}");
+    }
+    eprintln!("skipping browser UI integration test: {message}");
+    None
+}
+
 fn find_chrome() -> Option<PathBuf> {
     let candidates = if cfg!(target_os = "macos") {
         vec![
@@ -90,18 +105,12 @@ fn find_chrome() -> Option<PathBuf> {
 async fn launch_browser() -> Option<(Browser, TempDir)> {
     let chrome_path = match find_chrome() {
         Some(path) => path,
-        None => {
-            eprintln!("skipping browser UI integration test: Chrome/Chromium binary not found");
-            return None;
-        }
+        None => return browser_unavailable("Chrome/Chromium binary not found"),
     };
 
     let profile_dir = match tempfile::tempdir() {
         Ok(dir) => dir,
-        Err(err) => {
-            eprintln!("skipping browser UI integration test: tempdir failed: {err}");
-            return None;
-        }
+        Err(err) => return browser_unavailable(format!("tempdir failed: {err}")),
     };
 
     let config = match BrowserConfig::builder()
@@ -116,18 +125,12 @@ async fn launch_browser() -> Option<(Browser, TempDir)> {
         .build()
     {
         Ok(config) => config,
-        Err(err) => {
-            eprintln!("skipping browser UI integration test: browser config failed: {err}");
-            return None;
-        }
+        Err(err) => return browser_unavailable(format!("browser config failed: {err}")),
     };
 
     let (browser, mut handler) = match Browser::launch(config).await {
         Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("skipping browser UI integration test: browser launch failed: {err}");
-            return None;
-        }
+        Err(err) => return browser_unavailable(format!("browser launch failed: {err}")),
     };
 
     tokio::spawn(async move { while handler.next().await.is_some() {} });

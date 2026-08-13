@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "features": "full",
+  "hermetic": [
+    "acp_stdio_smoke",
+    "agent_subsystem_integration",
+    "cli_contract",
+    "cli_coverage_manifest",
+    "cli_docs_contract",
+    "cli_safety_contract",
+    "cli_setup_contract",
+    "cli_surface_contract",
+    "crate_ownership_hygiene",
+    "db_contract",
+    "desktop_autonomy_live_smoke",
+    "device_pairing_integration",
+    "docker_sandbox_smoke",
+    "heartbeat_integration",
+    "host_runtime_smoke",
+    "html_to_markdown",
+    "linux_deploy_config",
+    "openai_compat_integration",
+    "openapi_snapshot",
+    "pairing_integration",
+    "process_launch_contract",
+    "registry_channel_catalog",
+    "repo_hygiene",
+    "repo_project_docker_e2e",
+    "shared_helper_drift",
+    "snapshots",
+    "tool_registry_contract",
+    "wasm_channel_integration",
+    "ws_gateway_integration"
+  ],
+  "external": [
+    {
+      "target": "schema_divergence",
+      "reason": "Requires live PostgreSQL and the explicit schema-divergence feature.",
+      "workflow": ".github/workflows/ci.yml",
+      "evidence": "--test schema_divergence"
+    },
+    {
+      "target": "web_gateway_ui_browser_integration",
+      "reason": "Requires a real Chrome process in addition to a libSQL contract database.",
+      "workflow": ".github/workflows/ci.yml",
+      "evidence": "--test web_gateway_ui_browser_integration"
+    },
+    {
+      "target": "workspace_integration",
+      "reason": "Requires a migrated PostgreSQL service with pgvector.",
+      "workflow": ".github/workflows/ci.yml",
+      "evidence": "--test workspace_integration"
+    }
+  ],
+  "ignored_external": [
+    {
+      "target": "desktop_autonomy_live_smoke",
+      "reason": "Six ignored cases require a privileged interactive desktop; hermetic cases still run in the blanket job.",
+      "workflow": ".github/workflows/nightly.yml",
+      "evidence": "desktop_autonomy_live_smoke.rs"
+    },
+    {
+      "target": "docker_sandbox_smoke",
+      "reason": "Ignored worker/bridge cases require a locally built worker and optional provider credentials; hermetic cases still run in the blanket job.",
+      "workflow": ".github/workflows/nightly.yml",
+      "evidence": "--test docker_sandbox_smoke"
+    },
+    {
+      "target": "heartbeat_integration",
+      "reason": "The ignored end-to-end heartbeat requires PostgreSQL and a live LLM credential.",
+      "workflow": ".github/workflows/nightly.yml",
+      "evidence": "--test heartbeat_integration"
+    },
+    {
+      "target": "repo_project_docker_e2e",
+      "reason": "The ignored dispatch case requires a locally built worker image; hermetic cases still run in the blanket job.",
+      "workflow": ".github/workflows/nightly.yml",
+      "evidence": "--test repo_project_docker_e2e"
+    }
+  ]
+}
