@@ -15,6 +15,9 @@ use uuid::Uuid;
 use thinclaw_tools_core::{OutboundUrlGuardOptions, ToolError, validate_outbound_url_structure};
 
 const MAX_MCP_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
+pub const MIN_STDIO_REQUEST_TIMEOUT_SECS: u64 = 1;
+pub const MAX_STDIO_REQUEST_TIMEOUT_SECS: u64 = 30 * 60;
+pub const DEFAULT_STDIO_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 /// Transport type for MCP servers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,6 +28,58 @@ pub enum McpTransport {
     Http,
     /// Stdio transport — spawn a child process and communicate via stdin/stdout.
     Stdio,
+}
+
+/// Host-process containment mode for a local stdio MCP server.
+///
+/// Strict mode is the default and fails closed when the current OS cannot
+/// provide the filesystem/network sandbox. Compatibility mode is deliberately
+/// named and persisted because it runs the server directly on the host (while
+/// retaining the private environment and owned process-tree boundary).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpStdioIsolationMode {
+    #[default]
+    Strict,
+    Compatibility,
+}
+
+/// Isolation and hang-containment policy for a local stdio MCP server.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpStdioIsolation {
+    #[serde(default)]
+    pub mode: McpStdioIsolationMode,
+
+    /// Permit network access inside the strict OS sandbox. Network is denied
+    /// by default; compatibility mode always has host network access and cannot
+    /// use this flag to claim otherwise.
+    #[serde(default)]
+    pub allow_network: bool,
+
+    /// Per-request deadline. A deadline violation terminates the entire server
+    /// process tree because its protocol state can no longer be trusted.
+    #[serde(default = "default_stdio_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+
+    /// Set only while migrating a pre-isolation config. Launch is blocked
+    /// until the operator explicitly chooses strict or compatibility behavior.
+    #[serde(default)]
+    pub migration_required: bool,
+}
+
+impl Default for McpStdioIsolation {
+    fn default() -> Self {
+        Self {
+            mode: McpStdioIsolationMode::Strict,
+            allow_network: false,
+            request_timeout_secs: DEFAULT_STDIO_REQUEST_TIMEOUT_SECS,
+            migration_required: false,
+        }
+    }
+}
+
+fn default_stdio_request_timeout_secs() -> u64 {
+    DEFAULT_STDIO_REQUEST_TIMEOUT_SECS
 }
 
 #[async_trait]
@@ -117,6 +172,10 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secret_env: BTreeMap<String, Uuid>,
 
+    /// OS isolation and timeout policy for stdio transports.
+    #[serde(default)]
+    pub stdio_isolation: McpStdioIsolation,
+
     /// OAuth configuration (if server requires authentication).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthConfig>,
@@ -169,6 +228,7 @@ impl std::fmt::Debug for McpServerConfig {
                 "secret_environment_keys",
                 &self.secret_env.keys().collect::<Vec<_>>(),
             )
+            .field("stdio_isolation", &self.stdio_isolation)
             .field("oauth", &self.oauth)
             .field("enabled", &self.enabled)
             .field("allow_local_http", &self.allow_local_http)
@@ -200,6 +260,7 @@ impl McpServerConfig {
             args: Vec::new(),
             env: BTreeMap::new(),
             secret_env: BTreeMap::new(),
+            stdio_isolation: McpStdioIsolation::default(),
             oauth: None,
             enabled: true,
             display_name: None,
@@ -227,6 +288,7 @@ impl McpServerConfig {
             args,
             env: BTreeMap::new(),
             secret_env: BTreeMap::new(),
+            stdio_isolation: McpStdioIsolation::default(),
             oauth: None,
             enabled: true,
             display_name: None,
@@ -325,6 +387,31 @@ impl McpServerConfig {
                 }
                 validate_stdio_environment(&self.env, &self.secret_env)?;
                 validate_stdio_arguments(&self.args)?;
+                if self.stdio_isolation.migration_required {
+                    return Err(ConfigError::InvalidConfig {
+                        reason: format!(
+                            "MCP stdio server '{}' predates process isolation; choose strict or explicit compatibility with `thinclaw extensions mcp server isolation {}` before launch",
+                            self.name, self.name
+                        ),
+                    });
+                }
+                if !(MIN_STDIO_REQUEST_TIMEOUT_SECS..=MAX_STDIO_REQUEST_TIMEOUT_SECS)
+                    .contains(&self.stdio_isolation.request_timeout_secs)
+                {
+                    return Err(ConfigError::InvalidConfig {
+                        reason: format!(
+                            "MCP stdio request timeout must be between {MIN_STDIO_REQUEST_TIMEOUT_SECS} and {MAX_STDIO_REQUEST_TIMEOUT_SECS} seconds"
+                        ),
+                    });
+                }
+                if self.stdio_isolation.mode == McpStdioIsolationMode::Compatibility
+                    && self.stdio_isolation.allow_network
+                {
+                    return Err(ConfigError::InvalidConfig {
+                        reason: "MCP stdio compatibility mode already has host network access; allow_network is only meaningful in strict mode"
+                            .to_string(),
+                    });
+                }
             }
         }
 
@@ -588,19 +675,32 @@ impl OAuthConfig {
 }
 
 /// Configuration file containing all MCP servers.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServersFile {
     /// List of configured MCP servers.
     #[serde(default)]
     pub servers: Vec<McpServerConfig>,
 
     /// Schema version for future compatibility.
-    #[serde(default = "default_schema_version")]
+    #[serde(default = "missing_schema_version")]
     pub schema_version: u32,
 }
 
-fn default_schema_version() -> u32 {
-    2
+fn current_schema_version() -> u32 {
+    3
+}
+
+fn missing_schema_version() -> u32 {
+    0
+}
+
+impl Default for McpServersFile {
+    fn default() -> Self {
+        Self {
+            servers: Vec::new(),
+            schema_version: current_schema_version(),
+        }
+    }
 }
 
 impl McpServersFile {
@@ -613,6 +713,20 @@ impl McpServersFile {
                 }
             }
             self.schema_version = 2;
+        }
+        // v3 does not silently reinterpret or relaunch a legacy direct-host
+        // process. Preserve its prior behavior as the proposed compatibility
+        // choice, but block launch until the operator explicitly acknowledges
+        // compatibility or selects strict isolation.
+        if self.schema_version < 3 {
+            for server in &mut self.servers {
+                if server.transport == McpTransport::Stdio {
+                    server.stdio_isolation.mode = McpStdioIsolationMode::Compatibility;
+                    server.stdio_isolation.allow_network = false;
+                    server.stdio_isolation.migration_required = true;
+                }
+            }
+            self.schema_version = 3;
         }
     }
 
@@ -1014,6 +1128,13 @@ mod tests {
         assert!(config.validate().is_ok());
         assert!(config.is_stdio());
         assert!(!config.requires_auth());
+        assert_eq!(config.stdio_isolation.mode, McpStdioIsolationMode::Strict);
+        assert!(!config.stdio_isolation.allow_network);
+        assert_eq!(
+            config.stdio_isolation.request_timeout_secs,
+            DEFAULT_STDIO_REQUEST_TIMEOUT_SECS
+        );
+        assert!(!config.stdio_isolation.migration_required);
 
         // Invalid: stdio without command
         let mut bad = McpServerConfig::new_stdio("bad", "", vec![]);
@@ -1042,6 +1163,18 @@ mod tests {
         let encoded = serde_json::to_value(&bound).unwrap();
         assert_eq!(encoded["secret_env"]["API_KEY"], source_id.to_string());
         assert!(!encoded.to_string().contains("plaintext"));
+
+        let mut invalid_timeout = McpServerConfig::new_stdio("timeout", "server", vec![]);
+        invalid_timeout.stdio_isolation.request_timeout_secs = 0;
+        assert!(invalid_timeout.validate().is_err());
+        invalid_timeout.stdio_isolation.request_timeout_secs = MAX_STDIO_REQUEST_TIMEOUT_SECS + 1;
+        assert!(invalid_timeout.validate().is_err());
+
+        let mut compatibility = McpServerConfig::new_stdio("compat", "server", vec![]);
+        compatibility.stdio_isolation.mode = McpStdioIsolationMode::Compatibility;
+        assert!(compatibility.validate().is_ok());
+        compatibility.stdio_isolation.allow_network = true;
+        assert!(compatibility.validate().is_err());
     }
 
     #[test]
@@ -1057,11 +1190,58 @@ mod tests {
         let json = serde_json::to_value(&config).unwrap();
         assert_eq!(json["transport"], "stdio");
         assert_eq!(json["command"], "npx");
+        assert_eq!(json["stdio_isolation"]["mode"], "strict");
+        assert_eq!(json["stdio_isolation"]["allow_network"], false);
+        assert_eq!(
+            json["stdio_isolation"]["request_timeout_secs"],
+            DEFAULT_STDIO_REQUEST_TIMEOUT_SECS
+        );
 
         // Roundtrip
         let restored: McpServerConfig = serde_json::from_value(json).unwrap();
         assert_eq!(restored.transport, McpTransport::Stdio);
         assert_eq!(restored.command.as_deref(), Some("npx"));
+    }
+
+    #[test]
+    fn legacy_stdio_configs_require_an_explicit_isolation_choice() {
+        let mut file: McpServersFile = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "servers": [{
+                "name": "legacy",
+                "url": "",
+                "transport": "stdio",
+                "command": "/usr/bin/server",
+                "enabled": true
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            file.servers[0].stdio_isolation,
+            McpStdioIsolation::default()
+        );
+        file.migrate_in_place();
+        assert_eq!(file.schema_version, 3);
+        assert_eq!(
+            file.servers[0].stdio_isolation.mode,
+            McpStdioIsolationMode::Compatibility
+        );
+        assert!(file.servers[0].stdio_isolation.migration_required);
+        let error = file.servers[0].validate().unwrap_err();
+        assert!(error.to_string().contains("server isolation legacy"));
+
+        let mut unversioned: McpServersFile = serde_json::from_value(serde_json::json!({
+            "servers": [{
+                "name": "unversioned",
+                "transport": "stdio",
+                "command": "/usr/bin/server"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(unversioned.schema_version, 0);
+        unversioned.migrate_in_place();
+        assert!(unversioned.servers[0].stdio_isolation.migration_required);
     }
 
     #[test]

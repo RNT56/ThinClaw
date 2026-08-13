@@ -89,6 +89,9 @@ pub enum NetworkPolicy {
     LoopbackOnly,
     ReviewedExternal,
     InheritedSandbox,
+    /// Validated runtime policy: fail-closed sandbox/no-network by default,
+    /// with explicit persisted opt-ins for network or compatibility.
+    ConfigSelectedFailClosed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +102,9 @@ pub enum IsolationPolicy {
     WorkspaceSandbox,
     Container,
     DedicatedUser,
+    /// Validated runtime policy selects strict OS sandboxing or an explicitly
+    /// persisted compatibility boundary.
+    ConfigSelectedFailClosed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +285,7 @@ impl CheckedProcessLaunch {
                 "loopback_only" => NetworkPolicy::LoopbackOnly,
                 "reviewed_external" => NetworkPolicy::ReviewedExternal,
                 "inherited_sandbox" => NetworkPolicy::InheritedSandbox,
+                "config_selected_fail_closed" => NetworkPolicy::ConfigSelectedFailClosed,
                 other => panic!("invalid checked network policy: {other}"),
             },
             isolation: match self.isolation_policy.as_str() {
@@ -287,6 +294,7 @@ impl CheckedProcessLaunch {
                 "workspace_sandbox" => IsolationPolicy::WorkspaceSandbox,
                 "container" => IsolationPolicy::Container,
                 "dedicated_user" => IsolationPolicy::DedicatedUser,
+                "config_selected_fail_closed" => IsolationPolicy::ConfigSelectedFailClosed,
                 other => panic!("invalid checked isolation policy: {other}"),
             },
             io: ProcessIoPolicy {

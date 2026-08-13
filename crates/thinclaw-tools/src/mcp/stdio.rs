@@ -6,6 +6,7 @@
 //! stream immediately releases callers waiting for responses.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -16,6 +17,7 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
+use super::config::{McpStdioIsolation, McpStdioIsolationMode};
 use super::protocol::{McpError, McpNotification, McpRequest, McpResponse, McpTransportMessage};
 use crate::execution::OwnedChild;
 use thinclaw_platform::read_bounded_line;
@@ -34,8 +36,6 @@ const MAX_PENDING_REQUESTS: usize = 1024;
 const MAX_INBOUND_HANDLER_TASKS: usize = 32;
 const INBOUND_EVENT_BUFFER: usize = 8;
 
-const STDIO_REQUEST_TIMEOUT: Duration = Duration::from_secs(1830);
-const INBOUND_HANDLER_TIMEOUT: Duration = Duration::from_secs(1830);
 const STDIO_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const CHILD_GRACEFUL_SHUTDOWN: Duration = Duration::from_secs(2);
 const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -113,6 +113,9 @@ pub struct StdioTransport {
     /// Server name for logging.
     server_name: String,
 
+    /// Per-request deadline. A violation tears down the process tree.
+    request_timeout: Duration,
+
     /// Launcher-owned private home/temp substrate retained for the child lifetime.
     _private_environment: tempfile::TempDir,
 }
@@ -125,6 +128,8 @@ impl StdioTransport {
         args: &[String],
         env: &BTreeMap<String, String>,
         secret_env: &BTreeMap<String, String>,
+        roots_grants: &[String],
+        isolation: &McpStdioIsolation,
         handler: Option<Arc<dyn McpInboundHandler>>,
     ) -> Result<Self, ToolError> {
         let server_name = server_name.into();
@@ -139,24 +144,32 @@ impl StdioTransport {
                     "Failed to create private MCP process environment: {error}"
                 ))
             })?;
-        let private_root = private_environment.path();
+        let private_root = std::fs::canonicalize(private_environment.path()).map_err(|error| {
+            ToolError::ExternalService(format!(
+                "Failed to canonicalize private MCP process environment: {error}"
+            ))
+        })?;
+
+        let launch =
+            prepare_stdio_launch(&executable, args, &private_root, roots_grants, isolation)?;
 
         let mut command_builder = thinclaw_platform::tokio_process_command!(
             "crates.thinclaw-tools.src.mcp.stdio.tokio.101",
-            executable
+            &launch.program
         );
         command_builder
             .env_clear()
-            .args(args)
+            .args(&launch.args)
+            .current_dir(&private_root)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
         command_builder
-            .env("HOME", private_root)
-            .env("TMPDIR", private_root)
-            .env("TMP", private_root)
-            .env("TEMP", private_root);
+            .env("HOME", &private_root)
+            .env("TMPDIR", &private_root)
+            .env("TMP", &private_root)
+            .env("TEMP", &private_root);
         if let Some(path) = sanitized_search_path() {
             command_builder.env("PATH", path);
         }
@@ -222,12 +235,24 @@ impl StdioTransport {
             handler.clone(),
             inbound_events.clone(),
             server_name.clone(),
+            Duration::from_secs(isolation.request_timeout_secs),
         ));
 
         let stderr_handle =
             stderr.map(|stderr| tokio::spawn(run_stderr_reader(stderr, server_name.clone())));
 
-        tracing::info!(server = %server_name, "MCP stdio transport spawned");
+        tracing::info!(
+            server = %server_name,
+            isolation = %launch.enforcement,
+            network = if isolation.mode == McpStdioIsolationMode::Compatibility {
+                "host-available"
+            } else if isolation.allow_network {
+                "allowed-in-sandbox"
+            } else {
+                "denied"
+            },
+            "MCP stdio transport spawned"
+        );
 
         Ok(Self {
             stdin,
@@ -240,6 +265,7 @@ impl StdioTransport {
             has_handler: handler.is_some(),
             inbound_events,
             server_name,
+            request_timeout: Duration::from_secs(isolation.request_timeout_secs),
             _private_environment: private_environment,
         })
     }
@@ -285,7 +311,7 @@ impl StdioTransport {
             return Err(error);
         }
 
-        match tokio::time::timeout(STDIO_REQUEST_TIMEOUT, receiver).await {
+        match tokio::time::timeout(self.request_timeout, receiver).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => Err(ToolError::ExternalService(format!(
                 "MCP stdio server '{}' response channel closed",
@@ -293,10 +319,15 @@ impl StdioTransport {
             ))),
             Err(_) => {
                 self.pending.write().await.remove(&id);
+                // A server that misses its protocol deadline may later emit a
+                // response for a request ID the client has already released.
+                // Terminate the whole owned tree instead of reusing a transport
+                // whose JSON-RPC state is no longer trustworthy.
+                fail_transport(&self.running, &self.shutdown_tx);
                 Err(ToolError::ExternalService(format!(
                     "MCP stdio server '{}' timed out after {}s",
                     self.server_name,
-                    STDIO_REQUEST_TIMEOUT.as_secs()
+                    self.request_timeout.as_secs()
                 )))
             }
         }
@@ -347,6 +378,349 @@ impl StdioTransport {
     }
 }
 
+struct PreparedStdioLaunch {
+    program: PathBuf,
+    args: Vec<OsString>,
+    enforcement: &'static str,
+}
+
+fn prepare_stdio_launch(
+    executable: &Path,
+    args: &[String],
+    private_root: &Path,
+    roots_grants: &[String],
+    isolation: &McpStdioIsolation,
+) -> Result<PreparedStdioLaunch, ToolError> {
+    if isolation.mode == McpStdioIsolationMode::Compatibility {
+        return Ok(PreparedStdioLaunch {
+            program: executable.to_path_buf(),
+            args: args.iter().map(OsString::from).collect(),
+            enforcement: "explicit-direct-host-compatibility",
+        });
+    }
+
+    let filesystem_roots = resolve_filesystem_roots(roots_grants)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let sandbox = Path::new("/usr/bin/sandbox-exec");
+        if !sandbox.is_file() {
+            return Err(strict_isolation_unavailable(
+                "macOS sandbox-exec is unavailable",
+            ));
+        }
+        let profile = macos_mcp_sandbox_profile(
+            executable,
+            private_root,
+            &filesystem_roots,
+            isolation.allow_network,
+        );
+        let mut launch_args = vec![
+            OsString::from("-p"),
+            OsString::from(profile),
+            executable.as_os_str().to_os_string(),
+        ];
+        launch_args.extend(args.iter().map(OsString::from));
+        return Ok(PreparedStdioLaunch {
+            program: sandbox.to_path_buf(),
+            args: launch_args,
+            enforcement: "macos-seatbelt",
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let wrapper = resolve_linux_bubblewrap()?;
+        return Ok(PreparedStdioLaunch {
+            program: wrapper,
+            args: linux_mcp_bubblewrap_args(
+                executable,
+                args,
+                private_root,
+                &filesystem_roots,
+                isolation.allow_network,
+            ),
+            enforcement: "linux-bubblewrap",
+        });
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = executable;
+        let _ = args;
+        let _ = private_root;
+        let _ = filesystem_roots;
+        let _ = isolation;
+        Err(strict_isolation_unavailable(
+            "strict stdio isolation is not implemented on this OS",
+        ))
+    }
+}
+
+fn strict_isolation_unavailable(reason: &str) -> ToolError {
+    ToolError::NotAuthorized(format!(
+        "{reason}; strict MCP stdio isolation fails closed. Install the supported OS sandbox or explicitly set stdio_isolation.mode=compatibility after reviewing the server"
+    ))
+}
+
+fn resolve_filesystem_roots(roots: &[String]) -> Result<Vec<PathBuf>, ToolError> {
+    const MAX_FILESYSTEM_ROOTS: usize = 64;
+    if roots.len() > MAX_FILESYSTEM_ROOTS {
+        return Err(ToolError::InvalidParameters(format!(
+            "MCP stdio server has more than {MAX_FILESYSTEM_ROOTS} roots grants"
+        )));
+    }
+
+    let mut resolved = Vec::new();
+    for root in roots {
+        let candidate = if let Ok(url) = url::Url::parse(root) {
+            if url.scheme() != "file" {
+                // Non-file MCP roots remain protocol grants, but never become
+                // implicit host filesystem grants.
+                continue;
+            }
+            url.to_file_path().map_err(|_| {
+                ToolError::InvalidParameters(format!(
+                    "MCP file root '{root}' is not a valid local path"
+                ))
+            })?
+        } else {
+            let path = PathBuf::from(root);
+            if !path.is_absolute() {
+                return Err(ToolError::InvalidParameters(format!(
+                    "MCP stdio filesystem root '{root}' must be absolute"
+                )));
+            }
+            path
+        };
+        let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+            ToolError::InvalidParameters(format!(
+                "MCP stdio filesystem root '{}' is unavailable: {error}",
+                candidate.display()
+            ))
+        })?;
+        if !resolved.contains(&canonical) {
+            resolved.push(canonical);
+        }
+    }
+    Ok(resolved)
+}
+
+fn executable_runtime_roots(executable: &Path) -> Vec<PathBuf> {
+    let operator_home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|path| std::fs::canonicalize(path).ok());
+    let mut candidates = Vec::new();
+    if let Some(parent) = executable.parent() {
+        candidates.push(parent.to_path_buf());
+        if let Some(runtime_root) = parent.parent() {
+            candidates.push(runtime_root.to_path_buf());
+        }
+    }
+    if let Some(path) = sanitized_search_path() {
+        candidates.extend(std::env::split_paths(&path));
+    }
+    let mut resolved = Vec::new();
+    for root in candidates {
+        if root.is_dir()
+            && root.parent().is_some()
+            && operator_home.as_ref().is_none_or(|home| &root != home)
+            && !resolved.contains(&root)
+        {
+            resolved.push(root);
+            if resolved.len() == 64 {
+                break;
+            }
+        }
+    }
+    resolved
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mcp_sandbox_profile(
+    executable: &Path,
+    private_root: &Path,
+    filesystem_roots: &[PathBuf],
+    allow_network: bool,
+) -> String {
+    fn grant(profile: &mut String, operation: &str, kind: &str, path: &Path) {
+        profile.push_str(&format!(
+            "(allow {operation} ({kind} \"{}\"))\n",
+            seatbelt_escape(path)
+        ));
+    }
+
+    // macOS system processes need several undocumented runtime reads, so a
+    // global file-read deny aborts even /bin/sh. Deny operator/removable/temp
+    // data roots instead, then re-open only the private launcher root and
+    // explicit grants. System/runtime installation paths remain read-only.
+    let mut profile = String::from("(version 1)\n(allow default)\n");
+    for root in [
+        PathBuf::from("/Users"),
+        PathBuf::from("/Volumes"),
+        PathBuf::from("/Network"),
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/private/var/folders"),
+    ] {
+        if root.exists() {
+            profile.push_str(&format!(
+                "(deny file-read* (subpath \"{}\"))\n",
+                seatbelt_escape(&root)
+            ));
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|path| std::fs::canonicalize(path).ok())
+    {
+        profile.push_str(&format!(
+            "(deny file-read* (subpath \"{}\"))\n",
+            seatbelt_escape(&home)
+        ));
+    }
+    profile.push_str("(deny file-write*)\n");
+    grant(&mut profile, "file-read*", "literal", executable);
+    for root in executable_runtime_roots(executable) {
+        grant(&mut profile, "file-read*", "subpath", &root);
+    }
+    grant(&mut profile, "file-read*", "subpath", private_root);
+    grant(&mut profile, "file-write*", "subpath", private_root);
+    for root in filesystem_roots {
+        let kind = if root.is_dir() { "subpath" } else { "literal" };
+        grant(&mut profile, "file-read*", kind, root);
+        grant(&mut profile, "file-write*", kind, root);
+    }
+    for device in ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"] {
+        grant(&mut profile, "file-write*", "literal", Path::new(device));
+    }
+    if !allow_network {
+        profile.push_str("(deny network*)\n");
+    }
+    profile
+}
+
+#[cfg(target_os = "macos")]
+fn seatbelt_escape(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "")
+        .replace('\r', "")
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_linux_bubblewrap() -> Result<PathBuf, ToolError> {
+    for candidate in [PathBuf::from("/usr/bin/bwrap"), PathBuf::from("/bin/bwrap")] {
+        if candidate.is_file() {
+            return validate_executable(&candidate);
+        }
+    }
+    if let Some(search_path) = sanitized_search_path() {
+        for directory in std::env::split_paths(&search_path) {
+            let candidate = directory.join("bwrap");
+            if candidate.is_file() {
+                return validate_executable(&candidate);
+            }
+        }
+    }
+    Err(strict_isolation_unavailable(
+        "Linux bubblewrap (bwrap) is unavailable",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_mcp_bubblewrap_args(
+    executable: &Path,
+    args: &[String],
+    private_root: &Path,
+    filesystem_roots: &[PathBuf],
+    allow_network: bool,
+) -> Vec<OsString> {
+    let mut result = [
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-uts",
+        "--unshare-ipc",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    if !allow_network {
+        result.push(OsString::from("--unshare-net"));
+    }
+
+    for root in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/nix/store"] {
+        let root = Path::new(root);
+        if root.exists() {
+            push_bwrap_mount(&mut result, "--ro-bind", root, root);
+        }
+    }
+    result.extend([OsString::from("--dir"), OsString::from("/etc")]);
+    for file in [
+        "/etc/ssl",
+        "/etc/hosts",
+        "/etc/resolv.conf",
+        "/etc/nsswitch.conf",
+        "/etc/passwd",
+        "/etc/group",
+        "/etc/localtime",
+        "/etc/ld.so.cache",
+    ] {
+        let file = Path::new(file);
+        if file.exists() {
+            push_bwrap_mount(&mut result, "--ro-bind", file, file);
+        }
+    }
+    result.extend([
+        OsString::from("--dev"),
+        OsString::from("/dev"),
+        OsString::from("--proc"),
+        OsString::from("/proc"),
+        OsString::from("--tmpfs"),
+        OsString::from("/tmp"),
+    ]);
+    push_bwrap_mount(&mut result, "--bind", private_root, private_root);
+    for root in filesystem_roots {
+        push_bwrap_mount(&mut result, "--bind", root, root);
+    }
+
+    let system_executable = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/nix/store"]
+        .into_iter()
+        .any(|root| executable.starts_with(root));
+    if !system_executable {
+        let runtime_roots = executable_runtime_roots(executable);
+        if runtime_roots.is_empty() {
+            push_bwrap_mount(&mut result, "--ro-bind", executable, executable);
+        } else {
+            for root in runtime_roots {
+                if !["/usr", "/bin", "/sbin", "/lib", "/lib64", "/nix/store"]
+                    .into_iter()
+                    .any(|system| root.starts_with(system))
+                {
+                    push_bwrap_mount(&mut result, "--ro-bind", &root, &root);
+                }
+            }
+        }
+    }
+    result.extend([
+        OsString::from("--chdir"),
+        private_root.as_os_str().to_os_string(),
+        OsString::from("--"),
+        executable.as_os_str().to_os_string(),
+    ]);
+    result.extend(args.iter().map(OsString::from));
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn push_bwrap_mount(args: &mut Vec<OsString>, kind: &str, source: &Path, target: &Path) {
+    args.push(OsString::from(kind));
+    args.push(source.as_os_str().to_os_string());
+    args.push(target.as_os_str().to_os_string());
+}
+
 impl Drop for StdioTransport {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
@@ -384,7 +758,11 @@ async fn supervise_child(
 
     match reason {
         ExitReason::Natural(Ok(status)) => {
-            tracing::debug!(server = %server_name, %status, "MCP stdio server exited");
+            if status.success() {
+                tracing::debug!(server = %server_name, %status, "MCP stdio server exited");
+            } else {
+                tracing::warn!(server = %server_name, %status, "MCP stdio server crashed or exited unsuccessfully");
+            }
         }
         ExitReason::Natural(Err(error)) => {
             tracing::warn!(server = %server_name, error = %error, "Failed to wait for MCP stdio server");
@@ -419,6 +797,7 @@ async fn run_stdout_reader(
     handler: Option<Arc<dyn McpInboundHandler>>,
     inbound_events: broadcast::Sender<McpTransportMessage>,
     server_name: String,
+    handler_timeout: Duration,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut inbound_tasks = JoinSet::new();
@@ -492,7 +871,7 @@ async fn run_stdout_reader(
                     tokio::select! {
                         _ = handler.handle_notification(notification) => {}
                         _ = wait_for_shutdown(&mut shutdown_rx) => {}
-                        _ = tokio::time::sleep(INBOUND_HANDLER_TIMEOUT) => {
+                        _ = tokio::time::sleep(handler_timeout) => {
                             tracing::warn!(server = %name, "MCP notification handler timed out");
                         }
                     }
@@ -535,6 +914,7 @@ async fn run_stdout_reader(
                 let task_shutdown = shutdown_tx.clone();
                 let task_handler = handler.clone();
                 let name = server_name.clone();
+                let request_timeout = handler_timeout;
                 inbound_tasks.spawn(async move {
                     let _active_request = active_request;
                     let request_id = request.id;
@@ -549,7 +929,7 @@ async fn run_stdout_reader(
                                     McpError::request_cancelled("MCP transport shut down"),
                                 )
                             }
-                            _ = tokio::time::sleep(INBOUND_HANDLER_TIMEOUT) => {
+                            _ = tokio::time::sleep(request_timeout) => {
                                 handler.cancel_request(request_id, "MCP client request timed out").await;
                                 McpResponse::error(
                                     request_id,
@@ -958,6 +1338,15 @@ fn drain_finished_tasks(tasks: &mut JoinSet<()>, server_name: &str) {
 mod tests {
     use super::*;
 
+    fn compatibility_isolation(request_timeout_secs: u64) -> McpStdioIsolation {
+        McpStdioIsolation {
+            mode: McpStdioIsolationMode::Compatibility,
+            allow_network: false,
+            request_timeout_secs,
+            migration_required: false,
+        }
+    }
+
     #[tokio::test]
     async fn bounded_line_reader_drains_an_oversized_record() {
         let (mut writer, reader) = tokio::io::duplex(64);
@@ -1013,15 +1402,30 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn filesystem_roots_are_explicit_absolute_local_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = resolve_filesystem_roots(&[
+            temp.path().display().to_string(),
+            "https://example.com/context".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(roots, vec![temp.path().canonicalize().unwrap()]);
+        assert!(resolve_filesystem_roots(&["relative/path".to_string()]).is_err());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
-    async fn process_exit_immediately_releases_pending_requests() {
+    async fn process_crash_immediately_releases_pending_requests() {
+        let isolation = compatibility_isolation(5);
         let transport = StdioTransport::spawn(
             "exit-test",
             "/bin/sh",
-            &["-c".to_string(), "IFS= read -r line; exit 0".to_string()],
+            &["-c".to_string(), "IFS= read -r line; exit 23".to_string()],
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &[],
+            &isolation,
             None,
         )
         .unwrap();
@@ -1039,6 +1443,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn duplicate_request_ids_do_not_overwrite_waiters() {
+        let isolation = compatibility_isolation(5);
         let transport = Arc::new(
             StdioTransport::spawn(
                 "duplicate-test",
@@ -1049,6 +1454,8 @@ mod tests {
                 ],
                 &BTreeMap::new(),
                 &BTreeMap::new(),
+                &[],
+                &isolation,
                 None,
             )
             .unwrap(),
@@ -1080,5 +1487,225 @@ mod tests {
 
         transport.shutdown().await;
         assert!(first.await.unwrap().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compatibility_transport_completes_a_normal_request() {
+        let isolation = compatibility_isolation(5);
+        let transport = StdioTransport::spawn(
+            "normal-test",
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "IFS= read -r line; printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}'"
+                    .to_string(),
+            ],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+            &isolation,
+            None,
+        )
+        .unwrap();
+
+        let response = transport
+            .send_request(McpRequest::new(1, "test", None))
+            .await
+            .unwrap();
+        assert_eq!(response.result, Some(serde_json::json!({ "ok": true })));
+        transport.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn request_timeout_terminates_the_server_transport() {
+        let isolation = compatibility_isolation(1);
+        let transport = StdioTransport::spawn(
+            "hang-test",
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "while IFS= read -r line; do sleep 30; done".to_string(),
+            ],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+            &isolation,
+            None,
+        )
+        .unwrap();
+
+        let error = transport
+            .send_request(McpRequest::new(1, "hang", None))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out after 1s"));
+        assert!(!transport.is_running());
+        transport.shutdown().await;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn strict_macos_profile_denies_ambient_files_and_network() {
+        let profile = macos_mcp_sandbox_profile(
+            Path::new("/bin/sh"),
+            Path::new("/private/tmp/thinclaw-private"),
+            &[PathBuf::from("/Users/example/granted")],
+            false,
+        );
+        assert!(profile.contains("(deny file-read* (subpath \"/Users\"))"));
+        assert!(profile.contains("(deny file-write*)"));
+        assert!(profile.contains("/Users/example/granted"));
+        assert!(profile.contains("(deny network*)"));
+        assert!(!profile.contains("(allow file-read* (subpath \"/Users/example\"))"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn strict_macos_transport_denies_ambient_file_reads() {
+        let denied = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(denied.path(), b"ambient-secret").unwrap();
+        let mut env = BTreeMap::new();
+        env.insert(
+            "DENIED_TEST_FILE".to_string(),
+            denied.path().display().to_string(),
+        );
+        let isolation = McpStdioIsolation {
+            request_timeout_secs: 5,
+            ..McpStdioIsolation::default()
+        };
+        let transport = StdioTransport::spawn(
+            "strict-file-test",
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "IFS= read -r line; if /bin/cat \"$DENIED_TEST_FILE\" >/dev/null 2>&1; then denied=false; else denied=true; fi; printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"denied\":%s}}\\n' \"$denied\""
+                    .to_string(),
+            ],
+            &env,
+            &BTreeMap::new(),
+            &[],
+            &isolation,
+            None,
+        )
+        .unwrap();
+
+        let response = transport
+            .send_request(McpRequest::new(1, "test", None))
+            .await
+            .unwrap();
+        assert_eq!(response.result, Some(serde_json::json!({ "denied": true })));
+        transport.shutdown().await;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn strict_macos_transport_allows_explicit_file_root() {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
+        let granted = tempfile::Builder::new()
+            .prefix(".thinclaw-mcp-grant-")
+            .tempdir_in(home)
+            .unwrap();
+        let readable = granted.path().join("read.txt");
+        let writable = granted.path().join("write.txt");
+        std::fs::write(&readable, b"granted").unwrap();
+        let mut env = BTreeMap::new();
+        env.insert(
+            "GRANTED_TEST_READ".to_string(),
+            readable.display().to_string(),
+        );
+        env.insert(
+            "GRANTED_TEST_WRITE".to_string(),
+            writable.display().to_string(),
+        );
+        let roots = [granted.path().display().to_string()];
+        let isolation = McpStdioIsolation {
+            request_timeout_secs: 5,
+            ..McpStdioIsolation::default()
+        };
+        let transport = StdioTransport::spawn(
+            "strict-grant-test",
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "IFS= read -r line; if /bin/cat \"$GRANTED_TEST_READ\" >/dev/null 2>&1 && printf allowed > \"$GRANTED_TEST_WRITE\"; then allowed=true; else allowed=false; fi; printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"allowed\":%s}}\\n' \"$allowed\""
+                    .to_string(),
+            ],
+            &env,
+            &BTreeMap::new(),
+            &roots,
+            &isolation,
+            None,
+        )
+        .unwrap();
+
+        let response = transport
+            .send_request(McpRequest::new(1, "test", None))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.result,
+            Some(serde_json::json!({ "allowed": true }))
+        );
+        assert_eq!(std::fs::read_to_string(writable).unwrap(), "allowed");
+        transport.shutdown().await;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn strict_macos_transport_denies_network() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut env = BTreeMap::new();
+        env.insert("DENIED_TEST_PORT".to_string(), port.to_string());
+        let isolation = McpStdioIsolation {
+            request_timeout_secs: 5,
+            ..McpStdioIsolation::default()
+        };
+        let transport = StdioTransport::spawn(
+            "strict-network-test",
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "IFS= read -r line; if /usr/bin/nc -z -w 1 127.0.0.1 \"$DENIED_TEST_PORT\" >/dev/null 2>&1; then denied=false; else denied=true; fi; printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"denied\":%s}}\\n' \"$denied\""
+                    .to_string(),
+            ],
+            &env,
+            &BTreeMap::new(),
+            &[],
+            &isolation,
+            None,
+        )
+        .unwrap();
+
+        let response = transport
+            .send_request(McpRequest::new(1, "test", None))
+            .await
+            .unwrap();
+        assert_eq!(response.result, Some(serde_json::json!({ "denied": true })));
+        transport.shutdown().await;
+        drop(listener);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strict_linux_launch_uses_namespaces_and_explicit_mounts() {
+        let args = linux_mcp_bubblewrap_args(
+            Path::new("/usr/bin/server"),
+            &[],
+            Path::new("/tmp/thinclaw-private"),
+            &[PathBuf::from("/workspace/granted")],
+            false,
+        );
+        let rendered = args
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>();
+        assert!(rendered.iter().any(|value| value == "--unshare-net"));
+        assert!(rendered.iter().any(|value| value == "--unshare-user"));
+        assert!(rendered.iter().any(|value| value == "--unshare-pid"));
+        assert!(rendered.iter().any(|value| value == "/workspace/granted"));
+        assert!(!rendered.iter().any(|value| value == "/home"));
     }
 }

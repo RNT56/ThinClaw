@@ -14,7 +14,8 @@ use crate::secrets::PostgresSecretsStore;
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::terminal_branding::TerminalBranding;
 use crate::tools::mcp::{
-    McpClient, McpServerConfig, McpSessionManager, OAuthConfig, PromptContent,
+    McpClient, McpServerConfig, McpSessionManager, McpStdioIsolationMode, OAuthConfig,
+    PromptContent,
     auth::{authorize_mcp_server, is_authenticated},
     config::{self, McpConfigStore, McpServersFile},
 };
@@ -68,6 +69,19 @@ pub enum McpServerCommand {
         /// Credential environment bindings (KEY=SOURCE_ID, repeatable)
         #[arg(long = "secret-env", value_delimiter = ',')]
         secret_env: Option<Vec<String>>,
+
+        /// Run stdio directly on the host when strict OS isolation is unavailable.
+        /// This is an explicit unsafe compatibility opt-in.
+        #[arg(long = "stdio-compatibility")]
+        stdio_compatibility: bool,
+
+        /// Allow network access inside the strict stdio OS sandbox.
+        #[arg(long = "stdio-allow-network")]
+        stdio_allow_network: bool,
+
+        /// Per-request stdio deadline in seconds (1-1800; default 120).
+        #[arg(long = "stdio-request-timeout")]
+        stdio_request_timeout: Option<u64>,
 
         /// OAuth client ID (if authentication is required)
         #[arg(long)]
@@ -127,6 +141,28 @@ pub enum McpServerCommand {
         /// User ID for authentication (default: "default")
         #[arg(short, long, default_value = "default")]
         user: String,
+    },
+
+    /// Choose or migrate the process isolation policy for a stdio server.
+    Isolation {
+        /// Server name
+        name: String,
+
+        /// Use fail-closed OS isolation (recommended).
+        #[arg(long, conflicts_with = "compatibility")]
+        strict: bool,
+
+        /// Explicitly accept direct-host filesystem and network access.
+        #[arg(long, conflicts_with = "strict")]
+        compatibility: bool,
+
+        /// Allow network inside strict isolation.
+        #[arg(long)]
+        allow_network: bool,
+
+        /// Per-request deadline in seconds (1-1800).
+        #[arg(long = "request-timeout")]
+        request_timeout: Option<u64>,
     },
 
     /// Enable or disable an MCP server
@@ -271,6 +307,9 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
                 args,
                 env,
                 secret_env,
+                stdio_compatibility,
+                stdio_allow_network,
+                stdio_request_timeout,
                 client_id,
                 auth_url,
                 token_url,
@@ -285,6 +324,9 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
                     args,
                     env,
                     secret_env,
+                    stdio_compatibility,
+                    stdio_allow_network,
+                    stdio_request_timeout,
                     client_id,
                     auth_url,
                     token_url,
@@ -309,6 +351,23 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
             McpServerCommand::Test { name, user } => {
                 branding.print_banner("MCP", Some("Test a model context server"));
                 test_server(name, user).await
+            }
+            McpServerCommand::Isolation {
+                name,
+                strict,
+                compatibility,
+                allow_network,
+                request_timeout,
+            } => {
+                branding.print_banner("MCP", Some("Configure stdio process isolation"));
+                configure_server_isolation(
+                    name,
+                    strict,
+                    compatibility,
+                    allow_network,
+                    request_timeout,
+                )
+                .await
             }
             McpServerCommand::Toggle {
                 name,
@@ -384,6 +443,9 @@ async fn add_server(
     args: Option<Vec<String>>,
     env: Option<Vec<String>>,
     secret_env: Option<Vec<String>>,
+    stdio_compatibility: bool,
+    stdio_allow_network: bool,
+    stdio_request_timeout: Option<u64>,
     client_id: Option<String>,
     auth_url: Option<String>,
     token_url: Option<String>,
@@ -438,10 +500,24 @@ async fn add_server(
             cfg = cfg.with_secret_env(secret_env_map);
         }
 
+        if stdio_compatibility {
+            cfg.stdio_isolation.mode = McpStdioIsolationMode::Compatibility;
+        }
+        cfg.stdio_isolation.allow_network = stdio_allow_network;
+        if let Some(timeout) = stdio_request_timeout {
+            cfg.stdio_isolation.request_timeout_secs = timeout;
+        }
+
         cfg
     } else {
-        if args.is_some() || env.is_some() || secret_env.is_some() {
-            anyhow::bail!("--args, --env, and --secret-env require --command");
+        if args.is_some()
+            || env.is_some()
+            || secret_env.is_some()
+            || stdio_compatibility
+            || stdio_allow_network
+            || stdio_request_timeout.is_some()
+        {
+            anyhow::bail!("--args, --env, --secret-env, and --stdio-* options require --command");
         }
         // HTTP transport: url is required
         let url = url.ok_or_else(|| anyhow::anyhow!("URL is required for HTTP MCP servers"))?;
@@ -612,6 +688,30 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
                         println!("      Secret env: {}=source:{}", key, source_id);
                     }
                 }
+                println!(
+                    "      Isolation: {}",
+                    format!("{:?}", server.stdio_isolation.mode).to_ascii_lowercase()
+                );
+                println!(
+                    "      Network: {}",
+                    if server.stdio_isolation.mode == McpStdioIsolationMode::Compatibility {
+                        "host (compatibility)"
+                    } else if server.stdio_isolation.allow_network {
+                        "allowed in sandbox"
+                    } else {
+                        "denied"
+                    }
+                );
+                println!(
+                    "      Request timeout: {}s",
+                    server.stdio_isolation.request_timeout_secs
+                );
+                if server.stdio_isolation.migration_required {
+                    println!(
+                        "      Migration required: choose `server isolation {} --strict` or explicitly use `--compatibility` before launch",
+                        server.name
+                    );
+                }
             } else {
                 println!("      URL: {}", server.url);
             }
@@ -666,6 +766,30 @@ async fn show_server(name: String) -> anyhow::Result<()> {
         );
         if !server.args.is_empty() {
             println!("  Args: {}", server.args.join(" "));
+        }
+        println!(
+            "  Stdio isolation: {}",
+            format!("{:?}", server.stdio_isolation.mode).to_ascii_lowercase()
+        );
+        println!(
+            "  Stdio network: {}",
+            if server.stdio_isolation.mode == McpStdioIsolationMode::Compatibility {
+                "host (compatibility)"
+            } else if server.stdio_isolation.allow_network {
+                "allowed in sandbox"
+            } else {
+                "denied"
+            }
+        );
+        println!(
+            "  Stdio request timeout: {}s",
+            server.stdio_isolation.request_timeout_secs
+        );
+        if server.stdio_isolation.migration_required {
+            println!(
+                "  Migration required: run `thinclaw extensions mcp server isolation {} --strict` (recommended), or explicitly choose `--compatibility`.",
+                server.name
+            );
         }
     } else {
         println!("  URL: {}", server.url);
@@ -1244,6 +1368,68 @@ async fn print_tools(client: &McpClient) {
             println!("  ✗ Failed to list tools: {}", e);
         }
     }
+}
+
+/// Resolve a legacy migration or deliberately change stdio isolation.
+async fn configure_server_isolation(
+    name: String,
+    strict: bool,
+    compatibility: bool,
+    allow_network: bool,
+    request_timeout: Option<u64>,
+) -> anyhow::Result<()> {
+    if strict == compatibility {
+        anyhow::bail!("choose exactly one of --strict or --compatibility");
+    }
+    if compatibility && allow_network {
+        anyhow::bail!(
+            "--allow-network is unnecessary in compatibility mode, which has host network access"
+        );
+    }
+
+    let db = connect_db().await;
+    let mut servers = load_servers(db.as_deref()).await?;
+    let server = servers
+        .get_mut(&name)
+        .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
+    if !server.is_stdio() {
+        anyhow::bail!("Server '{}' does not use stdio transport", name);
+    }
+
+    server.stdio_isolation.mode = if strict {
+        McpStdioIsolationMode::Strict
+    } else {
+        McpStdioIsolationMode::Compatibility
+    };
+    server.stdio_isolation.allow_network = strict && allow_network;
+    if let Some(timeout) = request_timeout {
+        server.stdio_isolation.request_timeout_secs = timeout;
+    }
+    server.stdio_isolation.migration_required = false;
+    server.validate()?;
+    let effective_timeout = server.stdio_isolation.request_timeout_secs;
+    save_servers(db.as_deref(), &servers).await?;
+
+    println!();
+    println!(
+        "  Server '{}' isolation is now {} (network: {}, timeout: {}s).",
+        name,
+        if strict { "strict" } else { "compatibility" },
+        if compatibility || allow_network {
+            "available"
+        } else {
+            "denied"
+        },
+        effective_timeout
+    );
+    if compatibility {
+        println!(
+            "  Warning: compatibility mode grants the server direct host filesystem and network access."
+        );
+    }
+    println!("  Restart or reactivate the server for this process boundary to take effect.");
+    println!();
+    Ok(())
 }
 
 /// Toggle server enabled/disabled state.

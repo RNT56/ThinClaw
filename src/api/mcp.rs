@@ -51,6 +51,19 @@ async fn build_server_info(
         },
         url: (!config.url.is_empty()).then_some(config.url.clone()),
         command: config.command.clone(),
+        stdio_isolation_mode: config
+            .is_stdio()
+            .then(|| format!("{:?}", config.stdio_isolation.mode).to_ascii_lowercase()),
+        stdio_network_allowed: config.is_stdio().then_some(
+            config.stdio_isolation.mode == crate::tools::mcp::McpStdioIsolationMode::Compatibility
+                || config.stdio_isolation.allow_network,
+        ),
+        stdio_request_timeout_secs: config
+            .is_stdio()
+            .then_some(config.stdio_isolation.request_timeout_secs),
+        stdio_migration_required: config
+            .is_stdio()
+            .then_some(config.stdio_isolation.migration_required),
         enabled: config.enabled,
         active: installed_ext.map(|entry| entry.active).unwrap_or(false),
         authenticated: installed_ext

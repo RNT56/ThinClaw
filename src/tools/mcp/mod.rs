@@ -37,7 +37,7 @@ pub use auth::{is_authenticated, refresh_access_token};
 pub use client::{McpClient, McpInteractionKind, McpPendingInteraction};
 pub use config::{
     McpCapabilityPolicy, McpLoggingLevel, McpRuntimeHealth, McpServerConfig, McpServersFile,
-    McpTransport, OAuthConfig,
+    McpStdioIsolation, McpStdioIsolationMode, McpTransport, OAuthConfig,
 };
 pub use protocol::{
     CallToolResult, CompleteArgument, CompleteResult, ElicitationCreateRequest, GetPromptResult,

@@ -119,6 +119,37 @@ DYNAMIC_ENVIRONMENT_SCHEMAS: dict[str, dict[str, object]] = {
     },
 }
 
+# Scanner-derived defaults are intentionally conservative. Boundaries whose
+# policy is selected by a validated typed configuration need an explicit,
+# reviewable override so the checked runtime manifest describes the real
+# home/temp/network/isolation and protocol bounds instead of a direct-host
+# placeholder.
+PROCESS_POLICY_OVERRIDES: dict[str, dict[str, object]] = {
+    "crates.thinclaw-tools.src.mcp.stdio.tokio.101": {
+        "process_class": "tool_executor",
+        "cwd_filesystem": "launcher_private_with_explicit_roots",
+        "home_policy": "launcher_private",
+        "temp_policy": "launcher_private",
+        "network_policy": "config_selected_fail_closed",
+        "isolation_policy": "config_selected_fail_closed",
+        "io_policy": {
+            "bounded": True,
+            "stdout_limit": 4 * 1024 * 1024,
+            "stderr_limit": 16 * 1024,
+        },
+        "lifetime_policy": {
+            "timeout_ms": 1_800_000,
+            "owns_process_tree": True,
+            "reap_on_drop": True,
+        },
+        "availability": [
+            "strict:macos-seatbelt",
+            "strict:linux-bubblewrap",
+            "compatibility:explicit-all-platforms",
+        ],
+    },
+}
+
 
 def production_files() -> list[Path]:
     files: list[Path] = []
@@ -260,7 +291,9 @@ def rust_structure_mask(text: str) -> str:
     return "".join(masked)
 
 
-@functools.lru_cache(maxsize=None)
+# Source text is the cache key. Retain only the immediately repeated lookup;
+# caching the production tree makes the CI scanner itself exhaust memory.
+@functools.lru_cache(maxsize=1)
 def test_only_ranges(text: str) -> tuple[tuple[int, int], ...]:
     """Return byte ranges owned by modules whose cfg predicate requires tests."""
     if "test" not in text:
@@ -299,9 +332,12 @@ def launch_records(files: list[Path]) -> tuple[list[dict[str, object]], list[str
     for path in files:
         relative = path.relative_to(ROOT).as_posix()
         text = path.read_text(encoding="utf-8")
+        raw_matches = list(LAUNCH.finditer(text))
+        if not raw_matches:
+            continue
         test_ranges = test_only_ranges(text)
         matches = [
-            match for match in LAUNCH.finditer(text) if not in_ranges(match.start(), test_ranges)
+            match for match in raw_matches if not in_ranges(match.start(), test_ranges)
         ]
         for index, match in enumerate(matches):
             launch_id = match.group("id")
@@ -333,8 +369,7 @@ def launch_records(files: list[Path]) -> tuple[list[dict[str, object]], list[str
             ]
             if dynamic_environment is not None:
                 credential_slots.extend(dynamic_environment["credential_slots"])
-            records.append(
-                {
+            record = {
                     "id": launch_id,
                     "classification": "production",
                     "owner": relative.removesuffix(".rs").replace("/", "::"),
@@ -375,7 +410,8 @@ def launch_records(files: list[Path]) -> tuple[list[dict[str, object]], list[str
                     "proof_id": "process-launch-"
                     + hashlib.sha256(launch_id.encode("utf-8")).hexdigest()[:24],
                 }
-            )
+            record.update(PROCESS_POLICY_OVERRIDES.get(launch_id, {}))
+            records.append(record)
     for launch_id in sorted(set(DYNAMIC_ENVIRONMENT_SCHEMAS) - set(seen)):
         problems.append(f"dynamic process environment classification has no launch: {launch_id}")
     records.sort(key=lambda item: str(item["id"]))
@@ -387,6 +423,10 @@ def source_safety(files: list[Path]) -> list[str]:
     for path in files:
         relative = path.relative_to(ROOT).as_posix()
         text = path.read_text(encoding="utf-8")
+        raw_matches = list(RAW.finditer(text))
+        sensitive_matches = list(SENSITIVE_ARG.finditer(text))
+        if not raw_matches and not sensitive_matches:
+            continue
         test_ranges = test_only_ranges(text)
         offset = 0
         for line_number, line in enumerate(text.splitlines(keepends=True), 1):
@@ -402,7 +442,7 @@ def source_safety(files: list[Path]) -> list[str]:
             if RAW.search(line) and not in_ranges(offset, test_ranges):
                 problems.append(f"raw process constructor: {relative}:{line_number}")
             offset += len(line)
-        for match in SENSITIVE_ARG.finditer(text):
+        for match in sensitive_matches:
             if in_ranges(match.start(), test_ranges):
                 continue
             line_number = text.count("\n", 0, match.start()) + 1

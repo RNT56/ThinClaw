@@ -710,6 +710,7 @@ impl McpClient {
         config_store: Option<McpConfigStore>,
         secret_env: &BTreeMap<String, String>,
     ) -> Result<Self, ToolError> {
+        config.validate().map_err(ToolError::from)?;
         if config.secret_env.len() != secret_env.len()
             || config
                 .secret_env
@@ -740,6 +741,8 @@ impl McpClient {
             &config.args,
             &config.env,
             secret_env,
+            &config.roots_grants,
+            &config.stdio_isolation,
             Some(handler),
         )?;
 
