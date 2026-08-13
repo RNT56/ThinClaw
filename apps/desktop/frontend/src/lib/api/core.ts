@@ -5,7 +5,14 @@
  * Command names, parameters, and result data are owned by bindings.ts.
  */
 
-import { compatibilityCommands } from '../command-client';
+import { commandClient, compatibilityCommands } from '../command-client';
+import type {
+    GatewayState as GeneratedGatewayState,
+    GatewayTarget as GeneratedGatewayTarget,
+} from '../bindings';
+
+export type GatewayState = GeneratedGatewayState;
+export type GatewayTarget = GeneratedGatewayTarget;
 // ============================================================================
 // Types (matching Rust types from commands.rs)
 // ============================================================================
@@ -27,6 +34,7 @@ export interface ThinClawStatus {
     remote_url: string | null;
     /** Always null in status responses; retained for wire compatibility. */
     remote_token: string | null;
+    gateway_state: GatewayState;
     has_remote_token: boolean;
     device_id: string;
     /** Always empty in status responses; retained for wire compatibility. */
@@ -111,6 +119,7 @@ export interface AgentProfile {
     token: string | null;
     mode: string;
     auto_connect: boolean;
+    revision?: number;
     // Sprint 13 extensions (optional for backward compat)
     is_default?: boolean;
     status?: 'running' | 'paused' | 'error' | 'offline';
@@ -233,6 +242,67 @@ export interface ThinClawDiagnostics {
  */
 export async function getThinClawStatus(): Promise<ThinClawStatus> {
     return compatibilityCommands.thinclawGetStatus();
+}
+
+/** Read the revisioned desired/effective gateway state owned by the desktop. */
+export async function getGatewayState(): Promise<GatewayState> {
+    return commandClient.thinclawGetGatewayState();
+}
+
+/**
+ * Atomically prepare and activate a target against the state revision the UI
+ * actually rendered. A stale renderer receives a typed conflict instead of
+ * overwriting a newer selection.
+ */
+export async function activateGatewayTarget(
+    target: GatewayTarget,
+    expectedRevision: number,
+): Promise<GatewayState> {
+    return commandClient.thinclawActivateGatewayTarget(target, expectedRevision);
+}
+
+export function gatewayTargetForProfile(
+    profile: Pick<AgentProfile, 'id' | 'revision'>,
+): GatewayTarget {
+    return {
+        kind: 'profile',
+        profile_id: profile.id,
+        profile_revision: Math.max(1, profile.revision ?? 0),
+    };
+}
+
+export function gatewayTargetIsEffective(
+    state: GatewayState,
+    target: GatewayTarget,
+): boolean {
+    if (target.kind === 'local') return state.effective.kind === 'local';
+    return state.effective.kind === 'profile'
+        && state.effective.profile_id === target.profile_id
+        && state.effective.profile_revision === target.profile_revision;
+}
+
+/** Activate a profile using a fresh CAS revision and its canonical revision. */
+export async function activateAgentProfile(profileId: string): Promise<GatewayState> {
+    const status = await getThinClawStatus();
+    const profile = status.profiles.find((candidate) => candidate.id === profileId);
+    if (!profile) throw new Error(`Agent profile '${profileId}' was not found`);
+    const target = gatewayTargetForProfile(profile);
+    const next = await activateGatewayTarget(target, status.gateway_state.revision);
+    if (!next.in_sync || !gatewayTargetIsEffective(next, target)) {
+        throw new Error('Gateway activation completed without making the selected profile effective');
+    }
+    return next;
+}
+
+/** Activate the embedded runtime using a fresh CAS revision. */
+export async function activateLocalGateway(): Promise<GatewayState> {
+    const current = await getGatewayState();
+    const target: GatewayTarget = { kind: 'local' };
+    const next = await activateGatewayTarget(target, current.revision);
+    if (!next.in_sync || !gatewayTargetIsEffective(next, target)) {
+        throw new Error('Gateway activation completed without making Local Core effective');
+    }
+    return next;
 }
 
 /** Reveal the local gateway token only for an explicit user copy action. */

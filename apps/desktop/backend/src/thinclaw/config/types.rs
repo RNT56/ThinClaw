@@ -20,6 +20,110 @@ fn default_workspace_mode() -> String {
 }
 use zeroize::Zeroize;
 
+/// Persisted gateway destination. The desired target is independent from the
+/// runtime that is currently effective, so a failed switch never lies about
+/// which runtime is still serving requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GatewayTarget {
+    Local,
+    Profile {
+        profile_id: String,
+        profile_revision: u64,
+    },
+}
+
+impl Default for GatewayTarget {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
+/// Runtime target that has actually been committed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EffectiveGatewayTarget {
+    Stopped,
+    Local,
+    Profile {
+        profile_id: String,
+        profile_revision: u64,
+        url: String,
+    },
+}
+
+impl Default for EffectiveGatewayTarget {
+    fn default() -> Self {
+        Self::Stopped
+    }
+}
+
+impl EffectiveGatewayTarget {
+    pub fn satisfies(&self, desired: &GatewayTarget) -> bool {
+        match (self, desired) {
+            (Self::Local, GatewayTarget::Local) => true,
+            (
+                Self::Profile {
+                    profile_id: effective,
+                    profile_revision: effective_revision,
+                    ..
+                },
+                GatewayTarget::Profile {
+                    profile_id: desired,
+                    profile_revision: desired_revision,
+                },
+            ) => effective == desired && effective_revision == desired_revision,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod gateway_target_tests {
+    use super::{EffectiveGatewayTarget, GatewayTarget};
+
+    #[test]
+    fn effective_target_requires_exact_profile_revision() {
+        let desired = GatewayTarget::Profile {
+            profile_id: "remote-one".to_string(),
+            profile_revision: 4,
+        };
+        let effective = EffectiveGatewayTarget::Profile {
+            profile_id: "remote-one".to_string(),
+            profile_revision: 3,
+            url: "https://agent.example.test".to_string(),
+        };
+
+        assert!(!effective.satisfies(&desired));
+        assert!(EffectiveGatewayTarget::Profile {
+            profile_revision: 4,
+            ..effective
+        }
+        .satisfies(&desired));
+    }
+
+    #[test]
+    fn stopped_target_never_claims_desired_target_is_effective() {
+        assert!(!EffectiveGatewayTarget::Stopped.satisfies(&GatewayTarget::Local));
+    }
+
+    #[test]
+    fn gateway_target_uses_stable_tagged_wire_shape() {
+        let target = GatewayTarget::Profile {
+            profile_id: "remote-one".to_string(),
+            profile_revision: 9,
+        };
+        assert_eq!(
+            serde_json::to_value(target).expect("gateway target JSON"),
+            serde_json::json!({
+                "kind": "profile",
+                "profile_id": "remote-one",
+                "profile_revision": 9,
+            })
+        );
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, specta::Type, Default)]
 pub struct CustomSecret {
     pub id: String,
@@ -59,6 +163,10 @@ pub struct AgentProfile {
     pub mode: String, // "local" | "remote"
     #[serde(default)]
     pub auto_connect: bool,
+    /// Incremented whenever connection-bearing profile fields change.
+    #[serde(default)]
+    #[specta(optional)]
+    pub revision: u64,
 }
 
 impl std::fmt::Debug for AgentProfile {
@@ -74,6 +182,7 @@ impl std::fmt::Debug for AgentProfile {
             )
             .field("mode", &self.mode)
             .field("auto_connect", &self.auto_connect)
+            .field("revision", &self.revision)
             .finish()
     }
 }
@@ -89,6 +198,7 @@ impl AgentProfile {
             token: None,
             mode: self.mode.clone(),
             auto_connect: self.auto_connect,
+            revision: self.revision,
         }
     }
 }
@@ -123,6 +233,12 @@ pub struct ThinClawIdentity {
     pub profiles: Vec<AgentProfile>,
     #[serde(default)]
     pub gateway_mode: String,
+    /// Desired gateway target. Missing legacy documents migrate from
+    /// gateway_mode/remote_url during load.
+    #[serde(default)]
+    pub gateway_target: GatewayTarget,
+    #[serde(default)]
+    pub gateway_revision: u64,
     #[serde(default)]
     pub remote_url: Option<String>,
     // remote_token → Keychain
@@ -296,6 +412,10 @@ pub struct ThinClawConfig {
     pub port: u16,
     /// Gateway mode (local or remote)
     pub gateway_mode: String,
+    /// Desired target persisted independently from the effective runtime.
+    pub gateway_target: GatewayTarget,
+    /// Monotonic optimistic-concurrency revision for target changes.
+    pub gateway_revision: u64,
     /// Remote gateway URL
     pub remote_url: Option<String>,
     /// Remote gateway token

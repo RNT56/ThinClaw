@@ -51,6 +51,50 @@ fn valid_identity_id(value: &str, max_bytes: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+fn migrate_legacy_gateway_target(identity: &mut ThinClawIdentity) -> bool {
+    if identity.gateway_mode != "remote" {
+        identity.gateway_target = GatewayTarget::Local;
+        identity.gateway_revision = identity.gateway_revision.max(1);
+        return true;
+    }
+
+    let Some(remote_url) = identity.remote_url.clone() else {
+        return false;
+    };
+    let normalized_url = remote_url.trim_end_matches('/');
+    let (profile_id, profile_revision) = identity
+        .profiles
+        .iter()
+        .find(|profile| {
+            profile.mode == "remote" && profile.url.trim_end_matches('/') == normalized_url
+        })
+        .map(|profile| (profile.id.clone(), profile.revision.max(1)))
+        .unwrap_or_else(|| {
+            let mut id = "legacy-remote".to_string();
+            let mut suffix = 2_u64;
+            while identity.profiles.iter().any(|profile| profile.id == id) {
+                id = format!("legacy-remote-{suffix}");
+                suffix += 1;
+            }
+            identity.profiles.push(AgentProfile {
+                id: id.clone(),
+                name: "Migrated remote gateway".to_string(),
+                url: normalized_url.to_string(),
+                token: None,
+                mode: "remote".to_string(),
+                auto_connect: true,
+                revision: 1,
+            });
+            (id, 1)
+        });
+    identity.gateway_target = GatewayTarget::Profile {
+        profile_id,
+        profile_revision,
+    };
+    identity.gateway_revision = identity.gateway_revision.max(1);
+    true
+}
+
 fn validate_identity_document(identity: &ThinClawIdentity) -> Result<(), String> {
     if (!identity.device_id.is_empty() && !valid_identity_id(&identity.device_id, 128))
         || !bounded_identity_text(&identity.auth_token, MAX_CREDENTIAL_BYTES, true)
@@ -114,6 +158,19 @@ fn validate_identity_document(identity: &ThinClawIdentity) -> Result<(), String>
             .ok_or_else(|| "remote gateway mode requires a URL".to_string())?;
         crate::thinclaw::remote_proxy::RemoteGatewayProxy::validate_base_url(remote_url)
             .map_err(|error| format!("identity contains an invalid remote gateway URL: {error}"))?;
+    }
+    if let GatewayTarget::Profile {
+        profile_id,
+        profile_revision,
+    } = &identity.gateway_target
+    {
+        if !identity.profiles.iter().any(|profile| {
+            &profile.id == profile_id
+                && profile.mode == "remote"
+                && profile.revision.max(1) == *profile_revision
+        }) {
+            return Err("desired gateway target references a missing remote profile".to_string());
+        }
     }
 
     if identity.custom_secrets.len() > MAX_CUSTOM_SECRETS {
@@ -274,6 +331,10 @@ impl ThinClawConfig {
         if identity.gateway_mode.is_empty() {
             identity.gateway_mode = default_gateway_mode();
         }
+        let migrated_gateway_target = raw_json_value
+            .as_ref()
+            .is_some_and(|value| value.get("gateway_target").is_none())
+            && migrate_legacy_gateway_target(&mut identity);
         if identity.workspace_mode.is_empty() {
             identity.workspace_mode = "sandboxed".to_string();
         }
@@ -397,11 +458,28 @@ impl ThinClawConfig {
             },
         };
 
+        if migrated_gateway_target {
+            if let GatewayTarget::Profile { profile_id, .. } = &identity.gateway_target {
+                if let Some(legacy_token) = keychain::get_key("remote_token") {
+                    if let Some(profile) = identity
+                        .profiles
+                        .iter_mut()
+                        .find(|profile| &profile.id == profile_id && profile.token.is_none())
+                    {
+                        profile.token = Some(legacy_token);
+                    }
+                }
+            }
+        }
+
         let mut profile_ids = std::collections::HashSet::new();
         for profile in &mut identity.profiles {
             if profile.id.trim().is_empty() || !profile_ids.insert(profile.id.clone()) {
                 return Err("agent profiles must have unique, non-empty IDs".to_string());
             }
+            // Revision zero is the legacy/missing representation. Canonicalize
+            // it before exposing profiles or persisting the migrated document.
+            profile.revision = profile.revision.max(1);
             let token_key = keychain::profile_token_key(&profile.id);
             profile.token = match keychain::get_key(&token_key) {
                 Some(token) if bounded_identity_text(&token, 8 * 1024, false) => Some(token),
@@ -455,6 +533,8 @@ impl ThinClawConfig {
             profiles: identity.profiles,
             port,
             gateway_mode: identity.gateway_mode,
+            gateway_target: identity.gateway_target,
+            gateway_revision: identity.gateway_revision.max(1),
             remote_url: identity.remote_url,
             remote_token: keychain::get_key("remote_token"),
             private_key,
@@ -892,6 +972,79 @@ impl ThinClawConfig {
         Ok(())
     }
 
+    /// Persist a revisioned desired gateway target and its legacy compatibility
+    /// projection. Profile credentials remain owned by the profile keychain
+    /// entry; `remote_token` is mirrored for one release for older readers.
+    pub fn set_gateway_target(&mut self, target: GatewayTarget) -> std::io::Result<u64> {
+        if self.gateway_target == target {
+            return Ok(self.gateway_revision);
+        }
+
+        let (mode, remote_url, remote_token) = match &target {
+            GatewayTarget::Local => ("local".to_string(), None, None),
+            GatewayTarget::Profile {
+                profile_id,
+                profile_revision,
+            } => {
+                let profile = self
+                    .profiles
+                    .iter()
+                    .find(|profile| &profile.id == profile_id && profile.mode == "remote")
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "desired gateway profile does not exist",
+                        )
+                    })?;
+                if profile.revision.max(1) != *profile_revision {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "desired gateway profile revision is stale",
+                    ));
+                }
+                let token = profile
+                    .token
+                    .clone()
+                    .filter(|token| !token.trim().is_empty())
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "desired gateway profile has no stored bearer token",
+                        )
+                    })?;
+                ("remote".to_string(), Some(profile.url.clone()), Some(token))
+            }
+        };
+
+        let old_token = keychain::get_key("remote_token");
+        let old_mode = self.gateway_mode.clone();
+        let old_url = self.remote_url.clone();
+        let old_runtime_token = self.remote_token.clone();
+        let old_target = self.gateway_target.clone();
+        let old_revision = self.gateway_revision;
+        keychain::set_key("remote_token", remote_token.as_deref()).map_err(io_err)?;
+        self.gateway_mode = mode;
+        self.remote_url = remote_url;
+        self.remote_token = remote_token;
+        self.gateway_target = target;
+        self.gateway_revision = self.gateway_revision.saturating_add(1).max(1);
+
+        if let Err(error) = self.save_identity() {
+            self.gateway_mode = old_mode;
+            self.remote_url = old_url;
+            self.remote_token = old_runtime_token;
+            self.gateway_target = old_target;
+            self.gateway_revision = old_revision;
+            if let Err(rollback_error) = keychain::set_key("remote_token", old_token.as_deref()) {
+                return Err(std::io::Error::other(format!(
+                    "failed to persist gateway target ({error}); credential rollback also failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
+        Ok(self.gateway_revision)
+    }
+
     pub fn toggle_expose_inference(&mut self, enabled: bool) -> std::io::Result<()> {
         self.expose_inference = enabled;
         self.save_identity()
@@ -963,6 +1116,8 @@ impl ThinClawConfig {
                 })
                 .collect(),
             gateway_mode: self.gateway_mode.clone(),
+            gateway_target: self.gateway_target.clone(),
+            gateway_revision: self.gateway_revision,
             remote_url: self.remote_url.clone(),
             // remote_token goes to Keychain — not saved here
             private_key: None,
@@ -1095,6 +1250,7 @@ mod tests {
                 token: None,
                 mode: "local".to_string(),
                 auto_connect: false,
+                revision: 1,
             })
             .collect();
         assert!(validate_identity_document(&identity).is_err());
@@ -1103,5 +1259,73 @@ mod tests {
         identity.gateway_mode = "remote".to_string();
         identity.remote_url = Some("http://public.example".to_string());
         assert!(validate_identity_document(&identity).is_err());
+    }
+
+    #[test]
+    fn legacy_local_gateway_migrates_to_revisioned_local_target() {
+        let mut identity = ThinClawIdentity {
+            gateway_mode: "local".to_string(),
+            ..ThinClawIdentity::default()
+        };
+
+        assert!(migrate_legacy_gateway_target(&mut identity));
+        assert_eq!(identity.gateway_target, GatewayTarget::Local);
+        assert_eq!(identity.gateway_revision, 1);
+    }
+
+    #[test]
+    fn legacy_remote_gateway_reuses_matching_profile_and_revision() {
+        let mut identity = ThinClawIdentity {
+            gateway_mode: "remote".to_string(),
+            remote_url: Some("https://agent.example.test/".to_string()),
+            profiles: vec![AgentProfile {
+                id: "remote-one".to_string(),
+                name: "Remote One".to_string(),
+                url: "https://agent.example.test".to_string(),
+                token: None,
+                mode: "remote".to_string(),
+                auto_connect: true,
+                revision: 7,
+            }],
+            ..ThinClawIdentity::default()
+        };
+
+        assert!(migrate_legacy_gateway_target(&mut identity));
+        assert_eq!(
+            identity.gateway_target,
+            GatewayTarget::Profile {
+                profile_id: "remote-one".to_string(),
+                profile_revision: 7,
+            }
+        );
+        assert_eq!(identity.profiles.len(), 1);
+        assert_eq!(identity.gateway_revision, 1);
+    }
+
+    #[test]
+    fn legacy_remote_gateway_synthesizes_collision_free_profile() {
+        let mut identity = ThinClawIdentity {
+            gateway_mode: "remote".to_string(),
+            remote_url: Some("https://new-agent.example.test/".to_string()),
+            profiles: vec![AgentProfile {
+                id: "legacy-remote".to_string(),
+                mode: "local".to_string(),
+                revision: 1,
+                ..AgentProfile::default()
+            }],
+            ..ThinClawIdentity::default()
+        };
+
+        assert!(migrate_legacy_gateway_target(&mut identity));
+        assert_eq!(
+            identity.gateway_target,
+            GatewayTarget::Profile {
+                profile_id: "legacy-remote-2".to_string(),
+                profile_revision: 1,
+            }
+        );
+        let profile = identity.profiles.last().expect("synthesized profile");
+        assert_eq!(profile.url, "https://new-agent.example.test");
+        assert_eq!(profile.mode, "remote");
     }
 }

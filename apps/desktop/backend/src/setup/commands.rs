@@ -91,6 +91,8 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::rig_lib::agent_chat,
         // ── ThinClaw Agent Cockpit ──────────────────────────────────────
         crate::thinclaw::commands::thinclaw_get_status,
+        crate::thinclaw::commands::thinclaw_get_gateway_state,
+        crate::thinclaw::commands::thinclaw_activate_gateway_target,
         crate::thinclaw::commands::thinclaw_reveal_gateway_token,
         crate::thinclaw::commands::thinclaw_save_anthropic_key,
         crate::thinclaw::commands::thinclaw_get_anthropic_key,

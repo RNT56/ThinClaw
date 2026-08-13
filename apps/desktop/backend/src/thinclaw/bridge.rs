@@ -381,6 +381,11 @@ pub static ROUTE_TABLE: &[(&str, RouteMode)] = &[
     ("thinclaw_save_bedrock_credentials", RouteMode::LocalOnly),
     ("thinclaw_save_brave_key", RouteMode::LocalOnly),
     ("thinclaw_save_gateway_settings", RouteMode::LocalOnly),
+    ("thinclaw_get_gateway_state", RouteMode::LocalAndRemote),
+    (
+        "thinclaw_activate_gateway_target",
+        RouteMode::LocalAndRemote,
+    ),
     ("thinclaw_save_slack_config", RouteMode::LocalOnly),
     ("thinclaw_save_telegram_config", RouteMode::LocalOnly),
     ("thinclaw_secret_master_key_rotate", RouteMode::LocalOnly),

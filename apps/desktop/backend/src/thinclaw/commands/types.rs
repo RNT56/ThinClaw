@@ -3,7 +3,28 @@
 //! All typed structs used by the command layer, including
 //! status responses, input types, session/message models, and diagnostics.
 
-use super::super::config::{AgentProfile, CustomSecret};
+use super::super::config::{AgentProfile, CustomSecret, EffectiveGatewayTarget, GatewayTarget};
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayTransitionPhase {
+    #[default]
+    Idle,
+    Preparing,
+    Committing,
+    Failed,
+}
+
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct GatewayState {
+    pub desired: GatewayTarget,
+    pub effective: EffectiveGatewayTarget,
+    pub phase: GatewayTransitionPhase,
+    pub revision: u64,
+    pub in_sync: bool,
+    pub attempt: u64,
+    pub last_error: Option<String>,
+}
 
 #[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct SecurityTelemetryEvent {
@@ -94,6 +115,7 @@ pub struct ThinClawStatus {
     pub gateway_mode: String,
     pub remote_url: Option<String>,
     pub remote_token: Option<String>,
+    pub gateway_state: GatewayState,
     pub device_id: String,
     pub auth_token: String,
     pub state_dir: String,

@@ -38,7 +38,9 @@ function errorMessage(error: unknown): string {
 
 function sourceFor(status: thinclaw.ThinClawStatus | null): AgentCapabilityState['source'] {
     if (!status) return 'unknown';
-    return status.gateway_mode.toLowerCase() === 'remote' ? 'remote' : 'local';
+    if (status.gateway_state.effective.kind === 'profile') return 'remote';
+    if (status.gateway_state.effective.kind === 'local') return 'local';
+    return status.gateway_state.desired.kind === 'profile' ? 'remote' : 'local';
 }
 
 export function AgentCockpitProvider({ children, enabled = true }: { children: ReactNode; enabled?: boolean }) {

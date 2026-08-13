@@ -229,6 +229,9 @@ pub struct ThinClawRuntimeState {
     local_running: AtomicBool,
     /// Remote proxy — `Some` only when gateway_mode == "remote" and connected.
     remote: RwLock<Option<super::remote_proxy::RemoteGatewayProxy>>,
+    /// Runtime destination that has actually committed. This is deliberately
+    /// independent from the desired target persisted in identity.json.
+    effective_gateway: RwLock<super::config::EffectiveGatewayTarget>,
     /// App handle — needed to re-initialize the engine on start.
     app_handle: tauri::AppHandle<tauri::Wry>,
     /// State directory — needed for re-initialization.
@@ -256,6 +259,7 @@ impl ThinClawRuntimeState {
             inner: RwLock::new(None),
             local_running: AtomicBool::new(false),
             remote: RwLock::new(None),
+            effective_gateway: RwLock::new(super::config::EffectiveGatewayTarget::Stopped),
             app_handle,
             state_dir,
             boot_inject_done,
@@ -269,7 +273,12 @@ impl ThinClawRuntimeState {
     ///
     /// Stops the local engine if running, then activates the remote proxy.
     /// The caller is responsible for calling `proxy.health_check()` first.
-    pub async fn connect_remote(&self, proxy: super::remote_proxy::RemoteGatewayProxy) {
+    pub async fn connect_remote(
+        &self,
+        profile_id: String,
+        profile_revision: u64,
+        proxy: super::remote_proxy::RemoteGatewayProxy,
+    ) {
         let _lifecycle = self.lifecycle_lock.lock().await;
         if self.inner.read().await.is_some() {
             tracing::info!("[thinclaw-runtime] Stopping local engine before remote mode");
@@ -279,7 +288,13 @@ impl ThinClawRuntimeState {
         if let Some(previous) = previous {
             previous.stop_sse_subscription().await;
         }
+        let url = proxy.base_url().to_string();
         *self.remote.write().await = Some(proxy);
+        *self.effective_gateway.write().await = super::config::EffectiveGatewayTarget::Profile {
+            profile_id,
+            profile_revision,
+            url,
+        };
         tracing::info!("[thinclaw-runtime] Remote proxy connected");
     }
 
@@ -291,6 +306,7 @@ impl ThinClawRuntimeState {
             proxy.stop_sse_subscription().await;
             tracing::info!("[thinclaw-runtime] Remote proxy disconnected");
         }
+        *self.effective_gateway.write().await = super::config::EffectiveGatewayTarget::Stopped;
     }
 
     /// Get a clone of the active remote proxy, if in remote mode.
@@ -303,6 +319,10 @@ impl ThinClawRuntimeState {
     /// Returns true when operating in remote proxy mode.
     pub async fn is_remote_mode(&self) -> bool {
         self.remote.read().await.is_some()
+    }
+
+    pub async fn effective_gateway(&self) -> super::config::EffectiveGatewayTarget {
+        self.effective_gateway.read().await.clone()
     }
 
     /// Returns a human-readable description of the current mode.
@@ -421,13 +441,8 @@ impl ThinClawRuntimeState {
             }
         }
 
-        // Local and remote modes are mutually exclusive. Stop any remote SSE
-        // subscription as part of the same serialized transition.
-        let proxy = self.remote.write().await.take();
-        if let Some(proxy) = proxy {
-            proxy.stop_sse_subscription().await;
-        }
-
+        // Build while the old remote proxy remains effective. A local build
+        // failure must not tear down a healthy existing connection.
         let inner = Self::build_inner(
             self.app_handle.clone(),
             self.state_dir.clone(),
@@ -435,9 +450,17 @@ impl ThinClawRuntimeState {
         )
         .await?;
 
+        // The candidate is ready. Commit under the lifecycle lock by draining
+        // the previous proxy immediately before installing the new runtime.
+        let proxy = self.remote.write().await.take();
+        if let Some(proxy) = proxy {
+            proxy.stop_sse_subscription().await;
+        }
+
         self.boot_inject_done.send_replace(false);
         *self.inner.write().await = Some(inner);
         self.local_running.store(true, Ordering::Release);
+        *self.effective_gateway.write().await = super::config::EffectiveGatewayTarget::Local;
         tracing::info!("[thinclaw-runtime] Engine started successfully");
 
         // ── Boot-time proactive inject ───────────────────────────────────
@@ -692,6 +715,7 @@ impl ThinClawRuntimeState {
 
         let inner = self.inner.write().await.take();
         self.local_running.store(false, Ordering::Release);
+        *self.effective_gateway.write().await = super::config::EffectiveGatewayTarget::Stopped;
         if let Some(mut inner) = inner {
             // Stop host-side injectors/forwarders first so they cannot submit
             // fresh work while the agent itself is draining.

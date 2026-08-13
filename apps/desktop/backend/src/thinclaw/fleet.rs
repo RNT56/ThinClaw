@@ -410,6 +410,7 @@ mod tests {
             token: Some("secret".to_string()),
             mode: "remote".to_string(),
             auto_connect: false,
+            revision: 1,
         }
     }
 

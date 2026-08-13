@@ -635,6 +635,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
     const handleNext = () => {
         if (step === 'agent' && !agentName.trim()) return;
+        if (step === 'remote_setup' && !remoteConnected) return;
         if (step === 'inference' && !inferenceSelectionReady) return;
         if (step === 'engine_setup' && engineSetup.status?.state !== 'ready') return;
         if (step === 'complete') { handleFinish(); return; }
@@ -751,7 +752,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 auto_connect: true,
             };
             await thinclaw.addAgentProfile(newProfile);
-            await commands.thinclawSaveGatewaySettings('remote', url, remoteExistingToken || '');
+            await thinclaw.activateAgentProfile(newProfile.id);
             setRemoteConnected(true);
             toast.success('Connected to remote agent!');
         } catch (e: any) {
@@ -790,8 +791,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 // out: the deployment may still finish after this command, and
                 // the one-time token must not be lost with the response object.
                 await thinclaw.addAgentProfile(newProfile);
-                await commands.thinclawSaveGatewaySettings('remote', result.url, result.token || '');
-                if (result.status === 'success') {
+                if (result.reachable) {
+                    await thinclaw.activateAgentProfile(newProfile.id);
                     setRemoteConnected(true);
                     toast.success('Remote agent deployed and connected!');
                 } else {
@@ -1022,6 +1023,15 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
             await thinclaw.toggleThinClawLocalInference(
                 effectiveInferenceChoice === 'local'
             );
+
+            if (mode === 'local') {
+                await thinclaw.activateLocalGateway();
+            } else {
+                const gateway = await thinclaw.getGatewayState();
+                if (!gateway.in_sync || gateway.effective.kind !== 'profile') {
+                    throw new Error('Connect a healthy remote agent before completing setup.');
+                }
+            }
 
             // Save setup completed status
             await thinclaw.setSetupCompleted(true);
@@ -2418,6 +2428,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                         disabled={
                             isLoading
                             || (step === 'agent' && !agentName.trim())
+                            || (step === 'remote_setup' && !remoteConnected)
                             || (step === 'inference' && !inferenceSelectionReady)
                             || (step === 'engine_setup' && engineSetup.status?.state !== 'ready')
                             || (step === 'models' && !modelSelectionsReady)

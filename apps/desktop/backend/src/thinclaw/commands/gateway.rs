@@ -16,6 +16,44 @@ use super::types::*;
 use super::ThinClawManager;
 use crate::thinclaw::runtime_bridge::ThinClawRuntimeState;
 
+async fn gateway_state_snapshot(
+    state: &ThinClawManager,
+    ironclaw: &ThinClawRuntimeState,
+) -> GatewayState {
+    let config = state.get_config().await;
+    let desired = config
+        .as_ref()
+        .map(|config| config.gateway_target.clone())
+        .unwrap_or_default();
+    let revision = config
+        .as_ref()
+        .map(|config| config.gateway_revision)
+        .unwrap_or_default();
+    let effective = ironclaw.effective_gateway().await;
+    let transition = state.gateway_transition.read().await.clone();
+    GatewayState {
+        in_sync: effective.satisfies(&desired),
+        desired,
+        effective,
+        phase: transition.phase,
+        revision,
+        attempt: transition.attempt,
+        last_error: transition.last_error,
+    }
+}
+
+/// Return both the persisted desired target and the runtime that is actually
+/// effective. Renderers must use this instead of inferring connectivity from
+/// legacy gateway_mode fields.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_get_gateway_state(
+    state: State<'_, ThinClawManager>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
+) -> Result<GatewayState, crate::thinclaw::bridge::BridgeError> {
+    Ok(gateway_state_snapshot(&state, &ironclaw).await)
+}
+
 /// Get ThinClaw status.
 ///
 /// Config fields (API keys, grants, cloud settings) come from `ThinClawConfig`.
@@ -30,6 +68,7 @@ pub async fn thinclaw_get_status(
     let config = state.get_config().await;
 
     let engine_running = ironclaw.is_initialized() || ironclaw.is_remote_mode().await;
+    let gateway_state = gateway_state_snapshot(&state, &ironclaw).await;
     Ok(ThinClawStatus {
         gateway_mode: config
             .as_ref()
@@ -38,6 +77,7 @@ pub async fn thinclaw_get_status(
         remote_url: config.as_ref().and_then(|c| c.remote_url.clone()),
         // Credentials are never included in periodic renderer status payloads.
         remote_token: None,
+        gateway_state,
         port: config.as_ref().map(|c| c.port).unwrap_or(18789),
         device_id: config
             .as_ref()
@@ -359,14 +399,12 @@ pub async fn thinclaw_sync_local_llm(
 ///
 /// In both modes, the frontend receives the same events via `thinclaw-event`
 /// and invokes the same Tauri commands — all routing is transparent.
-#[tauri::command]
-#[specta::specta]
-pub async fn thinclaw_start_gateway(
-    state: State<'_, ThinClawManager>,
-    secret_store: State<'_, crate::secret_store::SecretStore>,
-    ironclaw: State<'_, ThinClawRuntimeState>,
-    sidecar: State<'_, crate::sidecar::SidecarManager>,
-    engine_manager: State<'_, crate::engine::EngineManager>,
+async fn start_gateway_for_desired_target(
+    state: &ThinClawManager,
+    secret_store: &crate::secret_store::SecretStore,
+    ironclaw: &ThinClawRuntimeState,
+    sidecar: &crate::sidecar::SidecarManager,
+    engine_manager: &crate::engine::EngineManager,
     app_handle: tauri::AppHandle,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     let oc_config = state.get_config().await;
@@ -376,6 +414,19 @@ pub async fn thinclaw_start_gateway(
         .as_ref()
         .map(|c| c.gateway_mode.clone())
         .unwrap_or_default();
+    let desired_target = oc_config
+        .as_ref()
+        .map(|config| config.gateway_target.clone())
+        .unwrap_or_default();
+
+    if ironclaw
+        .effective_gateway()
+        .await
+        .satisfies(&desired_target)
+    {
+        info!("[thinclaw-runtime] Desired gateway target is already effective");
+        return Ok(());
+    }
 
     info!("[thinclaw-runtime] Engine start requested (mode={})", mode);
 
@@ -394,21 +445,20 @@ pub async fn thinclaw_start_gateway(
             .and_then(|c| c.remote_token.clone())
             .unwrap_or_default();
 
-        // Already in remote mode and connected? No-op.
-        if ironclaw.is_remote_mode().await {
-            // Check if it's the same URL
-            if let Some(existing) = ironclaw.remote_proxy().await {
-                if existing.base_url() == remote_url {
-                    info!(
-                        "[thinclaw-runtime] Already connected to remote {} — no-op",
-                        remote_url
-                    );
-                    return Ok(());
-                }
+        let (profile_id, profile_revision) = match &desired_target {
+            crate::thinclaw::config::GatewayTarget::Profile {
+                profile_id,
+                profile_revision,
+            } => (profile_id.clone(), *profile_revision),
+            crate::thinclaw::config::GatewayTarget::Local => {
+                return Err(crate::thinclaw::bridge::BridgeError::Conflict {
+                    message:
+                        "remote compatibility settings do not match the desired gateway target"
+                            .to_string(),
+                    remediation: Some("select a remote agent profile again".to_string()),
+                });
             }
-            // Different URL — disconnect first, then reconnect below
-            ironclaw.disconnect_remote().await;
-        }
+        };
 
         let proxy =
             crate::thinclaw::remote_proxy::RemoteGatewayProxy::new(&remote_url, &remote_token)
@@ -434,7 +484,9 @@ pub async fn thinclaw_start_gateway(
             .map_err(|e| format!("Failed to start SSE subscription: {}", e))?;
 
         // Activate in ThinClawRuntimeState
-        ironclaw.connect_remote(proxy).await;
+        ironclaw
+            .connect_remote(profile_id, profile_revision, proxy)
+            .await;
 
         // Emit Connected event so frontend updates status
         use tauri::Emitter;
@@ -451,10 +503,8 @@ pub async fn thinclaw_start_gateway(
     }
 
     // ── Local mode (default): start in-process ThinClaw runtime ─────────────
-    if ironclaw.is_remote_mode().await {
-        // Switching from remote → local: disconnect proxy first
-        ironclaw.disconnect_remote().await;
-    }
+    // ThinClawRuntimeState builds the local candidate before draining the old
+    // remote proxy, so a failed build leaves the old target effective.
 
     // Wait for local inference engine if needed
     let local_inference = oc_config
@@ -526,6 +576,140 @@ pub async fn thinclaw_start_gateway(
     }
 }
 
+async fn activate_gateway_target_inner(
+    state: &ThinClawManager,
+    secret_store: &crate::secret_store::SecretStore,
+    ironclaw: &ThinClawRuntimeState,
+    sidecar: &crate::sidecar::SidecarManager,
+    engine_manager: &crate::engine::EngineManager,
+    app_handle: tauri::AppHandle,
+    target: crate::thinclaw::config::GatewayTarget,
+    expected_revision: u64,
+) -> Result<GatewayState, crate::thinclaw::bridge::BridgeError> {
+    let _switch = state.gateway_switch_lock.lock().await;
+    let mut config = if let Some(config) = state.get_config().await {
+        config
+    } else {
+        state.init_config().await?
+    };
+    if config.gateway_revision != expected_revision {
+        return Err(crate::thinclaw::bridge::BridgeError::Conflict {
+            message: format!(
+                "gateway target changed (expected revision {expected_revision}, current revision {})",
+                config.gateway_revision
+            ),
+            remediation: Some("refresh gateway state and retry".to_string()),
+        });
+    }
+
+    {
+        let mut transition = state.gateway_transition.write().await;
+        transition.attempt = transition.attempt.saturating_add(1);
+        transition.phase = GatewayTransitionPhase::Preparing;
+        transition.last_error = None;
+    }
+
+    if let Err(error) = config.set_gateway_target(target) {
+        let error = crate::thinclaw::bridge::BridgeError::Runtime {
+            message: error.to_string(),
+        };
+        let mut transition = state.gateway_transition.write().await;
+        transition.phase = GatewayTransitionPhase::Failed;
+        transition.last_error = Some(error.to_string());
+        return Err(error);
+    }
+    *state.config.write().await = Some(config);
+
+    if let Err(error) = start_gateway_for_desired_target(
+        state,
+        secret_store,
+        ironclaw,
+        sidecar,
+        engine_manager,
+        app_handle,
+    )
+    .await
+    {
+        let mut transition = state.gateway_transition.write().await;
+        transition.phase = GatewayTransitionPhase::Failed;
+        transition.last_error = Some(error.to_string());
+        return Err(error);
+    }
+
+    {
+        let mut transition = state.gateway_transition.write().await;
+        transition.phase = GatewayTransitionPhase::Committing;
+        transition.last_error = None;
+    }
+    let snapshot = gateway_state_snapshot(state, ironclaw).await;
+    {
+        let mut transition = state.gateway_transition.write().await;
+        transition.phase = GatewayTransitionPhase::Idle;
+    }
+    Ok(GatewayState {
+        phase: GatewayTransitionPhase::Idle,
+        ..snapshot
+    })
+}
+
+/// Activate a revisioned desired gateway target. Runtime preparation happens
+/// while the previous effective target remains available; only a healthy
+/// remote proxy or successfully built local runtime is committed.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_activate_gateway_target(
+    state: State<'_, ThinClawManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
+    sidecar: State<'_, crate::sidecar::SidecarManager>,
+    engine_manager: State<'_, crate::engine::EngineManager>,
+    app_handle: tauri::AppHandle,
+    target: crate::thinclaw::config::GatewayTarget,
+    expected_revision: u64,
+) -> Result<GatewayState, crate::thinclaw::bridge::BridgeError> {
+    activate_gateway_target_inner(
+        &state,
+        &secret_store,
+        &ironclaw,
+        &sidecar,
+        &engine_manager,
+        app_handle,
+        target,
+        expected_revision,
+    )
+    .await
+}
+
+/// Start or reconnect the persisted desired target.
+#[tauri::command]
+#[specta::specta]
+pub async fn thinclaw_start_gateway(
+    state: State<'_, ThinClawManager>,
+    secret_store: State<'_, crate::secret_store::SecretStore>,
+    ironclaw: State<'_, ThinClawRuntimeState>,
+    sidecar: State<'_, crate::sidecar::SidecarManager>,
+    engine_manager: State<'_, crate::engine::EngineManager>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let config = if let Some(config) = state.get_config().await {
+        config
+    } else {
+        state.init_config().await?
+    };
+    activate_gateway_target_inner(
+        &state,
+        &secret_store,
+        &ironclaw,
+        &sidecar,
+        &engine_manager,
+        app_handle,
+        config.gateway_target.clone(),
+        config.gateway_revision,
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Stop the ThinClaw gateway.
 ///
 /// - Local mode: shuts down in-process engine gracefully.
@@ -533,9 +717,10 @@ pub async fn thinclaw_start_gateway(
 #[tauri::command]
 #[specta::specta]
 pub async fn thinclaw_stop_gateway(
-    _state: State<'_, ThinClawManager>,
+    state: State<'_, ThinClawManager>,
     ironclaw: State<'_, ThinClawRuntimeState>,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let _switch = state.gateway_switch_lock.lock().await;
     info!(
         "[thinclaw-runtime] Gateway stop requested (mode={})",
         ironclaw.mode_label().await
@@ -552,6 +737,10 @@ pub async fn thinclaw_stop_gateway(
             info!("[thinclaw-runtime] Engine was already stopped");
         }
     }
+
+    let mut transition = state.gateway_transition.write().await;
+    transition.phase = GatewayTransitionPhase::Idle;
+    transition.last_error = None;
 
     Ok(())
 }
@@ -673,7 +862,10 @@ pub async fn thinclaw_copy_gateway_token(
         use thinclaw_tools::execution::OwnedChild;
         use tokio::io::AsyncWriteExt;
 
-        let mut command = thinclaw_platform::tokio_process_command!("apps.desktop.backend.src.thinclaw.commands.gateway.tokio.1", "/usr/bin/pbcopy");
+        let mut command = thinclaw_platform::tokio_process_command!(
+            "apps.desktop.backend.src.thinclaw.commands.gateway.tokio.1",
+            "/usr/bin/pbcopy"
+        );
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -737,7 +929,7 @@ pub async fn thinclaw_switch_to_profile(
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
     info!("[thinclaw-runtime] Switching to profile: {}", profile_id);
 
-    let mut cfg = if let Some(c) = state.get_config().await {
+    let cfg = if let Some(c) = state.get_config().await {
         c
     } else {
         state.init_config().await?
@@ -751,39 +943,29 @@ pub async fn thinclaw_switch_to_profile(
         .cloned()
         .ok_or_else(|| format!("Profile '{}' not found", profile_id))?;
 
-    let remote_url = if profile.mode == "remote" && !profile.url.is_empty() {
-        Some(profile.url.clone())
-    } else {
-        None
+    if profile.mode != "remote" {
+        return Err(crate::thinclaw::bridge::BridgeError::InvalidInput {
+            message:
+                "Only remote profiles can be activated; use Local Core for the embedded runtime"
+                    .to_string(),
+            field: Some("profile_id".to_string()),
+        });
+    }
+    let expected_revision = cfg.gateway_revision;
+    let target = crate::thinclaw::config::GatewayTarget::Profile {
+        profile_id: profile.id,
+        profile_revision: profile.revision.max(1),
     };
-    let remote_token = if profile.mode == "remote" {
-        Some(
-            profile
-                .token
-                .clone()
-                .filter(|token| !token.is_empty())
-                .ok_or_else(|| "Remote agent profile has no stored bearer token".to_string())?,
-        )
-    } else {
-        None
-    };
-    cfg.update_gateway_settings(profile.mode.clone(), remote_url, remote_token)
-        .map_err(|error| error.to_string())?;
-    *state.config.write().await = Some(cfg);
-
-    info!(
-        "[thinclaw-runtime] Profile '{}' (mode={}) activated - restarting gateway...",
-        profile.name, profile.mode
-    );
-
-    // Restart with new settings
-    thinclaw_start_gateway(
-        state,
-        secret_store,
-        ironclaw,
-        sidecar,
-        engine_manager,
+    activate_gateway_target_inner(
+        &state,
+        &secret_store,
+        &ironclaw,
+        &sidecar,
+        &engine_manager,
         app_handle,
+        target,
+        expected_revision,
     )
     .await
+    .map(|_| ())
 }

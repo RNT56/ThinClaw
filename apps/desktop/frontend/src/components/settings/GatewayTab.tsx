@@ -26,9 +26,7 @@ interface StatusInfo {
     slackEnabled: boolean;
     telegramEnabled: boolean;
     port: number;
-    gatewayMode: string;
-    remoteUrl: string | null;
-    remoteToken: string | null;
+    gatewayState: thinclaw.GatewayState | null;
     deviceId: string;
     authToken: string;
     stateDir: string;
@@ -66,9 +64,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
         slackEnabled: false,
         telegramEnabled: false,
         port: 18789,
-        gatewayMode: 'local',
-        remoteUrl: null,
-        remoteToken: null,
+        gatewayState: null,
         deviceId: '',
         authToken: '',
         stateDir: '',
@@ -107,8 +103,6 @@ export function GatewayTab({ className }: GatewayTabProps) {
         screen_recording: false
     });
 
-    const [remoteUrlInput, setRemoteUrlInput] = useState('');
-    const [remoteTokenInput, setRemoteTokenInput] = useState('');
     const [viewingFile, setViewingFile] = useState<{ title: string; content: string } | null>(null);
 
     const { maxContext, setMaxContext } = useModelContext();
@@ -116,8 +110,13 @@ export function GatewayTab({ className }: GatewayTabProps) {
 
     const [isLoading, setIsLoading] = useState(false);
 
-    // Calculate Mode
-    const isSafeMode = status.gatewayMode === 'local';
+    const desiredTarget: thinclaw.GatewayTarget = status.gatewayState?.desired ?? { kind: 'local' };
+    const effectiveTarget = status.gatewayState?.effective ?? { kind: 'stopped' as const };
+    const desiredIsLocal = desiredTarget.kind === 'local';
+    const isSafeMode = effectiveTarget.kind !== 'profile';
+    const selectedRemoteProfile = desiredTarget.kind === 'profile'
+        ? status.profiles.find((profile) => profile.id === desiredTarget.profile_id) ?? null
+        : null;
 
     // Poll gateway status
     const fetchStatus = useCallback(async () => {
@@ -129,9 +128,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 slackEnabled: s.slack_enabled,
                 telegramEnabled: s.telegram_enabled,
                 port: s.port,
-                gatewayMode: s.gateway_mode,
-                remoteUrl: s.remote_url,
-                remoteToken: s.remote_token,
+                gatewayState: s.gateway_state,
                 deviceId: s.device_id,
                 authToken: s.auth_token,
                 stateDir: s.state_dir,
@@ -164,8 +161,6 @@ export function GatewayTab({ className }: GatewayTabProps) {
             const perms = await thinclaw.getPermissionStatus();
             setPermissions(perms);
 
-            if (s.remote_url) setRemoteUrlInput(s.remote_url);
-            if (s.remote_token) setRemoteTokenInput(s.remote_token);
         } catch (e) {
             console.error('Failed to fetch thinclaw status:', e);
         }
@@ -206,7 +201,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
             return;
         }
 
-        if (status.gatewayMode === 'local' && maxContext < 32768) {
+        if (desiredIsLocal && maxContext < 32768) {
             setShowContextWarning(true);
             return;
         }
@@ -234,13 +229,21 @@ export function GatewayTab({ className }: GatewayTabProps) {
         await handleStart();
     };
 
-    const handleSaveGateway = async (mode: string, url: string | null, token: string | null) => {
+    const handleActivateGateway = async (target: thinclaw.GatewayTarget, label: string) => {
+        setIsLoading(true);
         try {
-            await thinclaw.saveGatewaySettings(mode, url, token);
+            const current = await thinclaw.getGatewayState();
+            const next = await thinclaw.activateGatewayTarget(target, current.revision);
+            if (!next.in_sync || !thinclaw.gatewayTargetIsEffective(next, target)) {
+                throw new Error('The selected target did not become effective');
+            }
             await fetchStatus();
-            toast.success('Gateway settings updated');
+            toast.success(`Connected to ${label}`);
         } catch (e) {
-            toast.error('Failed to update gateway settings', { description: String(e) });
+            await fetchStatus();
+            toast.error('Failed to switch gateway', { description: String(e) });
+        } finally {
+            setIsLoading(false);
         }
     };
 
@@ -324,10 +327,11 @@ export function GatewayTab({ className }: GatewayTabProps) {
             <div className="grid grid-cols-1 gap-3">
                 {/* Always show Local Core */}
                 <button
-                    onClick={() => handleSaveGateway('local', null, null)}
+                    onClick={() => void handleActivateGateway({ kind: 'local' }, 'Local Core')}
+                    disabled={isLoading}
                     className={cn(
                         "p-4 rounded-xl text-left border transition-all flex items-center justify-between group",
-                        status.gatewayMode === 'local'
+                        effectiveTarget.kind === 'local'
                             ? "bg-primary/5 border-primary/40 shadow-xs"
                             : "bg-card border-border/50 hover:bg-muted/50 hover:border-primary/30"
                     )}
@@ -350,7 +354,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             )}
                         </div>
                     </div>
-                    {status.gatewayMode === 'local' && (
+                    {effectiveTarget.kind === 'local' && (
                         <div className="flex items-center gap-2 text-emerald-500 text-xs font-bold bg-emerald-500/10 px-2 py-1 rounded-md">
                             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                             ACTIVE
@@ -359,25 +363,30 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 </button>
 
                 {/* Remote Profiles */}
-                {status.profiles.map((profile) => (
+                {status.profiles.filter((profile) => profile.mode === 'remote').map((profile) => {
+                    const target = thinclaw.gatewayTargetForProfile(profile) as Extract<
+                        thinclaw.GatewayTarget,
+                        { kind: 'profile' }
+                    >;
+                    const isEffective = effectiveTarget.kind === 'profile'
+                        && effectiveTarget.profile_id === profile.id
+                        && effectiveTarget.profile_revision === target.profile_revision;
+                    const isDesired = desiredTarget.kind === 'profile'
+                        && desiredTarget.profile_id === profile.id
+                        && desiredTarget.profile_revision === target.profile_revision;
+                    return (
                     <div
                         key={profile.id}
                         className={cn(
                             "p-4 rounded-xl text-left border transition-all flex items-center justify-between group",
-                            status.gatewayMode === 'remote' && status.remoteUrl === profile.url
+                            isEffective
                                 ? "bg-indigo-500/5 border-indigo-500/40 shadow-xs"
                                 : "bg-card border-border/50 hover:bg-muted/50 hover:border-indigo-500/30"
                         )}
                     >
                         <button
-                            onClick={() => {
-                                thinclaw.switchToProfile(profile.id)
-                                    .then(fetchStatus)
-                                    .then(() => toast.success(`Connected to ${profile.name}`))
-                                    .catch((error) => toast.error('Failed to switch agent', {
-                                        description: String(error),
-                                    }));
-                            }}
+                            onClick={() => void handleActivateGateway(target, profile.name)}
+                            disabled={isLoading}
                             className="flex items-center gap-4 flex-1 text-left"
                         >
                             <div className="p-2.5 rounded-lg bg-indigo-500/10 text-indigo-500">
@@ -392,10 +401,14 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         </button>
 
                         <div className="flex items-center gap-2">
-                            {status.gatewayMode === 'remote' && status.remoteUrl === profile.url ? (
+                            {isEffective ? (
                                 <div className="flex items-center gap-2 text-indigo-500 text-xs font-bold bg-indigo-500/10 px-2 py-1 rounded-md">
                                     <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
                                     CONNECTED
+                                </div>
+                            ) : isDesired ? (
+                                <div className="text-amber-500 text-[10px] font-bold bg-amber-500/10 px-2 py-1 rounded-md">
+                                    {status.gatewayState?.phase === 'failed' ? 'FAILED' : 'PENDING'}
                                 </div>
                             ) : (
                                 <button
@@ -411,8 +424,15 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             )}
                         </div>
                     </div>
-                ))}
+                    );
+                })}
             </div>
+
+            {status.gatewayState?.last_error && !status.gatewayState.in_sync && (
+                <div className="rounded-xl border border-rose-500/20 bg-rose-500/5 p-3 text-xs text-rose-600 dark:text-rose-400">
+                    Last switch failed: {status.gatewayState.last_error}
+                </div>
+            )}
 
             <button
                 onClick={() => setShowDeployWizard(true)}
@@ -507,7 +527,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
 
             {/* Detailed Configuration */}
             <div className="space-y-8">
-                {status.gatewayMode === 'remote' && (
+                {selectedRemoteProfile && (
                     <div className="p-8 rounded-3xl bg-card border border-border/50 shadow-xl space-y-6 animate-in fade-in slide-in-from-top-4 duration-500">
                         <div className="flex items-center justify-between border-b border-border/50 pb-4">
                             <div className="flex items-center gap-3">
@@ -525,29 +545,15 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                 DEPLOY NEW SERVER
                             </button>
                         </div>
-                        <div className="grid grid-cols-1 gap-6">
-                            <div className="space-y-2">
-                                <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Gateway Socket URL</label>
-                                <input
-                                    type="text"
-                                    placeholder="http://server-ip:18789"
-                                    value={remoteUrlInput}
-                                    onChange={(e) => setRemoteUrlInput(e.target.value)}
-                                    onBlur={() => handleSaveGateway('remote', remoteUrlInput, remoteTokenInput)}
-                                    className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden font-mono"
-                                />
+                        <div className="grid grid-cols-1 gap-4 text-sm">
+                            <div className="rounded-xl border border-border/50 bg-muted/20 px-4 py-3">
+                                <div className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Selected profile</div>
+                                <div className="mt-1 font-semibold">{selectedRemoteProfile.name}</div>
+                                <div className="mt-1 break-all font-mono text-xs text-muted-foreground">{selectedRemoteProfile.url}</div>
                             </div>
-                            <div className="space-y-2">
-                                <label className="text-[10px] font-bold text-primary uppercase tracking-[0.2em]">Secure Access Token</label>
-                                <input
-                                    type="password"
-                                    placeholder="••••••••••••••••"
-                                    value={remoteTokenInput}
-                                    onChange={(e) => setRemoteTokenInput(e.target.value)}
-                                    onBlur={() => handleSaveGateway('remote', remoteUrlInput, remoteTokenInput)}
-                                    className="w-full bg-muted/30 border border-border/50 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary/20 outline-hidden"
-                                />
-                            </div>
+                            <p className="text-xs text-muted-foreground">
+                                Credentials are stored in the system keychain and are never returned to this screen. Use Add New Agent to replace connection details explicitly.
+                            </p>
                         </div>
                     </div>
                 )}
@@ -1100,7 +1106,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                         {/* OS Permissions Section (Mac Only) */}
-                        {status.gatewayMode === 'local' && (
+                        {desiredIsLocal && (
                             <div className="p-6 rounded-3xl bg-card border border-border/50 shadow-lg space-y-4">
                                 <div className="flex items-center justify-between">
                                     <h5 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">OS Governance</h5>
@@ -1204,7 +1210,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         )}
 
                         {/* Pairing Credentials (Local Mode Only) */}
-                        {status.gatewayMode === 'local' && (
+                        {desiredIsLocal && (
                             <div className="p-6 rounded-3xl bg-card border border-border/50 shadow-lg space-y-4">
                                 <h5 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Neural Pairing</h5>
                                 <div className="space-y-3">

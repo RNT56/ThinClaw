@@ -1310,6 +1310,7 @@ pub async fn thinclaw_save_gateway_settings(
     url: Option<String>,
     token: Option<String>,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let _switch = state.gateway_switch_lock.lock().await;
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -1334,6 +1335,7 @@ pub async fn thinclaw_add_agent_profile(
     state: State<'_, ThinClawManager>,
     mut profile: AgentProfile,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let _switch = state.gateway_switch_lock.lock().await;
     profile.id = profile.id.trim().to_string();
     profile.name = profile.name.trim().to_string();
     profile.url = profile.url.trim().trim_end_matches('/').to_string();
@@ -1382,6 +1384,11 @@ pub async fn thinclaw_add_agent_profile(
         .profiles
         .iter()
         .any(|existing| existing.id == profile.id);
+    let previous_profile_revision = cfg
+        .profiles
+        .iter()
+        .find(|existing| existing.id == profile.id)
+        .map(|existing| existing.revision.max(1));
     if !replacing_existing && cfg.profiles.len() >= 64 {
         return Err(crate::thinclaw::bridge::BridgeError::Runtime {
             message: "agent profile limit of 64 has been reached".to_string(),
@@ -1417,12 +1424,18 @@ pub async fn thinclaw_add_agent_profile(
             .map_err(|error| format!("invalid remote agent profile: {error}"))?;
     }
     profile.token = resolved_token.clone();
+    profile.revision = previous_profile_revision
+        .map(|revision| revision.saturating_add(1))
+        .unwrap_or(1);
 
     if supplied_token.is_some() || old_stored_token.is_none() && resolved_token.is_some() {
         crate::thinclaw::config::keychain::set_key(&token_key, resolved_token.as_deref())
             .map_err(|error| format!("failed to secure agent profile token: {error}"))?;
     }
 
+    let updated_profile_id = profile.id.clone();
+    let updated_profile_revision = profile.revision;
+    let updated_profile_url = profile.url.clone();
     if let Some(existing) = cfg
         .profiles
         .iter_mut()
@@ -1433,9 +1446,37 @@ pub async fn thinclaw_add_agent_profile(
         cfg.profiles.push(profile);
     }
 
+    let updates_desired_target = matches!(
+        &cfg.gateway_target,
+        crate::thinclaw::config::GatewayTarget::Profile { profile_id, .. }
+            if profile_id == &updated_profile_id
+    );
+    let old_legacy_remote_token = if updates_desired_target {
+        let old = crate::thinclaw::config::keychain::get_key("remote_token");
+        crate::thinclaw::config::keychain::set_key("remote_token", resolved_token.as_deref())
+            .map_err(|error| format!("failed to mirror active profile token: {error}"))?;
+        cfg.gateway_target = crate::thinclaw::config::GatewayTarget::Profile {
+            profile_id: updated_profile_id,
+            profile_revision: updated_profile_revision,
+        };
+        cfg.gateway_revision = cfg.gateway_revision.saturating_add(1).max(1);
+        cfg.gateway_mode = "remote".to_string();
+        cfg.remote_url = Some(updated_profile_url);
+        cfg.remote_token = resolved_token.clone();
+        Some(old)
+    } else {
+        None
+    };
+
     if let Err(error) = cfg.save_identity() {
         let rollback =
             crate::thinclaw::config::keychain::set_key(&token_key, old_stored_token.as_deref());
+        if let Some(old_legacy_remote_token) = old_legacy_remote_token {
+            let _ = crate::thinclaw::config::keychain::set_key(
+                "remote_token",
+                old_legacy_remote_token.as_deref(),
+            );
+        }
         return match rollback {
             Ok(()) => Err(crate::thinclaw::bridge::BridgeError::Runtime { message: error.to_string() }),
             Err(rollback_error) => Err(format!(
@@ -1454,6 +1495,7 @@ pub async fn thinclaw_remove_agent_profile(
     state: State<'_, ThinClawManager>,
     id: String,
 ) -> Result<(), crate::thinclaw::bridge::BridgeError> {
+    let _switch = state.gateway_switch_lock.lock().await;
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -1465,6 +1507,16 @@ pub async fn thinclaw_remove_agent_profile(
         .iter()
         .position(|profile| profile.id == id)
         .ok_or_else(|| "agent profile not found".to_string())?;
+    if matches!(
+        &cfg.gateway_target,
+        crate::thinclaw::config::GatewayTarget::Profile { profile_id, .. }
+            if profile_id == &id
+    ) {
+        return Err(crate::thinclaw::bridge::BridgeError::Conflict {
+            message: "the desired gateway profile cannot be removed while selected".to_string(),
+            remediation: Some("activate Local Core or another profile first".to_string()),
+        });
+    }
     let token_key = crate::thinclaw::config::keychain::profile_token_key(&id);
     let old_token = crate::thinclaw::config::keychain::get_key(&token_key)
         .or_else(|| cfg.profiles[profile_index].token.clone());

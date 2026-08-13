@@ -242,7 +242,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `update_remote_model_catalog` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 | `update_user_config` | `LocalOnly` | Remote mode returns a typed unavailable reason; use the embedded runtime. |
 
-### Local and remote (153)
+### Local and remote (155)
 
 | Command | Route mode | Unsupported-mode behavior |
 | --- | --- | --- |
@@ -250,6 +250,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `direct_inference_refresh_cloud_models` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `select_thinclaw_brain` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_abort_chat` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
+| `thinclaw_activate_gateway_target` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_agents_set_default` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_autonomy_bootstrap` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_autonomy_checks` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
@@ -309,6 +310,7 @@ surface-level table remains the endpoint-oriented operational summary.
 | `thinclaw_get_diagnostics` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_get_file` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_get_fleet_status` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
+| `thinclaw_get_gateway_state` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_get_history` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_get_memory` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |
 | `thinclaw_get_sessions` | `LocalAndRemote` | Supported in both embedded and remote-gateway modes. |

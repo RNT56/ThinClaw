@@ -107,12 +107,12 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
             };
 
             await thinclaw.addAgentProfile(newProfile);
-            await thinclaw.saveGatewaySettings('remote', deployResult.url, deployResult.token || '');
 
             if (deployResult.reachable === false) {
-                toast.warning('Remote agent saved. Connect this desktop to the same tailnet before using it.');
+                toast.warning('Remote agent saved but not activated. Connect this desktop to the same tailnet, then select the profile.');
             } else {
-                toast.success('Remote agent saved! Connecting...');
+                await thinclaw.activateAgentProfile(newProfile.id);
+                toast.success('Remote agent connected');
                 onCheckStatus?.();
             }
             onClose();
@@ -159,7 +159,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
             };
 
             await thinclaw.addAgentProfile(newProfile);
-            await thinclaw.saveGatewaySettings('remote', url, existingToken || '');
+            await thinclaw.activateAgentProfile(newProfile.id);
 
             toast.success('Connected to remote agent');
             onCheckStatus?.();

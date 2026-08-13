@@ -593,6 +593,32 @@ async thinclawGetStatus() : Promise<Result<ThinClawStatus, BridgeError>> {
 }
 },
 /**
+ * Return both the persisted desired target and the runtime that is actually
+ * effective. Renderers must use this instead of inferring connectivity from
+ * legacy gateway_mode fields.
+ */
+async thinclawGetGatewayState() : Promise<Result<GatewayState, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_gateway_state") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Activate a revisioned desired gateway target. Runtime preparation happens
+ * while the previous effective target remains available; only a healthy
+ * remote proxy or successfully built local runtime is committed.
+ */
+async thinclawActivateGatewayTarget(target: GatewayTarget, expectedRevision: number) : Promise<Result<GatewayState, BridgeError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_activate_gateway_target", { target, expectedRevision }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Reveal the local gateway bearer token for an explicit user copy action.
  */
 async thinclawRevealGatewayToken() : Promise<Result<string, BridgeError>> {
@@ -913,19 +939,7 @@ async thinclawRemoteAccessStop() : Promise<Result<RemoteAccessStatus, BridgeErro
 }
 },
 /**
- * Start the ThinClaw gateway.
- *
- * Behavior depends on `identity.json:gateway_mode`:
- * "local" (default):
- * - Waits for local inference engine if configured
- * - Starts the ThinClaw in-process engine via ThinClawRuntimeState::start()
- * "remote":
- * - Reads remote_url + remote_token from config
- * - Creates a RemoteGatewayProxy, verifies health, opens SSE subscription
- * - No local engine is started
- *
- * In both modes, the frontend receives the same events via `thinclaw-event`
- * and invokes the same Tauri commands — all routing is transparent.
+ * Start or reconnect the persisted desired target.
  */
 async thinclawStartGateway() : Promise<Result<null, BridgeError>> {
     try {
@@ -3753,7 +3767,11 @@ async thinclawRevealFile(path: string) : Promise<Result<null, BridgeError>> {
 
 /** user-defined types **/
 
-export type AgentProfile = { id: string; name: string; url: string; mode: string; auto_connect?: boolean }
+export type AgentProfile = { id: string; name: string; url: string; mode: string; auto_connect?: boolean;
+/**
+ * Incremented whenever connection-bearing profile fields change.
+ */
+revision?: number }
 export type AgentStatusSummary = { id: string; name: string; url: string; online: boolean; latency_ms: number | null; version: string | null; stats: JsonValue | null; current_task: string | null; progress: number | null; logs: string[] | null; parent_id: string | null; children_ids: string[] | null; active_session_id: string | null; active: boolean; capabilities: string[] | null; run_status: string | null; model: string | null }
 export type AssetKind = "image" | "audio" | "video" | "document" | "generated_image" | "other"
 export type AssetNamespace = "direct_workbench" | "thin_claw_agent"
@@ -3917,6 +3935,10 @@ export type DirectTtsResponse = {
 audioBytes: string; asset: AssetRecord }
 export type Document = { id: string; path: string; status: string; created_at: number; updated_at: number; project_id: string | null }
 /**
+ * Runtime target that has actually been committed.
+ */
+export type EffectiveGatewayTarget = { kind: "stopped" } | { kind: "local" } | { kind: "profile"; profile_id: string; profile_revision: number; url: string }
+/**
  * Information about the active inference engine, exposed to the frontend.
  */
 export type EngineInfo = {
@@ -4013,6 +4035,14 @@ chat_template: string | null;
  * Detected model family based on architecture + template heuristics
  */
 model_family: string | null }
+export type GatewayState = { desired: GatewayTarget; effective: EffectiveGatewayTarget; phase: GatewayTransitionPhase; revision: number; in_sync: boolean; attempt: number; last_error: string | null }
+/**
+ * Persisted gateway destination. The desired target is independent from the
+ * runtime that is currently effective, so a failed switch never lies about
+ * which runtime is still serving requests.
+ */
+export type GatewayTarget = { kind: "local" } | { kind: "profile"; profile_id: string; profile_revision: number }
+export type GatewayTransitionPhase = "idle" | "preparing" | "committing" | "failed"
 /**
  * Metadata for a generated image
  */
@@ -4501,7 +4531,7 @@ export type ThinClawSessionsResponse = { sessions: ThinClawSession[] }
 /**
  * ThinClaw status response
  */
-export type ThinClawStatus = { engine_running: boolean; engine_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean;
+export type ThinClawStatus = { engine_running: boolean; engine_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; gateway_state: GatewayState; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean;
 /**
  * Whether the agent runs tools without individual approval prompts.
  */

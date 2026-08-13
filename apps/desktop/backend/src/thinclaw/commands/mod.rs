@@ -83,6 +83,17 @@ pub struct ThinClawManager {
     /// single event channel, so overlapping runs would mix output and could
     /// associate one run's credential result with another target.
     pub(crate) deploy_lock: Mutex<()>,
+    /// Serializes prepare/persist/commit gateway target transactions.
+    pub(crate) gateway_switch_lock: Mutex<()>,
+    /// Non-blocking renderer-visible transition status.
+    pub(crate) gateway_transition: RwLock<GatewayTransitionRuntime>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct GatewayTransitionRuntime {
+    pub phase: GatewayTransitionPhase,
+    pub attempt: u64,
+    pub last_error: Option<String>,
 }
 
 impl ThinClawManager {
@@ -91,6 +102,8 @@ impl ThinClawManager {
             app,
             config: RwLock::new(None),
             deploy_lock: Mutex::new(()),
+            gateway_switch_lock: Mutex::new(()),
+            gateway_transition: RwLock::new(GatewayTransitionRuntime::default()),
         }
     }
 

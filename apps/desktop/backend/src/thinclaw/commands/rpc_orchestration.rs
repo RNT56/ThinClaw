@@ -479,6 +479,7 @@ pub async fn thinclaw_agents_list(
                 token: None,
                 mode: "embedded".to_string(),
                 auto_connect: true,
+                revision: 1,
             },
         );
     }

@@ -43,15 +43,24 @@ interface ThinClawSidebarProps {
 
 function profileName(status: thinclaw.ThinClawStatus | null) {
     if (!status) return 'Checking profile';
-    if (status.gateway_mode === 'local') return 'Local Core';
-    return status.profiles.find((profile) => profile.url === status.remote_url)?.name ?? 'Remote profile';
+    const effective = status.gateway_state.effective;
+    if (effective.kind === 'local') return 'Local Core';
+    if (effective.kind === 'profile') {
+        return status.profiles.find((profile) => profile.id === effective.profile_id)?.name ?? 'Remote profile';
+    }
+    if (status.gateway_state.desired.kind === 'profile') {
+        const desiredProfileId = status.gateway_state.desired.profile_id;
+        return status.profiles.find((profile) => profile.id === desiredProfileId)?.name
+            ?? 'Remote profile';
+    }
+    return 'Local Core';
 }
 
 function profileConnection(status: thinclaw.ThinClawStatus | null) {
     if (!status) return 'Checking';
+    if (status.gateway_state.effective.kind === 'stopped') return 'Stopped';
     if (status.engine_running && status.engine_connected) return 'Connected';
-    if (status.gateway_mode === 'remote') return 'Disconnected';
-    return 'Stopped';
+    return status.gateway_state.effective.kind === 'profile' ? 'Disconnected' : 'Stopped';
 }
 
 export function ThinClawSidebar({
@@ -80,7 +89,7 @@ export function ThinClawSidebar({
     const profileCapability = capability('always');
     const activeProfileName = profileName(status);
     const connection = profileConnection(status);
-    const profileIcon = status?.gateway_mode === 'remote' ? Server : Laptop;
+    const profileIcon = status?.gateway_state.effective.kind === 'profile' ? Server : Laptop;
     const ProfileIcon = profileIcon;
     const freshness = checkedAt ? new Date(checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null;
 
@@ -115,8 +124,8 @@ export function ThinClawSidebar({
         setIsSwitching(true);
         setSwitchError(null);
         try {
-            if (profile === 'local') await thinclaw.saveGatewaySettings('local', '', '');
-            else await thinclaw.switchToProfile(profile.id);
+            if (profile === 'local') await thinclaw.activateLocalGateway();
+            else await thinclaw.activateAgentProfile(profile.id);
             setAgentMenuOpen(false);
             await refresh();
         } catch (caught) {
@@ -199,11 +208,11 @@ export function ThinClawSidebar({
 
                 {agentMenuOpen && sidebarOpen && (
                     <div className="absolute inset-x-2 top-full z-50 mt-2 rounded-[var(--radius-panel)] border border-surface-outline bg-surface-elevated p-2 shadow-lg">
-                        <button type="button" onClick={() => void switchProfile('local')} disabled={isSwitching} className={cn('flex w-full items-center gap-3 rounded-[var(--radius-control)] p-2 text-left text-xs transition-colors hover:bg-surface-subtle', status?.gateway_mode === 'local' && 'bg-primary/10 text-primary')}>
+                        <button type="button" onClick={() => void switchProfile('local')} disabled={isSwitching} className={cn('flex w-full items-center gap-3 rounded-[var(--radius-control)] p-2 text-left text-xs transition-colors hover:bg-surface-subtle', status?.gateway_state.effective.kind === 'local' && 'bg-primary/10 text-primary')}>
                             <Laptop className="size-4" aria-hidden="true" /><span className="min-w-0 flex-1"><span className="block font-semibold">Local Core</span><span className="block text-[10px] text-content-muted">Runs on this Desktop</span></span>
                         </button>
                         {(status?.profiles ?? []).map((profile) => (
-                            <button key={profile.id} type="button" onClick={() => void switchProfile(profile)} disabled={isSwitching} className={cn('mt-1 flex w-full items-center gap-3 rounded-[var(--radius-control)] p-2 text-left text-xs transition-colors hover:bg-surface-subtle', status?.gateway_mode === 'remote' && status.remote_url === profile.url && 'bg-primary/10 text-primary')}>
+                            <button key={profile.id} type="button" onClick={() => void switchProfile(profile)} disabled={isSwitching || profile.mode !== 'remote'} className={cn('mt-1 flex w-full items-center gap-3 rounded-[var(--radius-control)] p-2 text-left text-xs transition-colors hover:bg-surface-subtle disabled:opacity-50', status?.gateway_state.effective.kind === 'profile' && status.gateway_state.effective.profile_id === profile.id && 'bg-primary/10 text-primary')}>
                                 <Server className="size-4 shrink-0" aria-hidden="true" /><span className="min-w-0 flex-1"><span className="block truncate font-semibold">{profile.name}</span><span className="block truncate text-[10px] text-content-muted">{profile.url}</span></span>
                             </button>
                         ))}
