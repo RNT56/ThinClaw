@@ -198,7 +198,9 @@ pub async fn auth_middleware(
             if *source == TokenSource::Query {
                 warn_query_token_auth();
             }
-            let identity = fallback_request_identity(&auth, source.auth_source()).await;
+            let identity = fallback_request_identity(&auth, source.auth_source())
+                .await
+                .with_legacy_primary_binding();
             if let Some(denied) = enforce_capability(&request, &identity) {
                 return denied;
             }
@@ -806,7 +808,7 @@ mod tests {
 
         fn router(auth: AuthState) -> Router {
             Router::new()
-                .route("/api/chat/send", get(echo_identity))
+                .route("/api/chat/send", get(echo_identity).post(echo_identity))
                 .route("/api/devices/me", get(echo_identity))
                 .route("/api/totally/unknown/route", get(echo_identity))
                 .route_layer(axum::middleware::from_fn_with_state(auth, auth_middleware))
@@ -835,6 +837,14 @@ mod tests {
             builder.body(Body::empty()).unwrap()
         }
 
+        fn post_request(uri: &str, token: Option<&str>) -> Request<Body> {
+            let mut builder = Request::builder().method(axum::http::Method::POST).uri(uri);
+            if let Some(token) = token {
+                builder = builder.header("authorization", format!("Bearer {token}"));
+            }
+            builder.body(Body::empty()).unwrap()
+        }
+
         #[tokio::test]
         async fn device_token_accepted_uses_shared_fallback_identity() {
             let (registry, store, _dir) = test_registry().await;
@@ -856,7 +866,7 @@ mod tests {
             };
 
             let response = router(auth)
-                .oneshot(request("/api/chat/send", Some(&token)))
+                .oneshot(post_request("/api/chat/send", Some(&token)))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -893,7 +903,7 @@ mod tests {
             };
 
             let response = router(auth)
-                .oneshot(request("/api/chat/send", Some(&token)))
+                .oneshot(post_request("/api/chat/send", Some(&token)))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -924,7 +934,7 @@ mod tests {
             };
 
             let response = router(auth)
-                .oneshot(request("/api/chat/send", Some(&token)))
+                .oneshot(post_request("/api/chat/send", Some(&token)))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1044,13 +1054,6 @@ mod tests {
         #[tokio::test]
         async fn compat_overrides_are_ignored_for_device_principals() {
             // A device-authenticated request must not be able to override
-            // its principal/actor id via request params: `allows_compat_overrides`
-            // must be false for the DeviceToken auth source. Route handlers
-            // gate every call to `with_compat_overrides` on this flag, so a
-            // `false` here is what keeps `?user_id=`/`?actor_id=`-style
-            // overrides from ever reaching a device identity.
-            assert!(!GatewayAuthSource::DeviceToken.allows_compat_overrides());
-
             let (registry, store, _dir) = test_registry().await;
             let (record, token) = store
                 .insert(
@@ -1069,20 +1072,21 @@ mod tests {
                 ..base_auth_state()
             };
 
-            // Even though `with_compat_overrides` is a plain data
-            // transform (it doesn't itself branch on `auth_source`), a
-            // device-authenticated request never has attacker-controlled
-            // principal/actor params applied because callers must check
-            // `allows_compat_overrides()` first. Confirm the identity the
-            // middleware actually attaches is the shared-fallback identity,
-            // not something request-controlled.
+            // Compatibility is bound to the primary credential, not to the
+            // bearer transport. A device fallback identity stays bound.
             let identity = fallback_request_identity(&auth, GatewayAuthSource::DeviceToken).await;
             assert_eq!(identity.principal_id, "operator");
             assert_eq!(identity.actor_id, "operator");
-            assert!(!identity.auth_source.allows_compat_overrides());
+            assert!(!identity.allows_compat_overrides());
+            assert_eq!(
+                identity
+                    .with_compat_overrides(Some("attacker"), Some("attacker"))
+                    .principal_id,
+                "operator"
+            );
 
             let response = router(auth)
-                .oneshot(request("/api/chat/send", Some(&token)))
+                .oneshot(post_request("/api/chat/send", Some(&token)))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);

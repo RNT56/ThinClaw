@@ -25,18 +25,16 @@ impl GatewayAuthSource {
             Self::DeviceToken => "device_token",
         }
     }
+}
 
-    /// Whether this auth source may honor request-supplied
-    /// `user_id`/`actor_id` compatibility overrides.
-    ///
-    /// Device principals must never be able to override their identity via
-    /// request params — a paired device always acts as the operator
-    /// (`fallback_principal_id`/`fallback_actor_id`), never as an arbitrary
-    /// caller-chosen identity. See `docs/MOBILE_SECURITY.md` D-T4 and the
-    /// gateway hardening checklist (§8).
-    pub fn allows_compat_overrides(&self) -> bool {
-        matches!(self, Self::BearerHeader | Self::BearerQuery)
-    }
+/// Whether the authenticated credential is allowed to use the historical
+/// request-body identity override fields. This is a credential property, not
+/// an auth-transport property: scoped principals may also use a bearer header
+/// but must remain bound to their configured principal and actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayIdentityBinding {
+    Bound,
+    LegacyPrimaryBearer,
 }
 
 /// Attached to a request's extensions when it authenticated with a device
@@ -106,6 +104,7 @@ pub struct GatewayRequestIdentity {
     pub compatibility_fallback: bool,
     /// RBAC privilege tier for this request. See `crate::web::rbac`.
     pub role: GatewayRole,
+    binding: GatewayIdentityBinding,
 }
 
 impl GatewayRequestIdentity {
@@ -126,7 +125,23 @@ impl GatewayRequestIdentity {
             auth_source,
             compatibility_fallback,
             role: GatewayRole::ReadOnly,
+            binding: GatewayIdentityBinding::Bound,
         }
+    }
+
+    /// Enable compatibility overrides for the primary shared bearer token.
+    /// Callers must not use this for configured principals or device tokens.
+    pub fn with_legacy_primary_binding(mut self) -> Self {
+        self.binding = GatewayIdentityBinding::LegacyPrimaryBearer;
+        self
+    }
+
+    pub fn allows_compat_overrides(&self) -> bool {
+        self.binding == GatewayIdentityBinding::LegacyPrimaryBearer
+    }
+
+    pub fn is_legacy_primary_bearer(&self) -> bool {
+        self.binding == GatewayIdentityBinding::LegacyPrimaryBearer
     }
 
     /// Set the RBAC role, returning the updated identity.
@@ -144,6 +159,9 @@ impl GatewayRequestIdentity {
         requested_principal_id: Option<&str>,
         requested_actor_id: Option<&str>,
     ) -> Self {
+        if !self.allows_compat_overrides() {
+            return self.clone();
+        }
         let principal_id = requested_identity_override(requested_principal_id)
             .unwrap_or_else(|| self.principal_id.clone());
         let actor_id = requested_identity_override(requested_actor_id).unwrap_or_else(|| {
@@ -163,6 +181,7 @@ impl GatewayRequestIdentity {
             auth_source: self.auth_source.clone(),
             compatibility_fallback,
             role: self.role,
+            binding: self.binding,
         }
     }
 
@@ -301,13 +320,36 @@ mod tests {
     }
 
     #[test]
+    fn compatibility_overrides_are_bound_to_primary_credential_not_transport_or_role() {
+        let scoped_admin =
+            GatewayRequestIdentity::new("scoped", "scoped", GatewayAuthSource::BearerHeader, false)
+                .with_role(GatewayRole::Admin);
+        let attempted = scoped_admin.with_compat_overrides(Some("other"), Some("other"));
+        assert_eq!(attempted.principal_id, "scoped");
+        assert_eq!(attempted.actor_id, "scoped");
+
+        let primary = GatewayRequestIdentity::new(
+            "operator",
+            "operator",
+            GatewayAuthSource::BearerHeader,
+            true,
+        )
+        .with_role(GatewayRole::Admin)
+        .with_legacy_primary_binding();
+        let overridden = primary.with_compat_overrides(Some("alice"), Some("alice"));
+        assert_eq!(overridden.principal_id, "alice");
+        assert!(overridden.is_legacy_primary_bearer());
+    }
+
+    #[test]
     fn rate_limit_key_partitions_devices_without_trusting_actor_overrides() {
         let identity = GatewayRequestIdentity::new(
             "principal",
             "actor-a",
             GatewayAuthSource::BearerHeader,
             false,
-        );
+        )
+        .with_legacy_primary_binding();
         let overridden = identity.with_compat_overrides(None, Some("actor-b"));
         assert_eq!(
             identity.rate_limit_key(None),

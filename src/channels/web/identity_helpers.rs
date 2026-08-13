@@ -90,7 +90,7 @@ pub(crate) async fn request_identity_with_overrides(
         }
         identity.compatibility_fallback = true;
     }
-    if identity.auth_source.allows_compat_overrides() {
+    if identity.allows_compat_overrides() {
         identity.with_compat_overrides(requested_principal_id, requested_actor_id)
     } else {
         identity
@@ -542,7 +542,8 @@ mod tests {
             "gateway-actor",
             GatewayAuthSource::BearerHeader,
             true,
-        );
+        )
+        .with_legacy_primary_binding();
 
         let resolved = request_identity_with_overrides(
             &state,
@@ -555,6 +556,29 @@ mod tests {
         assert_eq!(resolved.principal_id, "other-user");
         assert_eq!(resolved.actor_id, "other-actor");
         assert!(resolved.compatibility_fallback);
+    }
+
+    #[tokio::test]
+    async fn scoped_bearer_identity_ignores_compatibility_overrides() {
+        let state = test_gateway_state("gateway-user", "gateway-actor", None);
+        let identity = GatewayRequestIdentity::new(
+            "scoped-user",
+            "scoped-actor",
+            GatewayAuthSource::BearerHeader,
+            false,
+        )
+        .with_role(thinclaw_settings::GatewayRole::Admin);
+
+        let resolved = request_identity_with_overrides(
+            &state,
+            &identity,
+            Some("other-user"),
+            Some("other-actor"),
+        )
+        .await;
+
+        assert_eq!(resolved.principal_id, "scoped-user");
+        assert_eq!(resolved.actor_id, "scoped-actor");
     }
 
     #[tokio::test]

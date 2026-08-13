@@ -26,7 +26,9 @@ pub fn required_scope(method: &str, path: &str) -> Option<DeviceScope> {
     // Most specific first: approvals is a sub-surface of /api/chat but
     // requires a distinct scope so watch/widget tokens can stay
     // least-privilege (approvals without full chat send/read).
-    if path.starts_with("/api/chat/approvals") || path.starts_with("/api/chat/approval") {
+    if (method == "POST" && path == "/api/chat/approval")
+        || (method == "GET" && path == "/api/chat/approvals")
+    {
         return Some(DeviceScope::Approvals);
     }
 
@@ -34,7 +36,22 @@ pub fn required_scope(method: &str, path: &str) -> Option<DeviceScope> {
     // but are an extensions surface (they submit OAuth credentials and
     // activate extensions) — never grantable to device tokens per D-T4.
 
-    if path.starts_with("/api/chat/") || path == "/api/chat" {
+    let exact_chat_route = matches!(
+        (method.as_str(), path),
+        ("POST", "/api/chat/send")
+            | ("POST", "/api/chat/abort")
+            | ("POST", "/api/chat/thread/new")
+            | ("GET", "/api/chat/events")
+            | ("GET", "/api/chat/ws")
+            | ("GET", "/api/chat/history")
+            | ("GET", "/api/chat/threads")
+    );
+    let thread_export = method == "GET"
+        && path
+            .strip_prefix("/api/chat/thread/")
+            .and_then(|suffix| suffix.strip_suffix("/export"))
+            .is_some_and(|thread_id| !thread_id.is_empty() && !thread_id.contains('/'));
+    if exact_chat_route || thread_export {
         return Some(DeviceScope::Chat);
     }
 
@@ -71,31 +88,34 @@ mod tests {
             required_scope("GET", "/api/chat/approvals"),
             Some(DeviceScope::Approvals)
         );
-        assert_eq!(
-            required_scope("POST", "/api/chat/approvals/123"),
-            Some(DeviceScope::Approvals)
-        );
+        assert_eq!(required_scope("POST", "/api/chat/approvals/123"), None);
     }
 
     #[test]
-    fn chat_prefix_covers_send_history_events_ws() {
-        for path in [
-            "/api/chat/send",
-            "/api/chat/history",
-            "/api/chat/threads",
-            "/api/chat/events",
-            "/api/chat/ws",
+    fn chat_routes_are_an_exact_method_and_path_allowlist() {
+        for (method, path) in [
+            ("POST", "/api/chat/send"),
+            ("POST", "/api/chat/abort"),
+            ("POST", "/api/chat/thread/new"),
+            ("GET", "/api/chat/history"),
+            ("GET", "/api/chat/threads"),
+            ("GET", "/api/chat/events"),
+            ("GET", "/api/chat/ws"),
+            ("GET", "/api/chat/thread/abc/export"),
         ] {
-            assert_eq!(
-                required_scope("GET", path),
-                Some(DeviceScope::Chat),
-                "path: {path}"
-            );
-            assert_eq!(
-                required_scope("POST", path),
-                Some(DeviceScope::Chat),
-                "path: {path}"
-            );
+            assert_eq!(required_scope(method, path), Some(DeviceScope::Chat));
+        }
+
+        for (method, path) in [
+            ("GET", "/api/chat/send"),
+            ("POST", "/api/chat/history"),
+            ("POST", "/api/chat/thread/abc/reset"),
+            ("POST", "/api/chat/thread/abc/compact"),
+            ("DELETE", "/api/chat/thread/abc"),
+            ("GET", "/api/chat/unknown"),
+            ("GET", "/api/chat/thread//export"),
+        ] {
+            assert_eq!(required_scope(method, path), None, "{method} {path}");
         }
     }
 
