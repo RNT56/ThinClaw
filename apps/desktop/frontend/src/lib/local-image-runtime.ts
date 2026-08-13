@@ -1,5 +1,3 @@
-import { unwrapResult } from "./guards";
-
 export type ImageGenerationProvider =
     | "local"
     | "nano-banana"
@@ -20,18 +18,13 @@ export function requireLocalImageModelPath(
     return resolvedModelPath;
 }
 
-/** Start the local image runtime and convert backend Result errors to failures. */
-export async function startLocalImageRuntime<E>({
+/** Start the local image runtime through the rejecting command client. */
+export async function startLocalImageRuntime({
     modelPath,
     start,
 }: {
     modelPath: string;
-    start: (
-        modelPath: string,
-    ) => Promise<{ status: "ok"; data: null } | { status: "error"; error: E }>;
+    start: (modelPath: string) => Promise<null>;
 }): Promise<void> {
-    unwrapResult(
-        await start(modelPath),
-        "start local image generation runtime",
-    );
+    await start(modelPath);
 }

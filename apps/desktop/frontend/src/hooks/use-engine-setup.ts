@@ -10,7 +10,6 @@ import { useState, useEffect, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { EngineSetupStatus } from "../lib/bindings";
 import { directCommands } from "../lib/generated/direct-commands";
-import { unwrap } from "../lib/utils";
 
 interface SetupProgress {
     stage: string; // "creating_venv" | "installing" | "complete" | "error"
@@ -39,7 +38,6 @@ export function useEngineSetup(): EngineSetupState {
     // Check setup status on mount
     const refreshStatus = useCallback(async () => {
         directCommands.directRuntimeGetEngineSetupStatus()
-            .then(unwrap)
             .then(setStatus)
             .catch((err) => console.warn("Failed to check engine setup:", err));
     }, []);
@@ -79,7 +77,7 @@ export function useEngineSetup(): EngineSetupState {
         setSetupMessage("Starting setup...");
 
         try {
-            unwrap(await directCommands.directRuntimeSetupEngine());
+            await directCommands.directRuntimeSetupEngine();
             setSetupRequested(false);
             await refreshStatus();
         } catch (err: any) {

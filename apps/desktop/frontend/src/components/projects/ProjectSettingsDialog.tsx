@@ -1,13 +1,12 @@
 import { useEffect, useState, useCallback } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
-import { commands } from "../../lib/bindings";
 import type { Document as ProjectDocument, Project } from "../../lib/bindings";
+import { commandClient as commands } from "../../lib/command-client";
 import { directCommands } from "../../lib/generated/direct-commands";
 import { Folder, FileText, Trash2, Upload, AlertTriangle, CheckCircle2, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { useModelContext } from "../model-context";
-import { unwrap } from "../../lib/utils";
 
 interface ProjectSettingsDialogProps {
     open: boolean;
@@ -41,8 +40,7 @@ export function ProjectSettingsDialog({
         if (!project.id) return;
         try {
             setLoading(true);
-            const res = await commands.getProjectDocuments(project.id);
-            setDocs(unwrap(res));
+            setDocs(await commands.getProjectDocuments(project.id));
         } catch (e) {
             console.error(e);
             toast.error("Failed to load project documents");
@@ -78,13 +76,11 @@ export function ProjectSettingsDialog({
                 try {
                     const buffer = await file.arrayBuffer();
                     const bytes = Array.from(new Uint8Array(buffer));
-                    const upRes = await directCommands.directRagUploadDocument(bytes, file.name);
-                    const savedPath = unwrap(upRes).path;
+                    const savedPath = (await directCommands.directRagUploadDocument(bytes, file.name)).path;
 
                     toast.loading(`Indexing ${file.name}...`, { id: toastId });
                     // Pass embedding model path — backend auto-starts server if needed
-                    const ingestRes = await directCommands.directRagIngestDocument(savedPath, null, project.id, currentEmbeddingModelPath || null);
-                    unwrap(ingestRes);
+                    await directCommands.directRagIngestDocument(savedPath, null, project.id, currentEmbeddingModelPath || null);
 
                     toast.success("Added to Knowledge Base", { id: toastId });
                 } catch (e) {
@@ -100,7 +96,7 @@ export function ProjectSettingsDialog({
     const handleDeleteDoc = async (id: string, path: string) => {
         if (!confirm(`Delete ${path.split('/').pop()} from project?`)) return;
         try {
-            unwrap(await commands.deleteDocument(id));
+            await commands.deleteDocument(id);
             setDocs(prev => prev.filter(d => d.id !== id));
             toast.success("Document removed");
         } catch (e) {
@@ -116,11 +112,11 @@ export function ProjectSettingsDialog({
 
         try {
             setSaving(true);
-            const updatedProject = unwrap(await commands.updateProject(
+            const updatedProject = await commands.updateProject(
                 project.id,
                 normalizedName,
                 normalizedDescription,
-            ));
+            );
             setEditName(updatedProject.name);
             setEditDesc(updatedProject.description ?? "");
             toast.success("Project updated");
@@ -135,7 +131,7 @@ export function ProjectSettingsDialog({
     const handleDeleteProject = async () => {
         if (!confirm("Are you sure? This will delete the project and ALL its chats and documents. This cannot be undone.")) return;
         try {
-            unwrap(await commands.deleteProject(project.id));
+            await commands.deleteProject(project.id);
             toast.success("Project deleted");
             onProjectDeleted();
             onOpenChange(false);

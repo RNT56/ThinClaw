@@ -39,10 +39,7 @@ describe("unified desktop onboarding route", () => {
         await expect(persistOnboardingEmbeddingDimension({
             dimension: 768,
             currentDimension: 384,
-            persist: async () => ({
-                status: "error" as const,
-                error: { message: "config is read-only" },
-            }),
+            persist: async () => { throw new Error("config is read-only"); },
         })).rejects.toThrow("config is read-only");
     });
 });

@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowUp, Command, Copy, Pin, PinOff, Check } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useChat } from '../../hooks/use-chat';
-import { commands } from '../../lib/bindings';
+import { commandClient as commands } from '../../lib/command-client';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import remarkGfm from 'remark-gfm';

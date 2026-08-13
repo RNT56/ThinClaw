@@ -1,6 +1,5 @@
 import type { EngineInfo } from "./bindings";
 import { directCommands } from "./generated/direct-commands";
-import { unwrapResult } from "./guards";
 
 export type LocalChatLaunchKind = "llamacpp-sidecar" | "engine-manager" | "unavailable";
 export const LOCAL_CHAT_RUNTIME_RESTART_EVENT =
@@ -39,20 +38,6 @@ export interface StartLocalChatRuntimeOptions {
     quantizeKv?: boolean;
 }
 
-function resultErrorMessage(result: unknown, operation: string): string | null {
-    try {
-        unwrapResult(
-            result as Awaited<
-                ReturnType<typeof directCommands.directRuntimeStopEngine>
-            >,
-            operation,
-        );
-        return null;
-    } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-    }
-}
-
 /**
  * Stop both possible owners of the local chat endpoint.
  *
@@ -72,9 +57,6 @@ export async function stopLocalChatRuntime(): Promise<void> {
                 ? sidecar.reason.message
                 : String(sidecar.reason),
         );
-    } else {
-        const message = resultErrorMessage(sidecar.value, "stop llama.cpp");
-        if (message) errors.push(message);
     }
     if (engine.status === "rejected") {
         errors.push(
@@ -82,9 +64,6 @@ export async function stopLocalChatRuntime(): Promise<void> {
                 ? engine.reason.message
                 : String(engine.reason),
         );
-    } else {
-        const message = resultErrorMessage(engine.value, "stop local engine");
-        if (message) errors.push(message);
     }
     if (errors.length > 0) {
         throw new Error(errors.join("; "));
@@ -112,17 +91,14 @@ export async function startLocalChatRuntime({
         throw new Error("This build has no available local inference runtime");
     }
     if (launchKind === "llamacpp-sidecar") {
-        unwrapResult(
-            await directCommands.directRuntimeStartChatServer(
-                modelPath,
-                contextSize,
-                template,
-                mmproj,
-                false,
-                mlock,
-                quantizeKv,
-            ),
-            "start llama.cpp",
+        await directCommands.directRuntimeStartChatServer(
+            modelPath,
+            contextSize,
+            template,
+            mmproj,
+            false,
+            mlock,
+            quantizeKv,
         );
         return;
     }
@@ -131,13 +107,7 @@ export async function startLocalChatRuntime({
     // provisioning command intentionally rejects engines with a configured
     // base URL, so only bundled directory runtimes should pass through it.
     if (localChatUsesManagedModelPath(engine)) {
-        unwrapResult(
-            await directCommands.directRuntimeEnsureEngineReady(),
-            "prepare local inference runtime",
-        );
+        await directCommands.directRuntimeEnsureEngineReady();
     }
-    unwrapResult(
-        await directCommands.directRuntimeStartEngine(modelPath, contextSize),
-        "start local inference runtime",
-    );
+    await directCommands.directRuntimeStartEngine(modelPath, contextSize);
 }

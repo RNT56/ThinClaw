@@ -18,7 +18,7 @@ import {
     Sparkles,
     Link,
 } from 'lucide-react';
-import { commands } from '../../lib/bindings';
+import { commandClient as commands } from '../../lib/command-client';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';

@@ -17,7 +17,6 @@ import { revealFile } from '../../lib/thinclaw';
 import { ThinkingDots } from './ThinkingDots';
 import { useInferenceBackends } from '../../hooks/use-inference-backends';
 import { parseStatusTaggedContent } from '../../lib/status-tags';
-import { bridgeErrorMessage } from '../../lib/command-errors';
 
 export function sanitizeMessageContent(content: string): string {
     return DOMPurify.sanitize(content);
@@ -121,14 +120,8 @@ const ImageAttachment = ({ id, isFresh = false }: { id: string, isFresh?: boolea
         if (id === "pending_generation") return;
         setIsLoading(true);
         try {
-            const res = await directCommands.directAssetsGetImagePath(id);
-            if (res.status === "ok") {
-                const assetUrl = convertFileSrc(res.data);
-                setSrc(assetUrl);
-            } else {
-                console.error("[ImageAttachment] Path not found for ID:", id, res.error);
-                setError(true);
-            }
+            const path = await directCommands.directAssetsGetImagePath(id);
+            setSrc(convertFileSrc(path));
         } catch (e) {
             console.error("[ImageAttachment] Error loading path for ID:", id, e);
             setError(true);
@@ -387,16 +380,11 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
         setIsSpeaking(true);
         try {
             const res = await directCommands.directMediaTtsSynthesize(sanitizedContent, null);
-            if (res.status === 'error') {
-                toast.error('TTS failed', { description: bridgeErrorMessage(res.error) });
-                setIsSpeaking(false);
-                return;
-            }
             // Decode base64 audio and play via Web Audio API. Cloud providers
             // (OpenAI/ElevenLabs) return container-encoded audio (MP3); local Piper
             // and Gemini return raw s16le PCM @22050. Try the container decoder
             // first and fall back to the raw-PCM path so both formats play.
-            const binary = atob(res.data.audioBytes);
+            const binary = atob(res.audioBytes);
             const bytes = new Uint8Array(binary.length);
             for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 

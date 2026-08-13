@@ -6,7 +6,7 @@ describe("summarizer runtime reconciliation", () => {
         const events: string[] = [];
         const start = vi.fn(async () => {
             events.push("started");
-            return { status: "ok" as const, data: null };
+            return null;
         });
         const persistSelection = vi.fn(() => {
             events.push("persisted");
@@ -29,19 +29,13 @@ describe("summarizer runtime reconciliation", () => {
         expect(events).toEqual(["started", "persisted"]);
     });
 
-    it("does not persist when the backend returns an error Result", async () => {
+    it("does not persist when the command client rejects a backend error", async () => {
         const persistSelection = vi.fn();
 
         await expect(reconcileSummarizerRuntime({
             modelPath: "/managed/LLM/model/model.gguf",
             contextSize: 32768,
-            start: vi.fn().mockResolvedValue({
-                status: "error",
-                error: {
-                    kind: "runtime",
-                    message: "model rejected",
-                },
-            }),
+            start: vi.fn().mockRejectedValue(new Error("model rejected")),
             persistSelection,
         })).rejects.toThrow(/model rejected/);
 

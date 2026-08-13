@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { commands } from "../lib/bindings";
+import { commandClient } from "../lib/command-client";
 
 export const I18N_STORAGE_KEY = "thinclaw-ui-locale";
 
@@ -70,7 +70,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     useEffect(() => {
         document.documentElement.lang = locale;
         let active = true;
-        commands.directI18nGetCatalog(locale)
+        commandClient.directI18nGetCatalog(locale)
             .then((catalog) => {
                 if (!active || !catalog?.messages) return;
                 setMessages({ ...FALLBACK_MESSAGES, ...catalog.messages });

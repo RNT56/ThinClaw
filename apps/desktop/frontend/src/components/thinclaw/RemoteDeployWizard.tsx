@@ -5,7 +5,6 @@ import { listen } from '@tauri-apps/api/event';
 import { Server, CheckCircle, AlertCircle, Loader2, Zap, Copy } from 'lucide-react';
 import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
-import { unwrapResult } from '../../lib/guards';
 
 interface RemoteDeployWizardProps {
     isOpen: boolean;
@@ -80,10 +79,7 @@ export const RemoteDeployWizard: React.FC<RemoteDeployWizardProps> = ({ isOpen, 
                 setLogs((prev) => appendDeployLog(prev, event.payload));
             });
             try {
-                const result = unwrapResult(
-                    await thinclawCommands.thinclawDeployRemote(ip, user, tailscaleKey || null, enableSystemd),
-                    'Deploy remote gateway',
-                );
+                const result = await thinclawCommands.thinclawDeployRemote(ip, user, tailscaleKey || null, enableSystemd);
                 setDeployResult(result);
                 setStep('success');
             } finally {

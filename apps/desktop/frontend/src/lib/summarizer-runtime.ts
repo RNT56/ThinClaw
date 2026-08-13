@@ -1,10 +1,7 @@
-import type { BridgeError, Result } from "./bindings";
-import { unwrapResult } from "./guards";
-
 export type StartSummarizerRuntime = (
     modelPath: string,
     contextSize: number,
-) => Promise<Result<null, BridgeError>>;
+) => Promise<null>;
 
 export interface ReconcileSummarizerOptions {
     modelPath: string;
@@ -33,9 +30,6 @@ export async function reconcileSummarizerRuntime({
         throw new Error("Summarizer context size must be a positive integer");
     }
 
-    unwrapResult(
-        await start(modelPath, contextSize),
-        "start summarizer",
-    );
+    await start(modelPath, contextSize);
     persistSelection(modelPath);
 }

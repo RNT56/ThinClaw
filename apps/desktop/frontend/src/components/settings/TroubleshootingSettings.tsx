@@ -8,10 +8,11 @@ import {
     FlaskConical
 } from 'lucide-react';
 import * as thinclaw from '../../lib/thinclaw';
-import { commands, SidecarStatus } from '../../lib/bindings';
+import type { SidecarStatus } from '../../lib/bindings';
+import { commandClient as commands } from '../../lib/command-client';
 import { directCommands } from '../../lib/generated/direct-commands';
 import { toast } from 'sonner';
-import { cn, unwrap } from '../../lib/utils';
+import { cn } from '../../lib/utils';
 import { useModelContext } from '../model-context';
 
 export function TroubleshootingSettings() {
@@ -61,7 +62,7 @@ export function TroubleshootingSettings() {
         validatePath(modelPath);
     }, [modelPath, validatePath]);
 
-    const openModelsFolder = async () => unwrap(await commands.openModelsFolder());
+    const openModelsFolder = async () => { await commands.openModelsFolder(); };
 
 
 
@@ -94,13 +95,13 @@ export function TroubleshootingSettings() {
                             <FolderOpen className="w-4 h-4 mr-2 text-primary" /> Open Models Folder
                         </button>
                         <button
-                            onClick={async () => unwrap(await directCommands.directAssetsOpenImagesFolder())}
+                            onClick={async () => { await directCommands.directAssetsOpenImagesFolder(); }}
                             className="w-full bg-background border border-border/50 hover:bg-accent text-accent-foreground p-3 rounded-xl transition-all flex items-center justify-center text-sm shadow-xs"
                         >
                             <ImageIcon className="w-4 h-4 mr-2 text-pink-500" /> Open Generated Images
                         </button>
                         <button
-                            onClick={async () => unwrap(await commands.openConfigFile())}
+                            onClick={async () => { await commands.openConfigFile(); }}
                             className="w-full bg-background border border-border/50 hover:bg-accent text-accent-foreground p-3 rounded-xl transition-all flex items-center justify-center text-sm shadow-xs"
                         >
                             <Settings className="w-4 h-4 mr-2 text-muted-foreground" /> Reveal Config Recovery Snapshot

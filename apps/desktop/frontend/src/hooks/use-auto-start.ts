@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { commands } from "../lib/bindings";
+import { commandClient } from "../lib/command-client";
 import { useModelContext } from "../components/model-context";
 import { useConfig } from "./use-config";
 import { toast } from "sonner";
@@ -96,7 +96,7 @@ export function useAutoStart() {
                             && isCompatibleManagedModelForCategory(model, "LLM")
                         );
                         const isValid = Boolean(selected)
-                            && await commands.checkModelPath(cleanPath);
+                            && await commandClient.checkModelPath(cleanPath);
                         if (!isValid) {
                             toast.error("Model path invalid", {
                                 id: toastId,
@@ -160,7 +160,7 @@ export function useAutoStart() {
                     && isCompatibleManagedModelForCategory(model, "LLM")
                 );
                 const isValid = Boolean(selectedModel)
-                    && await commands.checkModelPath(cleanPath);
+                    && await commandClient.checkModelPath(cleanPath);
                 if (!isValid) {
                     setIsRestarting(false);
                     console.warn("[AutoStart] Invalid model path:", cleanPath);

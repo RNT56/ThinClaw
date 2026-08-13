@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { commands } from '../../lib/bindings';
+import { commandClient as commands } from '../../lib/command-client';
 import { Eye, EyeOff, Save, ShieldCheck, ShieldAlert, Loader2, Trash2, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';

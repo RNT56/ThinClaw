@@ -5,7 +5,8 @@ import {
     Command,
     Sparkles
 } from 'lucide-react';
-import { commands, type UserConfig } from '../../lib/bindings';
+import type { UserConfig } from '../../lib/bindings';
+import { commandClient as commands } from '../../lib/command-client';
 import { cn } from '../../lib/utils';
 import { ThemeToggle, useTheme } from '../theme-provider';
 import { DARK_SYNTAX_THEMES, LIGHT_SYNTAX_THEMES, SyntaxTheme } from '../../lib/syntax-themes';

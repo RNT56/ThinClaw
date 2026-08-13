@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import { commands, Project } from '../lib/bindings';
+import type { Project } from '../lib/bindings';
+import { commandClient } from '../lib/command-client';
 import { toast } from 'sonner';
-import { unwrap } from "../lib/utils";
 
 export function useProjects() {
     const [projects, setProjects] = useState<Project[]>([]);
@@ -10,8 +10,7 @@ export function useProjects() {
     const fetchProjects = useCallback(async () => {
         try {
             setIsLoading(true);
-            const res = await commands.listProjects();
-            setProjects(unwrap(res));
+            setProjects(await commandClient.listProjects());
         } catch (error) {
             console.error('Failed to fetch projects', error);
             toast.error('Failed to load projects');
@@ -22,8 +21,7 @@ export function useProjects() {
 
     const createProject = async (name: string, description: string | null) => {
         try {
-            const res = await commands.createProject({ name, description });
-            const project = unwrap(res);
+            const project = await commandClient.createProject({ name, description });
             setProjects(prev => [project, ...prev]);
             toast.success('Project created');
             return project;
@@ -36,8 +34,7 @@ export function useProjects() {
 
     const deleteProject = async (id: string) => {
         try {
-            const res = await commands.deleteProject(id);
-            unwrap(res);
+            await commandClient.deleteProject(id);
             setProjects(prev => prev.filter(p => p.id !== id));
             toast.success('Project deleted');
         } catch (error) {
@@ -48,7 +45,7 @@ export function useProjects() {
 
     const updateProjectsOrder = async (orders: [string, number][]) => {
         try {
-            await commands.updateProjectsOrder(orders);
+            await commandClient.updateProjectsOrder(orders);
             // Optimistically update local state if needed, or just let the caller handle it
         } catch (error) {
             console.error('Failed to update project order', error);

@@ -1,6 +1,6 @@
 
 import { useState, useEffect } from 'react';
-import { commands } from '../../lib/bindings';
+import { commandClient as commands } from '../../lib/command-client';
 import { Bot, Zap, ShieldCheck, ShieldAlert, CheckCircle, Info, KeyRound } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
@@ -18,8 +18,7 @@ export function ChatProviderTab() {
     const loadAll = async () => {
         setLoading(true);
         try {
-            const s = await commands.thinclawGetStatus();
-            if (s.status === 'ok') setStatus(s.data);
+            setStatus(await commands.thinclawGetStatus());
         } catch (e) {
             console.error(e);
             toast.error("Failed to load settings");

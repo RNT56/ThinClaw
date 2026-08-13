@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ConfigProvider, useConfigContext } from '../../components/config-context';
-import { commands, type UserConfig } from '../../lib/bindings';
+import type { UserConfig } from '../../lib/bindings';
+import { commandClient as commands } from '../../lib/command-client';
 import { directCommands } from '../../lib/generated/direct-commands';
 import { LOCAL_CHAT_RUNTIME_RESTART_EVENT } from '../../lib/local-runtime-start';
 
@@ -48,19 +49,13 @@ describe('ConfigProvider updates', () => {
         delete document.body.dataset.updateFailed;
         toastError.mockReset();
         vi.spyOn(commands, 'getUserConfig').mockResolvedValue(initialConfig);
-        vi.spyOn(directCommands, 'directRuntimeStopChatServer').mockResolvedValue({
-            status: 'ok',
-            data: null,
-        });
-        vi.spyOn(directCommands, 'directRuntimeStopEngine').mockResolvedValue({
-            status: 'ok',
-            data: null,
-        });
+        vi.spyOn(directCommands, 'directRuntimeStopChatServer').mockResolvedValue(null);
+        vi.spyOn(directCommands, 'directRuntimeStopEngine').mockResolvedValue(null);
     });
 
     it('publishes config state only after the backend accepts the patch', async () => {
         let resolveUpdate!: (value: Awaited<ReturnType<typeof commands.updateUserConfig>>) => void;
-        vi.spyOn(commands, 'updateUserConfig').mockImplementation(() =>
+        const update = vi.spyOn(commands, 'updateUserConfig').mockImplementation(() =>
             new Promise(resolve => {
                 resolveUpdate = resolve;
             }),
@@ -76,17 +71,17 @@ describe('ConfigProvider updates', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Select cloud' }));
         expect(screen.getByTestId('provider')).toHaveTextContent('local');
         await waitFor(() =>
-            expect(commands.updateUserConfig).toHaveBeenCalledOnce(),
+            expect(update).toHaveBeenCalledOnce(),
         );
 
         await act(async () => {
-            resolveUpdate({ status: 'ok', data: null });
+            resolveUpdate(null);
         });
 
         await waitFor(() =>
             expect(screen.getByTestId('provider')).toHaveTextContent('openai'),
         );
-        expect(commands.updateUserConfig).toHaveBeenCalledWith({
+        expect(update).toHaveBeenCalledWith({
             selected_chat_provider: 'openai',
             chat_backend: 'openai',
         });
@@ -97,13 +92,7 @@ describe('ConfigProvider updates', () => {
     it('keeps the prior config and rejects when the backend rejects the patch', async () => {
         const restartRequested = vi.fn();
         window.addEventListener(LOCAL_CHAT_RUNTIME_RESTART_EVENT, restartRequested);
-        vi.spyOn(commands, 'updateUserConfig').mockResolvedValue({
-            status: 'error',
-            error: {
-                kind: 'runtime',
-                message: 'write failed',
-            },
-        } as Awaited<ReturnType<typeof commands.updateUserConfig>>);
+        vi.spyOn(commands, 'updateUserConfig').mockRejectedValue(new Error('write failed'));
 
         render(
             <ConfigProvider>
@@ -126,17 +115,8 @@ describe('ConfigProvider updates', () => {
     it('keeps local selected when either local runtime cannot be stopped', async () => {
         const restartRequested = vi.fn();
         window.addEventListener(LOCAL_CHAT_RUNTIME_RESTART_EVENT, restartRequested);
-        vi.mocked(directCommands.directRuntimeStopEngine).mockResolvedValue({
-            status: 'error',
-            error: {
-                kind: 'runtime',
-                message: 'engine stop failed',
-            },
-        });
-        const update = vi.spyOn(commands, 'updateUserConfig').mockResolvedValue({
-            status: 'ok',
-            data: null,
-        });
+        vi.mocked(directCommands.directRuntimeStopEngine).mockRejectedValue(new Error('engine stop failed'));
+        const update = vi.spyOn(commands, 'updateUserConfig').mockResolvedValue(null);
 
         render(
             <ConfigProvider>

@@ -33,7 +33,6 @@ import type {
 } from "../../lib/bindings";
 import { commandClient } from "../../lib/command-client";
 import { directCommands } from "../../lib/generated/direct-commands";
-import { unwrapResult } from "../../lib/guards";
 import {
     createRequestGenerationGuard,
     createHfSearchCache,
@@ -348,8 +347,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
             query,
             activeFilter.task,
             requestedLimit,
-        ).then(result => {
-            const response = unwrapResult(result, "Hugging Face model search");
+        ).then(response => {
             if (!searchGuard.current.isCurrent(generation)) return;
             if (
                 response.engine_id !== engineInfo.id
@@ -423,13 +421,10 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
         setIsLoadingMore(true);
         setLoadMoreError(null);
         try {
-            const response = unwrapResult(
-                await directCommands.directRuntimeDiscoverHfModelsV2(
-                    query,
-                    activeFilter.task,
-                    requestedLimit,
-                ),
-                "Hugging Face model search",
+            const response = await directCommands.directRuntimeDiscoverHfModelsV2(
+                query,
+                activeFilter.task,
+                requestedLimit,
             );
             if (!searchGuard.current.isCurrent(generation)) return;
             if (
@@ -491,10 +486,7 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
             [key]: { status: "loading" },
         }));
         try {
-            const plan = unwrapResult(
-                await directCommands.directRuntimeGetModelFilesV2(repoId, activeFilter.task),
-                "Hugging Face artifact plan",
-            );
+            const plan = await directCommands.directRuntimeGetModelFilesV2(repoId, activeFilter.task);
             if (
                 plan.repo_id !== repoId
                 || plan.engine_id !== engineInfo.id

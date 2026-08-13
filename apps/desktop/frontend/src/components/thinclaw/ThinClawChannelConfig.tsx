@@ -58,21 +58,16 @@ export function ThinClawChannelConfig() {
         setIsLoading(true);
         setNotice(null);
         try {
-            const r = await thinclawCommands.thinclawChannelConfigSchemas();
-            if (r.status === 'ok') {
-                const data = r.data as ChannelConfigSchemasResponse;
-                if (data?.available === false) {
-                    setNotice(data.reason ?? 'Channel configuration is unavailable in this mode.');
-                    setSchemas([]);
-                    setValues({});
-                } else {
-                    setSchemas(Array.isArray(data?.schemas) ? data.schemas : []);
-                    setValues(data?.values ?? {});
-                    setSecretBindingAvailable(data?.secret_binding_available === true);
-                    setSecretBindingReason(data?.secret_binding_reason ?? null);
-                }
+            const data = await thinclawCommands.thinclawChannelConfigSchemas() as ChannelConfigSchemasResponse;
+            if (data?.available === false) {
+                setNotice(data.reason ?? 'Channel configuration is unavailable in this mode.');
+                setSchemas([]);
+                setValues({});
             } else {
-                setNotice(String(r.error));
+                setSchemas(Array.isArray(data?.schemas) ? data.schemas : []);
+                setValues(data?.values ?? {});
+                setSecretBindingAvailable(data?.secret_binding_available === true);
+                setSecretBindingReason(data?.secret_binding_reason ?? null);
             }
         } catch (caught) {
             setSchemas([]);
@@ -110,31 +105,23 @@ export function ThinClawChannelConfig() {
         }, {});
         const tId = toast.loading(`Saving ${schema.channel_name} configuration…`);
         try {
-            const r = await thinclawCommands.thinclawChannelConfigSubmit(schema.channel_id, payload);
-            if (r.status === 'ok') {
-                const data = r.data as ChannelConfigSubmitResponse;
-                const outcome = normalizeAgentActionOutcome(data, 'Configuration saved');
-                const detail = outcome.message;
-                if (outcome.state === 'rejected') {
-                    setNotice(detail);
-                    toast.error(detail, { id: tId });
-                } else if (outcome.state === 'persisted' || outcome.state === 'prepared') {
-                    setNotice(detail);
-                    toast.info(detail, { id: tId });
-                } else if (outcome.state === 'restart-required') {
-                    setNotice(detail);
-                    toast.info(detail, { id: tId });
-                } else if (outcome.state === 'unknown') {
-                    setNotice(`The request completed, but its apply state is not known. ${detail}`);
-                    toast.info(`The request completed, but its apply state is not known. ${detail}`, { id: tId });
-                } else {
-                    toast.success(detail, { id: tId });
-                }
+            const data = await thinclawCommands.thinclawChannelConfigSubmit(schema.channel_id, payload) as ChannelConfigSubmitResponse;
+            const outcome = normalizeAgentActionOutcome(data, 'Configuration saved');
+            const detail = outcome.message;
+            if (outcome.state === 'rejected') {
+                setNotice(detail);
+                toast.error(detail, { id: tId });
+            } else if (outcome.state === 'persisted' || outcome.state === 'prepared') {
+                setNotice(detail);
+                toast.info(detail, { id: tId });
+            } else if (outcome.state === 'restart-required') {
+                setNotice(detail);
+                toast.info(detail, { id: tId });
+            } else if (outcome.state === 'unknown') {
+                setNotice(`The request completed, but its apply state is not known. ${detail}`);
+                toast.info(`The request completed, but its apply state is not known. ${detail}`, { id: tId });
             } else {
-                const e = r.error as { reason?: string; message?: string };
-                const message = e?.reason ?? e?.message ?? String(r.error);
-                setNotice(message);
-                toast.error(message, { id: tId });
+                toast.success(detail, { id: tId });
             }
         } catch (caught) {
             const message = caught instanceof Error ? caught.message : String(caught);

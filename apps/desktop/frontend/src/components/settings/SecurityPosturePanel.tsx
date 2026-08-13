@@ -10,7 +10,8 @@ import {
     type LucideIcon,
 } from 'lucide-react';
 
-import { commands, type SecurityPosture } from '../../lib/bindings';
+import type { SecurityPosture } from '../../lib/bindings';
+import { commandClient as commands } from '../../lib/command-client';
 import { cn } from '../../lib/utils';
 
 const REFRESH_INTERVAL_MS = 5_000;
@@ -23,12 +24,7 @@ export function SecurityPosturePanel() {
     const refresh = useCallback(async (showSpinner = false) => {
         if (showSpinner) setLoading(true);
         try {
-            const result = await commands.thinclawSecurityPosture();
-            if (result.status === 'error') {
-                setError(String(result.error));
-                return;
-            }
-            setPosture(result.data);
+            setPosture(await commands.thinclawSecurityPosture());
             setError(null);
         } catch (cause) {
             setError(cause instanceof Error ? cause.message : String(cause));

@@ -5,7 +5,6 @@ import { listen } from "@tauri-apps/api/event";
 import { Message, StreamChunk, WebSearchResult, TokenUsage, AssetRef } from "../../lib/bindings";
 import { directCommands } from "../../lib/generated/direct-commands";
 import { toast } from "sonner";
-import { bridgeErrorMessage } from "../../lib/command-errors";
 
 interface ChatJob {
     conversationId: string;
@@ -87,9 +86,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // 1. Ensure Conversation exists (AWAITED so we can return ID)
         if (!conversationId) {
             const title = content.length > 30 ? content.substring(0, 30) + "..." : (content || "Image Upload");
-            const result = await directCommands.directHistoryCreateConversation(title, projectId);
-            if (result.status === "error") throw new Error(bridgeErrorMessage(result.error));
-            conversationId = result.data.id;
+            conversationId = (await directCommands.directHistoryCreateConversation(title, projectId)).id;
         }
 
         // 2. Define the background generation process
@@ -112,8 +109,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                 const assets = messageAssets(images, storageDocs);
                 const hasUserTurn = (typeof content === "string" && content.trim().length > 0) || images.length > 0 || storageDocs.length > 0;
                 if (hasUserTurn) {
-                    const resSave = await directCommands.directHistorySaveMessage(id, "user", content, images.length > 0 ? images : null, assets, storageDocs.length > 0 ? storageDocs : null, null);
-                    if (resSave.status === "error") throw new Error(bridgeErrorMessage(resSave.error));
+                    await directCommands.directHistorySaveMessage(id, "user", content, images.length > 0 ? images : null, assets, storageDocs.length > 0 ? storageDocs : null, null);
                 }
 
                 let finalMessages = [...history, { role: "user", content, images: images.length > 0 ? images : null, assets, attached_docs: storageDocs.length > 0 ? storageDocs : null }];
@@ -122,13 +118,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                 if ((content.trim().length > 3 || attachedDocs.length > 0) && currentEmbeddingModelPath) {
                     updateJob(id, { isThinking: true });
                     try {
-                        const hitsRes = await directCommands.directRagRetrieveContext(content, id, attachedDocs.map((d: any) => d.id), projectId);
-                        if (hitsRes.status === "ok" && hitsRes.data.length > 0) {
+                        const hits = await directCommands.directRagRetrieveContext(content, id, attachedDocs.map((d: any) => d.id), projectId);
+                        if (hits.length > 0) {
                             finalMessages = [
                                 ...history,
                                 {
                                     role: "user",
-                                    content: `Context:\n${hitsRes.data.join("\n---\n")}\n\nQuestion: ${content}`,
+                                    content: `Context:\n${hits.join("\n---\n")}\n\nQuestion: ${content}`,
                                     images,
                                     assets,
                                     attached_docs: storageDocs.length > 0 ? storageDocs : null
@@ -232,11 +228,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                         const currentSearchResults = activeJobsRef.current[id]?.searchResults ?? null;
                         if (fullText) {
                             directCommands.directHistorySaveMessage(id, "assistant", fullText, null, null, null, currentSearchResults)
-                                .then((res) => {
+                                .then((messageId) => {
                                     // Store the real message ID so useChat can update in-place
-                                    if (res.status === 'ok') {
-                                        updateJob(id, { savedMessageId: res.data });
-                                    }
+                                    updateJob(id, { savedMessageId: messageId });
                                     // Give useChat a moment to read savedMessageId, then cleanup
                                     setTimeout(() => removeJob(id), 500);
                                 });

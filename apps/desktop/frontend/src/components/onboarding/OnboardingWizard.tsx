@@ -13,17 +13,16 @@ import { toast } from 'sonner';
 // model-library no longer used directly — all models discovered via HF Hub
 import { useModelContext } from '../model-context';
 import {
-    commands,
     type HfCapabilityProfileDto,
     type HfModelCard,
     type HfModelFilePlan,
     type HfModelTask,
 } from '../../lib/bindings';
+import { commandClient as commands } from '../../lib/command-client';
 import { listen } from '@tauri-apps/api/event';
 import { useEngineSetup } from '../../hooks/use-engine-setup';
 import { clearOnboardingProgress, startOnboardingProgress } from '../../lib/local-storage-migration';
 import { directCommands } from '../../lib/generated/direct-commands';
-import { unwrapResult } from '../../lib/guards';
 import { bridgeErrorMessage } from '../../lib/command-errors';
 import { Progress } from '../ui';
 import {
@@ -145,20 +144,17 @@ export function buildAgentSettingsPatch(agentName: string, personalityPack: stri
     };
 }
 
-export async function persistOnboardingEmbeddingDimension<E>({
+export async function persistOnboardingEmbeddingDimension({
     dimension,
     currentDimension,
     persist,
 }: {
     dimension: number;
     currentDimension: number | undefined;
-    persist: () => Promise<
-        { status: 'ok'; data: null }
-        | { status: 'error'; error: E }
-    >;
+    persist: () => Promise<null>;
 }): Promise<boolean> {
     if (dimension <= 0 || currentDimension === dimension) return false;
-    unwrapResult(await persist(), 'save embedding dimension');
+    await persist();
     return true;
 }
 
@@ -593,10 +589,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 delete next[key];
                 return next;
             });
-            const plan = unwrapResult(
-                await directCommands.directRuntimeGetModelFilesV2(repoId, profile.task),
-                'Hugging Face artifact plan'
-            );
+            const plan = await directCommands.directRuntimeGetModelFilesV2(repoId, profile.task);
             setHfFilePlanCache(previous => ({ ...previous, [key]: plan }));
             const recommended = selectRecommendedArtifact(plan.artifacts);
             if (
@@ -662,10 +655,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         const generation = categoryTopGuards.current[cat].begin();
         setCategoryTopStatus(previous => ({ ...previous, [cat]: 'loading' }));
         try {
-            const response = unwrapResult(
-                await directCommands.directRuntimeDiscoverHfModelsV2('', profile.task, 5),
-                `HuggingFace ${cat} models`
-            );
+            const response = await directCommands.directRuntimeDiscoverHfModelsV2('', profile.task, 5);
             if (!categoryTopGuards.current[cat].isCurrent(generation)) return;
             setCategoryTopModels(prev => ({ ...prev, [cat]: response.models }));
             setCategoryTopStatus(previous => ({ ...previous, [cat]: 'ready' }));
@@ -703,10 +693,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
             setCategorySearching(prev => ({ ...prev, [cat]: true }));
             setCategorySearchError(prev => ({ ...prev, [cat]: null }));
             try {
-                const response = unwrapResult(
-                    await directCommands.directRuntimeDiscoverHfModelsV2(query, profile.task, 10),
-                    `HuggingFace ${cat} search`
-                );
+                const response = await directCommands.directRuntimeDiscoverHfModelsV2(query, profile.task, 10);
                 if (!categorySearchGuards.current[cat].isCurrent(generation)) return;
                 setCategorySearchResults(prev => ({ ...prev, [cat]: response.models }));
             } catch (error) {
@@ -748,10 +735,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         setRemoteConnecting(true);
         setRemoteError('');
         try {
-            const ok = unwrapResult(
-                await commands.thinclawTestConnection(url, remoteExistingToken || null),
-                'Test remote gateway connection',
-            );
+            const ok = await commands.thinclawTestConnection(url, remoteExistingToken || null);
             if (!ok) {
                 setRemoteError('Cannot connect — server unreachable or auth failed');
                 setRemoteConnecting(false);
@@ -767,10 +751,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 auto_connect: true,
             };
             await thinclaw.addAgentProfile(newProfile);
-            unwrapResult(
-                await commands.thinclawSaveGatewaySettings('remote', url, remoteExistingToken || ''),
-                'Save remote gateway settings',
-            );
+            await commands.thinclawSaveGatewaySettings('remote', url, remoteExistingToken || '');
             setRemoteConnected(true);
             toast.success('Connected to remote agent!');
         } catch (e: any) {
@@ -791,14 +772,11 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 setRemoteDeployLogs((prev) => [...prev, event.payload]);
             });
             try {
-                const result = unwrapResult(
-                    await commands.thinclawDeployRemote(
-                        remoteIp,
-                        remoteUser,
-                        remoteTailscaleKey || null,
-                        remoteEnableSystemd,
-                    ),
-                    'Deploy remote gateway',
+                const result = await commands.thinclawDeployRemote(
+                    remoteIp,
+                    remoteUser,
+                    remoteTailscaleKey || null,
+                    remoteEnableSystemd,
                 );
                 const newProfile: thinclaw.AgentProfile = {
                     id: crypto.randomUUID(),
@@ -812,10 +790,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 // out: the deployment may still finish after this command, and
                 // the one-time token must not be lost with the response object.
                 await thinclaw.addAgentProfile(newProfile);
-                unwrapResult(
-                    await commands.thinclawSaveGatewaySettings('remote', result.url, result.token || ''),
-                    'Save deployed gateway settings',
-                );
+                await commands.thinclawSaveGatewaySettings('remote', result.url, result.token || '');
                 if (result.status === 'success') {
                     setRemoteConnected(true);
                     toast.success('Remote agent deployed and connected!');
@@ -842,14 +817,10 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         try {
             const provider = CLOUD_PROVIDERS.find(p => p.id === providerId);
             if (!provider) return;
-            const res = await (commands as any)[provider.save](value);
-            if (res?.status === 'ok') {
-                setApiKeySaved(prev => ({ ...prev, [providerId]: true }));
-                setApiKeys(prev => ({ ...prev, [providerId]: '' }));
-                toast.success(`${provider.label} key saved`);
-            } else {
-                toast.error(`Failed to save ${provider.label} key`);
-            }
+            await (commands as unknown as Record<string, (key: string) => Promise<unknown>>)[provider.save](value);
+            setApiKeySaved(prev => ({ ...prev, [providerId]: true }));
+            setApiKeys(prev => ({ ...prev, [providerId]: '' }));
+            toast.success(`${provider.label} key saved`);
         } catch {
             toast.error('Failed to save API key');
         } finally {
@@ -873,11 +844,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 );
             }
 
-            unwrapResult(
-                await commands.thinclawConfigPatch(
-                    buildAgentSettingsPatch(agentName, personalityPack)
-                ),
-                'agent setup'
+            await commands.thinclawConfigPatch(
+                buildAgentSettingsPatch(agentName, personalityPack)
             );
 
             // Save HF Token if provided
@@ -1012,12 +980,9 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 if (embeddingProvenance) {
                     let discoveredDimension: number | null = null;
                     try {
-                        discoveredDimension = unwrapResult(
-                            await directCommands.directRuntimeDiscoverEmbeddingDimension(
-                                embeddingProvenance.repoId,
-                                embeddingProvenance.revision,
-                            ),
-                            'HuggingFace embedding dimension'
+                        discoveredDimension = await directCommands.directRuntimeDiscoverEmbeddingDimension(
+                            embeddingProvenance.repoId,
+                            embeddingProvenance.revision,
                         );
                     } catch (e) {
                         console.warn('[onboarding] Could not discover embedding dimension:', e);

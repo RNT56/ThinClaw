@@ -1110,9 +1110,8 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                 <button
                                     onClick={async () => {
                                         if (!effectiveSessionKey) return;
-                                        const r = await thinclawCommands.thinclawUndo(effectiveSessionKey);
-                                        if (r.status === 'ok') toast.success('Undo sent');
-                                        else toast.error(`Undo failed: ${r.error}`);
+                                        await thinclawCommands.thinclawUndo(effectiveSessionKey);
+                                        toast.success('Undo sent');
                                     }}
                                     disabled={!effectiveSessionKey}
                                     title="Undo the last turn"
@@ -1123,9 +1122,8 @@ export function ThinClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                 <button
                                     onClick={async () => {
                                         if (!effectiveSessionKey) return;
-                                        const r = await thinclawCommands.thinclawRedo(effectiveSessionKey);
-                                        if (r.status === 'ok') toast.success('Redo sent');
-                                        else toast.error(`Redo failed: ${r.error}`);
+                                        await thinclawCommands.thinclawRedo(effectiveSessionKey);
+                                        toast.success('Redo sent');
                                     }}
                                     disabled={!effectiveSessionKey}
                                     title="Redo the last undone turn"

@@ -15,14 +15,9 @@ export function MemoryEditor() {
     const loadMemory = async () => {
         setIsLoading(true);
         try {
-            const res = await thinclawCommands.thinclawGetMemory();
-            if (res.status === 'ok') {
-                setContent(res.data);
-                setIsDirty(false);
-                setLastSaved(new Date());
-            } else {
-                toast.error("Failed to load memory: " + res.error);
-            }
+            setContent(await thinclawCommands.thinclawGetMemory());
+            setIsDirty(false);
+            setLastSaved(new Date());
         } catch (e) {
             console.error(e);
             toast.error("Failed to load memory");
@@ -34,14 +29,10 @@ export function MemoryEditor() {
     const saveMemory = async () => {
         setIsSaving(true);
         try {
-            const res = await thinclawCommands.thinclawSaveMemory(content);
-            if (res.status === 'ok') {
-                setIsDirty(false);
-                setLastSaved(new Date());
-                toast.success("Memory updated");
-            } else {
-                toast.error("Failed to save memory: " + res.error);
-            }
+            await thinclawCommands.thinclawSaveMemory(content);
+            setIsDirty(false);
+            setLastSaved(new Date());
+            toast.success("Memory updated");
         } catch (e) {
             console.error(e);
             toast.error("Failed to save memory");

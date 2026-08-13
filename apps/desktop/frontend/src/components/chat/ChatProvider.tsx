@@ -14,7 +14,8 @@ import { useChat } from '../../hooks/use-chat';
 import { useDropzone } from 'react-dropzone';
 import { isVisionCapable } from '../../lib/vision';
 import { useModelContext } from '../model-context';
-import { commands, type AssetRef } from '../../lib/bindings';
+import type { AssetRef } from '../../lib/bindings';
+import { commandClient as commands } from '../../lib/command-client';
 import { directCommands } from '../../lib/generated/direct-commands';
 import { join } from '@tauri-apps/api/path';
 import { useAutoStart } from '../../hooks/use-auto-start';
@@ -30,7 +31,6 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { SettingsPage } from '../settings/SettingsSidebar';
 import { findStyle, STYLE_LIBRARY } from '../../lib/style-library';
-import { bridgeErrorMessage } from '../../lib/command-errors';
 import {
     isCompatibleManagedModelForCategory,
     resolveCompatibleManagedModel,
@@ -472,14 +472,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     // Load project documents
     useEffect(() => {
         if (selectedProjectId) {
-            commands.getProjectDocuments(selectedProjectId).then(res => {
-                if (res.status === 'ok') {
-                    setAvailableDocs(res.data.map(d => ({
-                        ...d,
-                        name: d.path.split(/[/\\]/).pop() || 'Untitled',
-                    })));
-                }
-            });
+            commands.getProjectDocuments(selectedProjectId).then(documents => {
+                setAvailableDocs(documents.map(d => ({
+                    ...d,
+                    name: d.path.split(/[/\\]/).pop() || 'Untitled',
+                })));
+            }).catch(() => setAvailableDocs([]));
         } else {
             setAvailableDocs([]);
         }
@@ -571,8 +569,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         if (!imageRunning) {
             const tId = toast.loading('Starting Image Engine...');
             try {
-                const res = await directCommands.directRuntimeStartImageServer(modelPathToUse);
-                if (res.status !== 'ok') throw new Error(bridgeErrorMessage(res.error));
+                await directCommands.directRuntimeStartImageServer(modelPathToUse);
                 await new Promise(r => setTimeout(r, 4000));
                 toast.success('Image Engine Ready', { id: tId });
             } catch (e) {
@@ -745,13 +742,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 try {
                     const buffer = await file.arrayBuffer();
                     const bytes = Array.from(new Uint8Array(buffer));
-                    const res = await directCommands.directAssetsUploadImage(bytes);
-                    if (res.status === 'ok') {
-                        setAttachedImages(prev => [...prev, res.data]);
-                        toast.success('Image attached', { id: toastId });
-                    } else {
-                        throw new Error(bridgeErrorMessage(res.error));
-                    }
+                    const image = await directCommands.directAssetsUploadImage(bytes);
+                    setAttachedImages(prev => [...prev, image]);
+                    toast.success('Image attached', { id: toastId });
                 } catch (e) {
                     console.error('Failed to upload image:', e);
                     toast.error('Failed to upload image', { id: toastId });
@@ -764,16 +757,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 try {
                     const buffer = await file.arrayBuffer();
                     const bytes = Array.from(new Uint8Array(buffer));
-                    const res = await directCommands.directRagUploadDocument(bytes, file.name);
-                    if (res.status === 'ok') {
-                        const savedPath = res.data.path;
-                        toast.loading(`Indexing ${file.name}...`, { id: toastId });
-                        const docId = await ingestFile(savedPath, selectedProjectId);
-                        toast.success('added to knowledge base', { id: toastId, description: file.name });
-                        setIngestedFiles(prev => [...prev, { id: docId, name: file.name, assetRef: { namespace: 'direct_workbench', id: docId } }]);
-                    } else {
-                        throw new Error(bridgeErrorMessage(res.error));
-                    }
+                    const upload = await directCommands.directRagUploadDocument(bytes, file.name);
+                    toast.loading(`Indexing ${file.name}...`, { id: toastId });
+                    const docId = await ingestFile(upload.path, selectedProjectId);
+                    toast.success('added to knowledge base', { id: toastId, description: file.name });
+                    setIngestedFiles(prev => [...prev, { id: docId, name: file.name, assetRef: { namespace: 'direct_workbench', id: docId } }]);
                 } catch (e) {
                     console.error('Failed to upload/ingest document:', e);
                     toast.error(`Failed to ingest ${file.name}`, { id: toastId, description: String(e) });
@@ -832,8 +820,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             // replaces a different target atomically.
             const tId = !sttRunning ? toast.loading('Starting STT Engine...') : undefined;
             try {
-                const res = await directCommands.directRuntimeStartSttServer(currentSttModelPath);
-                if (res.status !== 'ok') throw new Error(bridgeErrorMessage(res.error));
+                await directCommands.directRuntimeStartSttServer(currentSttModelPath);
                 if (tId !== undefined) toast.success('STT Engine Ready', { id: tId });
             } catch (e) {
                 if (tId !== undefined) {
@@ -853,13 +840,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             const bytes = Array.from(new Uint8Array(buffer));
             const toastId = toast.loading('Transcribing...');
             try {
-                const res = await directCommands.directMediaTranscribeAudio(bytes);
-                if (res.status === 'ok') {
-                    setInput(prev => (prev ? prev + ' ' + res.data.text : res.data.text));
-                    toast.success('Transcribed', { id: toastId });
-                } else {
-                    throw new Error(bridgeErrorMessage(res.error));
-                }
+                const transcription = await directCommands.directMediaTranscribeAudio(bytes);
+                setInput(prev => (prev ? prev + ' ' + transcription.text : transcription.text));
+                toast.success('Transcribed', { id: toastId });
             } catch (e) {
                 console.error(e);
                 toast.error('Transcription Failed', { id: toastId, description: String(e) });

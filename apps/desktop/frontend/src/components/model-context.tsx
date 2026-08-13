@@ -5,7 +5,6 @@ import { toast } from "sonner";
 import {
     ModelFile,
     SystemSpecs,
-    commands,
     StandardAsset,
     EngineInfo,
     LocalRuntimeSnapshot,
@@ -15,7 +14,6 @@ import {
 } from "../lib/bindings";
 import { directCommands } from "../lib/generated/direct-commands";
 import { commandClient } from "../lib/command-client";
-import { unwrapResult } from "../lib/guards";
 import { getMigratedLocalStorageItem, isOnboardingInProgress, setMigratedLocalStorageItem } from "../lib/local-storage-migration";
 import { bridgeErrorMessage } from "../lib/command-errors";
 import { hfDownloadSelectionFingerprint } from "../lib/hf-models";
@@ -181,17 +179,12 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     const refreshRuntimeSnapshot = useCallback(async (): Promise<LocalRuntimeSnapshot | null> => {
         const generation = ++runtimeSnapshotGenerationRef.current;
         try {
-            const result = await directCommands.directRuntimeSnapshot();
-            if (result.status === "ok") {
-                if (generation === runtimeSnapshotGenerationRef.current) {
-                    setRuntimeSnapshot(result.data);
-                    return result.data;
-                }
-                return null;
-            }
+            const snapshot = await directCommands.directRuntimeSnapshot();
             if (generation === runtimeSnapshotGenerationRef.current) {
-                console.warn("Failed to get runtime snapshot:", result.error);
+                setRuntimeSnapshot(snapshot);
+                return snapshot;
             }
+            return null;
         } catch (err) {
             if (generation === runtimeSnapshotGenerationRef.current) {
                 console.warn("Failed to get runtime snapshot:", err);
@@ -232,9 +225,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
 
     const checkStandardAssets = useCallback(async () => {
         try {
-            const result = await commands.checkMissingStandardAssets();
-            if (result.status === "error") throw new Error(bridgeErrorMessage(result.error));
-            setStandardAssets(result.data);
+            setStandardAssets(await commandClient.checkMissingStandardAssets());
         } catch (e) {
             console.error(e);
         }
@@ -449,7 +440,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
                 specsError,
             } = await loadInitialModelState({
                 refreshInventory: refreshModels,
-                getSystemSpecs: commands.getSystemSpecs,
+                getSystemSpecs: commandClient.getSystemSpecs,
             });
             if (specs) setSystemSpecs(specs);
             if (specsError) {
@@ -488,7 +479,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         // Polling loop for real-time resource tracking (30 second default)
         const interval = setInterval(async () => {
             try {
-                const specs = await commands.getSystemSpecs();
+                const specs = await commandClient.getSystemSpecs();
                 if (specs) setSystemSpecs(specs);
             } catch (e) {
                 console.error("Health poll failed:", e);
@@ -665,16 +656,13 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         mutatingModelRootsRef.current.add(installRoot);
         for (const path of affectedPaths) mutatingModelPathsRef.current.add(path);
         try {
-            unwrapResult(
-                await directCommands.directRuntimeDeactivateModelServices(
-                    installRoot,
-                    roles.chat,
-                    roles.embedding,
-                    roles.summarizer,
-                    roles.stt,
-                    roles.image,
-                ),
-                "stop local model services",
+            await directCommands.directRuntimeDeactivateModelServices(
+                installRoot,
+                roles.chat,
+                roles.embedding,
+                roles.summarizer,
+                roles.stt,
+                roles.image,
             );
 
             // Compare after the awaited backend operation. A different model
@@ -819,10 +807,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         let operation: Promise<HfDownloadResult>;
         operation = (async () => {
             try {
-                const result = unwrapResult(
-                    await directCommands.directRuntimeDownloadHfSelection(request),
-                    "HuggingFace model download"
-                );
+                const result = await directCommands.directRuntimeDownloadHfSelection(request);
                 if (result.download_id !== downloadId) {
                     throw new Error("HuggingFace download returned an unexpected progress identity");
                 }

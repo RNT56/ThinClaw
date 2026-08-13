@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { commands, UserConfig, UserConfigPatch } from '../lib/bindings';
+import type { UserConfig, UserConfigPatch } from '../lib/bindings';
 import { commandClient } from '../lib/command-client';
 import { toast } from 'sonner';
 import {
@@ -22,7 +22,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
     const fetchConfig = useCallback(async () => {
         try {
-            const cfg = await commands.getUserConfig();
+            const cfg = await commandClient.getUserConfig();
             setConfig(cfg);
         } catch (e) {
             console.error("Failed to load config", e);

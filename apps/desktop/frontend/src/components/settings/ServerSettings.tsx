@@ -7,10 +7,9 @@ import {
     Zap,
     ShieldAlert
 } from 'lucide-react';
-import { commands, GGUFMetadata, type UserConfigPatch } from '../../lib/bindings';
+import type { GGUFMetadata, UserConfigPatch } from '../../lib/bindings';
 import { commandClient } from '../../lib/command-client';
 import { directCommands } from '../../lib/generated/direct-commands';
-import { unwrapResult } from '../../lib/guards';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import { useModelContext } from '../model-context';
@@ -76,15 +75,14 @@ export function ServerSettings() {
     const isCloudOnly = runtimeKind ? runtimeKind === 'none' : engineInfo?.id === 'none';
 
     useEffect(() => {
-        commands.getUserConfig().then(setConfig);
+        commandClient.getUserConfig().then(setConfig);
     }, []);
 
     useEffect(() => {
         if (modelPath && modelPath !== "auto") {
-            commands.getModelMetadata(modelPath).then((res) => {
-                if (res.status === "ok") setMetadata(res.data);
-                else setMetadata(undefined);
-            }).catch(() => setMetadata(undefined));
+            commandClient.getModelMetadata(modelPath)
+                .then(setMetadata)
+                .catch(() => setMetadata(undefined));
         } else {
             setMetadata(undefined);
         }
@@ -117,10 +115,7 @@ export function ServerSettings() {
                 if (!isLlamaCpp) {
                     // Directory runtimes are explicitly stopped before a manual
                     // restart; llama.cpp replaces its own owned sidecar.
-                    unwrapResult(
-                        await directCommands.directRuntimeStopEngine(),
-                        'stop local inference runtime',
-                    );
+                    await directCommands.directRuntimeStopEngine();
                 }
                 const selected = localModels.find(model => model.path === modelPath);
                 if (

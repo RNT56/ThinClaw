@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { commands, type ThinClawStatus } from '../../lib/bindings';
+import type { ThinClawStatus } from '../../lib/bindings';
+import { commandClient as commands } from '../../lib/command-client';
 import { Eye, EyeOff, Save, Bot, Loader2, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
@@ -24,13 +25,10 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
     const handleFetch = async () => {
         setFetching(true);
         try {
-            const res = await commands.thinclawGetBedrockCredentials();
-            if (res.status === 'ok' && res.data) {
-                const [ak, sk, r] = res.data;
-                if (ak) setAccessKeyId(ak);
-                if (sk) setSecretAccessKey(sk);
-                if (r) setRegion(r);
-            }
+            const [ak, sk, r] = await commands.thinclawGetBedrockCredentials();
+            if (ak) setAccessKeyId(ak);
+            if (sk) setSecretAccessKey(sk);
+            if (r) setRegion(r);
             setShowKeys(true);
         } catch {
             toast.error('Failed to fetch Bedrock credentials');
@@ -42,14 +40,10 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
     const handleSave = async () => {
         setLoading(true);
         try {
-            const res = await commands.thinclawSaveBedrockCredentials(accessKeyId, secretAccessKey, region);
-            if (res.status === 'ok') {
-                await loadStatus();
-                await reloadSecrets().catch(() => { /* engine may be stopped */ });
-                toast.success('Bedrock credentials saved');
-            } else {
-                toast.error('Failed to save Bedrock credentials');
-            }
+            await commands.thinclawSaveBedrockCredentials(accessKeyId, secretAccessKey, region);
+            await loadStatus();
+            await reloadSecrets().catch(() => { /* engine may be stopped */ });
+            toast.success('Bedrock credentials saved');
         } finally {
             setLoading(false);
         }
@@ -58,18 +52,14 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
     const handleDelete = async () => {
         setLoading(true);
         try {
-            const res = await commands.thinclawSaveBedrockCredentials('', '', '');
-            if (res.status === 'ok') {
-                setAccessKeyId('');
-                setSecretAccessKey('');
-                setRegion('us-east-1');
-                setShowConfirm(false);
-                await loadStatus();
-                await reloadSecrets().catch(() => { /* engine may be stopped */ });
-                toast.success('Bedrock credentials deleted');
-            } else {
-                toast.error('Failed to delete Bedrock credentials');
-            }
+            await commands.thinclawSaveBedrockCredentials('', '', '');
+            setAccessKeyId('');
+            setSecretAccessKey('');
+            setRegion('us-east-1');
+            setShowConfirm(false);
+            await loadStatus();
+            await reloadSecrets().catch(() => { /* engine may be stopped */ });
+            toast.success('Bedrock credentials deleted');
         } finally {
             setLoading(false);
         }

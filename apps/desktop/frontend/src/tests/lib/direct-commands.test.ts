@@ -48,11 +48,8 @@ describe('directCommands', () => {
         const result = await directCommands.directRuntimeSnapshot();
 
         expect(mockInvoke).toHaveBeenCalledWith('direct_runtime_snapshot');
-        expect(result.status).toBe('ok');
-        if (result.status === 'ok') {
-            expect(result.data.supportedCapabilities).toEqual(['chat', 'embedding']);
-            expect(result.data.endpoint).not.toHaveProperty('apiKey');
-        }
+        expect(result.supportedCapabilities).toEqual(['chat', 'embedding']);
+        expect(result.endpoint).not.toHaveProperty('apiKey');
     });
 
     it('routes backend-owned Hugging Face capabilities', async () => {
@@ -95,13 +92,10 @@ describe('directCommands', () => {
             limit: 20,
         });
         expect(result).toEqual({
-            status: 'ok',
-            data: {
-                engine_id: 'llamacpp',
-                task: 'embedding',
-                models: [],
-                has_more: false,
-            },
+            engine_id: 'llamacpp',
+            task: 'embedding',
+            models: [],
+            has_more: false,
         });
     });
 
@@ -169,7 +163,7 @@ describe('directCommands', () => {
             repoId: plan.repo_id,
             task: 'vision',
         });
-        expect(result).toEqual({ status: 'ok', data: plan });
+        expect(result).toEqual(plan);
     });
 
     it('preserves a structured file-plan bridge failure', async () => {
@@ -180,16 +174,13 @@ describe('directCommands', () => {
         };
         mockInvoke.mockRejectedValueOnce(error);
 
-        const result = await directCommands.directRuntimeGetModelFilesV2(
-            'owner/model',
-            'chat',
-        );
+        const result = directCommands.directRuntimeGetModelFilesV2('owner/model', 'chat');
 
         expect(mockInvoke).toHaveBeenCalledWith('direct_runtime_get_model_files_v2', {
             repoId: 'owner/model',
             task: 'chat',
         });
-        expect(result).toEqual({ status: 'error', error });
+        await expect(result).rejects.toThrow('Hugging Face is unavailable');
     });
 
     it('passes a structured pinned artifact selection to the download command', async () => {

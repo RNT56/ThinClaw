@@ -3,7 +3,6 @@ import * as Progress from '@radix-ui/react-progress';
 import { cn } from "../../lib/utils";
 import { useModelContext } from "../model-context";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { commands } from "../../lib/bindings";
 import { commandClient } from "../../lib/command-client";
 import { bridgeErrorMessage } from "../../lib/command-errors";
 import { directCommands } from "../../lib/generated/direct-commands";
@@ -191,8 +190,7 @@ export function ModelBrowser() {
     useEffect(() => {
         const load = async () => {
             try {
-                const s = await commands.thinclawGetStatus();
-                if (s.status === 'ok') setStatus(s.data);
+                setStatus(await commandClient.thinclawGetStatus());
             } catch (e) {
                 console.error(e);
             }
@@ -649,7 +647,7 @@ export function ModelBrowser() {
                                     If a folder is empty, click download to restore the asset.
                                 </span>
                                 <button
-                                    onClick={() => commands.openStandardModelsFolder()}
+                                    onClick={() => commandClient.openStandardModelsFolder()}
                                     className="bg-background border border-border/50 hover:bg-accent hover:border-border text-foreground px-3 py-1.5 rounded-xl transition-all text-xs font-medium flex items-center shrink-0 ml-4 shadow-xs"
                                 >
                                     <FolderOpen className="w-3.5 h-3.5 mr-1.5" /> Open Folder
@@ -1123,7 +1121,7 @@ export function ModelBrowser() {
                                                     const modelId = model.id.split('-').slice(1).join('-');
                                                     // Propagate context window from discovery metadata
                                                     const contextSize = (model as any)._cloudMeta?.contextWindow ?? null;
-                                                    const cfg = await commands.getUserConfig();
+                                                    const cfg = await commandClient.getUserConfig();
                                                     const newConfig = {
                                                         ...cfg,
                                                         selected_chat_provider: brain,
@@ -1135,8 +1133,7 @@ export function ModelBrowser() {
                                                     await updateConfig(newConfig);
                                                     const providerName = brain === "gemini" ? "Google" : brain.charAt(0).toUpperCase() + brain.slice(1);
                                                     toast.success(`${model.name} selected as active ${providerName} Brain`);
-                                                    const s = await commands.thinclawGetStatus();
-                                                    if (s.status === 'ok') setStatus(s.data);
+                                                    setStatus(await commandClient.thinclawGetStatus());
                                                 } catch (e) {
                                                     toast.error("Failed to select cloud model");
                                                 }
