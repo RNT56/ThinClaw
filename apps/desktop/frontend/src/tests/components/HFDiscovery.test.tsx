@@ -103,13 +103,10 @@ function card(id: string, gated = false): HfModelCard {
 
 function okSearch(models: HfModelCard[], hasMore: boolean) {
     return {
-        status: "ok" as const,
-        data: {
-            engine_id: activeEngineId,
-            task: "chat" as const,
-            models,
-            has_more: hasMore,
-        },
+        engine_id: activeEngineId,
+        task: "chat" as const,
+        models,
+        has_more: hasMore,
     };
 }
 
@@ -142,15 +139,9 @@ beforeEach(() => {
         async () => [capability(activeEngineId)],
     );
     commandMocks.openUrl.mockResolvedValue(null);
-    commandMocks.getPlan.mockResolvedValue({
-        status: "error",
-        error: {
-            kind: "unauthorized",
-            message: "403 Forbidden: gated repo",
-            remediation: null,
-            retryable: true,
-        },
-    });
+    commandMocks.getPlan.mockRejectedValue(
+        new Error("403 Forbidden: gated repo"),
+    );
 });
 
 describe("HFDiscovery", () => {

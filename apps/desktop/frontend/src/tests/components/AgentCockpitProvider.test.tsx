@@ -43,7 +43,27 @@ describe('AgentCockpitProvider', () => {
 
     it('derives honest local and remote capability gates from the selected profile', async () => {
         api.getThinClawStatus.mockResolvedValue(status({
-            gateway_mode: 'remote',
+            // Desired/effective state is authoritative even when the legacy
+            // compatibility field disagrees.
+            gateway_mode: 'local',
+            gateway_state: {
+                desired: {
+                    kind: 'profile',
+                    profile_id: 'remote-profile',
+                    profile_revision: 2,
+                },
+                effective: {
+                    kind: 'profile',
+                    profile_id: 'remote-profile',
+                    profile_revision: 2,
+                    url: 'https://gateway.example',
+                },
+                phase: 'idle',
+                revision: 4,
+                in_sync: true,
+                attempt: 0,
+                last_error: null,
+            },
             engine_running: true,
             engine_connected: true,
         }));
@@ -70,6 +90,7 @@ describe('AgentCockpitProvider', () => {
 
     it('does not imply that a stopped local runtime is usable', async () => {
         api.getThinClawStatus.mockResolvedValue(status({
+            // Legacy payload compatibility: gateway_state was not present.
             gateway_mode: 'local',
             engine_running: false,
             engine_connected: false,

@@ -28,26 +28,14 @@ import {
 describe("local chat runtime dispatch", () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        runtimeCommands.ensureEngineReady.mockResolvedValue({
-            status: "ok",
-            data: null,
-        });
+        runtimeCommands.ensureEngineReady.mockResolvedValue(null);
         runtimeCommands.startEngine.mockResolvedValue({
-            status: "ok",
-            data: { port: 11434, token: "" },
+            port: 11434,
+            token: "",
         });
-        runtimeCommands.launchChatSidecar.mockResolvedValue({
-            status: "ok",
-            data: null,
-        });
-        runtimeCommands.stopChatServer.mockResolvedValue({
-            status: "ok",
-            data: null,
-        });
-        runtimeCommands.stopEngine.mockResolvedValue({
-            status: "ok",
-            data: null,
-        });
+        runtimeCommands.launchChatSidecar.mockResolvedValue(null);
+        runtimeCommands.stopChatServer.mockResolvedValue(null);
+        runtimeCommands.stopEngine.mockResolvedValue(null);
     });
 
     it("routes only llama.cpp through the GGUF sidecar", () => {
@@ -118,10 +106,9 @@ describe("local chat runtime dispatch", () => {
     });
 
     it("attempts both stops and reports every failure", async () => {
-        runtimeCommands.stopChatServer.mockResolvedValue({
-            status: "error",
-            error: { kind: "runtime", message: "sidecar failed" },
-        });
+        runtimeCommands.stopChatServer.mockRejectedValue(
+            new Error("sidecar failed"),
+        );
         runtimeCommands.stopEngine.mockRejectedValue(new Error("engine failed"));
 
         await expect(stopLocalChatRuntime()).rejects.toThrow(

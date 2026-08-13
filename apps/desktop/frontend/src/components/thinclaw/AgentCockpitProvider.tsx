@@ -38,9 +38,18 @@ function errorMessage(error: unknown): string {
 
 function sourceFor(status: thinclaw.ThinClawStatus | null): AgentCapabilityState['source'] {
     if (!status) return 'unknown';
-    if (status.gateway_state.effective.kind === 'profile') return 'remote';
-    if (status.gateway_state.effective.kind === 'local') return 'local';
-    return status.gateway_state.desired.kind === 'profile' ? 'remote' : 'local';
+    const effectiveKind = status.gateway_state?.effective?.kind;
+    if (effectiveKind === 'profile') return 'remote';
+    if (effectiveKind === 'local') return 'local';
+
+    const desiredKind = status.gateway_state?.desired?.kind;
+    if (desiredKind === 'profile') return 'remote';
+    if (desiredKind === 'local') return 'local';
+
+    // Older status payloads predate the revisioned desired/effective state.
+    // Keep their read-only cockpit usable while all switching mutations remain
+    // behind the new CAS command boundary.
+    return status.gateway_mode?.toLowerCase() === 'remote' ? 'remote' : 'local';
 }
 
 export function AgentCockpitProvider({ children, enabled = true }: { children: ReactNode; enabled?: boolean }) {

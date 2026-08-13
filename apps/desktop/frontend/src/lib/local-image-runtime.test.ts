@@ -13,13 +13,9 @@ describe("local image runtime", () => {
     });
 
     it("unwraps backend startup failures and does not report readiness", async () => {
-        const start = vi.fn().mockResolvedValue({
-            status: "error",
-            error: {
-                kind: "runtime",
-                message: "diffusion server failed",
-            },
-        });
+        const start = vi.fn().mockRejectedValue(
+            new Error("diffusion server failed"),
+        );
 
         await expect(startLocalImageRuntime({
             modelPath: "/models/diffusion",
@@ -29,10 +25,7 @@ describe("local image runtime", () => {
     });
 
     it("resolves only after the backend accepts startup", async () => {
-        const start = vi.fn().mockResolvedValue({
-            status: "ok",
-            data: null,
-        });
+        const start = vi.fn().mockResolvedValue(null);
 
         await expect(startLocalImageRuntime({
             modelPath: "/models/diffusion",

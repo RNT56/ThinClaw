@@ -22,35 +22,29 @@ describe('ThinClawChannelConfig', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         commands.thinclawChannelConfigSchemas.mockResolvedValue({
-            status: 'ok',
-            data: {
-                available: true,
-                schemas: [{
-                    channel_id: 'imessage',
-                    channel_name: 'iMessage',
-                    fields: [
-                        {
-                            id: 'allow_from',
-                            label: 'Allowed contacts',
-                            field_type: 'textarea',
-                            required: false,
-                            default_value: '+12025550100',
-                        },
-                        {
-                            id: 'poll_interval',
-                            label: 'Polling interval (seconds)',
-                            field_type: 'number',
-                            required: true,
-                            default_value: 3,
-                        },
-                    ],
-                }],
-            },
+            available: true,
+            schemas: [{
+                channel_id: 'imessage',
+                channel_name: 'iMessage',
+                fields: [
+                    {
+                        id: 'allow_from',
+                        label: 'Allowed contacts',
+                        field_type: 'textarea',
+                        required: false,
+                        default_value: '+12025550100',
+                    },
+                    {
+                        id: 'poll_interval',
+                        label: 'Polling interval (seconds)',
+                        field_type: 'number',
+                        required: true,
+                        default_value: 3,
+                    },
+                ],
+            }],
         });
-        commands.thinclawChannelConfigSubmit.mockResolvedValue({
-            status: 'ok',
-            data: { note: 'Saved' },
-        });
+        commands.thinclawChannelConfigSubmit.mockResolvedValue({ note: 'Saved' });
     });
 
     it('submits number fields as numbers and preserves current schema values', async () => {
@@ -71,16 +65,13 @@ describe('ThinClawChannelConfig', () => {
 
     it('renders host-managed channels without a misleading save action', async () => {
         commands.thinclawChannelConfigSchemas.mockResolvedValue({
-            status: 'ok',
-            data: {
-                available: true,
-                schemas: [{
-                    channel_id: 'apns',
-                    channel_name: 'Apns',
-                    fields: [],
-                    help: 'APNs signing identity is host-managed with APNS_PRIVATE_KEY.',
-                }],
-            },
+            available: true,
+            schemas: [{
+                channel_id: 'apns',
+                channel_name: 'Apns',
+                fields: [],
+                help: 'APNs signing identity is host-managed with APNS_PRIVATE_KEY.',
+            }],
         });
 
         render(<ThinClawChannelConfig />);
@@ -91,21 +82,18 @@ describe('ThinClawChannelConfig', () => {
 
     it('keeps manifest credentials opaque until encrypted secret binding is available', async () => {
         commands.thinclawChannelConfigSchemas.mockResolvedValue({
-            status: 'ok',
-            data: {
-                available: true,
-                schemas: [{
-                    channel_id: 'line',
-                    channel_name: 'Line',
-                    fields: [{
-                        id: 'line_channel_secret',
-                        label: 'Channel secret',
-                        field_type: 'password',
-                        required: true,
-                        default_value: null,
-                    }],
+            available: true,
+            schemas: [{
+                channel_id: 'line',
+                channel_name: 'Line',
+                fields: [{
+                    id: 'line_channel_secret',
+                    label: 'Channel secret',
+                    field_type: 'password',
+                    required: true,
+                    default_value: null,
                 }],
-            },
+            }],
         });
 
         render(<ThinClawChannelConfig />);
@@ -116,13 +104,10 @@ describe('ThinClawChannelConfig', () => {
 
     it('does not report persisted-but-not-forwarded settings as a full success', async () => {
         commands.thinclawChannelConfigSubmit.mockResolvedValue({
-            status: 'ok',
-            data: {
-                ok: false,
-                persisted: true,
-                forwarded: false,
-                note: 'Settings were saved and will apply when the channel starts.',
-            },
+            ok: false,
+            persisted: true,
+            forwarded: false,
+            note: 'Settings were saved and will apply when the channel starts.',
         });
 
         render(<ThinClawChannelConfig />);
