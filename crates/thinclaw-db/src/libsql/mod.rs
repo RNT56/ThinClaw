@@ -96,12 +96,21 @@ pub struct LibSqlBackend {
 impl LibSqlBackend {
     /// Create a new local embedded database.
     pub async fn new_local(path: &Path) -> Result<Self, DatabaseError> {
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            prepare_database_directory(parent).map_err(|e| {
                 DatabaseError::Pool(format!("Failed to create database directory: {}", e))
             })?;
         }
+
+        if !path.exists() {
+            thinclaw_platform::write_private_file_atomic(path, b"", false).map_err(|e| {
+                DatabaseError::Pool(format!("Failed to create private database file: {e}"))
+            })?;
+        }
+        harden_database_artifacts(path)?;
 
         let db = libsql::Builder::new_local(path)
             .build()
@@ -143,16 +152,28 @@ impl LibSqlBackend {
         url: &str,
         auth_token: &str,
     ) -> Result<Self, DatabaseError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            prepare_database_directory(parent).map_err(|e| {
                 DatabaseError::Pool(format!("Failed to create database directory: {}", e))
             })?;
         }
+
+        // Validate an existing replica before the driver opens it. This does
+        // not pre-create the main file (the replication builder owns initial
+        // creation and its WAL index), but it rejects planted symlinks.
+        harden_database_artifacts(path)?;
 
         let db = libsql::Builder::new_remote_replica(path, url.to_string(), auth_token.to_string())
             .build()
             .await
             .map_err(|e| DatabaseError::Pool(format!("Failed to open remote replica: {}", e)))?;
+
+        // The replication builder owns initial creation (including its WAL
+        // index); harden only after it has established a valid replica.
+        harden_database_artifacts(path)?;
 
         Ok(Self {
             db: Arc::new(db),
@@ -219,6 +240,9 @@ impl LibSqlBackend {
             .next()
             .await
             .map_err(|e| DatabaseError::Pool(format!("Failed to confirm busy_timeout: {}", e)))?;
+        if let Some(path) = &self.file_path {
+            harden_database_artifacts(path)?;
+        }
         Ok(conn)
     }
 }
@@ -472,7 +496,7 @@ impl Database for LibSqlBackend {
 
         // Ensure destination parent directory exists
         if let Some(parent) = dest.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            prepare_database_directory(parent).map_err(|e| {
                 DatabaseError::Pool(format!(
                     "Failed to create snapshot directory {}: {}",
                     parent.display(),
@@ -481,11 +505,25 @@ impl Database for LibSqlBackend {
             })?;
         }
 
-        // Copy the database file
-        let bytes = tokio::fs::copy(db_path, dest).await.map_err(|e| {
+        // Publish the database through a private sibling stage so an
+        // interrupted copy never leaves a partial snapshot at `dest`.
+        let bytes = thinclaw_platform::copy_private_file_atomic_async(
+            db_path.clone(),
+            dest.to_path_buf(),
+            true,
+        )
+        .await
+        .map_err(|e| {
             DatabaseError::Pool(format!(
                 "Failed to copy database {} → {}: {}",
                 db_path.display(),
+                dest.display(),
+                e
+            ))
+        })?;
+        thinclaw_platform::harden_private_regular_file(dest).map_err(|e| {
+            DatabaseError::Pool(format!(
+                "Failed to harden database snapshot {}: {}",
                 dest.display(),
                 e
             ))
@@ -503,6 +541,39 @@ impl Database for LibSqlBackend {
 
     fn db_path(&self) -> Option<&std::path::Path> {
         self.file_path.as_deref()
+    }
+}
+
+fn harden_database_artifacts(path: &Path) -> Result<(), DatabaseError> {
+    for suffix in ["", "-wal", "-shm", "-journal", "-client_wal_index"] {
+        let artifact = if suffix.is_empty() {
+            path.to_path_buf()
+        } else {
+            let mut value = path.as_os_str().to_os_string();
+            value.push(suffix);
+            value.into()
+        };
+        thinclaw_platform::harden_private_regular_file(&artifact).map_err(|error| {
+            DatabaseError::Pool(format!(
+                "Failed to harden database state {}: {}",
+                artifact.display(),
+                error
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn prepare_database_directory(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
+            std::io::Error::other("database parent is not a real directory"),
+        ),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            thinclaw_platform::ensure_private_directory(path)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -760,6 +831,32 @@ mod tests {
         assert_eq!(timeout, 5000);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_database_and_sidecars_are_owner_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("private.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+        backend.connect().await.unwrap();
+
+        for suffix in ["", "-wal", "-shm", "-journal", "-client_wal_index"] {
+            let mut artifact = db_path.as_os_str().to_os_string();
+            artifact.push(suffix);
+            let artifact = std::path::PathBuf::from(artifact);
+            if artifact.exists() {
+                assert_eq!(
+                    std::fs::metadata(&artifact).unwrap().permissions().mode() & 0o777,
+                    0o600,
+                    "{}",
+                    artifact.display()
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_concurrent_connects_set_busy_timeout() {
         let dir = tempfile::tempdir().unwrap();
@@ -858,6 +955,14 @@ mod tests {
         let bytes = backend.snapshot(&snap_path).await.unwrap();
         assert!(bytes > 0, "Snapshot should have non-zero size");
         assert!(snap_path.exists(), "Snapshot file should exist");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&snap_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
 
         // Open the snapshot and verify data survived
         let snap_backend = LibSqlBackend::new_local(&snap_path).await.unwrap();

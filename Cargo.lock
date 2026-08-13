@@ -8346,6 +8346,7 @@ dependencies = [
  "thinclaw-experiments",
  "thinclaw-history",
  "thinclaw-identity",
+ "thinclaw-platform",
  "thinclaw-repo-projects",
  "thinclaw-types",
  "thinclaw-workspace",

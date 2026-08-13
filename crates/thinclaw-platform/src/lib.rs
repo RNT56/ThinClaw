@@ -16,11 +16,12 @@ pub use artifact_publish::{
     recover_file_pair_sync, remove_file_pair, remove_file_pair_sync,
 };
 pub use fs::{
-    append_private_file_locked, append_private_file_locked_async, read_regular_file_bounded,
-    read_regular_file_bounded_async, read_regular_file_bounded_single_link,
-    read_regular_file_bounded_single_link_async, rename_no_replace, replace_path_atomic,
-    write_private_file_atomic, write_private_file_atomic_async, write_regular_file_atomic,
-    write_regular_file_atomic_async,
+    append_private_file_locked, append_private_file_locked_async, copy_private_file_atomic,
+    copy_private_file_atomic_async, ensure_private_directory, harden_private_regular_file,
+    read_regular_file_bounded, read_regular_file_bounded_async,
+    read_regular_file_bounded_single_link, read_regular_file_bounded_single_link_async,
+    rename_no_replace, replace_path_atomic, write_private_file_atomic,
+    write_private_file_atomic_async, write_regular_file_atomic, write_regular_file_atomic_async,
 };
 pub use paths::{
     StatePaths, expand_home_dir, instance_id_path, read_instance_id, resolve_data_dir,

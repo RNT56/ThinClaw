@@ -61,9 +61,11 @@ impl RuntimeLease {
                 });
             }
         }
-        std::fs::create_dir_all(&state_dir).map_err(|source| RuntimeLeaseError::Prepare {
-            path: state_dir.clone(),
-            source,
+        crate::platform::ensure_private_directory(&state_dir).map_err(|source| {
+            RuntimeLeaseError::Prepare {
+                path: state_dir.clone(),
+                source,
+            }
         })?;
         let state_metadata =
             std::fs::symlink_metadata(&state_dir).map_err(|source| RuntimeLeaseError::Prepare {
@@ -134,6 +136,15 @@ impl RuntimeLease {
                 path: lock_path,
                 source: std::io::Error::other("runtime lock is not a regular file"),
             });
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|source| RuntimeLeaseError::Prepare {
+                    path: lock_path.clone(),
+                    source,
+                })?;
         }
         match FileExt::try_lock(&file) {
             Ok(()) => {}
@@ -253,9 +264,22 @@ fn open_operation_lock(state_dir: &Path) -> Result<File, RuntimeLeaseError> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    options
+    let file = options
         .open(&path)
-        .map_err(|source| RuntimeLeaseError::Prepare { path, source })
+        .map_err(|source| RuntimeLeaseError::Prepare {
+            path: path.clone(),
+            source,
+        })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|source| RuntimeLeaseError::Prepare {
+                path: path.clone(),
+                source,
+            })?;
+    }
+    Ok(file)
 }
 
 pub fn runtime_scope_id_for_path(path: &Path) -> String {
@@ -281,6 +305,12 @@ fn load_or_create_scope_id(state_dir: &Path) -> Result<String, RuntimeLeaseError
     let path = state_dir.join(".runtime-scope-id");
     match thinclaw_platform::read_regular_file_bounded(&path, 128) {
         Ok(bytes) => {
+            crate::platform::harden_private_regular_file(&path).map_err(|source| {
+                RuntimeLeaseError::Identity {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
             let value = String::from_utf8(bytes).map_err(|source| RuntimeLeaseError::Identity {
                 path: path.clone(),
                 source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
@@ -317,6 +347,24 @@ mod tests {
     fn lease_excludes_a_second_runtime_and_scope_is_stable() {
         let temp = tempfile::tempdir().unwrap();
         let first = RuntimeLease::acquire(temp.path()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            for file in [".runtime.lock", ".runtime-scope-id"] {
+                assert_eq!(
+                    std::fs::metadata(temp.path().join(file))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+        }
         assert!(matches!(
             RuntimeLease::acquire(temp.path()),
             Err(RuntimeLeaseError::AlreadyRunning { .. })

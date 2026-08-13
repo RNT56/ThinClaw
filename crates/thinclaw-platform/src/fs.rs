@@ -412,6 +412,85 @@ pub async fn write_private_file_atomic_async(
         .map_err(|error| std::io::Error::other(format!("atomic file writer panicked: {error}")))?
 }
 
+/// Copy a regular file into an owner-private sibling stage and publish it
+/// atomically. Neither endpoint follows a final-component symlink, and an
+/// interrupted copy leaves the previous destination intact.
+pub fn copy_private_file_atomic(
+    source: &Path,
+    destination: &Path,
+    replace_existing: bool,
+) -> std::io::Result<u64> {
+    let mut source_file = open_regular_file_nofollow(source)?;
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_metadata = std::fs::symlink_metadata(parent)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(std::io::Error::other(
+            "atomic copy target parent is not a real directory",
+        ));
+    }
+    match std::fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(std::io::Error::other(
+                "atomic copy target is not a regular file",
+            ));
+        }
+        Ok(_) if !replace_existing => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "atomic copy target already exists",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let stage = parent.join(format!(
+        ".thinclaw-copy-{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let result = (|| -> std::io::Result<u64> {
+        let mut stage_file = options.open(&stage)?;
+        let bytes = std::io::copy(&mut source_file, &mut stage_file)?;
+        stage_file.sync_all()?;
+        drop(stage_file);
+        if replace_existing {
+            replace_path_atomic(&stage, destination)?;
+        } else {
+            rename_no_replace(&stage, destination)?;
+        }
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(bytes)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&stage);
+    }
+    result
+}
+
+pub async fn copy_private_file_atomic_async(
+    source: PathBuf,
+    destination: PathBuf,
+    replace_existing: bool,
+) -> std::io::Result<u64> {
+    tokio::task::spawn_blocking(move || {
+        copy_private_file_atomic(&source, &destination, replace_existing)
+    })
+    .await
+    .map_err(|error| std::io::Error::other(format!("atomic file copier panicked: {error}")))?
+}
+
 /// Crash-safely publish ordinary file contents without following a final
 /// symlink. Existing file permissions are preserved; newly created files use
 /// the process umask rather than the owner-private policy used for secrets.
@@ -745,6 +824,34 @@ mod tests {
     }
 
     #[test]
+    fn atomic_private_copy_publishes_complete_contents() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::write(&source, b"complete snapshot").unwrap();
+        std::fs::write(&destination, b"old snapshot").unwrap();
+
+        let copied = copy_private_file_atomic(&source, &destination, true).unwrap();
+        assert_eq!(copied, 17);
+        assert_eq!(std::fs::read(destination).unwrap(), b"complete snapshot");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_private_copy_rejects_symlink_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let destination = temp.path().join("destination");
+        std::fs::write(&source, b"snapshot").unwrap();
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, &destination).unwrap();
+
+        assert!(copy_private_file_atomic(&source, &destination, true).is_err());
+        assert_eq!(std::fs::read(target).unwrap(), b"keep");
+    }
+
+    #[test]
     fn locked_appender_enforces_file_limit() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("events.jsonl");
@@ -820,4 +927,84 @@ mod tests {
         assert!(write_regular_file_atomic(&link, b"replacement", true).is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"secret");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_state_helpers_harden_modes_and_reject_symlinks() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("state");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_private_directory(&directory).unwrap();
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let file = directory.join("state.db");
+        std::fs::write(&file, b"state").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        harden_private_regular_file(&file).unwrap();
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let link = temp.path().join("state-link");
+        std::os::unix::fs::symlink(&directory, &link).unwrap();
+        assert!(ensure_private_directory(&link).is_err());
+    }
+}
+/// Create (or validate) a state directory and make it owner-private. The final
+/// component must be a real directory; symlinks and non-directory targets are
+/// rejected so security-sensitive state cannot be redirected unexpectedly.
+pub fn ensure_private_directory(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(std::io::Error::other(
+                "private state path is not a real directory",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(path)?;
+            let metadata = std::fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(std::io::Error::other(
+                    "private state path is not a real directory",
+                ));
+            }
+        }
+        Err(error) => return Err(error),
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Validate an existing state file and make it readable/writable only by its
+/// owner. Missing files are allowed so callers can harden optional sidecars.
+pub fn harden_private_regular_file(path: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(std::io::Error::other(
+            "private state file is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }

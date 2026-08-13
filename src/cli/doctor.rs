@@ -29,6 +29,8 @@ pub async fn run_doctor_command(
 
     check("Workspace directory", check_workspace_dir(), &mut checks);
 
+    check("State permissions", check_state_permissions(), &mut checks);
+
     // ── Linux readiness checks ────────────────────────────────
 
     let linux = crate::platform::linux_readiness_report(linux_profile).await;
@@ -331,6 +333,91 @@ fn check_workspace_dir() -> CheckResult {
     }
 }
 
+fn check_state_permissions() -> CheckResult {
+    let state_dir = crate::platform::resolve_data_dir("");
+    let database = std::env::var("LIBSQL_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| crate::config::default_libsql_path());
+    let approvals = crate::platform::resolve_data_dir("mobile").join("pending-approvals.json");
+
+    let mut paths = vec![(state_dir, true), (database.clone(), false)];
+    for suffix in ["-wal", "-shm", "-journal", "-client_wal_index"] {
+        let mut sidecar = database.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        paths.push((sidecar.into(), false));
+    }
+    paths.push((approvals.clone(), false));
+
+    let mut checked = Vec::new();
+    for (path, directory) in paths {
+        match private_path_problem(&path, directory) {
+            Ok(true) => checked.push(path),
+            Ok(false) => {}
+            Err(error) => {
+                return CheckResult::Fail(format!("{}: {error}", path.display()));
+            }
+        }
+    }
+
+    if approvals.exists() {
+        match crate::platform::read_regular_file_bounded_single_link(&approvals, 8 * 1024 * 1024)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)
+                    .map(|_| ())
+                    .map_err(|error| format!("invalid approval store: {error}"))
+            }) {
+            Ok(()) => {}
+            Err(error) => {
+                return CheckResult::Fail(format!("{}: {error}", approvals.display()));
+            }
+        }
+    }
+
+    CheckResult::Pass(if checked.is_empty() {
+        "private state paths do not exist yet; they will be created owner-only".to_string()
+    } else {
+        format!("{} private state path(s) are owner-only", checked.len())
+    })
+}
+
+/// `Ok(false)` means the optional path is absent. Existing paths must be real
+/// directories/files and expose no group/other permission bits on Unix.
+fn private_path_problem(path: &std::path::Path, directory: bool) -> Result<bool, String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    if metadata.file_type().is_symlink()
+        || (directory && !metadata.is_dir())
+        || (!directory && !metadata.is_file())
+    {
+        return Err(format!(
+            "expected a real {} (symlinks are not allowed)",
+            if directory {
+                "directory"
+            } else {
+                "regular file"
+            }
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = metadata.permissions().mode() & 0o777;
+        let required_owner_bits = if directory { 0o700 } else { 0o600 };
+        if mode & 0o077 != 0 || mode & required_owner_bits != required_owner_bits {
+            return Err(format!(
+                "permissions {mode:o} are not owner-private and usable; run `chmod {} {}`",
+                if directory { "700" } else { "600" },
+                path.display()
+            ));
+        }
+    }
+    Ok(true)
+}
+
 fn check_binary(name: &str, args: &[&str]) -> CheckResult {
     let mut command = thinclaw_platform::std_process_command!("src.cli.doctor.std.1", name);
     command.args(args);
@@ -398,6 +485,21 @@ mod tests {
         match result {
             CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_state_permission_probe_rejects_group_access() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(private_path_problem(&path, true).is_err());
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(private_path_problem(&path, true).unwrap(), true);
     }
 
     #[tokio::test]
