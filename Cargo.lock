@@ -8334,7 +8334,6 @@ dependencies = [
  "chrono-tz",
  "deadpool-postgres",
  "libsql",
- "pgvector",
  "refinery",
  "rust_decimal",
  "rustls",

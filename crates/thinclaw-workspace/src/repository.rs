@@ -13,6 +13,7 @@ use uuid::Uuid;
 use thinclaw_types::error::WorkspaceError;
 
 use crate::document::{MemoryChunk, MemoryDocument, WorkspaceEntry};
+use crate::postgres_vector::{search_postgres_vectors, validate_embedding_with_model};
 use crate::search::{
     RankedResult, SearchConfig, SearchResult, apply_temporal_decay, expand_query_keywords,
     mmr_rerank, reciprocal_rank_fusion,
@@ -414,18 +415,32 @@ impl Repository {
         chunk_index: i32,
         content: &str,
         embedding: Option<&[f32]>,
+        embedding_model: Option<&str>,
     ) -> Result<Uuid, WorkspaceError> {
+        if let Some(embedding) = embedding {
+            validate_embedding_with_model(embedding, embedding_model)?;
+        }
         let conn = self.conn().await?;
         let id = Uuid::new_v4();
 
         let embedding_vec = embedding.map(|e| Vector::from(e.to_vec()));
+        let stored_model = embedding.and(embedding_model);
 
         conn.execute(
             r#"
-            INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO memory_chunks (
+                id, document_id, chunk_index, content, embedding, embedding_model
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
             "#,
-            &[&id, &document_id, &chunk_index, &content, &embedding_vec],
+            &[
+                &id,
+                &document_id,
+                &chunk_index,
+                &content,
+                &embedding_vec,
+                &stored_model,
+            ],
         )
         .await
         .map_err(|e| WorkspaceError::ChunkingFailed {
@@ -444,7 +459,13 @@ impl Repository {
         &self,
         document_id: Uuid,
         chunks: &[(i32, String, Option<Vec<f32>>)],
+        embedding_model: Option<&str>,
     ) -> Result<(), WorkspaceError> {
+        for (_, _, embedding) in chunks {
+            if let Some(embedding) = embedding {
+                validate_embedding_with_model(embedding, embedding_model)?;
+            }
+        }
         let mut conn = self.conn().await?;
         let tx = conn
             .transaction()
@@ -465,11 +486,20 @@ impl Repository {
         for (index, content, embedding) in chunks {
             let chunk_id = Uuid::new_v4();
             let embedding_vec = embedding.as_ref().map(|e| Vector::from(e.clone()));
+            let stored_model = embedding.as_ref().and(embedding_model);
             let content_str: &str = content;
             tx.execute(
-                r#"INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
-                   VALUES ($1, $2, $3, $4, $5)"#,
-                &[&chunk_id, &document_id, index, &content_str, &embedding_vec],
+                r#"INSERT INTO memory_chunks (
+                       id, document_id, chunk_index, content, embedding, embedding_model
+                   ) VALUES ($1, $2, $3, $4, $5, $6)"#,
+                &[
+                    &chunk_id,
+                    &document_id,
+                    index,
+                    &content_str,
+                    &embedding_vec,
+                    &stored_model,
+                ],
             )
             .await
             .map_err(|e| WorkspaceError::ChunkingFailed {
@@ -494,7 +524,13 @@ impl Repository {
         document_id: Uuid,
         expected_content: &str,
         chunks: &[(i32, String, Option<Vec<f32>>)],
+        embedding_model: Option<&str>,
     ) -> Result<bool, WorkspaceError> {
+        for (_, _, embedding) in chunks {
+            if let Some(embedding) = embedding {
+                validate_embedding_with_model(embedding, embedding_model)?;
+            }
+        }
         let mut conn = self.conn().await?;
         let tx = conn
             .transaction()
@@ -537,10 +573,19 @@ impl Repository {
         for (index, content, embedding) in chunks {
             let chunk_id = Uuid::new_v4();
             let embedding_vec = embedding.as_ref().map(|value| Vector::from(value.clone()));
+            let stored_model = embedding.as_ref().and(embedding_model);
             tx.execute(
-                r#"INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
-                   VALUES ($1, $2, $3, $4, $5)"#,
-                &[&chunk_id, &document_id, index, &content, &embedding_vec],
+                r#"INSERT INTO memory_chunks (
+                       id, document_id, chunk_index, content, embedding, embedding_model
+                   ) VALUES ($1, $2, $3, $4, $5, $6)"#,
+                &[
+                    &chunk_id,
+                    &document_id,
+                    index,
+                    &content,
+                    &embedding_vec,
+                    &stored_model,
+                ],
             )
             .await
             .map_err(|e| WorkspaceError::ChunkingFailed {
@@ -570,13 +615,15 @@ impl Repository {
         &self,
         chunk_id: Uuid,
         embedding: &[f32],
+        embedding_model: &str,
     ) -> Result<(), WorkspaceError> {
+        validate_embedding_with_model(embedding, Some(embedding_model))?;
         let conn = self.conn().await?;
         let embedding_vec = Vector::from(embedding.to_vec());
 
         conn.execute(
-            "UPDATE memory_chunks SET embedding = $2 WHERE id = $1",
-            &[&chunk_id, &embedding_vec],
+            "UPDATE memory_chunks SET embedding = $2, embedding_model = $3 WHERE id = $1",
+            &[&chunk_id, &embedding_vec, &embedding_model],
         )
         .await
         .map_err(|e| WorkspaceError::EmbeddingFailed {
@@ -587,12 +634,20 @@ impl Repository {
     }
 
     /// Get chunks without embeddings for backfilling.
-    pub async fn get_chunks_without_embeddings(
+    pub async fn get_chunks_requiring_embedding(
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
+        embedding_model: &str,
+        embedding_dimension: usize,
         limit: usize,
     ) -> Result<Vec<MemoryChunk>, WorkspaceError> {
+        crate::postgres_vector::validate_embedding_model(Some(embedding_model))?;
+        crate::postgres_vector::validate_embedding_dimension(embedding_dimension)?;
+        let embedding_dimension =
+            i32::try_from(embedding_dimension).map_err(|_| WorkspaceError::EmbeddingFailed {
+                reason: "embedding dimension does not fit PostgreSQL metadata".to_string(),
+            })?;
         let conn = self.conn().await?;
 
         let rows = conn
@@ -602,12 +657,18 @@ impl Repository {
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
                 WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
-                  AND c.embedding IS NULL
-                LIMIT $3
+                  AND (
+                      c.embedding IS NULL
+                      OR vector_dims(c.embedding) <> $3
+                      OR c.embedding_model IS DISTINCT FROM $4
+                  )
+                LIMIT $5
                 "#,
                 &[
                     &user_id,
                     &agent_id,
+                    &embedding_dimension,
+                    &embedding_model,
                     &(limit.min(MAX_CHUNK_BACKFILL_RESULTS) as i64),
                 ],
             )
@@ -641,6 +702,7 @@ impl Repository {
         agent_id: Option<Uuid>,
         query: &str,
         embedding: Option<&[f32]>,
+        embedding_model: Option<&str>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
         let config = config
@@ -679,6 +741,7 @@ impl Repository {
                     user_id,
                     agent_id,
                     embedding,
+                    embedding_model,
                     config.pre_fusion_limit,
                     need_embeddings,
                     &config.path_prefixes,
@@ -788,92 +851,23 @@ impl Repository {
         user_id: &str,
         agent_id: Option<Uuid>,
         embedding: &[f32],
+        embedding_model: Option<&str>,
         limit: usize,
         include_embeddings: bool,
         path_prefixes: &[String],
     ) -> Result<Vec<RankedResult>, WorkspaceError> {
         let conn = self.conn().await?;
-        let embedding_vec = Vector::from(embedding.to_vec());
-
-        // When MMR is enabled we also need the raw embedding vectors.
-        let query_sql = if include_embeddings {
-            r#"
-            SELECT c.id as chunk_id, c.document_id, d.path, c.content,
-                   1 - (c.embedding <=> $3) as similarity,
-                   d.updated_at AS created_at, c.embedding
-            FROM memory_chunks c
-            JOIN memory_documents d ON d.id = c.document_id
-            WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
-              AND c.embedding IS NOT NULL
-              AND (
-                  cardinality($5::text[]) = 0 OR EXISTS (
-                      SELECT 1 FROM unnest($5::text[]) AS allowed(prefix)
-                      WHERE d.path = allowed.prefix
-                         OR left(d.path, length(allowed.prefix) + 1) = allowed.prefix || '/'
-                  )
-              )
-            ORDER BY c.embedding <=> $3
-            LIMIT $4
-            "#
-        } else {
-            r#"
-            SELECT c.id as chunk_id, c.document_id, d.path, c.content,
-                   1 - (c.embedding <=> $3) as similarity,
-                   d.updated_at AS created_at
-            FROM memory_chunks c
-            JOIN memory_documents d ON d.id = c.document_id
-            WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
-              AND c.embedding IS NOT NULL
-              AND (
-                  cardinality($5::text[]) = 0 OR EXISTS (
-                      SELECT 1 FROM unnest($5::text[]) AS allowed(prefix)
-                      WHERE d.path = allowed.prefix
-                         OR left(d.path, length(allowed.prefix) + 1) = allowed.prefix || '/'
-                  )
-              )
-            ORDER BY c.embedding <=> $3
-            LIMIT $4
-            "#
-        };
-
-        let rows = conn
-            .query(
-                query_sql,
-                &[
-                    &user_id,
-                    &agent_id,
-                    &embedding_vec,
-                    &(limit as i64),
-                    &path_prefixes,
-                ],
-            )
-            .await
-            .map_err(|e| WorkspaceError::SearchFailed {
-                reason: format!("Vector query failed: {}", e),
-            })?;
-
-        Ok(rows
-            .iter()
-            .enumerate()
-            .map(|(i, row)| {
-                let emb = if include_embeddings {
-                    row.try_get::<_, Vector>("embedding")
-                        .ok()
-                        .map(|v| v.to_vec())
-                } else {
-                    None
-                };
-                RankedResult {
-                    chunk_id: row.get("chunk_id"),
-                    document_id: row.get("document_id"),
-                    path: row.get("path"),
-                    content: row.get("content"),
-                    rank: (i + 1) as u32,
-                    created_at: row.get("created_at"),
-                    embedding: emb,
-                }
-            })
-            .collect())
+        search_postgres_vectors(
+            &**conn,
+            user_id,
+            agent_id,
+            embedding,
+            embedding_model,
+            limit,
+            include_embeddings,
+            path_prefixes,
+        )
+        .await
     }
 }
 
@@ -969,16 +963,26 @@ impl crate::WorkspaceStore for Repository {
         chunk_index: i32,
         content: &str,
         embedding: Option<&[f32]>,
+        embedding_model: Option<&str>,
     ) -> Result<Uuid, WorkspaceError> {
-        Repository::insert_chunk(self, document_id, chunk_index, content, embedding).await
+        Repository::insert_chunk(
+            self,
+            document_id,
+            chunk_index,
+            content,
+            embedding,
+            embedding_model,
+        )
+        .await
     }
 
     async fn replace_chunks(
         &self,
         document_id: Uuid,
         chunks: &[(i32, String, Option<Vec<f32>>)],
+        embedding_model: Option<&str>,
     ) -> Result<(), WorkspaceError> {
-        Repository::replace_chunks(self, document_id, chunks).await
+        Repository::replace_chunks(self, document_id, chunks, embedding_model).await
     }
 
     async fn replace_chunks_if_current(
@@ -986,25 +990,44 @@ impl crate::WorkspaceStore for Repository {
         document_id: Uuid,
         expected_content: &str,
         chunks: &[(i32, String, Option<Vec<f32>>)],
+        embedding_model: Option<&str>,
     ) -> Result<bool, WorkspaceError> {
-        Repository::replace_chunks_if_current(self, document_id, expected_content, chunks).await
+        Repository::replace_chunks_if_current(
+            self,
+            document_id,
+            expected_content,
+            chunks,
+            embedding_model,
+        )
+        .await
     }
 
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
         embedding: &[f32],
+        embedding_model: &str,
     ) -> Result<(), WorkspaceError> {
-        Repository::update_chunk_embedding(self, chunk_id, embedding).await
+        Repository::update_chunk_embedding(self, chunk_id, embedding, embedding_model).await
     }
 
-    async fn get_chunks_without_embeddings(
+    async fn get_chunks_requiring_embedding(
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
+        embedding_model: &str,
+        embedding_dimension: usize,
         limit: usize,
     ) -> Result<Vec<MemoryChunk>, WorkspaceError> {
-        Repository::get_chunks_without_embeddings(self, user_id, agent_id, limit).await
+        Repository::get_chunks_requiring_embedding(
+            self,
+            user_id,
+            agent_id,
+            embedding_model,
+            embedding_dimension,
+            limit,
+        )
+        .await
     }
 
     async fn hybrid_search(
@@ -1013,8 +1036,18 @@ impl crate::WorkspaceStore for Repository {
         agent_id: Option<Uuid>,
         query: &str,
         embedding: Option<&[f32]>,
+        embedding_model: Option<&str>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
-        Repository::hybrid_search(self, user_id, agent_id, query, embedding, config).await
+        Repository::hybrid_search(
+            self,
+            user_id,
+            agent_id,
+            query,
+            embedding,
+            embedding_model,
+            config,
+        )
+        .await
     }
 }

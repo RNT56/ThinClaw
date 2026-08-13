@@ -747,12 +747,20 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     embedding F32_BLOB(1536),
     embedding_blob BLOB,
     embedding_dim INTEGER,
+    embedding_model TEXT CHECK (
+        embedding_model IS NULL OR (
+            length(embedding_model) BETWEEN 1 AND 512
+        )
+    ),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (document_id, chunk_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_document ON memory_chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding_dim ON memory_chunks(embedding_dim);
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding_profile
+    ON memory_chunks(embedding_model, embedding_dim)
+    WHERE embedding_blob IS NOT NULL;
 
 -- Vector index for semantic search (libSQL native)
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding
@@ -1935,6 +1943,17 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         version: 33,
         description: "Index subagent runs by owner and spawn time",
         sql: "CREATE INDEX IF NOT EXISTS idx_subagent_runs_owner_spawned ON subagent_runs(principal_id, actor_id, spawned_at DESC)",
+    },
+    // ── V34: model-aware flexible embeddings ───────────────────────────
+    LibsqlColumnUpgrade {
+        version: 34,
+        description: "Add embedding model identity",
+        sql: "ALTER TABLE memory_chunks ADD COLUMN embedding_model TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 34,
+        description: "Index embedding model and dimension",
+        sql: "CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding_profile ON memory_chunks(embedding_model, embedding_dim) WHERE embedding_blob IS NOT NULL",
     },
 ];
 

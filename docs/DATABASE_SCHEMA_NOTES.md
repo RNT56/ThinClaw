@@ -12,8 +12,12 @@ This file tracks intentional schema differences between PostgreSQL and libSQL.
 4. PostgreSQL migration bookkeeping uses `refinery_schema_history`; libSQL uses `_migrations`.
 5. PostgreSQL `memory_chunks.content_tsv` generated column does not exist in libSQL.
 6. Vector storage differs:
-- PostgreSQL uses `VECTOR(...)`
-- libSQL uses `BLOB`-based embeddings with compatibility columns
+- PostgreSQL uses a flexible `VECTOR` column plus dimension-specific partial
+  HNSW expression indexes.
+- libSQL uses `BLOB`-based canonical embeddings and a 1536-dimension native
+  vector index; other dimensions use bounded exact search.
+- Both backends store `embedding_model` and filter by model and dimension. See
+  [PostgreSQL vector search](POSTGRES_VECTOR_SEARCH.md).
 
 ## Enforcement
 
@@ -22,4 +26,3 @@ Schema drift checks run in `tests/schema_divergence.rs` and apply the machine-re
 - `tests/schema_divergence_allowlist.json`
 
 Any new intentional divergence should be documented here and added to the allowlist in the same change.
-

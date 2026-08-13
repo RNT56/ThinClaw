@@ -12,6 +12,7 @@ name: Nightly
 #   - nightly-network-smoke: outbound network (hits https://api.telegram.org).
 #   - nightly-heartbeat     : a Postgres service + DATABASE_URL + an LLM key secret;
 #                            the whole job is gated on the LLM key being present.
+#   - nightly-vector-bench  : a Postgres + pgvector service; no external credentials.
 #
 # Intentionally NOT run here:
 #   - tests/desktop_autonomy_live_smoke.rs `*_live_desktop_smoke` (×6): need a real
@@ -129,3 +130,49 @@ jobs:
       - name: Skip notice (no LLM key)
         if: ${{ env.ANTHROPIC_API_KEY == '' }}
         run: echo "ANTHROPIC_API_KEY secret not set; skipping heartbeat integration test."
+
+  nightly-vector-bench:
+    name: Nightly PostgreSQL Vector Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: thinclaw
+          POSTGRES_PASSWORD: thinclaw
+          POSTGRES_DB: thinclaw_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U thinclaw -d thinclaw_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_BACKEND: postgres
+      DATABASE_URL: postgres://thinclaw:thinclaw@localhost:5432/thinclaw_test
+      THINCLAW_REQUIRE_POSTGRES_INTEGRATION: "1"
+      THINCLAW_VECTOR_BENCH_DIMENSIONS: "384,1536,3072"
+      THINCLAW_VECTOR_BENCH_ROW_COUNTS: "1000,10000"
+      THINCLAW_VECTOR_BENCH_MIN_SPEEDUP: "1.25"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: nightly-vector-bench
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Enable pgvector extension
+        run: PGPASSWORD=thinclaw psql -h localhost -U thinclaw -d thinclaw_test -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      - name: Compare production ANN plans with exact scans
+        run: >-
+          cargo test --locked --test workspace_integration
+          --no-default-features --features postgres
+          benchmark_postgres_vector_ann_against_exact_scan
+          -- --ignored --nocapture --test-threads=1

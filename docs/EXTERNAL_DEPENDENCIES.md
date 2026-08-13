@@ -663,6 +663,10 @@ createdb thinclaw
 psql thinclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
+ThinClaw's indexed flexible-dimension workspace search requires pgvector 0.7.0
+or newer. See [PostgreSQL vector search](POSTGRES_VECTOR_SEARCH.md) for the
+supported dimensions, online index backfill, benchmark, and rollback procedure.
+
 **ThinClaw configuration:**
 
 ```env

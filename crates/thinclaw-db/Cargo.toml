@@ -10,7 +10,6 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 deadpool-postgres = { version = "0.14", optional = true }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication"] }
-pgvector = { version = "0.4", features = ["postgres"], optional = true }
 refinery = { version = "0.9", features = ["tokio-postgres"], optional = true }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }
 rustls-native-certs = { version = "0.8", optional = true }
@@ -39,8 +38,8 @@ tempfile = "3"
 default = []
 postgres = [
     "thinclaw-types/postgres",
+    "thinclaw-workspace/postgres",
     "dep:deadpool-postgres",
-    "dep:pgvector",
     "dep:refinery",
     "dep:rustls",
     "dep:rustls-native-certs",

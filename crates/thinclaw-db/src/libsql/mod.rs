@@ -1249,6 +1249,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_migration_v34_preserves_legacy_vectors_as_stale_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("pre_v34_vectors.db");
+        let document_id = uuid::Uuid::new_v4();
+        let chunk_id = uuid::Uuid::new_v4();
+
+        {
+            let raw_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+            let conn = raw_db.connect().unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE memory_documents (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    agent_id TEXT,
+                    path TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    UNIQUE (user_id, agent_id, path)
+                );
+                CREATE TABLE memory_chunks (
+                    _rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE,
+                    document_id TEXT NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
+                    chunk_index INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    embedding F32_BLOB(1536),
+                    embedding_blob BLOB,
+                    embedding_dim INTEGER,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE (document_id, chunk_index)
+                );
+                "#,
+            )
+            .await
+            .unwrap();
+            conn.execute(
+                "INSERT INTO memory_documents (id, user_id, path, content) VALUES (?1, 'legacy-vector-user', 'legacy.md', 'legacy')",
+                libsql::params![document_id.to_string()],
+            )
+            .await
+            .unwrap();
+            let legacy = [1.0_f32, 0.0, 0.0, 0.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>();
+            conn.execute(
+                r#"INSERT INTO memory_chunks (
+                       id, document_id, chunk_index, content, embedding_blob, embedding_dim
+                   ) VALUES (?1, ?2, 0, 'legacy vector', ?3, 4)"#,
+                libsql::params![
+                    chunk_id.to_string(),
+                    document_id.to_string(),
+                    libsql::Value::Blob(legacy)
+                ],
+            )
+            .await
+            .unwrap();
+        }
+
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend
+            .run_migrations()
+            .await
+            .expect("V34 must upgrade an existing flexible-vector database");
+
+        let conn = backend.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT embedding_model FROM memory_chunks WHERE id = ?1",
+                libsql::params![chunk_id.to_string()],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert!(
+            row.get::<Option<String>>(0).unwrap().is_none(),
+            "migration must not guess the semantic model of a legacy vector"
+        );
+        let stale = backend
+            .get_chunks_requiring_embedding("legacy-vector-user", None, "model-v2", 4, 10)
+            .await
+            .unwrap();
+        assert_eq!(stale.len(), 1);
+
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_memory_chunks_embedding_profile'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn workspace_timezones_are_actor_private_but_group_stable() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("actor_timezones.db");
@@ -1306,6 +1407,7 @@ mod tests {
                     "variable-dimension chunk".to_string(),
                     Some(embedding.clone()),
                 )],
+                Some("variable-model"),
             )
             .await
             .unwrap();
@@ -1313,7 +1415,7 @@ mod tests {
         let conn = backend.connect().await.unwrap();
         let mut rows = conn
             .query(
-                "SELECT embedding, embedding_blob, embedding_dim FROM memory_chunks WHERE document_id = ?1",
+                "SELECT embedding, embedding_blob, embedding_dim, embedding_model FROM memory_chunks WHERE document_id = ?1",
                 libsql::params![document.id.to_string()],
             )
             .await
@@ -1322,8 +1424,10 @@ mod tests {
         let indexed_embedding: Option<Vec<u8>> = row.get(0).ok();
         let canonical_embedding: Vec<u8> = row.get(1).unwrap();
         let embedding_dim: i64 = row.get(2).unwrap();
+        let embedding_model: String = row.get(3).unwrap();
         assert!(indexed_embedding.is_none());
         assert_eq!(embedding_dim, 4);
+        assert_eq!(embedding_model, "variable-model");
         assert_eq!(
             canonical_embedding.len(),
             embedding.len() * std::mem::size_of::<f32>()
@@ -1335,6 +1439,7 @@ mod tests {
                 None,
                 "variable",
                 Some(&embedding),
+                Some("variable-model"),
                 &SearchConfig::default().vector_only().with_limit(5),
             )
             .await
@@ -1359,6 +1464,7 @@ mod tests {
             .replace_chunks(
                 document.id,
                 &[(0, "indexed chunk".to_string(), Some(embedding.clone()))],
+                Some("indexed-model"),
             )
             .await
             .unwrap();
@@ -1385,6 +1491,7 @@ mod tests {
                 None,
                 "indexed",
                 Some(&embedding),
+                Some("indexed-model"),
                 &SearchConfig::default().vector_only().with_limit(5),
             )
             .await
@@ -1422,6 +1529,7 @@ mod tests {
                         format!("foreign exact match {index}"),
                         Some(exact.clone()),
                     )],
+                    Some("scope-model"),
                 )
                 .await
                 .unwrap();
@@ -1438,6 +1546,7 @@ mod tests {
             .replace_chunks(
                 authorized.id,
                 &[(0, "authorized near match".to_string(), Some(near))],
+                Some("scope-model"),
             )
             .await
             .unwrap();
@@ -1448,6 +1557,7 @@ mod tests {
                 None,
                 "ignored in vector-only mode",
                 Some(&exact),
+                Some("scope-model"),
                 &SearchConfig::default()
                     .vector_only()
                     .with_limit(5)
@@ -1529,6 +1639,7 @@ mod tests {
                     first.id,
                     &first.content,
                     &[(0, "stale".to_string(), None)],
+                    None,
                 )
                 .await
                 .unwrap()
@@ -1540,6 +1651,7 @@ mod tests {
                     first.id,
                     &current.content,
                     &[(0, current.content.clone(), None)],
+                    None,
                 )
                 .await
                 .unwrap()
@@ -1596,6 +1708,7 @@ mod tests {
                     document.id,
                     &document.content,
                     &[(0, content.to_string(), None)],
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1606,6 +1719,7 @@ mod tests {
                 "scope-user",
                 None,
                 "shared keyword",
+                None,
                 None,
                 &SearchConfig::default()
                     .fts_only()

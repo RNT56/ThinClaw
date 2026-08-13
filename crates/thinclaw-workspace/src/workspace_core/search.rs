@@ -11,6 +11,33 @@ use super::Workspace;
 use crate::chunker::{ChunkConfig, chunk};
 use crate::search::{SearchConfig, SearchResult};
 
+fn embedding_shape_error(
+    provider: &dyn crate::embeddings::EmbeddingProvider,
+    embedding: &[f32],
+) -> Option<String> {
+    if embedding.len() != provider.dimension() {
+        return Some(format!(
+            "embedding model {} returned {} dimensions, expected {}",
+            provider.model_name(),
+            embedding.len(),
+            provider.dimension()
+        ));
+    }
+    if embedding.iter().any(|value| !value.is_finite()) {
+        return Some(format!(
+            "embedding model {} returned a non-finite value",
+            provider.model_name()
+        ));
+    }
+    if embedding.iter().all(|value| *value == 0.0) {
+        return Some(format!(
+            "embedding model {} returned a zero-norm vector",
+            provider.model_name()
+        ));
+    }
+    None
+}
+
 impl Workspace {
     // ==================== Search ====================
 
@@ -53,12 +80,23 @@ impl Workspace {
         }
 
         // Generate embedding for semantic search if provider available
-        let embedding = if let Some(ref provider) = self.embeddings {
+        let (embedding, embedding_model) = if let Some(ref provider) = self.embeddings {
             match provider.embed(query).await {
-                Ok(embedding) => Some(embedding),
+                Ok(embedding) => {
+                    if let Some(reason) = embedding_shape_error(provider.as_ref(), &embedding) {
+                        if config.use_fts {
+                            tracing::warn!(%reason, "Query embedding shape is invalid; continuing with FTS recall");
+                            (None, None)
+                        } else {
+                            return Err(WorkspaceError::EmbeddingFailed { reason });
+                        }
+                    } else {
+                        (Some(embedding), Some(provider.model_name()))
+                    }
+                }
                 Err(error) if config.use_fts => {
                     tracing::warn!(%error, "Query embedding failed; continuing with FTS recall");
-                    None
+                    (None, None)
                 }
                 Err(error) => {
                     return Err(WorkspaceError::EmbeddingFailed {
@@ -67,7 +105,7 @@ impl Workspace {
                 }
             }
         } else {
-            None
+            (None, None)
         };
 
         self.storage
@@ -76,6 +114,7 @@ impl Workspace {
                 self.agent_id,
                 query,
                 embedding.as_deref(),
+                embedding_model,
                 &config,
             )
             .await
@@ -91,6 +130,10 @@ impl Workspace {
     /// never a window where the document has zero search chunks.
     pub(super) async fn reindex_document(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
         const MAX_CAS_RETRIES: usize = 4;
+        let embedding_model = self
+            .embeddings
+            .as_ref()
+            .map(|provider| provider.model_name());
         for attempt in 0..MAX_CAS_RETRIES {
             let doc = self.storage.get_document_by_id(document_id).await?;
             let raw_chunks = chunk(&doc.content, ChunkConfig::default());
@@ -99,7 +142,17 @@ impl Workspace {
             for (index, content) in raw_chunks.into_iter().enumerate() {
                 let embedding = if let Some(ref provider) = self.embeddings {
                     match provider.embed(&content).await {
-                        Ok(embedding) => Some(embedding),
+                        Ok(embedding)
+                            if embedding_shape_error(provider.as_ref(), &embedding).is_none() =>
+                        {
+                            Some(embedding)
+                        }
+                        Ok(embedding) => {
+                            let reason = embedding_shape_error(provider.as_ref(), &embedding)
+                                .unwrap_or_else(|| "invalid embedding shape".to_string());
+                            tracing::warn!(%reason, "Failed to generate memory chunk embedding");
+                            None
+                        }
                         Err(error) => {
                             tracing::warn!(%error, "Failed to generate memory chunk embedding");
                             None
@@ -113,7 +166,7 @@ impl Workspace {
 
             if self
                 .storage
-                .replace_chunks_if_current(document_id, &doc.content, &prepared)
+                .replace_chunks_if_current(document_id, &doc.content, &prepared, embedding_model)
                 .await?
             {
                 return Ok(());
@@ -192,7 +245,13 @@ impl Workspace {
             }
             let chunks = self
                 .storage
-                .get_chunks_without_embeddings(&self.user_id, self.agent_id, scan_limit)
+                .get_chunks_requiring_embedding(
+                    &self.user_id,
+                    self.agent_id,
+                    provider.model_name(),
+                    provider.dimension(),
+                    scan_limit,
+                )
                 .await?;
             let exhausted = chunks.len() < scan_limit;
             let pending = chunks
@@ -205,11 +264,18 @@ impl Workspace {
             for chunk in pending {
                 attempted.insert(chunk.id);
                 match provider.embed(&chunk.content).await {
-                    Ok(embedding) => {
+                    Ok(embedding)
+                        if embedding_shape_error(provider.as_ref(), &embedding).is_none() =>
+                    {
                         self.storage
-                            .update_chunk_embedding(chunk.id, &embedding)
+                            .update_chunk_embedding(chunk.id, &embedding, provider.model_name())
                             .await?;
                         count += 1;
+                    }
+                    Ok(embedding) => {
+                        let reason = embedding_shape_error(provider.as_ref(), &embedding)
+                            .unwrap_or_else(|| "invalid embedding shape".to_string());
+                        tracing::warn!(chunk_id = %chunk.id, %reason, "Failed to backfill chunk embedding");
                     }
                     Err(error) => {
                         tracing::warn!(chunk_id = %chunk.id, %error, "Failed to backfill chunk embedding");

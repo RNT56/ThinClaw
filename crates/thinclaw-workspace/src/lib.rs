@@ -7,6 +7,8 @@ pub mod document;
 pub mod embeddings;
 pub mod hygiene;
 #[cfg(feature = "postgres")]
+pub mod postgres_vector;
+#[cfg(feature = "postgres")]
 pub mod repository;
 pub mod search;
 pub mod store;

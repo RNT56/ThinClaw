@@ -580,6 +580,7 @@ mod tests {
             _chunk_index: i32,
             _content: &str,
             _embedding: Option<&[f32]>,
+            _embedding_model: Option<&str>,
         ) -> Result<Uuid, WorkspaceError> {
             unreachable!("disabled heartbeat must not touch the workspace store")
         }
@@ -589,6 +590,7 @@ mod tests {
             _document_id: Uuid,
             _expected_content: &str,
             _chunks: &[(i32, String, Option<Vec<f32>>)],
+            _embedding_model: Option<&str>,
         ) -> Result<bool, WorkspaceError> {
             unreachable!("disabled heartbeat must not touch the workspace store")
         }
@@ -597,14 +599,17 @@ mod tests {
             &self,
             _chunk_id: Uuid,
             _embedding: &[f32],
+            _embedding_model: &str,
         ) -> Result<(), WorkspaceError> {
             unreachable!("disabled heartbeat must not touch the workspace store")
         }
 
-        async fn get_chunks_without_embeddings(
+        async fn get_chunks_requiring_embedding(
             &self,
             _user_id: &str,
             _agent_id: Option<Uuid>,
+            _embedding_model: &str,
+            _embedding_dimension: usize,
             _limit: usize,
         ) -> Result<Vec<MemoryChunk>, WorkspaceError> {
             unreachable!("disabled heartbeat must not touch the workspace store")
@@ -616,6 +621,7 @@ mod tests {
             _agent_id: Option<Uuid>,
             _query: &str,
             _embedding: Option<&[f32]>,
+            _embedding_model: Option<&str>,
             _config: &SearchConfig,
         ) -> Result<Vec<SearchResult>, WorkspaceError> {
             unreachable!("disabled heartbeat must not touch the workspace store")

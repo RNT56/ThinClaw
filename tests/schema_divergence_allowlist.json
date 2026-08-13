@@ -29,6 +29,8 @@
   ],
   "ignore_types": [],
   "ignore_nullability": [],
-  "ignore_indexes": [],
+  "ignore_indexes": [
+    "memory_chunks"
+  ],
   "allowed_exact": []
 }

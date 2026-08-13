@@ -82,6 +82,7 @@ pub trait WorkspaceStore: Send + Sync {
         chunk_index: i32,
         content: &str,
         embedding: Option<&[f32]>,
+        embedding_model: Option<&str>,
     ) -> Result<Uuid, WorkspaceError>;
 
     /// Atomically replace all chunks for a document.
@@ -89,11 +90,18 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         document_id: Uuid,
         chunks: &[(i32, String, Option<Vec<f32>>)],
+        embedding_model: Option<&str>,
     ) -> Result<(), WorkspaceError> {
         self.delete_chunks(document_id).await?;
         for (index, content, embedding) in chunks {
-            self.insert_chunk(document_id, *index, content, embedding.as_deref())
-                .await?;
+            self.insert_chunk(
+                document_id,
+                *index,
+                content,
+                embedding.as_deref(),
+                embedding_model,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -105,17 +113,21 @@ pub trait WorkspaceStore: Send + Sync {
         document_id: Uuid,
         expected_content: &str,
         chunks: &[(i32, String, Option<Vec<f32>>)],
+        embedding_model: Option<&str>,
     ) -> Result<bool, WorkspaceError>;
 
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
         embedding: &[f32],
+        embedding_model: &str,
     ) -> Result<(), WorkspaceError>;
-    async fn get_chunks_without_embeddings(
+    async fn get_chunks_requiring_embedding(
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
+        embedding_model: &str,
+        embedding_dimension: usize,
         limit: usize,
     ) -> Result<Vec<MemoryChunk>, WorkspaceError>;
     async fn hybrid_search(
@@ -124,6 +136,7 @@ pub trait WorkspaceStore: Send + Sync {
         agent_id: Option<Uuid>,
         query: &str,
         embedding: Option<&[f32]>,
+        embedding_model: Option<&str>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError>;
 }
@@ -231,9 +244,16 @@ where
         chunk_index: i32,
         content: &str,
         embedding: Option<&[f32]>,
+        embedding_model: Option<&str>,
     ) -> Result<Uuid, WorkspaceError> {
         (**self)
-            .insert_chunk(document_id, chunk_index, content, embedding)
+            .insert_chunk(
+                document_id,
+                chunk_index,
+                content,
+                embedding,
+                embedding_model,
+            )
             .await
     }
 
@@ -241,8 +261,11 @@ where
         &self,
         document_id: Uuid,
         chunks: &[(i32, String, Option<Vec<f32>>)],
+        embedding_model: Option<&str>,
     ) -> Result<(), WorkspaceError> {
-        (**self).replace_chunks(document_id, chunks).await
+        (**self)
+            .replace_chunks(document_id, chunks, embedding_model)
+            .await
     }
 
     async fn replace_chunks_if_current(
@@ -250,9 +273,10 @@ where
         document_id: Uuid,
         expected_content: &str,
         chunks: &[(i32, String, Option<Vec<f32>>)],
+        embedding_model: Option<&str>,
     ) -> Result<bool, WorkspaceError> {
         (**self)
-            .replace_chunks_if_current(document_id, expected_content, chunks)
+            .replace_chunks_if_current(document_id, expected_content, chunks, embedding_model)
             .await
     }
 
@@ -260,18 +284,29 @@ where
         &self,
         chunk_id: Uuid,
         embedding: &[f32],
+        embedding_model: &str,
     ) -> Result<(), WorkspaceError> {
-        (**self).update_chunk_embedding(chunk_id, embedding).await
+        (**self)
+            .update_chunk_embedding(chunk_id, embedding, embedding_model)
+            .await
     }
 
-    async fn get_chunks_without_embeddings(
+    async fn get_chunks_requiring_embedding(
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
+        embedding_model: &str,
+        embedding_dimension: usize,
         limit: usize,
     ) -> Result<Vec<MemoryChunk>, WorkspaceError> {
         (**self)
-            .get_chunks_without_embeddings(user_id, agent_id, limit)
+            .get_chunks_requiring_embedding(
+                user_id,
+                agent_id,
+                embedding_model,
+                embedding_dimension,
+                limit,
+            )
             .await
     }
 
@@ -281,10 +316,11 @@ where
         agent_id: Option<Uuid>,
         query: &str,
         embedding: Option<&[f32]>,
+        embedding_model: Option<&str>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
         (**self)
-            .hybrid_search(user_id, agent_id, query, embedding, config)
+            .hybrid_search(user_id, agent_id, query, embedding, embedding_model, config)
             .await
     }
 }

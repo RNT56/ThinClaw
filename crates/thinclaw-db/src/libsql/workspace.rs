@@ -21,6 +21,52 @@ use chrono::Utc;
 
 const LIBSQL_VECTOR_DIM: usize = 1536;
 const MAX_CHUNK_BACKFILL_RESULTS: usize = 10_000;
+const MAX_LIBSQL_EMBEDDING_DIM: usize = 65_536;
+const MAX_EXACT_VECTOR_CANDIDATES: i64 = 10_000;
+
+fn validate_libsql_profile(
+    dimension: usize,
+    embedding_model: Option<&str>,
+) -> Result<(), WorkspaceError> {
+    if dimension == 0 || dimension > MAX_LIBSQL_EMBEDDING_DIM {
+        return Err(WorkspaceError::EmbeddingFailed {
+            reason: format!(
+                "embedding dimension {} is outside libSQL's supported range 1..={MAX_LIBSQL_EMBEDDING_DIM}",
+                dimension
+            ),
+        });
+    }
+    let Some(model) = embedding_model else {
+        return Err(WorkspaceError::EmbeddingFailed {
+            reason: "embedding model identity is required for vector storage and search"
+                .to_string(),
+        });
+    };
+    if model.is_empty() || model.len() > 512 || model.chars().any(char::is_control) {
+        return Err(WorkspaceError::EmbeddingFailed {
+            reason: "embedding model identity is empty, oversized, or malformed".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_libsql_embedding(
+    embedding: &[f32],
+    embedding_model: Option<&str>,
+) -> Result<(), WorkspaceError> {
+    validate_libsql_profile(embedding.len(), embedding_model)?;
+    if embedding.iter().any(|value| !value.is_finite()) {
+        return Err(WorkspaceError::EmbeddingFailed {
+            reason: "embedding contains a non-finite value".to_string(),
+        });
+    }
+    if embedding.iter().all(|value| *value == 0.0) {
+        return Err(WorkspaceError::EmbeddingFailed {
+            reason: "zero-norm embeddings cannot participate in cosine search".to_string(),
+        });
+    }
+    Ok(())
+}
 
 fn serialize_libsql_embedding(embedding: &[f32]) -> (Option<Vec<u8>>, Vec<u8>, i64) {
     let canonical = embedding
@@ -59,22 +105,27 @@ fn cosine_similarity(query: &[f32], candidate: &[f32]) -> Option<f32> {
         return None;
     }
 
-    let mut dot = 0.0f32;
-    let mut query_norm = 0.0f32;
-    let mut candidate_norm = 0.0f32;
+    // Accumulate in f64 so large-but-finite provider output cannot overflow
+    // the exact-search scorer into NaN before the ratio is normalized.
+    let mut dot = 0.0_f64;
+    let mut query_norm = 0.0_f64;
+    let mut candidate_norm = 0.0_f64;
 
     for (q, c) in query.iter().zip(candidate.iter()) {
+        let q = f64::from(*q);
+        let c = f64::from(*c);
         dot += q * c;
         query_norm += q * q;
         candidate_norm += c * c;
     }
 
     let denom = query_norm.sqrt() * candidate_norm.sqrt();
-    if denom <= f32::EPSILON {
+    if denom <= f64::EPSILON || !denom.is_finite() {
         return None;
     }
 
-    Some(dot / denom)
+    let similarity = dot / denom;
+    similarity.is_finite().then_some(similarity as f32)
 }
 
 #[async_trait]
@@ -577,7 +628,11 @@ impl WorkspaceStore for LibSqlBackend {
         chunk_index: i32,
         content: &str,
         embedding: Option<&[f32]>,
+        embedding_model: Option<&str>,
     ) -> Result<Uuid, WorkspaceError> {
+        if let Some(embedding) = embedding {
+            validate_libsql_embedding(embedding, embedding_model)?;
+        }
         let conn = self
             .connect()
             .await
@@ -594,9 +649,10 @@ impl WorkspaceStore for LibSqlBackend {
         conn.execute(
             r#"
                 INSERT INTO memory_chunks (
-                    id, document_id, chunk_index, content, embedding, embedding_blob, embedding_dim
+                    id, document_id, chunk_index, content, embedding, embedding_blob,
+                    embedding_dim, embedding_model
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                 "#,
             params![
                 id.to_string(),
@@ -606,6 +662,7 @@ impl WorkspaceStore for LibSqlBackend {
                 indexed_embedding.map(libsql::Value::Blob),
                 canonical_embedding.map(libsql::Value::Blob),
                 embedding_dim,
+                embedding.and(embedding_model),
             ],
         )
         .await
@@ -625,7 +682,13 @@ impl WorkspaceStore for LibSqlBackend {
         &self,
         document_id: Uuid,
         chunks: &[(i32, String, Option<Vec<f32>>)],
+        embedding_model: Option<&str>,
     ) -> Result<(), WorkspaceError> {
+        for (_, _, embedding) in chunks {
+            if let Some(embedding) = embedding {
+                validate_libsql_embedding(embedding, embedding_model)?;
+            }
+        }
         let _transaction_guard = self.transaction_lock.lock().await;
         let conn = self
             .connect()
@@ -661,24 +724,26 @@ impl WorkspaceStore for LibSqlBackend {
                 });
 
             tx.execute(
-                    r#"INSERT INTO memory_chunks (
-                           id, document_id, chunk_index, content, embedding, embedding_blob, embedding_dim
+                r#"INSERT INTO memory_chunks (
+                           id, document_id, chunk_index, content, embedding, embedding_blob,
+                           embedding_dim, embedding_model
                        )
-                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
-                    params![
-                        chunk_id.to_string(),
-                        document_id.to_string(),
-                        *index as i64,
-                        content.as_str(),
-                        indexed_embedding.map(libsql::Value::Blob),
-                        canonical_embedding.map(libsql::Value::Blob),
-                        embedding_dim,
-                    ],
-                )
-                .await
-                .map_err(|e| WorkspaceError::ChunkingFailed {
-                    reason: format!("Insert failed: {}", e),
-                })?;
+                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+                params![
+                    chunk_id.to_string(),
+                    document_id.to_string(),
+                    *index as i64,
+                    content.as_str(),
+                    indexed_embedding.map(libsql::Value::Blob),
+                    canonical_embedding.map(libsql::Value::Blob),
+                    embedding_dim,
+                    embedding.as_ref().and(embedding_model),
+                ],
+            )
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: format!("Insert failed: {}", e),
+            })?;
         }
 
         tx.commit()
@@ -695,7 +760,13 @@ impl WorkspaceStore for LibSqlBackend {
         document_id: Uuid,
         expected_content: &str,
         chunks: &[(i32, String, Option<Vec<f32>>)],
+        embedding_model: Option<&str>,
     ) -> Result<bool, WorkspaceError> {
+        for (_, _, embedding) in chunks {
+            if let Some(embedding) = embedding {
+                validate_libsql_embedding(embedding, embedding_model)?;
+            }
+        }
         let _transaction_guard = self.transaction_lock.lock().await;
         let conn = self
             .connect()
@@ -755,8 +826,8 @@ impl WorkspaceStore for LibSqlBackend {
                 tx.execute(
                     r#"INSERT INTO memory_chunks (
                            id, document_id, chunk_index, content,
-                           embedding, embedding_blob, embedding_dim
-                       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+                           embedding, embedding_blob, embedding_dim, embedding_model
+                       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
                     params![
                         chunk_id.to_string(),
                         document_id.to_string(),
@@ -765,6 +836,7 @@ impl WorkspaceStore for LibSqlBackend {
                         indexed_embedding.map(libsql::Value::Blob),
                         canonical_embedding.map(libsql::Value::Blob),
                         embedding_dim,
+                        embedding.as_ref().and(embedding_model),
                     ],
                 )
                 .await
@@ -817,7 +889,9 @@ impl WorkspaceStore for LibSqlBackend {
         &self,
         chunk_id: Uuid,
         embedding: &[f32],
+        embedding_model: &str,
     ) -> Result<(), WorkspaceError> {
+        validate_libsql_embedding(embedding, Some(embedding_model))?;
         let conn = self
             .connect()
             .await
@@ -832,7 +906,8 @@ impl WorkspaceStore for LibSqlBackend {
                 UPDATE memory_chunks
                 SET embedding = ?2,
                     embedding_blob = ?3,
-                    embedding_dim = ?4
+                    embedding_dim = ?4,
+                    embedding_model = ?5
                 WHERE id = ?1
             "#,
             params![
@@ -840,6 +915,7 @@ impl WorkspaceStore for LibSqlBackend {
                 indexed_embedding.map(libsql::Value::Blob),
                 libsql::Value::Blob(canonical_embedding),
                 embedding_dim,
+                embedding_model,
             ],
         )
         .await
@@ -849,12 +925,15 @@ impl WorkspaceStore for LibSqlBackend {
         Ok(())
     }
 
-    async fn get_chunks_without_embeddings(
+    async fn get_chunks_requiring_embedding(
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
+        embedding_model: &str,
+        embedding_dimension: usize,
         limit: usize,
     ) -> Result<Vec<MemoryChunk>, WorkspaceError> {
+        validate_libsql_profile(embedding_dimension, Some(embedding_model))?;
         let conn = self
             .connect()
             .await
@@ -869,12 +948,18 @@ impl WorkspaceStore for LibSqlBackend {
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
                 WHERE d.user_id = ?1 AND d.agent_id IS ?2
-                  AND c.embedding_blob IS NULL
-                LIMIT ?3
+                  AND (
+                      c.embedding_blob IS NULL
+                      OR c.embedding_dim <> ?3
+                      OR c.embedding_model IS NOT ?4
+                  )
+                LIMIT ?5
                 "#,
                 params![
                     user_id,
                     agent_id_str.as_deref(),
+                    embedding_dimension as i64,
+                    embedding_model,
                     limit.min(MAX_CHUNK_BACKFILL_RESULTS) as i64
                 ],
             )
@@ -909,6 +994,7 @@ impl WorkspaceStore for LibSqlBackend {
         agent_id: Option<Uuid>,
         query: &str,
         embedding: Option<&[f32]>,
+        embedding_model: Option<&str>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
         let config = config
@@ -1003,6 +1089,7 @@ impl WorkspaceStore for LibSqlBackend {
         };
 
         let vector_results = if let (true, Some(emb)) = (config.use_vector, embedding) {
+            validate_libsql_embedding(emb, embedding_model)?;
             if emb.len() == LIBSQL_VECTOR_DIM {
                 let vector_json = format!(
                     "[{}]",
@@ -1044,6 +1131,7 @@ impl WorkspaceStore for LibSqlBackend {
                         JOIN memory_documents d ON d.id = c.document_id
                         WHERE c.embedding IS NOT NULL
                           AND d.user_id = ?1 AND d.agent_id IS ?2
+                          AND (?4 IS NULL OR c.embedding_model IS ?4)
                           AND (
                               ?3 = '[]' OR EXISTS (
                                   SELECT 1 FROM json_each(?3) AS allowed
@@ -1056,7 +1144,8 @@ impl WorkspaceStore for LibSqlBackend {
                         params![
                             user_id,
                             agent_id_str.as_deref(),
-                            path_prefixes_json.as_str()
+                            path_prefixes_json.as_str(),
+                            embedding_model,
                         ],
                     )
                     .await
@@ -1084,6 +1173,7 @@ impl WorkspaceStore for LibSqlBackend {
                         JOIN memory_chunks c ON c._rowid = top_k.id
                         JOIN memory_documents d ON d.id = c.document_id
                         WHERE d.user_id = ?3 AND d.agent_id IS ?4
+                          AND (?6 IS NULL OR c.embedding_model IS ?6)
                           AND (
                               ?5 = '[]' OR EXISTS (
                                   SELECT 1 FROM json_each(?5) AS allowed
@@ -1098,7 +1188,8 @@ impl WorkspaceStore for LibSqlBackend {
                                 candidate_limit,
                                 user_id,
                                 agent_id_str.as_deref(),
-                                path_prefixes_json.as_str()
+                                path_prefixes_json.as_str(),
+                                embedding_model,
                             ],
                         )
                         .await
@@ -1143,6 +1234,13 @@ impl WorkspaceStore for LibSqlBackend {
                 // fall back to exact cosine scoring over only the authorized
                 // principal/agent/path slice when the index under-fills it.
                 if results.len() < expected as usize {
+                    if scoped_indexed > MAX_EXACT_VECTOR_CANDIDATES {
+                        return Err(WorkspaceError::SearchFailed {
+                            reason: format!(
+                                "libSQL ANN under-filled and the exact profile fallback has {scoped_indexed} candidates, exceeding the safe limit of {MAX_EXACT_VECTOR_CANDIDATES}"
+                            ),
+                        });
+                    }
                     tracing::debug!(
                         indexed_results = results.len(),
                         expected,
@@ -1159,9 +1257,10 @@ impl WorkspaceStore for LibSqlBackend {
                             WHERE d.user_id = ?1 AND d.agent_id IS ?2
                               AND c.embedding_blob IS NOT NULL
                               AND c.embedding_dim = ?3
+                              AND (?4 IS NULL OR c.embedding_model IS ?4)
                               AND (
-                                  ?4 = '[]' OR EXISTS (
-                                      SELECT 1 FROM json_each(?4) AS allowed
+                                  ?5 = '[]' OR EXISTS (
+                                      SELECT 1 FROM json_each(?5) AS allowed
                                       WHERE d.path = allowed.value
                                          OR substr(d.path, 1, length(allowed.value) + 1)
                                             = allowed.value || '/'
@@ -1172,7 +1271,8 @@ impl WorkspaceStore for LibSqlBackend {
                                 user_id,
                                 agent_id_str.as_deref(),
                                 LIBSQL_VECTOR_DIM as i64,
-                                path_prefixes_json.as_str()
+                                embedding_model,
+                                path_prefixes_json.as_str(),
                             ],
                         )
                         .await
@@ -1225,6 +1325,58 @@ impl WorkspaceStore for LibSqlBackend {
                 results
             } else {
                 let query_dim = emb.len() as i64;
+                let mut count_rows = conn
+                    .query(
+                        r#"
+                        SELECT COUNT(*)
+                        FROM memory_chunks c
+                        JOIN memory_documents d ON d.id = c.document_id
+                        WHERE d.user_id = ?1 AND d.agent_id IS ?2
+                          AND c.embedding_blob IS NOT NULL
+                          AND c.embedding_dim = ?3
+                          AND (?4 IS NULL OR c.embedding_model IS ?4)
+                          AND (
+                              ?5 = '[]' OR EXISTS (
+                                  SELECT 1 FROM json_each(?5) AS allowed
+                                  WHERE d.path = allowed.value
+                                     OR substr(d.path, 1, length(allowed.value) + 1)
+                                        = allowed.value || '/'
+                              )
+                          )
+                        "#,
+                        params![
+                            user_id,
+                            agent_id_str.as_deref(),
+                            query_dim,
+                            embedding_model,
+                            path_prefixes_json.as_str()
+                        ],
+                    )
+                    .await
+                    .map_err(|error| WorkspaceError::SearchFailed {
+                        reason: format!("Exact vector candidate count failed: {error}"),
+                    })?;
+                let candidates = count_rows
+                    .next()
+                    .await
+                    .map_err(|error| WorkspaceError::SearchFailed {
+                        reason: format!("Exact vector candidate count fetch failed: {error}"),
+                    })?
+                    .map(|row| get_i64(&row, 0).max(0))
+                    .unwrap_or(0);
+                if candidates > MAX_EXACT_VECTOR_CANDIDATES {
+                    return Err(WorkspaceError::SearchFailed {
+                        reason: format!(
+                            "embedding dimension {query_dim} has {candidates} exact-search candidates, exceeding the safe limit of {MAX_EXACT_VECTOR_CANDIDATES}"
+                        ),
+                    });
+                }
+                tracing::warn!(
+                    dimension = query_dim,
+                    candidates,
+                    threshold = MAX_EXACT_VECTOR_CANDIDATES,
+                    "Using bounded exact libSQL vector search for an unindexed embedding dimension"
+                );
                 let mut rows = conn
                     .query(
                         r#"
@@ -1234,9 +1386,10 @@ impl WorkspaceStore for LibSqlBackend {
                     WHERE d.user_id = ?1 AND d.agent_id IS ?2
                       AND c.embedding_blob IS NOT NULL
                       AND c.embedding_dim = ?3
+                      AND (?4 IS NULL OR c.embedding_model IS ?4)
                       AND (
-                          ?4 = '[]' OR EXISTS (
-                              SELECT 1 FROM json_each(?4) AS allowed
+                          ?5 = '[]' OR EXISTS (
+                              SELECT 1 FROM json_each(?5) AS allowed
                               WHERE d.path = allowed.value
                                  OR substr(d.path, 1, length(allowed.value) + 1)
                                     = allowed.value || '/'
@@ -1247,6 +1400,7 @@ impl WorkspaceStore for LibSqlBackend {
                             user_id,
                             agent_id_str.as_deref(),
                             query_dim,
+                            embedding_model,
                             path_prefixes_json.as_str()
                         ],
                     )

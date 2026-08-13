@@ -103,6 +103,10 @@ impl Store {
             .run_async(&mut **client)
             .await
             .map_err(|e| DatabaseError::Migration(e.to_string()))?;
+        drop(client);
+        thinclaw_workspace::postgres_vector::ensure_postgres_vector_indexes(&self.pool)
+            .await
+            .map_err(DatabaseError::Migration)?;
         Ok(())
     }
 

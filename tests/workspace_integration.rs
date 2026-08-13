@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 use thinclaw::db::{Database as _, postgres::PgBackend};
 use thinclaw::workspace::{MockEmbeddings, SearchConfig, Workspace, paths};
+use thinclaw_workspace::postgres_vector::{
+    ANN_INDEXES, postgres_exact_vector_search_sql, postgres_vector_search_sql,
+};
 
 fn postgres_required() -> bool {
     std::env::var("THINCLAW_REQUIRE_POSTGRES_INTEGRATION")
@@ -53,6 +56,114 @@ async fn cleanup_user(pool: &deadpool_postgres::Pool, user_id: &str) {
     )
     .await
     .ok();
+}
+
+fn benchmark_sizes(name: &str, defaults: &[usize]) -> Vec<usize> {
+    let mut sizes = std::env::var(name)
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .unwrap_or_else(|error| panic!("invalid {name} value {value:?}: {error}"))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| defaults.to_vec());
+    sizes.retain(|value| *value > 0);
+    sizes.sort_unstable();
+    sizes.dedup();
+    assert!(!sizes.is_empty(), "{name} must contain a positive value");
+    sizes
+}
+
+fn deterministic_unit_embedding(dimension: usize, prototype: usize) -> Vec<f32> {
+    let mut state = (prototype as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let mut values = Vec::with_capacity(dimension);
+    let mut norm_squared = 0.0_f32;
+    for _ in 0..dimension {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let value = ((state >> 40) as f32 / ((1_u32 << 24) - 1) as f32) * 2.0 - 1.0;
+        norm_squared += value * value;
+        values.push(value);
+    }
+    let norm = norm_squared.sqrt();
+    values.iter_mut().for_each(|value| *value /= norm);
+    values
+}
+
+async fn seed_vector_benchmark_rows(
+    conn: &tokio_postgres::Client,
+    document_id: uuid::Uuid,
+    identity_prefix: &str,
+    model: &str,
+    dimension: usize,
+    start: usize,
+    end: usize,
+) {
+    const PROTOTYPES: usize = 32;
+    let end_inclusive = i32::try_from(end - 1).expect("benchmark row count exceeds i32");
+    let step = PROTOTYPES as i32;
+    for prototype in 0..PROTOTYPES.min(end) {
+        let first = i32::try_from(start + prototype).expect("benchmark row count exceeds i32");
+        if first > end_inclusive {
+            continue;
+        }
+        let vector = pgvector::Vector::from(deterministic_unit_embedding(dimension, prototype));
+        conn.execute(
+            r#"
+            INSERT INTO memory_chunks (
+                id, document_id, chunk_index, content, embedding, embedding_model
+            )
+            SELECT md5($1 || ':' || chunk_index::text)::uuid,
+                   $2, chunk_index, 'benchmark row ' || chunk_index::text, $6, $7
+            FROM generate_series($3::integer, $4::integer, $5::integer) AS chunk_index
+            "#,
+            &[
+                &identity_prefix,
+                &document_id,
+                &first,
+                &end_inclusive,
+                &step,
+                &vector,
+                &model,
+            ],
+        )
+        .await
+        .expect("seed deterministic vector benchmark rows");
+    }
+}
+
+async fn explain_vector_query(
+    conn: &tokio_postgres::Client,
+    sql: &str,
+    user_id: &str,
+    query: &pgvector::Vector,
+    model: &str,
+) -> (f64, String) {
+    let explain_sql = format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql}");
+    let agent_id = Option::<uuid::Uuid>::None;
+    let path_prefixes = Vec::<String>::new();
+    let model = Some(model);
+    let row = conn
+        .query_one(
+            &explain_sql,
+            &[&user_id, &agent_id, &query, &50_i64, &path_prefixes, &model],
+        )
+        .await
+        .expect("execute vector benchmark query plan");
+    let plan: serde_json::Value = row.get(0);
+    let execution_ms = plan[0]["Execution Time"]
+        .as_f64()
+        .expect("EXPLAIN JSON execution time");
+    let rendered = serde_json::to_string_pretty(&plan).expect("render EXPLAIN JSON");
+    (execution_ms, rendered)
 }
 
 #[tokio::test]
@@ -341,6 +452,244 @@ async fn test_workspace_hybrid_search_with_mock_embeddings() {
     // or we should have results from either method
 
     cleanup_user(&pool, user_id).await;
+}
+
+#[tokio::test]
+async fn test_supported_vector_queries_have_valid_hnsw_plans() {
+    let Some(pool) = get_pool().await else {
+        return;
+    };
+    let conn = pool.get().await.expect("get PostgreSQL plan connection");
+    conn.batch_execute("SET enable_seqscan = off")
+        .await
+        .expect("disable sequential plans for index contract");
+
+    for index in ANN_INDEXES {
+        let mut query = vec![0.0f32; index.dimension];
+        query[0] = 1.0;
+        let vector = pgvector::Vector::from(query);
+        let sql = format!(
+            "EXPLAIN (COSTS OFF, FORMAT TEXT) {}",
+            postgres_vector_search_sql(index.dimension, false)
+        );
+        let rows = conn
+            .query(
+                &sql,
+                &[
+                    &"plan-contract-user",
+                    &Option::<uuid::Uuid>::None,
+                    &vector,
+                    &5_i64,
+                    &Vec::<String>::new(),
+                    &Some("plan-contract-model"),
+                ],
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "EXPLAIN failed for {} dimensions ({}): {error}",
+                    index.dimension, index.name
+                )
+            });
+        let plan = rows
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains(index.name),
+            "{}-dimension plan did not use {}:\n{}",
+            index.dimension,
+            index.name,
+            plan
+        );
+    }
+
+    conn.batch_execute("RESET enable_seqscan")
+        .await
+        .expect("restore planner setting");
+}
+
+/// Reproducible performance proof for issue #370.
+///
+/// The regular PostgreSQL CI leg compiles this benchmark and exercises the
+/// production plans above. Nightly CI runs the ignored benchmark at 1k and
+/// 10k rows for a small, medium, and large built-in embedding profile.
+#[tokio::test]
+#[ignore = "performance benchmark; run explicitly against an isolated PostgreSQL database"]
+async fn benchmark_postgres_vector_ann_against_exact_scan() {
+    let Some(pool) = get_pool().await else {
+        return;
+    };
+    let dimensions = benchmark_sizes("THINCLAW_VECTOR_BENCH_DIMENSIONS", &[384, 1536, 3072]);
+    let row_counts = benchmark_sizes("THINCLAW_VECTOR_BENCH_ROW_COUNTS", &[1_000, 10_000]);
+    let minimum_speedup = std::env::var("THINCLAW_VECTOR_BENCH_MIN_SPEEDUP")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<f64>()
+                .unwrap_or_else(|error| panic!("invalid benchmark speedup {value:?}: {error}"))
+        })
+        .unwrap_or(1.25);
+    let largest_row_count = *row_counts.last().expect("non-empty benchmark row counts");
+
+    for dimension in dimensions {
+        let index = ANN_INDEXES
+            .iter()
+            .find(|index| index.dimension == dimension)
+            .unwrap_or_else(|| {
+                panic!("benchmark dimension {dimension} is not an indexed production profile")
+            });
+        let user_id = format!("vector_benchmark_{dimension}");
+        let model = format!("benchmark-model-{dimension}");
+        cleanup_user(&pool, &user_id).await;
+        let conn = pool
+            .get()
+            .await
+            .expect("get PostgreSQL benchmark connection");
+        let document_id = uuid::Uuid::new_v4();
+        conn.execute(
+            r#"
+            INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
+            VALUES ($1, $2, NULL, $3, '', '{}'::jsonb)
+            "#,
+            &[&document_id, &user_id, &format!("bench/{dimension}.md")],
+        )
+        .await
+        .expect("create vector benchmark document");
+
+        let identity_prefix = format!("{user_id}:{document_id}");
+        let query = pgvector::Vector::from(deterministic_unit_embedding(dimension, 0));
+        let indexed_sql = postgres_vector_search_sql(dimension, false);
+        let exact_sql = postgres_exact_vector_search_sql(dimension, false);
+        let mut seeded = 0;
+
+        for row_count in &row_counts {
+            seed_vector_benchmark_rows(
+                &conn,
+                document_id,
+                &identity_prefix,
+                &model,
+                dimension,
+                seeded,
+                *row_count,
+            )
+            .await;
+            seeded = *row_count;
+            conn.batch_execute("ANALYZE memory_chunks")
+                .await
+                .expect("analyze vector benchmark data");
+
+            // Warm both code paths before recording three repetitions. Forcing
+            // seqscan off proves and measures the intended ANN path; the exact
+            // query uses a raw vector expression that cannot match the HNSW
+            // expression index while retaining ordinary join indexes.
+            conn.batch_execute("SET enable_seqscan = off")
+                .await
+                .expect("force ANN benchmark plan");
+            let _ = explain_vector_query(&conn, &indexed_sql, &user_id, &query, &model).await;
+            conn.batch_execute("RESET enable_seqscan")
+                .await
+                .expect("reset benchmark planner");
+            let _ = explain_vector_query(&conn, &exact_sql, &user_id, &query, &model).await;
+
+            let mut indexed_ms = f64::INFINITY;
+            let mut exact_ms = f64::INFINITY;
+            let mut indexed_plan = String::new();
+            let mut exact_plan = String::new();
+            for _ in 0..3 {
+                conn.batch_execute("SET enable_seqscan = off")
+                    .await
+                    .expect("force ANN benchmark plan");
+                let (elapsed, plan) =
+                    explain_vector_query(&conn, &indexed_sql, &user_id, &query, &model).await;
+                conn.batch_execute("RESET enable_seqscan")
+                    .await
+                    .expect("reset benchmark planner");
+                if elapsed < indexed_ms {
+                    indexed_ms = elapsed;
+                    indexed_plan = plan;
+                }
+                let (elapsed, plan) =
+                    explain_vector_query(&conn, &exact_sql, &user_id, &query, &model).await;
+                if elapsed < exact_ms {
+                    exact_ms = elapsed;
+                    exact_plan = plan;
+                }
+            }
+
+            assert!(
+                indexed_plan.contains(index.name),
+                "benchmark ANN plan did not use {}:\n{}",
+                index.name,
+                indexed_plan
+            );
+            assert!(
+                !exact_plan.contains(index.name),
+                "exact baseline unexpectedly used {}:\n{}",
+                index.name,
+                exact_plan
+            );
+            let speedup = exact_ms / indexed_ms;
+            println!(
+                "VECTOR_BENCHMARK dimension={dimension} rows={row_count} indexed_ms={indexed_ms:.3} exact_ms={exact_ms:.3} speedup={speedup:.2}x"
+            );
+            println!("VECTOR_BENCHMARK indexed_plan={indexed_plan}");
+            println!("VECTOR_BENCHMARK exact_plan={exact_plan}");
+
+            if *row_count == largest_row_count {
+                assert!(
+                    speedup >= minimum_speedup,
+                    "{dimension}-dimension HNSW speedup {speedup:.2}x at {row_count} rows is below the required {minimum_speedup:.2}x"
+                );
+            }
+        }
+        cleanup_user(&pool, &user_id).await;
+    }
+}
+
+#[tokio::test]
+async fn test_postgres_vector_index_reconciliation_recovers_missing_index() {
+    let Some(pool) = get_pool().await else {
+        return;
+    };
+    let index = ANN_INDEXES
+        .iter()
+        .find(|index| index.dimension == 384)
+        .expect("384-dimension index policy");
+    let conn = pool
+        .get()
+        .await
+        .expect("get PostgreSQL recovery connection");
+    conn.batch_execute(&format!("DROP INDEX CONCURRENTLY IF EXISTS {}", index.name))
+        .await
+        .expect("simulate interrupted/missing online index backfill");
+    drop(conn);
+
+    PgBackend::from_pool(pool.clone())
+        .run_migrations()
+        .await
+        .expect("idempotent startup reconciliation should recreate the index");
+    let conn = pool
+        .get()
+        .await
+        .expect("get PostgreSQL verification connection");
+    let valid: bool = conn
+        .query_one(
+            r#"
+            SELECT pg_index.indisvalid AND pg_index.indisready
+            FROM pg_class
+            JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace
+            JOIN pg_index ON pg_index.indexrelid = pg_class.oid
+            WHERE pg_namespace.nspname = current_schema()
+              AND pg_class.relname = $1
+            "#,
+            &[&index.name],
+        )
+        .await
+        .expect("reconciled index catalog row")
+        .get(0);
+    assert!(valid, "reconciled vector index must be ready and valid");
 }
 
 #[tokio::test]

@@ -59,16 +59,17 @@ pub(crate) async fn run_memory_command(
 
     let embeddings = config.embeddings.create_provider().await;
 
-    // Warn if libSQL backend is used with non-1536 embedding dimension.
+    // libSQL indexes its canonical 1536-dimension profile. Other profiles
+    // remain available through a deliberately bounded exact fallback.
     if config.database.backend == thinclaw::config::DatabaseBackend::LibSql
         && config.embeddings.enabled
         && config.embeddings.dimension != 1536
     {
         tracing::warn!(
             configured_dimension = config.embeddings.dimension,
-            "Embedding dimension {} is not 1536. libSQL currently uses a fixed \
-             1536-dim vector index, so ThinClaw will keep storing documents but \
-             skip vector embeddings/search for that backend and fall back to FTS.",
+            "Embedding dimension {} is not 1536. libSQL will use bounded exact \
+             vector search for this profile and refuse the operation above the \
+             safe candidate threshold; use 1536 dimensions for indexed search.",
             config.embeddings.dimension
         );
     }
