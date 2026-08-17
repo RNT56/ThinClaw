@@ -32,6 +32,7 @@ mod core;
 mod extensions;
 mod jobs;
 mod memory;
+mod presence;
 mod providers;
 mod routines;
 mod sse;

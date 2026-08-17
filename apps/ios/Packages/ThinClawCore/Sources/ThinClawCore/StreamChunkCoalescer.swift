@@ -72,6 +72,8 @@ public struct StreamChunkCoalescer: Hashable, Sendable {
         case .thinking, .toolStarted, .toolCompleted, .approvalNeeded,
             .authRequired, .credentialPrompt, .usageUpdate, .heartbeat, .unknown:
             return nil
+        case .presence:
+            return nil
         }
     }
 

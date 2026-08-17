@@ -39,12 +39,15 @@ pub use thinclaw_gateway::web::types::{
     MemorySearchRequest, MemorySearchResponse, MemoryTreeResponse, MemoryWriteRequest,
     MemoryWriteResponse, ModelInfo, ModelUsageEntry, NostrSecretSourceRequest,
     PairingApproveRequest, PairingApprovedInfo, PairingListResponse, PairingRequestInfo,
-    PartialChannelSetupStatus, PendingApprovalEntry, PendingApprovalsResponse, ProjectFileEntry,
-    ProjectFileReadResponse, ProjectFilesResponse, ReadQuery, RegistryEntryInfo,
-    RegistrySearchQuery, RegistrySearchResponse, ResponseAttachment, RoutineClearRunsRequest,
-    RoutineCreateRequest, RoutineDetailResponse, RoutineEventActivityInfo,
-    RoutineEventActivityResponse, RoutineEventCheckInfo, RoutineInfo, RoutineListResponse,
-    RoutineRunInfo, RoutineSummaryResponse, RoutineTriggerCheckInfo, SearchHit, SecretFieldInfo,
+    PartialChannelSetupStatus, PendingApprovalEntry, PendingApprovalsResponse, PresenceAggregate,
+    PresenceClearResponse, PresenceEvent, PresenceEventCause, PresenceEventKind,
+    PresencePublishRequest, PresencePublishResponse, PresenceScope, PresenceSnapshotResponse,
+    PresenceState, PresenceSurface, ProjectFileEntry, ProjectFileReadResponse,
+    ProjectFilesResponse, ReadQuery, RegistryEntryInfo, RegistrySearchQuery,
+    RegistrySearchResponse, ResponseAttachment, RoutineClearRunsRequest, RoutineCreateRequest,
+    RoutineDetailResponse, RoutineEventActivityInfo, RoutineEventActivityResponse,
+    RoutineEventCheckInfo, RoutineInfo, RoutineListResponse, RoutineRunInfo,
+    RoutineSummaryResponse, RoutineTriggerCheckInfo, SearchHit, SecretFieldInfo,
     SendMessageRequest, SendMessageResponse, SettingResponse, SettingWriteRequest,
     SettingsExportResponse, SettingsImportRequest, SettingsListResponse, SkillCatalogSearchResult,
     SkillInfo, SkillInspectRequest, SkillInstallRequest, SkillListResponse, SkillPublishRequest,
@@ -139,6 +142,37 @@ mod tests {
         let json = r#"{"type":"ping"}"#;
         let msg: WsClientMessage = serde_json::from_str(json).unwrap();
         assert!(matches!(msg, WsClientMessage::Ping));
+    }
+
+    #[test]
+    fn test_ws_presence_parse_and_ack_shape() {
+        let session_id = uuid::Uuid::new_v4();
+        let json = format!(
+            r#"{{"type":"presence","session_id":"{session_id}","state":"online","surface":"ios","thread_id":null,"ttl_seconds":45}}"#
+        );
+        let msg: WsClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            msg,
+            WsClientMessage::Presence {
+                session_id: parsed,
+                state: PresenceState::Online,
+                surface: PresenceSurface::Ios,
+                thread_id: None,
+                ttl_seconds: Some(45),
+            } if parsed == session_id
+        ));
+
+        let ack = WsServerMessage::PresenceClearResult {
+            session_id,
+            response: PresenceClearResponse {
+                cleared: false,
+                presence: None,
+            },
+        };
+        let value = serde_json::to_value(ack).unwrap();
+        assert_eq!(value["type"], "presence_clear_result");
+        assert_eq!(value["session_id"], session_id.to_string());
+        assert_eq!(value["response"]["cleared"], false);
     }
 
     #[test]

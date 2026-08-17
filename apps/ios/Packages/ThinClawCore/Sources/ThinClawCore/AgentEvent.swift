@@ -58,6 +58,10 @@ public enum AgentEvent: Hashable, Sendable {
     /// Feed this to the reconnect watchdog, never to the UI timeline.
     case heartbeat
 
+    /// Short-lived, server-aggregated presence visible only in the caller's
+    /// authorized principal/thread scope.
+    case presence(PresenceEvent)
+
     /// The turn failed. Gateway shape: `{"type":"error","message":"…",…}`.
     case error(message: String, threadID: ThreadID?)
 
@@ -82,6 +86,8 @@ extension AgentEvent {
             return prompt.threadID
         case .usageUpdate(let usage):
             return usage.threadID
+        case .presence(let event):
+            return event.presence.scope.threadID
         case .heartbeat, .unknown:
             return nil
         }

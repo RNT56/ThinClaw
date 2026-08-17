@@ -872,6 +872,22 @@ mod tests {
                 message: "chain of thought".into(),
                 thread_id: Some("t1".into()),
             },
+            SseEvent::Presence {
+                event: crate::web::types::PresenceEvent {
+                    event: crate::web::types::PresenceEventKind::Joined,
+                    cause: crate::web::types::PresenceEventCause::Publish,
+                    presence: crate::web::types::PresenceAggregate {
+                        actor_id: "actor".into(),
+                        scope: crate::web::types::PresenceScope::Principal,
+                        state: crate::web::types::PresenceState::Online,
+                        surfaces: vec![crate::web::types::PresenceSurface::Ios],
+                        session_count: 1,
+                        updated_at: "now".into(),
+                        expires_at: "later".into(),
+                    },
+                    principal_id: "principal".into(),
+                },
+            },
         ] {
             assert!(!can_produce_push(&event), "pre-filter kept: {event:?}");
         }

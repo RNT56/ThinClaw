@@ -46,6 +46,7 @@ pub mod oauth_defaults;
 mod outcome;
 mod output;
 mod pairing;
+mod presence;
 mod registry;
 mod repo_projects;
 mod reset;
@@ -98,6 +99,7 @@ pub use models::{ModelCommand, run_model_command};
 pub use outcome::{CliDispatch, CliError, CliOutcome, ExitClass};
 pub use output::{ColorChoice, OutputFormat, OutputPolicy};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
+pub use presence::{PresenceCommand, run_presence_command};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use repo_projects::{RepoProjectCommand, run_repo_projects_command};
 pub use reset::{ResetCommand, run_reset_command};
@@ -447,6 +449,10 @@ pub enum Command {
     /// Spawn and manage sub-agents in the running runtime
     #[command(subcommand)]
     Subagents(SubagentCommand),
+
+    /// Publish and inspect authenticated transient presence
+    #[command(subcommand)]
+    Presence(PresenceCommand),
 
     /// Deprecated alias for `data conversations`
     #[command(subcommand, hide = true)]

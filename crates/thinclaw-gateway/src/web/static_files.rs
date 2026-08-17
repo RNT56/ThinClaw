@@ -154,4 +154,22 @@ mod tests {
         assert!(js.contains("device-pair-qr"));
         assert!(!js.contains("Not a QR image yet"));
     }
+
+    #[test]
+    fn web_client_renews_and_clears_scoped_presence() {
+        let js = include_str!("static/app.js");
+        assert!(js.contains("WEB_PRESENCE_TTL_SECONDS = 45"));
+        assert!(js.contains("WEB_TYPING_TTL_SECONDS = 5"));
+        assert!(js.contains("/api/presence/"));
+        assert!(js.contains("surface: 'web'"));
+        assert!(js.contains("addEventListener('presence'"));
+        assert!(js.contains("keepalive: true"));
+        assert!(js.contains("reconcileWebPresence(null)"));
+        assert!(js.contains("webPresenceReconciliations"));
+        assert!(js.contains("controller.abort(), 10000"));
+        assert!(js.contains("webPresenceRetryTimers"));
+        assert!(js.contains("webPresenceSessionIds = new Map()"));
+        assert!(js.contains("now - webTypingLastPublishAt < 1000"));
+        assert!(!js.contains("sessionStorage.setItem(storageKey, value)"));
+    }
 }

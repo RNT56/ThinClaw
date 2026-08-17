@@ -19,6 +19,7 @@ pub mod memory;
 #[cfg(feature = "nostr")]
 pub mod nostr;
 pub mod pairing;
+pub mod presence;
 pub mod projects;
 pub mod providers;
 pub mod repo_projects;
@@ -44,6 +45,7 @@ pub(crate) use memory::*;
 #[cfg(feature = "nostr")]
 pub(crate) use nostr::*;
 pub(crate) use pairing::*;
+pub(crate) use presence::*;
 pub(crate) use projects::*;
 pub(crate) use providers::*;
 pub(crate) use repo_projects::*;

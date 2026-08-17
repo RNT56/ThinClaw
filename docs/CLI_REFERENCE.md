@@ -144,6 +144,7 @@ for configuration, local/cloud mode, and workflow security details.
   - `status <RUN_ID>`: Show one owned durable run.
   - `cancel <RUN_ID>`: Cooperatively cancel an owned running run. A terminal run returns `not_found_or_already_done`, matching the agent tool contract.
   - All commands accept `--gateway-url <URL>`. Authentication is resolved from `GATEWAY_AUTH_TOKEN` or gateway configuration. Configured principals are restricted to their exact principal and actor; the historical primary bearer keeps its legacy administrator-wide view. Operators may spawn/cancel and read-only principals may only list/status. `--output-format json|jsonl` emits the standard versioned command envelope.
+- `thinclaw presence publish|list|clear`: Publish bounded transient presence to the authenticated running gateway, inspect principal/owned-thread aggregates, or idempotently clear an owned session. JSON/JSONL use the shared versioned output envelope; generated session IDs are returned by `publish` so callers can renew or clear them.
 - `thinclaw automation routines`: Manage scheduled background routines.
 - `thinclaw labs experiments`: Manage research automation (campaigns, providers, targets).
 - `thinclaw automation projects`: Manage the GitHub repository project supervisor (default off until enabled in settings). See [Repo Project Supervisor](#repo-project-supervisor).

@@ -8,6 +8,7 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
+use crate::web::presence::PresenceRegistry;
 use crate::web::types::SseEvent;
 
 /// Maximum number of concurrent SSE/WebSocket connections.
@@ -17,6 +18,7 @@ const MAX_CONNECTIONS: u64 = 100;
 /// Manages SSE broadcast to all connected browser tabs.
 pub struct SseManager {
     tx: broadcast::Sender<SseEvent>,
+    presence: PresenceRegistry,
     connection_count: Arc<AtomicU64>,
     max_connections: u64,
 }
@@ -27,6 +29,7 @@ impl SseManager {
         // Buffer 256 events; slow clients will miss events (acceptable for SSE with reconnect)
         let (tx, _) = broadcast::channel(256);
         Self {
+            presence: PresenceRegistry::new(tx.clone()),
             tx,
             connection_count: Arc::new(AtomicU64::new(0)),
             max_connections: MAX_CONNECTIONS,
@@ -42,6 +45,11 @@ impl SseManager {
     /// Get a clone of the broadcast sender for use by other components.
     pub fn sender(&self) -> broadcast::Sender<SseEvent> {
         self.tx.clone()
+    }
+
+    /// Shared transient presence registry for this gateway instance.
+    pub fn presence(&self) -> &PresenceRegistry {
+        &self.presence
     }
 
     /// Get current number of active connections.

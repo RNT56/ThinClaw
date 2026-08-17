@@ -1348,6 +1348,32 @@ mod tests {
     }
 
     #[test]
+    fn maps_presence_to_privacy_filtered_passthrough() {
+        let events = gateway_sse_to_ui_events(serde_json::json!({
+            "type": "presence",
+            "event": "joined",
+            "cause": "publish",
+            "presence": {
+                "actor_id": "actor-a",
+                "scope": { "kind": "principal" },
+                "state": "online",
+                "surfaces": ["desktop"],
+                "session_count": 1,
+                "updated_at": "now",
+                "expires_at": "later"
+            }
+        }));
+
+        assert!(matches!(
+            events.as_slice(),
+            [UiEvent::GatewayEvent { event_type, payload, .. }]
+                if event_type == "presence"
+                    && payload.get("principal_id").is_none()
+                    && payload.get("session_id").is_none()
+        ));
+    }
+
+    #[test]
     fn maps_local_and_remote_context_pressure_without_text_parsing() {
         let local = status_to_ui_event(
             StatusUpdate::ContextPressure {

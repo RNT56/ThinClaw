@@ -81,6 +81,7 @@ pub fn canonical_cli_leaf_effect(path: &str) -> Result<CliLeafEffect, String> {
         "auth",
         "block",
         "cancel",
+        "clear",
         "connect",
         "create",
         "delete",
@@ -164,6 +165,7 @@ pub fn canonical_cli_leaf_effect(path: &str) -> Result<CliLeafEffect, String> {
         MutationExecutionPolicy::StoppedExclusive
     } else if path == "send"
         || matches!(path, "subagents spawn" | "subagents cancel")
+        || matches!(path, "presence publish" | "presence clear")
         || path.starts_with("automation jobs ")
         || path == "automation routines trigger"
         || path == "extensions activate"
@@ -304,5 +306,11 @@ mod tests {
             ))
         );
         assert!(canonical_cli_leaf_effect("config frobnicate").is_err());
+        assert_eq!(
+            canonical_cli_leaf_effect("presence clear"),
+            Ok(CliLeafEffect::Mutating(
+                MutationExecutionPolicy::RuntimeRequired
+            ))
+        );
     }
 }

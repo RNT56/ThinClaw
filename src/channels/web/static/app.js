@@ -10,6 +10,16 @@ let hasMore = false;
 let oldestTimestamp = null;
 let loadingOlder = false;
 let sseHasConnectedBefore = false;
+let webPresenceRefreshTimer = null;
+let webTypingClearTimer = null;
+let webTypingLastPublishAt = 0;
+const webPresenceAggregates = new Map();
+const webPresenceSessionIds = new Map();
+const webPresenceReconciliations = new Map();
+const webPresenceRetryTimers = new Map();
+const WEB_PRESENCE_TTL_SECONDS = 45;
+const WEB_TYPING_TTL_SECONDS = 5;
+const WEB_PRESENCE_REFRESH_MS = 20000;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 let pairingPollInterval = null;
@@ -659,6 +669,7 @@ function startAuthenticatedSession(urlLogLevel, cleanedUrl) {
   window.history.replaceState({}, '', cleaned.pathname + cleaned.search + cleaned.hash);
   renderShellNavigation();
   connectSSE();
+  startWebPresence();
   connectLogSSE();
   startGatewayStatusPolling();
   checkTeeStatus();
@@ -715,6 +726,175 @@ function apiFetch(path, options) {
     return res.json();
   });
 }
+
+// --- Transient presence (never stored in chat history) ---
+
+function fallbackPresenceUUID() {
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) +
+    '-' + hex.slice(16, 20) + '-' + hex.slice(20);
+}
+
+function webPresenceSessionId(storageKey) {
+  let value = webPresenceSessionIds.get(storageKey);
+  if (!value) {
+    value = typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : fallbackPresenceUUID();
+    // Per-page IDs prevent duplicated tabs (which may clone sessionStorage)
+    // from sharing and clearing one another's leases.
+    webPresenceSessionIds.set(storageKey, value);
+  }
+  return value;
+}
+
+function presenceAggregateKey(presence) {
+  const scopeKey = presence.scope.kind === 'thread'
+    ? 'thread:' + presence.scope.thread_id
+    : 'principal';
+  return scopeKey + ':' + presence.actor_id;
+}
+
+function presenceScopeKey(presence) {
+  return presence.scope.kind === 'thread'
+    ? 'thread:' + presence.scope.thread_id
+    : 'principal';
+}
+
+function applyWebPresenceEvent(data) {
+  const presence = data.presence;
+  const key = presenceAggregateKey(presence);
+  if (data.event === 'expired') webPresenceAggregates.delete(key);
+  else webPresenceAggregates.set(key, presence);
+  window.dispatchEvent(new CustomEvent('thinclaw:presence', {
+    detail: { event: data.event, cause: data.cause, presence: presence },
+  }));
+}
+
+function reconcileWebPresence(threadId) {
+  const scopeKey = threadId ? 'thread:' + threadId : 'principal';
+  // A newer snapshot request supersedes any older request and its buffer.
+  // Those events predate the new authoritative snapshot and replaying them
+  // afterward can resurrect a stale aggregate across reconnects.
+  const reconciliation = { events: [] };
+  webPresenceReconciliations.set(scopeKey, reconciliation);
+  const query = threadId ? '?thread_id=' + encodeURIComponent(threadId) : '';
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), 10000) : null;
+  return apiFetch(
+    '/api/presence' + query,
+    controller ? { signal: controller.signal } : {}
+  ).then((snapshot) => {
+    if (webPresenceReconciliations.get(scopeKey) !== reconciliation) return;
+    const scopePrefix = scopeKey + ':';
+    for (const key of Array.from(webPresenceAggregates.keys())) {
+      if (key.startsWith(scopePrefix)) webPresenceAggregates.delete(key);
+    }
+    for (const presence of (snapshot.presences || [])) {
+      webPresenceAggregates.set(presenceAggregateKey(presence), presence);
+    }
+    window.dispatchEvent(new CustomEvent('thinclaw:presence-snapshot', {
+      detail: { thread_id: threadId || null, presences: snapshot.presences || [] },
+    }));
+    for (const data of reconciliation.events) applyWebPresenceEvent(data);
+    const retry = webPresenceRetryTimers.get(scopeKey);
+    if (retry) clearTimeout(retry);
+    webPresenceRetryTimers.delete(scopeKey);
+  }).catch(() => {
+    if (webPresenceReconciliations.get(scopeKey) === reconciliation) {
+      for (const data of reconciliation.events) applyWebPresenceEvent(data);
+      if (!webPresenceRetryTimers.has(scopeKey)) {
+        webPresenceRetryTimers.set(scopeKey, setTimeout(() => {
+          webPresenceRetryTimers.delete(scopeKey);
+          if (token && (!threadId || currentThreadId === threadId)) reconcileWebPresence(threadId);
+        }, 5000));
+      }
+    }
+  }).finally(() => {
+    if (timeout) clearTimeout(timeout);
+    if (webPresenceReconciliations.get(scopeKey) === reconciliation) {
+      webPresenceReconciliations.delete(scopeKey);
+    }
+  });
+}
+
+function publishWebPresence(sessionId, state, threadId, ttlSeconds) {
+  const body = { state: state, surface: 'web', ttl_seconds: ttlSeconds };
+  if (threadId) body.thread_id = threadId;
+  return apiFetch('/api/presence/' + encodeURIComponent(sessionId), {
+    method: 'PUT',
+    body: body,
+  });
+}
+
+function clearWebPresence(sessionId) {
+  return apiFetch('/api/presence/' + encodeURIComponent(sessionId), { method: 'DELETE' })
+    .catch(() => null);
+}
+
+function refreshWebPresence() {
+  if (!token) return Promise.resolve();
+  return publishWebPresence(
+    webPresenceSessionId('thinclaw_web_presence_session_v1'),
+    document.visibilityState === 'hidden' ? 'away' : 'online',
+    null,
+    WEB_PRESENCE_TTL_SECONDS
+  ).catch(() => null);
+}
+
+function startWebPresence() {
+  if (webPresenceRefreshTimer) clearInterval(webPresenceRefreshTimer);
+  refreshWebPresence();
+  webPresenceRefreshTimer = setInterval(refreshWebPresence, WEB_PRESENCE_REFRESH_MS);
+}
+
+function clearWebTypingPresence() {
+  if (webTypingClearTimer) clearTimeout(webTypingClearTimer);
+  webTypingClearTimer = null;
+  webTypingLastPublishAt = 0;
+  return clearWebPresence(webPresenceSessionId('thinclaw_web_typing_session_v1'));
+}
+
+function publishWebTypingPresence() {
+  if (!currentThreadId || !token) return;
+  const now = Date.now();
+  if (now - webTypingLastPublishAt < 1000) {
+    if (webTypingClearTimer) clearTimeout(webTypingClearTimer);
+    webTypingClearTimer = setTimeout(clearWebTypingPresence, 4000);
+    return;
+  }
+  webTypingLastPublishAt = now;
+  publishWebPresence(
+    webPresenceSessionId('thinclaw_web_typing_session_v1'),
+    'typing',
+    currentThreadId,
+    WEB_TYPING_TTL_SECONDS
+  ).catch(() => null);
+  if (webTypingClearTimer) clearTimeout(webTypingClearTimer);
+  webTypingClearTimer = setTimeout(clearWebTypingPresence, 4000);
+}
+
+document.addEventListener('visibilitychange', refreshWebPresence);
+window.addEventListener('pagehide', () => {
+  if (!token) return;
+  for (const key of ['thinclaw_web_presence_session_v1', 'thinclaw_web_typing_session_v1']) {
+    const sessionId = webPresenceSessionIds.get(key);
+    if (!sessionId) continue;
+    fetch('/api/presence/' + encodeURIComponent(sessionId), {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer ' + token },
+      keepalive: true,
+    }).catch(() => null);
+  }
+});
 
 function startMcpInteractionPolling() {
   if (mcpInteractionPollInterval) clearInterval(mcpInteractionPollInterval);
@@ -826,6 +1006,10 @@ function connectSSE() {
       loadThreads();
       refreshSubsessionUi();
     }
+    // SSE has no replay; repair principal and selected-thread aggregates on
+    // every initial connect/reconnect before applying subsequent events.
+    reconcileWebPresence(null);
+    if (currentThreadId) reconcileWebPresence(currentThreadId);
     sseHasConnectedBefore = true;
   };
 
@@ -917,6 +1101,15 @@ function connectSSE() {
   eventSource.addEventListener('conversation_deleted', (e) => {
     const data = JSON.parse(e.data);
     handleConversationSyncEvent(data, 'conversation_deleted');
+  });
+
+  eventSource.addEventListener('presence', (e) => {
+    const data = JSON.parse(e.data);
+    const presence = data.presence;
+    if (!presence || !presence.actor_id || !presence.scope) return;
+    const reconciliation = webPresenceReconciliations.get(presenceScopeKey(presence));
+    if (reconciliation) reconciliation.events.push(data);
+    else applyWebPresenceEvent(data);
   });
 
   eventSource.addEventListener('job_started', (e) => {
@@ -1873,6 +2066,8 @@ function sendMessage() {
   const content = input.value.trim();
   if (!content) return;
 
+  clearWebTypingPresence();
+
   startLiveTurn(content, new Date().toISOString());
   input.value = '';
   autoResizeTextarea(input);
@@ -2600,8 +2795,10 @@ function switchToAssistant() {
 }
 
 function switchThread(threadId) {
+  clearWebTypingPresence();
   finalizeActivityGroup();
   currentThreadId = threadId;
+  reconcileWebPresence(threadId);
   hasMore = false;
   oldestTimestamp = null;
   syncSelectedSubsessionForCurrentThread();
@@ -2693,6 +2890,10 @@ chatInput.addEventListener('keydown', (e) => {
   }
 });
 chatInput.addEventListener('input', () => autoResizeTextarea(chatInput));
+chatInput.addEventListener('input', () => {
+  if (chatInput.value.trim()) publishWebTypingPresence();
+  else clearWebTypingPresence();
+});
 window.addEventListener('resize', () => {
   syncChatComposerMetrics();
   syncThreadSidebarToggleState();

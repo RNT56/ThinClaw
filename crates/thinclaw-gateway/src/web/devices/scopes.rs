@@ -55,6 +55,15 @@ pub fn required_scope(method: &str, path: &str) -> Option<DeviceScope> {
         return Some(DeviceScope::Chat);
     }
 
+    let presence_session = path
+        .strip_prefix("/api/presence/")
+        .is_some_and(|session_id| !session_id.is_empty() && !session_id.contains('/'));
+    if (method == "GET" && path == "/api/presence")
+        || (matches!(method.as_str(), "PUT" | "DELETE") && presence_session)
+    {
+        return Some(DeviceScope::Chat);
+    }
+
     // Everything under `/api/devices/me/` — including companion management
     // (`/api/devices/me/companions*`, milestone M4) and push/live-activity
     // registration — is part of the device's own `devices:self` surface. A
@@ -129,6 +138,30 @@ mod tests {
             required_scope("GET", "/api/jobs/abc123"),
             Some(DeviceScope::JobsRead)
         );
+    }
+
+    #[test]
+    fn presence_routes_are_an_exact_chat_scope_allowlist() {
+        assert_eq!(
+            required_scope("GET", "/api/presence"),
+            Some(DeviceScope::Chat)
+        );
+        assert_eq!(
+            required_scope("PUT", "/api/presence/00000000-0000-0000-0000-000000000000"),
+            Some(DeviceScope::Chat)
+        );
+        assert_eq!(
+            required_scope("DELETE", "/api/presence/session"),
+            Some(DeviceScope::Chat)
+        );
+        for (method, path) in [
+            ("POST", "/api/presence"),
+            ("PUT", "/api/presence"),
+            ("GET", "/api/presence/session"),
+            ("PUT", "/api/presence/session/nested"),
+        ] {
+            assert_eq!(required_scope(method, path), None, "{method} {path}");
+        }
     }
 
     #[test]

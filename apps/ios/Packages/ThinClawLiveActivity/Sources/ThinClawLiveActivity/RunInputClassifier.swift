@@ -52,7 +52,7 @@ public enum RunInputClassifier {
         // No activity signal: streaming text (content — never in the activity),
         // usage accounting, auth/credential prompts, heartbeat, unknowns.
         case .streamChunk, .usageUpdate, .authRequired, .credentialPrompt, .heartbeat,
-            .unknown:
+            .presence, .unknown:
             return nil
         }
     }

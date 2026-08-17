@@ -111,6 +111,32 @@ public struct AgentEventDecoder: Sendable {
                     threadID: p.threadId.map(ThreadID.init)))
         case "heartbeat":
             return .heartbeat
+        case "presence":
+            let p = try payload(PresencePayload.self)
+            let scope: PresenceScope
+            switch p.presence.scope.kind {
+            case "principal":
+                scope = .principal
+            case "thread":
+                guard let threadID = p.presence.scope.threadId else {
+                    throw AgentEventDecodingError.invalidPayload(type: envelope.type)
+                }
+                scope = .thread(ThreadID(threadID))
+            default:
+                throw AgentEventDecodingError.invalidPayload(type: envelope.type)
+            }
+            return .presence(
+                PresenceEvent(
+                    event: p.event,
+                    cause: p.cause,
+                    presence: PresenceAggregate(
+                        actorID: p.presence.actorId,
+                        scope: scope,
+                        state: p.presence.state,
+                        surfaces: p.presence.surfaces,
+                        sessionCount: p.presence.sessionCount,
+                        updatedAt: p.presence.updatedAt,
+                        expiresAt: p.presence.expiresAt)))
         case "error":
             let p = try payload(ErrorPayload.self)
             return .error(message: p.message, threadID: p.threadId.map(ThreadID.init))
@@ -124,6 +150,40 @@ public struct AgentEventDecoder: Sendable {
 
 private struct TypeEnvelope: Decodable {
     let type: String
+}
+
+private struct PresencePayload: Decodable {
+    let event: PresenceEventKind
+    let cause: PresenceEventCause
+    let presence: Aggregate
+
+    struct Aggregate: Decodable {
+        let actorId: String
+        let scope: Scope
+        let state: PresenceState
+        let surfaces: [PresenceSurface]
+        let sessionCount: Int
+        let updatedAt: String
+        let expiresAt: String
+
+        enum CodingKeys: String, CodingKey {
+            case actorId = "actor_id"
+            case scope, state, surfaces
+            case sessionCount = "session_count"
+            case updatedAt = "updated_at"
+            case expiresAt = "expires_at"
+        }
+    }
+
+    struct Scope: Decodable {
+        let kind: String
+        let threadId: String?
+
+        enum CodingKeys: String, CodingKey {
+            case kind
+            case threadId = "thread_id"
+        }
+    }
 }
 
 private struct StreamChunkPayload: Decodable {

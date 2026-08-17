@@ -9,8 +9,9 @@ use uuid::Uuid;
 use crate::error::{ClientError, Result};
 use crate::sse::SseDecoder;
 use crate::wire::{
-    ApprovalAction, ApprovalRequest, HistoryResponse, SendMessageRequest, SendMessageResponse,
-    SseEvent, ThreadListResponse,
+    ApprovalAction, ApprovalRequest, HistoryResponse, PresenceClearResponse,
+    PresencePublishRequest, PresencePublishResponse, PresenceSnapshotResponse, SendMessageRequest,
+    SendMessageResponse, SseEvent, ThreadListResponse,
 };
 
 const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
@@ -246,6 +247,68 @@ impl Client {
             .await?;
         Self::error_for_status(resp).await?;
         Ok(())
+    }
+
+    /// Publish or renew one caller-owned, server-bounded presence lease.
+    /// Reuse `session_id` across reconnects so the gateway updates rather than
+    /// duplicates this client surface.
+    pub async fn publish_presence(
+        &self,
+        session_id: Uuid,
+        request: &PresencePublishRequest,
+    ) -> Result<PresencePublishResponse> {
+        let resp = self
+            .http
+            .put(self.url(&format!("/api/presence/{session_id}"))?)
+            .bearer_auth(&self.token)
+            .json(request)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await?;
+        let resp = Self::error_for_status(resp).await?;
+        thinclaw_types::http_response::bounded_json(resp, MAX_COMMAND_RESPONSE_BYTES)
+            .await
+            .map_err(|error| ClientError::Response(error.to_string()))
+    }
+
+    /// Idempotently clear one lease owned by this authenticated actor.
+    pub async fn clear_presence(&self, session_id: Uuid) -> Result<PresenceClearResponse> {
+        let resp = self
+            .http
+            .delete(self.url(&format!("/api/presence/{session_id}"))?)
+            .bearer_auth(&self.token)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await?;
+        let resp = Self::error_for_status(resp).await?;
+        thinclaw_types::http_response::bounded_json(resp, MAX_COMMAND_RESPONSE_BYTES)
+            .await
+            .map_err(|error| ClientError::Response(error.to_string()))
+    }
+
+    /// Cold-load the authoritative aggregate for the caller's principal or an
+    /// owned thread. Consumers should call this on initial SSE connect and
+    /// after reconnect/lag because the event stream has no replay.
+    pub async fn presence_snapshot(
+        &self,
+        thread_id: Option<Uuid>,
+    ) -> Result<PresenceSnapshotResponse> {
+        let mut url = self.url("/api/presence")?;
+        if let Some(thread_id) = thread_id {
+            url.query_pairs_mut()
+                .append_pair("thread_id", &thread_id.to_string());
+        }
+        let resp = self
+            .http
+            .get(url)
+            .bearer_auth(&self.token)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await?;
+        let resp = Self::error_for_status(resp).await?;
+        thinclaw_types::http_response::bounded_json(resp, MAX_COMMAND_RESPONSE_BYTES)
+            .await
+            .map_err(|error| ClientError::Response(error.to_string()))
     }
 
     /// Open the server-sent event stream (`GET /api/chat/events`).

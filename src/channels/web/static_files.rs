@@ -97,4 +97,14 @@ mod tests {
         assert!(js.contains("token ids"));
         assert!(js.contains("logprobs"));
     }
+
+    #[test]
+    fn legacy_web_asset_mirror_contains_presence_contract() {
+        let js = include_str!("static/app.js");
+        assert!(js.contains("/api/presence/"));
+        assert!(js.contains("thinclaw:presence"));
+        assert!(js.contains("WEB_TYPING_TTL_SECONDS = 5"));
+        assert!(js.contains("reconcileWebPresence"));
+        assert!(js.contains("webPresenceSessionIds = new Map()"));
+    }
 }

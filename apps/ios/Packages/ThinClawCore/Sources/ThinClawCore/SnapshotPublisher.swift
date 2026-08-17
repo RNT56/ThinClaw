@@ -184,7 +184,7 @@ public actor SnapshotPublisher {
             state.phase = .error
             state.activeToolName = nil
             adoptActiveThread(thread, title: threadTitle)
-        case .authRequired, .credentialPrompt, .usageUpdate, .heartbeat, .unknown:
+        case .authRequired, .credentialPrompt, .usageUpdate, .heartbeat, .presence, .unknown:
             // No status-surface signal: leave the projection untouched.
             break
         }

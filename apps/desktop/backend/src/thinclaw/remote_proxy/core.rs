@@ -53,6 +53,9 @@ pub(super) struct RemoteGatewayProxyInner {
     pub(super) sse_handle: Mutex<Option<JoinHandle<()>>>,
     /// Current connection state
     pub(super) state: RwLock<ConnectionState>,
+    /// Stable for this proxy lifetime so reconnects renew instead of adding
+    /// duplicate desktop sessions.
+    pub(super) presence_session_id: uuid::Uuid,
 }
 
 pub(super) fn remote_thread_id(session_key: &str) -> Option<String> {
@@ -120,6 +123,7 @@ impl RemoteGatewayProxy {
                 sse_client,
                 sse_handle: Mutex::new(None),
                 state: RwLock::new(ConnectionState::Disconnected),
+                presence_session_id: uuid::Uuid::new_v4(),
             }),
         })
     }

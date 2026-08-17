@@ -2,8 +2,9 @@
 //!
 //! A typed async Rust client for driving a [ThinClaw](https://thinclaw.dev)
 //! gateway — the analog of an Agent SDK. It wraps the gateway's HTTP + SSE
-//! surface: send chat messages, stream responses and tool-call events, browse
-//! thread history, and resolve tool approvals.
+//! surface: send chat messages, stream responses and tool-call/presence events,
+//! browse thread history, resolve tool approvals, and publish bounded transient
+//! presence.
 //!
 //! ## Quick start
 //!
@@ -58,6 +59,8 @@ mod wire;
 pub use client::Client;
 pub use error::{ClientError, Result};
 pub use wire::{
-    ApprovalAction, HistoryResponse, SendMessageResponse, SseEvent, ThreadInfo, ThreadListResponse,
-    ToolCallInfo, TurnInfo,
+    ApprovalAction, HistoryResponse, PresenceAggregate, PresenceClearResponse, PresenceEvent,
+    PresenceEventCause, PresenceEventKind, PresencePublishRequest, PresencePublishResponse,
+    PresenceScope, PresenceSnapshotResponse, PresenceState, PresenceSurface, SendMessageResponse,
+    SseEvent, ThreadInfo, ThreadListResponse, ToolCallInfo, TurnInfo,
 };

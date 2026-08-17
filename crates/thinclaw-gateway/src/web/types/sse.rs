@@ -5,6 +5,8 @@ use thinclaw_types::SubagentTaskPacket;
 
 use crate::web::devices::ApprovalRisk;
 
+use super::PresenceEvent;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -243,6 +245,15 @@ pub enum SseEvent {
     #[serde(rename = "heartbeat")]
     Heartbeat,
 
+    /// Ephemeral, authenticated presence aggregate. Routing ownership is
+    /// carried in a non-serialized field on `PresenceEvent` and filtered at
+    /// the SSE/WS boundary; presence never enters conversation history.
+    #[serde(rename = "presence")]
+    Presence {
+        #[serde(flatten)]
+        event: PresenceEvent,
+    },
+
     // Sandbox job streaming events (worker + Claude Code bridge)
     #[serde(rename = "job_message")]
     JobMessage {
@@ -451,6 +462,7 @@ impl SseEvent {
             SseEvent::CredentialPrompt { .. } => "credential_prompt",
             SseEvent::Error { .. } => "error",
             SseEvent::Heartbeat => "heartbeat",
+            SseEvent::Presence { .. } => "presence",
             SseEvent::JobMessage { .. } => "job_message",
             SseEvent::JobToolUse { .. } => "job_tool_use",
             SseEvent::JobToolResult { .. } => "job_tool_result",

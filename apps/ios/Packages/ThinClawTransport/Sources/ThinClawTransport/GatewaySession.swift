@@ -25,6 +25,8 @@ import ThinClawCore
 public actor GatewaySession {
     /// Coalescer flush cadence: ~10 Hz, matching a comfortable UI redraw rate.
     public static let coalesceInterval: Duration = .milliseconds(100)
+    public static let presenceTTLSeconds: Int64 = 45
+    public static let presenceRefreshInterval: Duration = .seconds(20)
 
     private let client: any APIProtocol
     private let stream: GatewayStream
@@ -38,6 +40,14 @@ public actor GatewaySession {
     /// even when the event carries no `thread_id` — so approvals fan out here
     /// rather than through the per-thread routing that drops thread-less events.
     private var approvalSubscribers: [UUID: AsyncStream<ApprovalRequest>.Continuation] = [:]
+    /// Scope-specific, privacy-filtered aggregate presence updates.
+    private struct PresenceSubscriber {
+        let scope: PresenceScope
+        let continuation: AsyncStream<PresenceUpdate>.Continuation
+        var reconciliationID: UUID?
+        var bufferedEvents: [PresenceEvent]
+    }
+    private var presenceSubscribers: [UUID: PresenceSubscriber] = [:]
     /// Per-thread coalescers for in-flight streaming text.
     private var coalescers: [ThreadID: StreamChunkCoalescer] = [:]
 
@@ -47,6 +57,9 @@ public actor GatewaySession {
 
     private var pumpTask: Task<Void, Never>?
     private var flushTask: Task<Void, Never>?
+    private var presenceTask: Task<Void, Never>?
+    private var presenceReconcileTasks: [UUID: Task<Void, Never>] = [:]
+    private let presenceSessionID = UUID()
     private let clock: any StreamClock
 
     /// - Parameters:
@@ -79,15 +92,43 @@ public actor GatewaySession {
             await self.consume(states)
         }
         flushTask = Task { await self.flushLoop() }
+        presenceTask = Task { await self.presenceLoop() }
     }
 
-    /// Tear down the stream, flush cadence, and all subscribers.
-    public func shutdown() async {
-        pumpTask?.cancel()
+    /// Pause network work while preserving subscribers for a later foreground
+    /// `start()`. This is the reversible scene-lifecycle path.
+    public func suspend() async {
+        let pump = pumpTask
         pumpTask = nil
-        flushTask?.cancel()
+        let flush = flushTask
         flushTask = nil
+        let presence = presenceTask
+        presenceTask = nil
+        let presenceReconciles = Array(presenceReconcileTasks.values)
+        presenceReconcileTasks.removeAll()
+        let wasRunning = pump != nil || flush != nil || presence != nil
+        pump?.cancel()
+        flush?.cancel()
+        presence?.cancel()
+        for task in presenceReconciles { task.cancel() }
         await stream.shutdown()
+        // Wait for every task that can publish before the final DELETE. Task
+        // cancellation alone does not guarantee an in-flight HTTP PUT ended.
+        await pump?.value
+        await flush?.value
+        await presence?.value
+        for task in presenceReconciles { await task.value }
+        if wasRunning { try? await clearPresence() }
+
+        resetPresenceReconciliation()
+        coalescers.removeAll()
+        updateConnectionState(.idle)
+    }
+
+    /// Permanently tear down the session and finish every subscriber. Use
+    /// ``suspend()`` for a background/foreground transition.
+    public func shutdown() async {
+        await suspend()
 
         for continuations in eventSubscribers.values {
             for continuation in continuations.values { continuation.finish() }
@@ -95,9 +136,9 @@ public actor GatewaySession {
         eventSubscribers.removeAll()
         for continuation in approvalSubscribers.values { continuation.finish() }
         approvalSubscribers.removeAll()
-        coalescers.removeAll()
+        for subscriber in presenceSubscribers.values { subscriber.continuation.finish() }
+        presenceSubscribers.removeAll()
 
-        updateConnectionState(.idle)
         for continuation in connectionContinuations.values { continuation.finish() }
         connectionContinuations.removeAll()
     }
@@ -162,6 +203,98 @@ public actor GatewaySession {
         approvalSubscribers[id] = nil
     }
 
+    // MARK: - Presence event routing
+
+    /// Principal/thread aggregates visible to this authenticated device. The
+    /// wire contract never contains individual session or principal IDs.
+    public func presenceEvents(thread: ThreadID? = nil) -> AsyncStream<PresenceUpdate> {
+        AsyncStream { continuation in
+            let id = UUID()
+            let scope = thread.map(PresenceScope.thread) ?? .principal
+            presenceSubscribers[id] = PresenceSubscriber(
+                scope: scope,
+                continuation: continuation,
+                reconciliationID: nil,
+                bufferedEvents: [])
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.dropPresenceSubscriber(id) }
+            }
+            // Before the stream is active, the next `.connected` transition
+            // owns the initial snapshot. A late subscriber to an already-live
+            // session still receives an immediate cold load.
+            if currentConnectionState == .connected {
+                Task { [weak self] in
+                    await self?.reconcilePresenceScopes([scope])
+                }
+            }
+        }
+    }
+
+    private func dropPresenceSubscriber(_ id: UUID) {
+        presenceSubscribers[id] = nil
+    }
+
+    private func reconcilePresenceScopes(_ scopes: Set<PresenceScope>) async {
+        let tickets = beginPresenceReconciliation(scopes)
+        await completePresenceReconciliation(tickets)
+    }
+
+    private func beginPresenceReconciliation(
+        _ scopes: Set<PresenceScope>
+    ) -> [PresenceScope: UUID] {
+        let tickets = Dictionary(uniqueKeysWithValues: scopes.map { ($0, UUID()) })
+        let subscriberIDs = presenceSubscribers.compactMap { id, subscriber in
+            tickets[subscriber.scope] == nil ? nil : id
+        }
+        for id in subscriberIDs {
+            guard var subscriber = presenceSubscribers[id] else { continue }
+            if subscriber.reconciliationID == nil {
+                subscriber.bufferedEvents.removeAll(keepingCapacity: true)
+            }
+            subscriber.reconciliationID = tickets[subscriber.scope]
+            presenceSubscribers[id] = subscriber
+        }
+        return tickets
+    }
+
+    private func completePresenceReconciliation(_ tickets: [PresenceScope: UUID]) async {
+        for (scope, ticket) in tickets {
+            let snapshot = try? await presenceSnapshot(thread: scope.threadID)
+            let matchingIDs = presenceSubscribers.compactMap { id, subscriber in
+                subscriber.scope == scope && subscriber.reconciliationID == ticket ? id : nil
+            }
+            for id in matchingIDs {
+                guard var subscriber = presenceSubscribers[id] else { continue }
+                let buffered = subscriber.bufferedEvents
+                subscriber.reconciliationID = nil
+                subscriber.bufferedEvents.removeAll(keepingCapacity: true)
+                presenceSubscribers[id] = subscriber
+                if let snapshot {
+                    subscriber.continuation.yield(.snapshot(snapshot))
+                }
+                for event in buffered {
+                    subscriber.continuation.yield(.event(event))
+                }
+            }
+        }
+    }
+
+    private func presenceReconciliationFinished(_ id: UUID) {
+        presenceReconcileTasks[id] = nil
+    }
+
+    /// A fresh transport connection gets an authoritative new snapshot. Any
+    /// event buffered for the previous connection predates that snapshot and
+    /// must not be replayed afterward as if it were newer.
+    private func resetPresenceReconciliation() {
+        for id in Array(presenceSubscribers.keys) {
+            guard var subscriber = presenceSubscribers[id] else { continue }
+            subscriber.reconciliationID = nil
+            subscriber.bufferedEvents.removeAll(keepingCapacity: true)
+            presenceSubscribers[id] = subscriber
+        }
+    }
+
     // MARK: - Actions
 
     /// Send a message. Returns the gateway-issued message id.
@@ -217,6 +350,55 @@ public actor GatewaySession {
                             action: decision.wire,
                             requestId: requestID,
                             threadId: thread?.rawValue))))
+        } catch {
+            throw APIError.from(error)
+        }
+    }
+
+    /// Publish a bounded iOS presence state. `typing` must carry an owned
+    /// thread; the gateway validates both the TTL and ownership again.
+    public func publishPresence(
+        _ state: PresenceState,
+        thread: ThreadID? = nil,
+        ttlSeconds: Int64 = GatewaySession.presenceTTLSeconds
+    ) async throws {
+        do {
+            let output = try await client.presencePublishHandler(
+                .init(
+                    path: .init(sessionId: presenceSessionID.uuidString),
+                    body: .json(
+                        .init(
+                            state: .init(rawValue: state.rawValue)!,
+                            surface: .ios,
+                            threadId: thread?.rawValue,
+                            ttlSeconds: ttlSeconds))))
+            _ = try output.ok
+        } catch {
+            throw APIError.from(error)
+        }
+    }
+
+    /// Idempotently remove this session's presence lease.
+    public func clearPresence() async throws {
+        do {
+            let output = try await client.presenceClearHandler(
+                .init(path: .init(sessionId: presenceSessionID.uuidString)))
+            _ = try output.ok
+        } catch {
+            throw APIError.from(error)
+        }
+    }
+
+    /// Fetch an authoritative principal- or thread-scoped aggregate. This is
+    /// the repair path for initial subscription and every SSE reconnect.
+    public func presenceSnapshot(thread: ThreadID? = nil) async throws -> PresenceSnapshot {
+        do {
+            let output = try await client.presenceSnapshotHandler(
+                .init(query: .init(threadId: thread?.rawValue)))
+            let generated = try output.ok.body.json
+            let encoded = try JSONEncoder().encode(generated)
+            let wire = try JSONDecoder().decode(PresenceSnapshotWire.self, from: encoded)
+            return try wire.domain(scope: thread.map(PresenceScope.thread) ?? .principal)
         } catch {
             throw APIError.from(error)
         }
@@ -302,7 +484,22 @@ public actor GatewaySession {
             switch state {
             case .connected:
                 updateConnectionState(.connected)
+                for task in presenceReconcileTasks.values { task.cancel() }
+                resetPresenceReconciliation()
+                let scopes = Set(presenceSubscribers.values.map(\.scope))
+                let tickets = beginPresenceReconciliation(scopes)
+                let reconciliationID = UUID()
+                presenceReconcileTasks[reconciliationID] = Task { [weak self] in
+                    guard let self else { return }
+                    try? await self.publishPresence(.online)
+                    if !Task.isCancelled {
+                        await self.completePresenceReconciliation(tickets)
+                    }
+                    await self.presenceReconciliationFinished(reconciliationID)
+                }
             case .reconnecting(let attempt):
+                for task in presenceReconcileTasks.values { task.cancel() }
+                resetPresenceReconciliation()
                 updateConnectionState(.reconnecting(attempt: attempt))
             case .degraded:
                 // A degrade does not by itself change the coarse domain state;
@@ -322,6 +519,21 @@ public actor GatewaySession {
         // one whose event omitted `thread_id`.
         if case .approvalNeeded(let request) = event {
             for continuation in approvalSubscribers.values { continuation.yield(request) }
+        }
+        if case .presence(let presence) = event {
+            let matchingIDs = presenceSubscribers.compactMap { id, subscriber in
+                subscriber.scope == presence.presence.scope ? id : nil
+            }
+            for id in matchingIDs {
+                guard var subscriber = presenceSubscribers[id] else { continue }
+                if subscriber.reconciliationID != nil {
+                    subscriber.bufferedEvents.append(presence)
+                    presenceSubscribers[id] = subscriber
+                } else {
+                    subscriber.continuation.yield(.event(presence))
+                }
+            }
+            return
         }
 
         guard let thread = event.threadID else {
@@ -368,6 +580,19 @@ public actor GatewaySession {
         }
     }
 
+    private func presenceLoop() async {
+        while !Task.isCancelled {
+            do {
+                try await clock.sleep(for: Self.presenceRefreshInterval)
+            } catch {
+                return
+            }
+            if currentConnectionState == .connected {
+                try? await publishPresence(.online)
+            }
+        }
+    }
+
     private func deliver(_ event: AgentEvent, to thread: ThreadID) {
         guard let subscribers = eventSubscribers[thread] else { return }
         for continuation in subscribers.values { continuation.yield(event) }
@@ -378,6 +603,79 @@ public actor GatewaySession {
         currentConnectionState = state
         for continuation in connectionContinuations.values { continuation.yield(state) }
     }
+}
+
+private struct PresenceSnapshotWire: Decodable {
+    let presences: [Aggregate]
+    let serverTime: String
+
+    enum CodingKeys: String, CodingKey {
+        case presences
+        case serverTime = "server_time"
+    }
+
+    struct Aggregate: Decodable {
+        let actorID: String
+        let scope: Scope
+        let state: PresenceState
+        let surfaces: [PresenceSurface]
+        let sessionCount: Int
+        let updatedAt: String
+        let expiresAt: String
+
+        enum CodingKeys: String, CodingKey {
+            case actorID = "actor_id"
+            case scope, state, surfaces
+            case sessionCount = "session_count"
+            case updatedAt = "updated_at"
+            case expiresAt = "expires_at"
+        }
+    }
+
+    struct Scope: Decodable {
+        let kind: String
+        let threadID: String?
+
+        enum CodingKeys: String, CodingKey {
+            case kind
+            case threadID = "thread_id"
+        }
+    }
+
+    func domain(scope snapshotScope: PresenceScope) throws -> PresenceSnapshot {
+        let mapped = try presences.map { wire -> PresenceAggregate in
+            let scope: PresenceScope
+            switch wire.scope.kind {
+            case "principal":
+                scope = .principal
+            case "thread":
+                guard let threadID = wire.scope.threadID else {
+                    throw PresenceSnapshotMappingError.invalidThreadScope
+                }
+                scope = .thread(ThreadID(threadID))
+            default:
+                throw PresenceSnapshotMappingError.unknownScope
+            }
+            guard scope == snapshotScope else {
+                throw PresenceSnapshotMappingError.scopeMismatch
+            }
+            return PresenceAggregate(
+                actorID: wire.actorID,
+                scope: scope,
+                state: wire.state,
+                surfaces: wire.surfaces,
+                sessionCount: wire.sessionCount,
+                updatedAt: wire.updatedAt,
+                expiresAt: wire.expiresAt)
+        }
+        return PresenceSnapshot(scope: snapshotScope, presences: mapped, serverTime: serverTime)
+    }
+}
+
+private enum PresenceSnapshotMappingError: Error {
+    case invalidThreadScope
+    case unknownScope
+    case scopeMismatch
 }
 
 extension Date {
