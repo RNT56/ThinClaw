@@ -436,6 +436,7 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
         loaded_wasm_channel_names,
         mut wasm_channel_runtime_state,
         webhook_server,
+        mut gateway_webhook_routes,
         canvas_store,
     } = channel_setup::setup_channels(
         &config,
@@ -646,16 +647,17 @@ pub(crate) async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_secrets_store(Arc::clone(ss));
         }
         gw = gw.with_channel_manager(Arc::clone(&channels));
-        // Mount WASM channel webhook routes on the gateway so they are
-        // reachable through the public tunnel URL. We create a second
-        // Router instance since axum::Router is not Clone.
+        // Mount signed native and WASM webhook routes on the gateway so they
+        // are reachable through the public tunnel URL.
         if let Some((_, _, ref wasm_router, _, _)) = wasm_channel_runtime_state {
-            let gateway_webhook_routes =
-                thinclaw::channels::wasm::router::create_wasm_channel_router(
-                    Arc::clone(wasm_router),
-                    components.extension_manager.as_ref().map(Arc::clone),
-                );
-            gw = gw.with_webhook_routes(vec![gateway_webhook_routes]);
+            let wasm_gateway_routes = thinclaw::channels::wasm::router::create_wasm_channel_router(
+                Arc::clone(wasm_router),
+                components.extension_manager.as_ref().map(Arc::clone),
+            );
+            gateway_webhook_routes.push(wasm_gateway_routes);
+        }
+        if !gateway_webhook_routes.is_empty() {
+            gw = gw.with_webhook_routes(gateway_webhook_routes);
         }
         #[cfg(feature = "docker-sandbox")]
         if config.sandbox.enabled {

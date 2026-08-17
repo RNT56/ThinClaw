@@ -7,9 +7,11 @@
 use clap::Subcommand;
 use serde::Serialize;
 
-use super::{CliContext, CliError, CliOutcome, GatewayClient};
+use super::{CliContext, CliError, CliOutcome, GatewayClient, GatewayClientError};
 use crate::channels::catalog::ChannelCatalogEntry;
 use thinclaw_app::capabilities::{FactState, HealthState, ProbeOutcome};
+
+const GATEWAY_STATUS_ENDPOINT: &str = "/api/gateway/status";
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ChannelCommand {
@@ -136,7 +138,7 @@ fn channel_reports(config: &crate::config::Config) -> Vec<ChannelStaticReport> {
     catalog
         .into_iter()
         .map(|entry| {
-            let configured = channel_is_configured(config, &entry.id, &entry.variant);
+            let configured = channel_configuration_state(config, &entry.id, &entry.variant);
             let installed = if entry.variant == "wasm" {
                 bool_fact(wasm_artifact_exists(&entry.id))
             } else {
@@ -147,7 +149,7 @@ fn channel_reports(config: &crate::config::Config) -> Vec<ChannelStaticReport> {
                 driver_id: format!("{}:{}", entry.variant, entry.id),
                 origin: entry.origin,
                 compiled: bool_fact(entry.compiled),
-                configured: bool_fact(configured),
+                configured,
                 installed,
                 registered: FactState::Unknown,
                 health: HealthState::NotProbed,
@@ -255,6 +257,15 @@ async fn check_channel_config(
     if report.configured == FactState::No && !report.driver_id.starts_with("local_surface:") {
         report.reasons.push("not_configured".to_string());
     }
+    if report.driver_id == "native:linq" {
+        let (_, unresolved) = linq_secret_binding_state(config);
+        if !unresolved.is_empty() {
+            report.reasons.push(format!(
+                "unresolved_secret_bindings:{}",
+                unresolved.join(",")
+            ));
+        }
+    }
     if report.driver_id.starts_with("wasm:") {
         validate_wasm_channel_installation(channel, &crate::platform::state_paths().channels_dir)
             .map_err(|error| {
@@ -327,9 +338,7 @@ async fn probe_channels(
     let client = GatewayClient::resolve_from_config(None, None, config)
         .map_err(|error| CliError::operational(error.to_string()))?;
     let checked_at = chrono::Utc::now().to_rfc3339();
-    let status = client
-        .get_json::<_, serde_json::Value>("/api/status", &[] as &[(&str, &str)])
-        .await;
+    let status = fetch_gateway_channel_status(&client).await;
     let mut reports = Vec::with_capacity(selected.len());
     let mut unhealthy = false;
     match status {
@@ -394,6 +403,14 @@ async fn probe_channels(
     })
 }
 
+async fn fetch_gateway_channel_status(
+    client: &GatewayClient,
+) -> Result<serde_json::Value, GatewayClientError> {
+    client
+        .get_json(GATEWAY_STATUS_ENDPOINT, &[] as &[(&str, &str)])
+        .await
+}
+
 fn live_channel_health(status: &serde_json::Value, channel: &str) -> (HealthState, Option<String>) {
     if channel == "gateway" {
         return (HealthState::Healthy, None);
@@ -409,6 +426,16 @@ fn live_channel_health(status: &serde_json::Value, channel: &str) -> (HealthStat
     };
     if setup.get("configured").and_then(serde_json::Value::as_bool) != Some(true) {
         return (HealthState::Unknown, Some("not_configured".to_string()));
+    }
+    if channel == "linq" {
+        return if setup.get("tool_ready").and_then(serde_json::Value::as_bool) == Some(true) {
+            (HealthState::Healthy, None)
+        } else {
+            (
+                HealthState::Unhealthy,
+                Some("runtime_not_active".to_string()),
+            )
+        };
     }
     if let Some(relay_health) = setup
         .get("relay_health")
@@ -538,6 +565,7 @@ fn channel_is_configured(config: &crate::config::Config, name: &str, variant: &s
         "slack" => config.channels.slack.is_some(),
         "discord" => config.channels.discord.is_some(),
         "gmail" => config.channels.gmail.is_some(),
+        "linq" => config.channels.linq.is_some(),
         "bluebubbles" => config.channels.bluebubbles.is_some(),
         "imessage" => {
             #[cfg(target_os = "macos")]
@@ -561,6 +589,50 @@ fn channel_is_configured(config: &crate::config::Config, name: &str, variant: &s
         }
         _ => false,
     }
+}
+
+fn channel_configuration_state(
+    config: &crate::config::Config,
+    name: &str,
+    variant: &str,
+) -> FactState {
+    if name == "linq" && variant == "native" {
+        return linq_secret_binding_state(config).0;
+    }
+    bool_fact(channel_is_configured(config, name, variant))
+}
+
+fn linq_secret_binding_state(config: &crate::config::Config) -> (FactState, Vec<&'static str>) {
+    let Some(linq) = config.channels.linq.as_ref() else {
+        return (FactState::No, Vec::new());
+    };
+    // Presence is sufficient for this no-I/O static check; validation and
+    // injection remain owned by the runtime credential consumer.
+    let api_key_present = linq.api_key.is_some();
+    let webhook_secret_present = linq.webhook_secret.is_some();
+    linq_secret_binding_state_from_presence(api_key_present, webhook_secret_present)
+}
+
+fn linq_secret_binding_state_from_presence(
+    api_key_present: bool,
+    webhook_secret_present: bool,
+) -> (FactState, Vec<&'static str>) {
+    let mut unresolved = Vec::new();
+    if !api_key_present {
+        unresolved.push(crate::channels::LINQ_API_KEY_SECRET);
+    }
+    if !webhook_secret_present {
+        unresolved.push(crate::channels::LINQ_WEBHOOK_SECRET);
+    }
+    let state = if unresolved.is_empty() {
+        FactState::Yes
+    } else {
+        // `check-config` is deliberately static and must not open the encrypted
+        // store (which may be remote). Absence from env/config is unresolved,
+        // not proof that the runtime-scoped credential is missing.
+        FactState::Unknown
+    };
+    (state, unresolved)
 }
 
 fn native_lifecycle_missing_env(name: &str) -> Vec<String> {
@@ -623,7 +695,105 @@ fn native_lifecycle_missing_env(name: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_wasm_channel_installation;
+    use super::{
+        GATEWAY_STATUS_ENDPOINT, fetch_gateway_channel_status,
+        linq_secret_binding_state_from_presence, live_channel_health,
+        validate_wasm_channel_installation,
+    };
+    use crate::cli::{GatewayClient, GatewayRequestBudget};
+    use thinclaw_app::capabilities::{FactState, HealthState};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn probe_uses_the_authenticated_gateway_status_contract() {
+        assert_eq!(GATEWAY_STATUS_ENDPOINT, "/api/gateway/status");
+    }
+
+    #[tokio::test]
+    async fn probe_status_request_uses_the_gateway_contract_path() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 4096];
+            let read = stream.read(&mut request).await.expect("read request");
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /api/gateway/status HTTP/1.1\r\n"));
+            let body = r#"{"channel_setup":{}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        let client = GatewayClient::new(
+            url::Url::parse(&format!("http://{address}/")).expect("valid loopback URL"),
+            None,
+            GatewayRequestBudget::control_plane(),
+        )
+        .expect("gateway client");
+
+        let status = fetch_gateway_channel_status(&client)
+            .await
+            .expect("status response");
+        assert_eq!(status, serde_json::json!({"channel_setup": {}}));
+        server.await.expect("mock server task");
+    }
+
+    #[test]
+    fn linq_static_config_does_not_claim_store_backed_secrets_are_present() {
+        let (state, unresolved) = linq_secret_binding_state_from_presence(false, false);
+        assert_eq!(state, FactState::Unknown);
+        assert_eq!(unresolved, vec!["linq_api_key", "linq_webhook_secret"]);
+
+        let (state, unresolved) = linq_secret_binding_state_from_presence(true, false);
+        assert_eq!(state, FactState::Unknown);
+        assert_eq!(unresolved, vec!["linq_webhook_secret"]);
+
+        let (state, unresolved) = linq_secret_binding_state_from_presence(true, true);
+        assert_eq!(state, FactState::Yes);
+        assert!(unresolved.is_empty());
+    }
+
+    #[test]
+    fn linq_live_status_requires_runtime_diagnostics() {
+        let configured = serde_json::json!({
+            "channel_setup": {
+                "linq": {"enabled": true, "configured": true, "tool_ready": true}
+            }
+        });
+        assert_eq!(
+            live_channel_health(&configured, "linq"),
+            (HealthState::Healthy, None)
+        );
+
+        let inactive = serde_json::json!({
+            "channel_setup": {
+                "linq": {"enabled": true, "configured": true}
+            }
+        });
+        assert_eq!(
+            live_channel_health(&inactive, "linq"),
+            (
+                HealthState::Unhealthy,
+                Some("runtime_not_active".to_string())
+            )
+        );
+
+        let legacy = serde_json::json!({"channel_setup": {}});
+        assert_eq!(
+            live_channel_health(&legacy, "linq"),
+            (
+                HealthState::NotSupported,
+                Some("safe_probe_not_supported".to_string())
+            )
+        );
+    }
 
     #[test]
     fn wasm_channel_validation_requires_artifact_and_capabilities() {

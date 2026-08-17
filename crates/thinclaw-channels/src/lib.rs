@@ -16,6 +16,7 @@ pub mod health_monitor;
 pub mod http;
 #[cfg(target_os = "macos")]
 pub mod imessage;
+pub mod linq;
 pub mod manager;
 pub mod native_lifecycle;
 pub mod native_lifecycle_clients;
@@ -45,6 +46,10 @@ pub use health_monitor::{ChannelHealthMonitor, ChannelHealthStatus, HealthMonito
 pub use http::{HttpChannel, HttpConfig};
 #[cfg(target_os = "macos")]
 pub use imessage::{IMessageChannel, IMessageConfig, IMessageDiagnostic};
+pub use linq::{
+    DEFAULT_LINQ_API_BASE_URL, LINQ_API_KEY_SECRET, LINQ_WEBHOOK_SECRET, LINQ_WEBHOOK_VERSION,
+    LinqChannel, LinqConfig, LinqPreferredService,
+};
 pub use manager::{
     ChannelDescriptor, ChannelManager, ChannelStatusChangeEvent, IncomingEvent,
     NativeLifecycleChannelConfig, SlashCommand, legacy_session_key_aliases, mint_session_key,

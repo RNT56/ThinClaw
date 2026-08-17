@@ -1583,6 +1583,7 @@ fn test_merged_response_metadata_overrides_and_includes_attachments() {
         "keep": true,
     });
     let response = thinclaw_channels_core::OutgoingResponse {
+        delivery_id: uuid::Uuid::new_v4(),
         content: "hello".to_string(),
         thread_id: None,
         metadata: serde_json::json!({
@@ -1608,6 +1609,7 @@ fn test_merged_response_metadata_overrides_and_includes_attachments() {
 #[test]
 fn test_wasm_response_content_falls_back_for_text_only_channels() {
     let response = thinclaw_channels_core::OutgoingResponse {
+        delivery_id: uuid::Uuid::new_v4(),
         content: "done".to_string(),
         thread_id: None,
         metadata: serde_json::Value::Null,

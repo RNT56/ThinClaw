@@ -18,7 +18,10 @@ SOURCE_ROOTS = (
     ROOT / "apps/desktop/backend/src",
 )
 PUBLIC_FIELD = re.compile(
-    r"^\s*pub(?:\([^)]*\))?\s+(?P<field>[A-Za-z_][A-Za-z0-9_]*(?:token|secret|password|api_key|private_key|credential)[A-Za-z0-9_]*)\s*:\s*(?P<rust_type>[^,\n]+)",
+    r"^\s*pub(?:\([^)]*\))?\s+"
+    r"(?P<field>(?=[A-Za-z0-9_]*(?:token|secret|password|api_key|private_key|credential)"
+    r"[A-Za-z0-9_]*\s*:)[A-Za-z_][A-Za-z0-9_]*)"
+    r"\s*:\s*(?P<rust_type>[^,\n]+)",
     re.IGNORECASE | re.MULTILINE,
 )
 PROOF_ID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -74,6 +77,8 @@ def disposition(
         "_used",
         "_supported",
         "tokenizer",
+        "token_capture",
+        "token_ids",
         "budget_token",
         "cancellation_token",
         "progress_token",
@@ -82,8 +87,23 @@ def disposition(
         "invalid_private_key",
         "needs_private_key",
     )
-    if numeric_or_bool or name.startswith("has_") or name.endswith("_present") or any(
-        marker in name for marker in semantic_markers
+    semantic_names = {
+        "credential_mode",
+        "credential_selection_strategy",
+        "secret_validation",
+        "secrets_store",
+        "token_endpoint",
+        "token_endpoint_auth_method",
+        "token_type",
+        "token_url",
+        "tokens",
+    }
+    if (
+        numeric_or_bool
+        or name.startswith("has_")
+        or name.endswith("_present")
+        or name in semantic_names
+        or any(marker in name for marker in semantic_markers)
     ):
         return (
             "non_secret_semantic",
@@ -118,8 +138,18 @@ def disposition(
         name.endswith(("_secret_name", "_secret_env", "_secret_id", "_secret_source_id"))
         or name.endswith("_env")
         or name in {
+            "credential_source_id",
+            "credential_source_ids",
             "required_secrets",
             "allowed_secrets",
+            "secret_env",
+            "secret_name",
+            "secret_names",
+            "secret_reference",
+            "secret_references",
+            "secret_source_id",
+            "secret_sources",
+            "secrets",
             "stored_secrets",
             "rotated_secrets",
             "custom_secrets",
@@ -267,8 +297,18 @@ def main() -> int:
             or "SourceId" in str(candidate["rust_type"])
             or str(candidate["field"]).endswith(("_secret_name", "_secret_env", "_secret_id", "_secret_source_id", "_env"))
             or str(candidate["field"]) in {
+                "credential_source_id",
+                "credential_source_ids",
                 "required_secrets",
                 "allowed_secrets",
+                "secret_env",
+                "secret_name",
+                "secret_names",
+                "secret_reference",
+                "secret_references",
+                "secret_source_id",
+                "secret_sources",
+                "secrets",
                 "stored_secrets",
                 "rotated_secrets",
                 "custom_secrets",

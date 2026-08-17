@@ -68,6 +68,7 @@ pub fn static_channel_catalog() -> Vec<ChannelCatalogEntry> {
         ChannelCatalogEntry::native("http", "HTTP webhook ingress", true),
         ChannelCatalogEntry::native("discord", "Discord Gateway and REST", true),
         ChannelCatalogEntry::native("gmail", "Gmail Pub/Sub and replies", true),
+        ChannelCatalogEntry::native("linq", "Managed headless iMessage, RCS, and SMS", true),
         ChannelCatalogEntry::native("bluebubbles", "BlueBubbles iMessage bridge", true),
         ChannelCatalogEntry::native(
             "imessage",

@@ -63,6 +63,10 @@ pub struct ChannelSetupStatus {
     pub slack: PartialChannelSetupStatus,
     pub telegram: PartialChannelSetupStatus,
     pub gmail: PartialChannelSetupStatus,
+    /// Optional for backwards compatibility with gateways predating Linq.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub linq: Option<PartialChannelSetupStatus>,
     pub apple_mail: PartialChannelSetupStatus,
     pub nostr: PartialChannelSetupStatus,
     pub matrix: PartialChannelSetupStatus,

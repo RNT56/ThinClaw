@@ -756,6 +756,7 @@ mod tests {
             slack: empty_partial_status(),
             telegram: empty_partial_status(),
             gmail: empty_partial_status(),
+            linq: None,
             apple_mail: empty_partial_status(),
             nostr: empty_partial_status(),
             matrix: empty_partial_status(),

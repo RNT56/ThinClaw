@@ -10584,6 +10584,17 @@ const SETTINGS_SCHEMA = {
       { key: 'channels.bluebubbles_send_read_receipts', label: 'Send read receipts', type: 'bool', desc: 'Send read receipts (requires Private API on server)', nullable: true },
     ]
   },
+  'Channels — Linq': {
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/></svg>',
+    fields: [
+      { key: 'channels.linq_enabled', label: 'Enabled', type: 'bool', desc: 'Enable managed Linq Partner API v3 messaging after storing both credentials in ThinClaw Secrets' },
+      { key: 'channels.linq_from_number', label: 'Managed sender', type: 'text', desc: 'Linq-managed E.164 sender number', nullable: true },
+      { key: 'channels.linq_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated phone, email, or handle UUID; empty denies all and * explicitly allows all', nullable: true },
+      { key: 'channels.linq_preferred_service', label: 'Outbound service', type: 'select', options: [{value: 'imessage', label: 'iMessage only'}, {value: 'auto', label: 'Automatic (fallback allowed)'}, {value: 'rcs', label: 'RCS only'}, {value: 'sms', label: 'SMS only'}], desc: 'iMessage is the safe default; only Automatic permits Linq fallback', nullable: true },
+      { key: 'channels.linq_webhook_host', label: 'Webhook bind IP', type: 'text', desc: 'Numeric local bind IP; must match the HTTP listener when sharing its socket', nullable: true },
+      { key: 'channels.linq_webhook_port', label: 'Webhook port', type: 'number', desc: 'Local signed-webhook listener port (default: 8080)', min: 1, max: 65535, nullable: true },
+    ]
+  },
   'Channels — Gmail': {
     icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="16" height="13" x="4" y="6" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/><path d="m4 6 8 5 8-5"/></svg>',
     fields: [

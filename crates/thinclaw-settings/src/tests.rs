@@ -26,6 +26,8 @@ fn settings_debug_never_exposes_persisted_credentials_or_personal_allowlists() {
     settings.channels.slack_bot_token = Some("slack-bot-secret".into());
     settings.channels.slack_app_token = Some("slack-app-secret".into());
     settings.channels.bluebubbles_password = Some("bluebubbles-secret".into());
+    settings.channels.linq_from_number = Some("+49111222333".into());
+    settings.channels.linq_allow_from = Some("+49123456789,user@example.com".into());
     settings.channels.gateway_auth_token = Some("gateway-secret".into());
     settings.channels.signal_allow_from = Some("+49123456789".into());
     settings
@@ -50,6 +52,8 @@ fn settings_debug_never_exposes_persisted_credentials_or_personal_allowlists() {
         "gateway-secret",
         "principal-secret",
         "+49123456789",
+        "+49111222333",
+        "user@example.com",
     ] {
         assert!(!debug.contains(sensitive), "debug leaked {sensitive}");
     }
@@ -79,6 +83,10 @@ fn channel_center_settings_round_trip_through_flat_database_keys() {
     settings.channels.telegram_enabled = true;
     settings.channels.telegram_dm_policy = Some("open".to_string());
     settings.channels.telegram_groups_enabled = false;
+    settings.channels.linq_enabled = true;
+    settings.channels.linq_from_number = Some("+12025550100".to_string());
+    settings.channels.linq_allow_from = Some("+12025550101".to_string());
+    settings.channels.linq_preferred_service = Some("imessage".to_string());
 
     let map = settings.to_db_map();
     assert_eq!(
@@ -88,6 +96,10 @@ fn channel_center_settings_round_trip_through_flat_database_keys() {
     assert_eq!(
         map.get("channels.telegram_groups_enabled"),
         Some(&serde_json::json!(false))
+    );
+    assert_eq!(
+        map.get("channels.linq_preferred_service"),
+        Some(&serde_json::json!("imessage"))
     );
 
     let restored = Settings::from_db_map(&map);
@@ -102,6 +114,15 @@ fn channel_center_settings_round_trip_through_flat_database_keys() {
         Some("open")
     );
     assert!(!restored.channels.telegram_groups_enabled);
+    assert!(restored.channels.linq_enabled);
+    assert_eq!(
+        restored.channels.linq_from_number.as_deref(),
+        Some("+12025550100")
+    );
+    assert_eq!(
+        restored.channels.linq_allow_from.as_deref(),
+        Some("+12025550101")
+    );
 }
 
 #[test]

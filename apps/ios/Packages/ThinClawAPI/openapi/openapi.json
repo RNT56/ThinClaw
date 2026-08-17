@@ -1515,6 +1515,9 @@
           "gmail": {
             "$ref": "#/components/schemas/PartialChannelSetupStatus"
           },
+          "linq": {
+            "$ref": "#/components/schemas/PartialChannelSetupStatus"
+          },
           "matrix": {
             "$ref": "#/components/schemas/PartialChannelSetupStatus"
           },

@@ -241,6 +241,31 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub bluebubbles_send_read_receipts: Option<bool>,
 
+    // === Linq (managed headless iMessage/RCS/SMS) ===
+    /// Whether the Linq Partner API v3 channel is enabled.
+    #[serde(default)]
+    pub linq_enabled: bool,
+
+    /// Linq-managed sending number in E.164 format.
+    #[serde(default)]
+    pub linq_from_number: Option<String>,
+
+    /// Shared webhook listener host. Defaults to loopback.
+    #[serde(default)]
+    pub linq_webhook_host: Option<String>,
+
+    /// Shared webhook listener port. Defaults to 8080.
+    #[serde(default)]
+    pub linq_webhook_port: Option<u16>,
+
+    /// Accepted inbound handles/handle UUIDs (comma-separated). Empty denies all.
+    #[serde(default)]
+    pub linq_allow_from: Option<String>,
+
+    /// Outbound transport: `imessage` (default), `auto`, `rcs`, or `sms`.
+    #[serde(default)]
+    pub linq_preferred_service: Option<String>,
+
     // === iMessage (macOS only) ===
     /// Whether iMessage channel is enabled.
     #[serde(default)]
@@ -355,6 +380,18 @@ impl std::fmt::Debug for ChannelSettings {
                 "bluebubbles_password",
                 &crate::redaction::RedactedOption(&self.bluebubbles_password),
             )
+            .field("linq_enabled", &self.linq_enabled)
+            .field(
+                "linq_from_number",
+                &self.linq_from_number.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("linq_webhook_host", &self.linq_webhook_host)
+            .field("linq_webhook_port", &self.linq_webhook_port)
+            .field(
+                "linq_allow_from",
+                &self.linq_allow_from.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("linq_preferred_service", &self.linq_preferred_service)
             .field("imessage_enabled", &self.imessage_enabled)
             .field("apple_mail_enabled", &self.apple_mail_enabled)
             .field("gateway_enabled", &self.gateway_enabled)
@@ -426,6 +463,12 @@ impl Default for ChannelSettings {
             bluebubbles_webhook_path: None,
             bluebubbles_allow_from: None,
             bluebubbles_send_read_receipts: None,
+            linq_enabled: false,
+            linq_from_number: None,
+            linq_webhook_host: None,
+            linq_webhook_port: None,
+            linq_allow_from: None,
+            linq_preferred_service: None,
             imessage_enabled: false,
             imessage_allow_from: None,
             imessage_poll_interval: None,
