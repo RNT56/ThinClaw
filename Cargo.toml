@@ -33,7 +33,7 @@ chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 futures = "0.3"
 utoipa = { version = "5", features = ["uuid"] }
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
 secrecy = { version = "0.10", features = ["serde"] }
 
 [package]
