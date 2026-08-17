@@ -251,7 +251,7 @@
         }
     }
 
-    extension WatchWipeTransport: @preconcurrency WCSessionDelegate {
+    extension WatchWipeTransport: WCSessionDelegate {
         nonisolated func session(
             _ session: WCSession,
             activationDidCompleteWith activationState: WCSessionActivationState,
