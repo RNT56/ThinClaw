@@ -342,6 +342,23 @@ mod tests {
     }
 
     #[test]
+    fn linq_channel_status_is_an_optional_plain_ref() {
+        let doc = gateway_openapi();
+        let doc_json = serde_json::to_value(&doc).expect("serializes");
+        let schema = &doc_json["components"]["schemas"]["ChannelSetupStatus"];
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .map(|items| items.iter().filter_map(|item| item.as_str()).collect())
+            .unwrap_or_default();
+        assert!(!required.contains(&"linq"));
+        assert_eq!(
+            schema["properties"]["linq"]["$ref"],
+            "#/components/schemas/PartialChannelSetupStatus"
+        );
+        assert!(schema["properties"]["linq"].get("oneOf").is_none());
+    }
+
+    #[test]
     fn thread_list_assistant_thread_is_optional_plain_ref() {
         // Regression guard: `ThreadListResponse.assistant_thread` must be a
         // plain, non-nullable `$ref` to `ThreadInfo` that is simply absent from

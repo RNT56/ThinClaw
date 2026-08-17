@@ -4,9 +4,9 @@
   "generator_version": "1.7.0",
   "outputs": {
     "Client.swift": "5901066e35e1d1a0fd128638fe0997a433e8a5d1709a6ba3e4cdbe8589e9dd54",
-    "Types.swift": "91fb29ffe226424652cb777e1eaedc6b9d845220f1d36ca53d18f7cd857cecc6"
+    "Types.swift": "0f088d62b19aa42ce26d93da381de01ee060c26d85462be5481f79f1c3e78d04"
   },
   "schema_version": 1,
-  "source_openapi_sha256": "56588e9c3258a7afa8422eec8606c0a5c71f2cdb4799f19007c13e0dbc47874c",
-  "vendored_openapi_sha256": "56588e9c3258a7afa8422eec8606c0a5c71f2cdb4799f19007c13e0dbc47874c"
+  "source_openapi_sha256": "9aae8365d6cb549dadcfeccbda4bf5177075f07794d831eaec21a1277566655a",
+  "vendored_openapi_sha256": "9aae8365d6cb549dadcfeccbda4bf5177075f07794d831eaec21a1277566655a"
 }

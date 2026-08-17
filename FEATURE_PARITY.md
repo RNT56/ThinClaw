@@ -27,6 +27,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | Capability | Status | Notes |
 |---------|--------|-------|
 | Channel-owned formatting hints | ✅ | Native channels own formatting guidance through `Channel::formatting_hints()`. WASM channels can declare `formatting_hints` in `*.capabilities.json`, and prompt assembly consumes the resolved hint through `ChannelManager::formatting_hints_for()` instead of hard-coded channel-name switches. |
+| Linq managed headless messaging | ✅ | Native Partner API v3 channel for managed iMessage/RCS/SMS with Standard Webhooks HMAC verification, pinned payload version, durable event deduplication, bounded media transfer, scoped encrypted credentials, stable reply/thread mapping, deterministic retry idempotency, default-deny senders, and explicit iMessage-only delivery unless fallback is intentionally enabled. See [`docs/LINQ_CHANNEL.md`](docs/LINQ_CHANNEL.md). |
 | Full status-type coverage for WASM channels | ✅ | The `wit/channel.wit` `status-type` enum covers every host `StatusUpdate` variant (lifecycle, sub-agent spawn/progress/complete, credential prompt, usage, plan, canvas, agent message, error, context compaction, advisor consultation, self-repair), so packaged channels classify these events directly instead of them collapsing to the generic `status` variant. The channel WIT package is versioned (`near:agent@x.y.z`, mirrored by `CHANNEL_WIT_VERSION`) for additive host/artifact negotiation. |
 | Watched OAuth credential sync | ✅ | Claude Code, Codex, and custom JSON auth files can seed provider credentials and hot-reload updated tokens into the live runtime without restart when providers opt into external OAuth sources. Multi-key pools use process-local credential leases with health snapshots for capacity diagnostics. |
 | External pre-exec shell scanner | ✅ | First-party `thinclaw-shell-scan` adds a pre-approval structural scanner with configured/PATH/bundled/cached resolution, bundled/cache manifest hash/signature verification, optional `external_scanner_require_verified`, and fail-open/fail-closed policy control. |
@@ -114,7 +115,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | Signal | ✅ | ✅ | - | signal-cli daemon, SSE listener, user/group allowlists, DM pairing |
 | Slack | ✅ | ✅ | - | WASM channel (Events API webhook). Native dead code (`slack.rs`) removed. |
 | iMessage | ✅ | ✅ | P3 | `IMessageChannel` + `IMessageConfig` native runtime ([`src/channels/imessage.rs`](src/channels/imessage.rs)) |
-| Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
+| Linq | ✅ | ✅ | P3 | Optional managed Partner API v3 channel for headless iMessage/RCS/SMS; signed default-deny ingress, explicit protocol selection, bounded media, and idempotent sends |
 | Feishu/Lark | ✅ | ✅ | P3 | WASM package with challenge, event callback, tenant-token, and bot-reply path; live tenant smoke remains env-gated |
 | LINE | ✅ | ✅ | P3 | WASM package with batched events, HMAC validation, reply-token routing, and Messaging API response path |
 | WebChat | ✅ | ✅ | - | Web gateway chat |

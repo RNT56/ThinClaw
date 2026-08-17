@@ -933,6 +933,7 @@ async fn send_notification(
     };
 
     let response = OutgoingResponse {
+        delivery_id: uuid::Uuid::new_v4(),
         content: notification.content,
         thread_id: None,
         metadata: notification.metadata,

@@ -42,6 +42,8 @@ pub struct ChannelsConfig {
     pub slack_enabled: bool,
     pub discord: Option<DiscordChannelConfig>,
     pub gmail: Option<GmailChannelConfig>,
+    /// Managed headless iMessage/RCS/SMS through Linq Partner API v3.
+    pub linq: Option<LinqChannelConfig>,
     #[cfg(target_os = "macos")]
     pub imessage: Option<IMessageChannelConfig>,
     #[cfg(target_os = "macos")]
@@ -400,6 +402,7 @@ impl ChannelsConfig {
             slack_enabled,
             discord: Self::resolve_discord(settings)?,
             gmail: Self::resolve_gmail()?,
+            linq: Self::resolve_linq(settings)?,
             #[cfg(target_os = "macos")]
             imessage: Self::resolve_imessage(settings)?,
             #[cfg(target_os = "macos")]
@@ -703,7 +706,120 @@ pub struct BlueBubblesChannelConfig {
     pub send_read_receipts: bool,
 }
 
+/// Linq Partner API v3 configuration.
+///
+/// Secret values are accepted only from the process environment here. The
+/// runtime fills absent values from the scoped encrypted `SecretsStore`.
+#[derive(Clone)]
+pub struct LinqChannelConfig {
+    pub api_base_url: String,
+    pub api_key: Option<SecretString>,
+    pub webhook_secret: Option<SecretString>,
+    pub from_number: String,
+    pub webhook_host: String,
+    pub webhook_port: u16,
+    pub webhook_path: String,
+    pub allow_from: Vec<String>,
+    pub preferred_service: String,
+}
+
+impl std::fmt::Debug for LinqChannelConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LinqChannelConfig")
+            .field("api_base_url", &self.api_base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "webhook_secret",
+                &self.webhook_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("from_number", &"[REDACTED]")
+            .field("webhook_host", &self.webhook_host)
+            .field("webhook_port", &self.webhook_port)
+            .field("webhook_path", &self.webhook_path)
+            .field("allow_from_count", &self.allow_from.len())
+            .field("preferred_service", &self.preferred_service)
+            .finish()
+    }
+}
+
 impl ChannelsConfig {
+    fn resolve_linq(settings: &Settings) -> Result<Option<LinqChannelConfig>, ConfigError> {
+        let enabled = parse_bool_env("LINQ_ENABLED", settings.channels.linq_enabled)?;
+        if !enabled {
+            return Ok(None);
+        }
+
+        let from_number = optional_env("LINQ_FROM_NUMBER")?
+            .or(settings.channels.linq_from_number.clone())
+            .ok_or_else(|| ConfigError::InvalidValue {
+                key: "LINQ_FROM_NUMBER".to_string(),
+                message: "LINQ_FROM_NUMBER is required when LINQ_ENABLED=true".to_string(),
+            })?;
+        let digits = from_number.strip_prefix('+').unwrap_or_default();
+        if !(7..=15).contains(&digits.len())
+            || digits.starts_with('0')
+            || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(ConfigError::InvalidValue {
+                key: "LINQ_FROM_NUMBER".to_string(),
+                message: "must use E.164 format".to_string(),
+            });
+        }
+
+        let webhook_port = optional_env("LINQ_WEBHOOK_PORT")?
+            .map(|value| {
+                value
+                    .parse::<u16>()
+                    .map_err(|error| ConfigError::InvalidValue {
+                        key: "LINQ_WEBHOOK_PORT".to_string(),
+                        message: format!("must be an integer: {error}"),
+                    })
+            })
+            .transpose()?
+            .or(settings.channels.linq_webhook_port)
+            .unwrap_or(8080);
+        if webhook_port == 0 {
+            return Err(ConfigError::InvalidValue {
+                key: "LINQ_WEBHOOK_PORT".to_string(),
+                message: "must be between 1 and 65535".to_string(),
+            });
+        }
+        let preferred_service = optional_env("LINQ_PREFERRED_SERVICE")?
+            .or(settings.channels.linq_preferred_service.clone())
+            .unwrap_or_else(|| "imessage".to_string())
+            .trim()
+            .to_ascii_lowercase();
+        if !matches!(
+            preferred_service.as_str(),
+            "imessage" | "auto" | "rcs" | "sms"
+        ) {
+            return Err(ConfigError::InvalidValue {
+                key: "LINQ_PREFERRED_SERVICE".to_string(),
+                message: "must be one of: imessage, auto, rcs, sms".to_string(),
+            });
+        }
+
+        Ok(Some(LinqChannelConfig {
+            // Deliberately fixed: a configurable credential destination could
+            // redirect a vault-resolved API key to an attacker-controlled host.
+            api_base_url: "https://api.linqapp.com/api/partner/v3/".to_string(),
+            api_key: optional_env("LINQ_API_KEY")?.map(SecretString::from),
+            webhook_secret: optional_env("LINQ_WEBHOOK_SECRET")?.map(SecretString::from),
+            from_number,
+            webhook_host: optional_env("LINQ_WEBHOOK_HOST")?
+                .or(settings.channels.linq_webhook_host.clone())
+                .unwrap_or_else(|| "127.0.0.1".to_string()),
+            webhook_port,
+            webhook_path: "/webhook/linq".to_string(),
+            allow_from: optional_env("LINQ_ALLOW_FROM")?
+                .or(settings.channels.linq_allow_from.clone())
+                .map(|raw| split_channel_list(&raw))
+                .unwrap_or_default(),
+            preferred_service,
+        }))
+    }
+
     fn resolve_slack(settings: &Settings) -> Result<Option<SlackChannelConfig>, ConfigError> {
         let enabled = parse_bool_env("SLACK_ENABLED", settings.channels.slack_enabled)?;
         if !enabled {
@@ -1021,6 +1137,60 @@ mod tests {
                 std::env::remove_var(key);
             }
         }
+    }
+
+    fn clear_linq_env() {
+        // SAFETY: Only called while holding the shared environment lock.
+        unsafe {
+            for key in [
+                "LINQ_ENABLED",
+                "LINQ_FROM_NUMBER",
+                "LINQ_API_KEY",
+                "LINQ_WEBHOOK_SECRET",
+                "LINQ_WEBHOOK_HOST",
+                "LINQ_WEBHOOK_PORT",
+                "LINQ_ALLOW_FROM",
+                "LINQ_PREFERRED_SERVICE",
+            ] {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    #[test]
+    fn linq_resolution_is_deny_by_default_and_keeps_secrets_external() {
+        let _guard = crate::helpers::lock_env();
+        clear_linq_env();
+        let mut settings = Settings::default();
+        settings.channels.linq_enabled = true;
+        settings.channels.linq_from_number = Some("+12025550100".to_string());
+
+        let resolved = ChannelsConfig::resolve(&settings)
+            .expect("channel settings should resolve")
+            .linq
+            .expect("Linq should be enabled");
+        assert!(resolved.allow_from.is_empty());
+        assert_eq!(resolved.preferred_service, "imessage");
+        assert!(resolved.api_key.is_none());
+        assert!(resolved.webhook_secret.is_none());
+        assert_eq!(resolved.webhook_host, "127.0.0.1");
+        assert_eq!(resolved.webhook_port, 8080);
+        clear_linq_env();
+    }
+
+    #[test]
+    fn linq_resolution_rejects_invalid_protocol_and_sender_number() {
+        let _guard = crate::helpers::lock_env();
+        clear_linq_env();
+        let mut settings = Settings::default();
+        settings.channels.linq_enabled = true;
+        settings.channels.linq_from_number = Some("not-a-number".to_string());
+        assert!(ChannelsConfig::resolve(&settings).is_err());
+
+        settings.channels.linq_from_number = Some("+12025550100".to_string());
+        settings.channels.linq_preferred_service = Some("fallback-silently".to_string());
+        assert!(ChannelsConfig::resolve(&settings).is_err());
+        clear_linq_env();
     }
 
     #[test]

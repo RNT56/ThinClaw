@@ -22,6 +22,7 @@ Some delivery surfaces are compiled into the trusted Rust host. Others are packa
 | Nostr | native | persistent relay connections |
 | Gmail | native | Pub/Sub pull and OAuth-heavy host integration, incl. unattended token refresh (see below) |
 | iMessage | native | local `chat.db` access on macOS |
+| Linq | native | managed Partner API v3 client plus signed webhook ingress |
 | Apple Mail | native | local mail index access on macOS |
 | Discord Gateway | native | persistent Gateway connection |
 | Matrix | native lifecycle | room/DM ingress, webhook sync payloads, outbound replies |
@@ -49,12 +50,12 @@ The installable WASM packages are represented in `registry/channels/`. The host 
 
 Linux note: native Apple Mail and native iMessage require macOS-only local data
 stores and are intentionally unavailable on Linux. Linux deployments should use
-Gmail for mail and BlueBubbles for iMessage-compatible messaging through a
-Mac-hosted BlueBubbles server.
+Gmail for mail and either BlueBubbles through a Mac-hosted server or Linq's
+managed Partner API for iMessage-compatible messaging.
 
 Raspberry Pi OS Lite 64-bit runs the same headless channel surface as other
 Linux servers when using the `full` native artifact or multi-arch Docker image:
-gateway, HTTP webhooks, Signal, Discord, Nostr, Gmail, BlueBubbles, Telegram,
+gateway, HTTP webhooks, Signal, Discord, Nostr, Gmail, BlueBubbles, Linq, Telegram,
 Slack, WhatsApp, Discord interactions, WASM channels, and ACP. Desktop-bound
 channels and desktop autonomy remain unavailable on Lite.
 
@@ -253,6 +254,7 @@ Current capability notes:
 | Apple Mail | Mail.app AppleScript attachments. |
 | iMessage | Native `response.attachments` path. |
 | BlueBubbles | Sends `response.attachments`; legacy metadata fallback remains for compatibility. |
+| Linq | Uses the v3 attachment pre-upload flow, then sends permanent attachment IDs with deterministic message idempotency. |
 | Signal | signal-cli JSON-RPC `attachments` with temporary file cleanup. |
 | Telegram WASM | Host-side Telegram media helper. |
 | WhatsApp WASM | Existing `response_attachments` bridge. |

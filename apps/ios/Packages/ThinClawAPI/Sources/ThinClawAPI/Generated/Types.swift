@@ -488,6 +488,8 @@ public enum Components {
             public var browserPush: Components.Schemas.PartialChannelSetupStatus
             /// - Remark: Generated from `#/components/schemas/ChannelSetupStatus/gmail`.
             public var gmail: Components.Schemas.PartialChannelSetupStatus
+            /// - Remark: Generated from `#/components/schemas/ChannelSetupStatus/linq`.
+            public var linq: Components.Schemas.PartialChannelSetupStatus?
             /// - Remark: Generated from `#/components/schemas/ChannelSetupStatus/matrix`.
             public var matrix: Components.Schemas.PartialChannelSetupStatus
             /// - Remark: Generated from `#/components/schemas/ChannelSetupStatus/nostr`.
@@ -505,6 +507,7 @@ public enum Components {
             ///   - appleMail:
             ///   - browserPush:
             ///   - gmail:
+            ///   - linq:
             ///   - matrix:
             ///   - nostr:
             ///   - slack:
@@ -515,6 +518,7 @@ public enum Components {
                 appleMail: Components.Schemas.PartialChannelSetupStatus,
                 browserPush: Components.Schemas.PartialChannelSetupStatus,
                 gmail: Components.Schemas.PartialChannelSetupStatus,
+                linq: Components.Schemas.PartialChannelSetupStatus? = nil,
                 matrix: Components.Schemas.PartialChannelSetupStatus,
                 nostr: Components.Schemas.PartialChannelSetupStatus,
                 slack: Components.Schemas.PartialChannelSetupStatus,
@@ -525,6 +529,7 @@ public enum Components {
                 self.appleMail = appleMail
                 self.browserPush = browserPush
                 self.gmail = gmail
+                self.linq = linq
                 self.matrix = matrix
                 self.nostr = nostr
                 self.slack = slack
@@ -536,6 +541,7 @@ public enum Components {
                 case appleMail = "apple_mail"
                 case browserPush = "browser_push"
                 case gmail
+                case linq
                 case matrix
                 case nostr
                 case slack

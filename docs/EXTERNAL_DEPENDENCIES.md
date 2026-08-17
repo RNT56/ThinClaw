@@ -22,6 +22,7 @@ This document lists every **optional external tool and service** that ThinClaw f
   - [Docker Chromium (headless)](#docker-chromium-headless)
 - [Messaging Channel Dependencies](#messaging-channel-dependencies)
   - [signal-cli (Signal channel)](#signal-cli-signal-channel)
+  - [Linq Partner API (managed messaging)](#linq-partner-api-managed-messaging)
   - [Provider accounts for live channel smokes](#provider-accounts-for-live-channel-smokes)
   - [ffmpeg / ffprobe (media processing)](#ffmpeg--ffprobe-media-processing)
 - [Code Delegation](#code-delegation)
@@ -54,6 +55,7 @@ This document lists every **optional external tool and service** that ThinClaw f
 | [Podman](#podman) | Rootless sandbox alternative to Docker | Optional | ✅ Free (OSS) | `brew install podman` / [podman.io](https://podman.io/docs/installation) |
 | [Chrome/Chromium](#chrome--chromium-local) | `BrowserTool` web automation | Optional | ✅ Free | [google.com/chrome](https://www.google.com/chrome/) / `brew install --cask chromium` |
 | [signal-cli](#signal-cli-signal-channel) | Signal messaging channel | Optional | ✅ Free (OSS) | [github.com/AsamK/signal-cli](https://github.com/AsamK/signal-cli) |
+| [Linq Partner API](#linq-partner-api-managed-messaging) | Managed headless iMessage/RCS/SMS channel | Optional | Commercial | [linqapp.com](https://linqapp.com/) |
 | Provider channel accounts | Optional live smokes for Matrix, APNs, Web Push, voice-call, and WASM provider packages | Optional | Varies | Provider consoles / test tenants |
 | [ffmpeg](#ffmpeg--ffprobe-media-processing) | Video/audio media processing | Optional | ✅ Free (OSS) | `brew install ffmpeg` / `apt install ffmpeg` |
 | [PostgreSQL](#postgresql--pgvector) | Production database with vector search | Optional | ✅ Free (OSS) | `brew install postgresql@15` / `apt install postgresql` |
@@ -505,6 +507,30 @@ See also: [signal-cli documentation](https://github.com/AsamK/signal-cli/wiki)
 
 ---
 
+### Linq Partner API (managed messaging)
+
+**What it does:** Linq supplies managed headless iMessage, RCS, and SMS through
+its Partner API v3. ThinClaw uses signed versioned webhooks for inbound messages
+and idempotent REST requests for replies, broadcasts, and attachment uploads.
+
+No local executable or Apple signing identity is required. You need a Linq
+partner account, a managed sending number, an API key, a webhook subscription,
+and the one-time signing secret returned when that subscription is created.
+
+```env
+LINQ_ENABLED=true
+LINQ_FROM_NUMBER=+12025550100
+LINQ_ALLOW_FROM=+12025550101
+LINQ_PREFERRED_SERVICE=imessage
+```
+
+Keep `LINQ_ALLOW_FROM` empty to deny all inbound senders. See
+[LINQ_CHANNEL.md](LINQ_CHANNEL.md) for encrypted-secret commands, exact webhook
+URL/version, protocol fallback policy, listener coordination, and operational
+limits.
+
+---
+
 ### Provider accounts for live channel smokes
 
 ThinClaw's CI channel coverage uses mock transports and fixture payloads by
@@ -519,6 +545,7 @@ Live channel validation requires the relevant provider setup:
 | APNs | Apple Developer team ID, key ID, bundle ID, private key, and a registered device token |
 | Browser push | VAPID key pair, subject, HTTPS origin, and at least one browser subscription endpoint |
 | Voice-call | Twilio/Telnyx or equivalent call webhook path plus a transcription/media callback path |
+| Linq | Partner API v3 account, managed sender number, API key, HTTPS webhook subscription, and signing secret |
 | WASM provider packages | Provider-specific bot/app credentials for Mattermost, Twilio SMS, DingTalk, Feishu/Lark, WeCom, Weixin, QQ, LINE, Google Chat, Microsoft Teams, or Twitch |
 
 Use `thinclaw extensions channels check-config <name>` for local readiness and the WebUI

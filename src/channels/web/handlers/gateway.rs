@@ -227,11 +227,21 @@ async fn load_channel_setup_status(state: &GatewayState, user_id: &str) -> Chann
         crate::settings::Settings::default()
     };
 
-    let nostr_diagnostics = if let Some(channel_manager) = state.channel_manager.as_ref() {
-        channel_manager.channel_diagnostics("nostr").await
-    } else {
-        None
-    };
+    let (nostr_diagnostics, linq_diagnostics, channel_statuses) =
+        if let Some(channel_manager) = state.channel_manager.as_ref() {
+            tokio::join!(
+                channel_manager.channel_diagnostics("nostr"),
+                channel_manager.channel_diagnostics("linq"),
+                channel_manager.status_entries(),
+            )
+        } else {
+            (None, None, Vec::new())
+        };
+    let linq_runtime_active = linq_diagnostics.is_some()
+        && channel_statuses
+            .iter()
+            .find(|status| status.name == "linq")
+            .is_some_and(|status| status.state.is_healthy());
 
     let slack = build_secure_native_lifecycle_setup_status(
         state.secrets_store.as_ref(),
@@ -271,6 +281,15 @@ async fn load_channel_setup_status(state: &GatewayState, user_id: &str) -> Chann
         slack,
         telegram,
         gmail: build_gmail_setup_status(&settings),
+        linq: Some(
+            build_linq_setup_status(
+                state.secrets_store.as_ref(),
+                user_id,
+                &settings,
+                linq_runtime_active,
+            )
+            .await,
+        ),
         apple_mail: build_native_lifecycle_setup_status(
             "APPLE_MAIL_ENABLED",
             settings.channels.apple_mail_enabled,
@@ -343,22 +362,10 @@ async fn build_secure_native_lifecycle_setup_status(
         .unwrap_or(enabled_setting);
     let mut resolved = Vec::with_capacity(required_fields.len());
     for (field, env_vars, secret_names) in required_fields {
-        let env_present = env_vars.iter().any(|env_var| {
-            crate::config::helpers::optional_env(env_var)
-                .ok()
-                .flatten()
-                .is_some_and(|value| !value.trim().is_empty())
-        });
-        let mut secret_present = false;
-        if !env_present && let Some(secrets) = secrets_store {
-            for secret_name in *secret_names {
-                if secrets.exists(user_id, secret_name).await.unwrap_or(false) {
-                    secret_present = true;
-                    break;
-                }
-            }
-        }
-        resolved.push(SetupFieldStatus::new(*field, env_present || secret_present));
+        resolved.push(SetupFieldStatus::new(
+            *field,
+            secure_setup_field_present(secrets_store, user_id, env_vars, secret_names).await,
+        ));
     }
 
     gateway_build_native_lifecycle_setup_status(NativeLifecycleSetupStatusInput {
@@ -366,6 +373,103 @@ async fn build_secure_native_lifecycle_setup_status(
         available,
         required_fields: resolved,
     })
+}
+
+async fn secure_setup_field_present(
+    secrets_store: Option<&std::sync::Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    user_id: &str,
+    env_vars: &[&str],
+    secret_names: &[&str],
+) -> bool {
+    let env_present = env_vars.iter().any(|env_var| {
+        crate::config::helpers::optional_env(env_var)
+            .ok()
+            .flatten()
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+    if env_present {
+        return true;
+    }
+    let Some(secrets) = secrets_store else {
+        return false;
+    };
+    for secret_name in secret_names {
+        if secrets.exists(user_id, secret_name).await.unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
+
+async fn build_linq_setup_status(
+    secrets_store: Option<&std::sync::Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    user_id: &str,
+    settings: &crate::settings::Settings,
+    runtime_active: bool,
+) -> PartialChannelSetupStatus {
+    let enabled =
+        crate::config::helpers::parse_bool_env("LINQ_ENABLED", settings.channels.linq_enabled)
+            .unwrap_or(settings.channels.linq_enabled);
+    let from_number_present = enabled
+        && crate::config::helpers::optional_env("LINQ_FROM_NUMBER")
+            .ok()
+            .flatten()
+            .or_else(|| settings.channels.linq_from_number.clone())
+            .is_some_and(|value| valid_linq_e164(&value));
+    let api_key_present = enabled
+        && secure_setup_field_present(
+            secrets_store,
+            user_id,
+            &["LINQ_API_KEY"],
+            &[crate::channels::LINQ_API_KEY_SECRET],
+        )
+        .await;
+    let webhook_secret_present = enabled
+        && secure_setup_field_present(
+            secrets_store,
+            user_id,
+            &["LINQ_WEBHOOK_SECRET"],
+            &[crate::channels::LINQ_WEBHOOK_SECRET],
+        )
+        .await;
+
+    finalize_linq_setup_status(
+        enabled,
+        from_number_present,
+        api_key_present,
+        webhook_secret_present,
+        runtime_active,
+    )
+}
+
+fn finalize_linq_setup_status(
+    enabled: bool,
+    from_number_present: bool,
+    api_key_present: bool,
+    webhook_secret_present: bool,
+    runtime_active: bool,
+) -> PartialChannelSetupStatus {
+    let mut status = gateway_build_native_lifecycle_setup_status(NativeLifecycleSetupStatusInput {
+        enabled,
+        available: true,
+        required_fields: vec![
+            SetupFieldStatus::new("from_number", from_number_present),
+            SetupFieldStatus::new("api_key", api_key_present),
+            SetupFieldStatus::new("webhook_secret", webhook_secret_present),
+        ],
+    });
+    // Linq uses bearer and webhook credentials, not an asymmetric private key.
+    status.needs_private_key = false;
+    status.tool_ready = status.configured && runtime_active;
+    status.control_ready = status.tool_ready;
+    status
+}
+
+fn valid_linq_e164(value: &str) -> bool {
+    let digits = value.strip_prefix('+').unwrap_or_default();
+    (7..=15).contains(&digits.len())
+        && !digits.starts_with('0')
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn build_native_lifecycle_setup_status(
@@ -570,6 +674,93 @@ fn build_nostr_setup_status(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn linq_status_requires_credentials_and_runtime_diagnostics() {
+        let unresolved = super::finalize_linq_setup_status(true, true, true, false, false);
+        assert!(unresolved.enabled);
+        assert!(!unresolved.configured);
+        assert_eq!(unresolved.missing_fields, vec!["webhook_secret"]);
+        assert!(!unresolved.tool_ready);
+        assert!(!unresolved.control_ready);
+        assert!(!unresolved.needs_private_key);
+
+        let configured_not_running =
+            super::finalize_linq_setup_status(true, true, true, true, false);
+        assert!(configured_not_running.configured);
+        assert!(!configured_not_running.tool_ready);
+
+        let running = super::finalize_linq_setup_status(true, true, true, true, true);
+        assert!(running.configured);
+        assert!(running.tool_ready);
+        assert!(running.control_ready);
+    }
+
+    #[test]
+    fn linq_status_validates_sender_without_exposing_it() {
+        assert!(super::valid_linq_e164("+12025550100"));
+        assert!(!super::valid_linq_e164("12025550100"));
+        assert!(!super::valid_linq_e164("+02025550100"));
+
+        let status = super::finalize_linq_setup_status(true, true, true, true, true);
+        let json = serde_json::to_string(&status).expect("status serializes");
+        assert!(!json.contains("12025550100"));
+        assert!(!json.contains("linq_api_key"));
+        assert!(!json.contains("linq_webhook_secret"));
+    }
+
+    #[tokio::test]
+    async fn linq_status_resolves_scoped_secret_presence_without_values() {
+        let crypto = std::sync::Arc::new(
+            crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                "0123456789abcdef0123456789abcdef".to_string(),
+            ))
+            .expect("test crypto"),
+        );
+        let store: std::sync::Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            std::sync::Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
+        for (name, value) in [
+            (crate::channels::LINQ_API_KEY_SECRET, "linq-api-sentinel"),
+            (
+                crate::channels::LINQ_WEBHOOK_SECRET,
+                "whsec_webhook-sentinel",
+            ),
+        ] {
+            store
+                .create(
+                    "channel-user",
+                    crate::secrets::CreateSecretParams::new(name, value),
+                )
+                .await
+                .expect("credential stored");
+        }
+
+        let api_key_present = super::secure_setup_field_present(
+            Some(&store),
+            "channel-user",
+            &[],
+            &[crate::channels::LINQ_API_KEY_SECRET],
+        )
+        .await;
+        let webhook_secret_present = super::secure_setup_field_present(
+            Some(&store),
+            "channel-user",
+            &[],
+            &[crate::channels::LINQ_WEBHOOK_SECRET],
+        )
+        .await;
+        let status = super::finalize_linq_setup_status(
+            true,
+            true,
+            api_key_present,
+            webhook_secret_present,
+            true,
+        );
+        assert!(status.configured);
+        let json = serde_json::to_string(&status).expect("status serializes");
+        assert!(!json.contains("linq-api-sentinel"));
+        assert!(!json.contains("whsec_webhook-sentinel"));
+    }
+
     #[tokio::test]
     async fn secure_channel_status_reports_only_redacted_credential_presence() {
         let crypto = std::sync::Arc::new(

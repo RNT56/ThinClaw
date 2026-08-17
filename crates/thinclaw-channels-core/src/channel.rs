@@ -130,6 +130,10 @@ impl IncomingIdentityMessage for IncomingMessage {
 /// Response to send back to a channel.
 #[derive(Debug, Clone)]
 pub struct OutgoingResponse {
+    /// Stable identity for this logical delivery. Channel implementations may
+    /// use it to make retries idempotent; cloning a response intentionally
+    /// preserves the same identity.
+    pub delivery_id: Uuid,
     pub content: String,
     pub thread_id: Option<String>,
     pub metadata: serde_json::Value,
@@ -140,6 +144,7 @@ impl OutgoingResponse {
     /// Create a simple text response.
     pub fn text(content: impl Into<String>) -> Self {
         Self {
+            delivery_id: Uuid::new_v4(),
             content: content.into(),
             thread_id: None,
             metadata: serde_json::Value::Null,

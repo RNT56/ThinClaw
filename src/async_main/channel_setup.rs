@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use thinclaw::app::{
     LocalRuntimeChannel, NativeChannelActivationInput, NativeChannelActivationPlan,
 };
@@ -11,7 +11,8 @@ use thinclaw::app::{
 use thinclaw::channels::IMessageChannel;
 use thinclaw::channels::{
     BlueBubblesChannel, BlueBubblesConfig, ChannelManager, DiscordChannel, DiscordConfig,
-    GmailChannel, HttpChannel, ReplChannel, SignalChannel, WebhookServer, WebhookServerConfig,
+    GmailChannel, HttpChannel, LinqChannel, LinqConfig, LinqPreferredService, ReplChannel,
+    SignalChannel, WebhookServer, WebhookServerConfig,
     canvas_gateway::CanvasStore,
     wasm::{WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime},
 };
@@ -34,6 +35,44 @@ pub(super) type WasmChannelRuntimeState = (
     PathBuf,
 );
 
+async fn resolve_linq_secret(
+    configured: Option<SecretString>,
+    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
+    name: &str,
+    purpose: &str,
+    target: Option<(&str, &str)>,
+) -> anyhow::Result<SecretString> {
+    if let Some(value) = configured {
+        let trimmed = value.expose_secret().trim();
+        if !trimmed.is_empty() {
+            return Ok(SecretString::from(trimmed.to_string()));
+        }
+    }
+    let store = secrets_store.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Linq is enabled but secret '{name}' is unavailable; configure the encrypted secret store or its environment fallback"
+        )
+    })?;
+    let mut context = thinclaw::secrets::SecretAccessContext::new("channel.linq", purpose)
+        .auth_source("encrypted_secret_store");
+    if let Some((host, path)) = target {
+        context = context.target(host, path);
+    }
+    let secret = store
+        .get_for_injection("default", name, context)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Linq is enabled but required secret '{name}' is unavailable; store it with `thinclaw secrets set {name} --from-stdin --provider linq`"
+            )
+        })?;
+    let trimmed = secret.expose().trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Linq secret '{name}' is empty");
+    }
+    Ok(SecretString::from(trimmed.to_string()))
+}
+
 pub(super) struct ChannelSetup {
     pub channels: Arc<ChannelManager>,
     pub channel_plan: NativeChannelActivationPlan,
@@ -41,6 +80,7 @@ pub(super) struct ChannelSetup {
     pub loaded_wasm_channel_names: Vec<String>,
     pub wasm_channel_runtime_state: Option<WasmChannelRuntimeState>,
     pub webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>>,
+    pub gateway_webhook_routes: Vec<axum::Router>,
     pub canvas_store: CanvasStore,
 }
 
@@ -97,6 +137,7 @@ pub(super) async fn setup_channels(
         },
         bluebubbles_configured: config.channels.bluebubbles.is_some()
             && runtime_args.channels.allows("bluebubbles"),
+        linq_configured: config.channels.linq.is_some() && runtime_args.channels.allows("linq"),
         gmail_configured: config.channels.gmail.is_some() && runtime_args.channels.allows("gmail"),
         http_configured: config.channels.http.is_some() && runtime_args.channels.allows("http"),
         gateway_configured: config.channels.gateway.is_some()
@@ -163,6 +204,9 @@ pub(super) async fn setup_channels(
 
     // Collect webhook route fragments; a single WebhookServer hosts them all.
     let mut webhook_routes: Vec<axum::Router> = Vec::new();
+    let mut gateway_webhook_routes: Vec<axum::Router> = Vec::new();
+    let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
+    let mut canvas_http_auth_token: Option<String> = None;
     if !runtime_args.channels.disables_external_ingress() {
         webhook_routes.extend(
             register_native_lifecycle_channels(
@@ -377,6 +421,77 @@ pub(super) async fn setup_channels(
         }
     }
 
+    // Add the managed Linq Partner API v3 channel. Its signed webhook route is
+    // mounted both on the shared local listener and on the authenticated
+    // gateway/tunnel listener. Signature verification remains mandatory on
+    // both paths, and an empty sender allowlist denies all inbound messages.
+    if channel_plan.linq
+        && let Some(ref linq_config) = config.channels.linq
+    {
+        let api_base_url = url::Url::parse(&linq_config.api_base_url)
+            .map_err(|error| anyhow::anyhow!("configured Linq API endpoint is invalid: {error}"))?;
+        let api_host = api_base_url
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("configured Linq API endpoint has no host"))?
+            .to_string();
+        let api_key = resolve_linq_secret(
+            linq_config.api_key.clone(),
+            secrets_store,
+            thinclaw::channels::LINQ_API_KEY_SECRET,
+            "partner_api_authentication",
+            Some((&api_host, api_base_url.path())),
+        )
+        .await?;
+        let webhook_secret = resolve_linq_secret(
+            linq_config.webhook_secret.clone(),
+            secrets_store,
+            thinclaw::channels::LINQ_WEBHOOK_SECRET,
+            "webhook_signature_verification",
+            None,
+        )
+        .await?;
+        let preferred_service = LinqPreferredService::parse(&linq_config.preferred_service)
+            .map_err(|message| anyhow::anyhow!("LINQ_PREFERRED_SERVICE {message}"))?;
+        let channel_config = LinqConfig::new(
+            api_base_url,
+            api_key,
+            webhook_secret,
+            linq_config.from_number.clone(),
+            linq_config.webhook_host.clone(),
+            linq_config.webhook_port,
+            linq_config.webhook_path.clone(),
+            linq_config.allow_from.clone(),
+            preferred_service,
+            thinclaw::platform::state_paths()
+                .home
+                .join("linq-channel-state.json"),
+        )?;
+        let linq_channel = LinqChannel::new(channel_config)?;
+        let linq_addr = linq_channel.webhook_addr()?;
+        if let Some(existing_addr) = webhook_server_addr
+            && existing_addr != linq_addr
+        {
+            anyhow::bail!(
+                "Linq webhook address {linq_addr} conflicts with shared webhook address {existing_addr}"
+            );
+        }
+        webhook_server_addr = Some(linq_addr);
+        webhook_routes.push(linq_channel.webhook_routes());
+        gateway_webhook_routes.push(linq_channel.webhook_routes());
+        channel_names.push("linq".to_string());
+        channels.add(Box::new(linq_channel)).await;
+        tracing::info!(
+            webhook = %format_args!("{}{}?version={}", linq_addr, linq_config.webhook_path, thinclaw::channels::LINQ_WEBHOOK_VERSION),
+            preferred_service = linq_config.preferred_service,
+            "Linq Partner API v3 channel enabled"
+        );
+        if linq_config.allow_from.is_empty() {
+            tracing::warn!(
+                "Linq allow_from is empty — all inbound messages are denied until LINQ_ALLOW_FROM is configured"
+            );
+        }
+    }
+
     // Add Gmail channel if configured and not CLI-only mode.
     if channel_plan.gmail
         && let Some(ref gmail_config) = config.channels.gmail
@@ -427,19 +542,26 @@ pub(super) async fn setup_channels(
     }
 
     // Add HTTP channel if configured and not CLI-only mode.
-    let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
-    let mut canvas_http_auth_token: Option<String> = None;
     if channel_plan.http
         && let Some(ref http_config) = config.channels.http
     {
         let http_channel = HttpChannel::new(http_config.clone());
         webhook_routes.push(http_channel.routes());
         let (host, port) = http_channel.addr();
-        webhook_server_addr = Some(format!("{}:{}", host, port).parse().map_err(|e| {
-            anyhow::anyhow!(
-                "HTTP channel bind address '{host}:{port}' is not a valid SocketAddr: {e}"
-            )
-        })?);
+        let http_addr: std::net::SocketAddr =
+            format!("{}:{}", host, port).parse().map_err(|e| {
+                anyhow::anyhow!(
+                    "HTTP channel bind address '{host}:{port}' is not a valid SocketAddr: {e}"
+                )
+            })?;
+        if let Some(existing_addr) = webhook_server_addr
+            && existing_addr != http_addr
+        {
+            anyhow::bail!(
+                "HTTP webhook address {http_addr} conflicts with shared webhook address {existing_addr}"
+            );
+        }
+        webhook_server_addr = Some(http_addr);
         channel_names.push("http".to_string());
         channels.add(Box::new(http_channel)).await;
         canvas_http_auth_token = http_config
@@ -533,6 +655,7 @@ pub(super) async fn setup_channels(
                         channel_name,
                         &recipient,
                         thinclaw::channels::OutgoingResponse {
+                            delivery_id: uuid::Uuid::new_v4(),
                             content: text,
                             thread_id,
                             metadata: serde_json::Value::Null,
@@ -566,6 +689,7 @@ pub(super) async fn setup_channels(
         loaded_wasm_channel_names,
         wasm_channel_runtime_state,
         webhook_server,
+        gateway_webhook_routes,
         canvas_store,
     })
 }
