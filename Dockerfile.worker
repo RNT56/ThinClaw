@@ -41,8 +41,12 @@ FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639
 
 # The Debian snapshot fixes the complete apt package universe. Its metadata is
 # verified by the archive keyring already present in the digest-pinned base.
-# Bootstrap TLS trust from the digest-pinned Node stage before contacting it.
-COPY --from=worker-tools /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+# Bootstrap TLS trust from the digest-pinned Rust stage before contacting it.
+# The Node stage cannot supply it: node:*-bookworm-slim carries no
+# ca-certificates package (Node reaches HTTPS through its own compiled-in CA
+# bundle), so /etc/ssl/certs/ca-certificates.crt does not exist there. The Rust
+# stage is equally digest-pinned and is already a COPY source below.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' \
         'Types: deb' \

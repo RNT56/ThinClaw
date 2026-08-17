@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import SwiftUI
 import ThinClawAuth
+import ThinClawCore
 import ThinClawWidgetKitShared
 
 #if canImport(WatchConnectivity) && canImport(Security) && canImport(CryptoKit)
