@@ -181,6 +181,34 @@ struct AgentEventDecoderTests {
         #expect(try decode(#"{"type":"heartbeat"}"#) == .heartbeat)
     }
 
+    @Test("presence aggregate decodes without tracking identifiers")
+    func presence() throws {
+        let event = try decode(
+            #"{"type":"presence","event":"joined","cause":"publish","presence":{"actor_id":"actor-a","scope":{"kind":"thread","thread_id":"thread-1"},"state":"typing","surfaces":["ios","web"],"session_count":2,"updated_at":"2026-08-13T10:00:00Z","expires_at":"2026-08-13T10:00:45Z"}}"#
+        )
+        guard case let .presence(value) = event else {
+            Issue.record("expected .presence, got \(event)")
+            return
+        }
+        #expect(value.event == .joined)
+        #expect(value.cause == .publish)
+        #expect(value.presence.actorID == "actor-a")
+        #expect(value.presence.scope == .thread(ThreadID("thread-1")))
+        #expect(value.presence.state == .typing)
+        #expect(value.presence.surfaces == [.ios, .web])
+        #expect(value.presence.sessionCount == 2)
+        #expect(event.threadID == ThreadID("thread-1"))
+    }
+
+    @Test("invalid presence scope fails closed")
+    func invalidPresenceScope() {
+        #expect(throws: AgentEventDecodingError.invalidPayload(type: "presence")) {
+            _ = try decode(
+                #"{"type":"presence","event":"updated","cause":"publish","presence":{"actor_id":"actor-a","scope":{"kind":"global"},"state":"online","surfaces":["ios"],"session_count":1,"updated_at":"now","expires_at":"later"}}"#
+            )
+        }
+    }
+
     @Test("error decodes")
     func errorEvent() throws {
         let event = try decode(

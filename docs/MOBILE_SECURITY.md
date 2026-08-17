@@ -111,7 +111,8 @@ thinclaw://pair?d=<base64url(json)>
   rotation (`POST /api/devices/{id}/rotate`), optional `expires_at` honored
   if set. *Rejected:* access+refresh token pairs — both would sit in the
   same Keychain item; complexity without a distinct threat covered.
-- **D-T4 — Scopes v1:** `chat` (send/abort/history/threads/events/ws),
+- **D-T4 — Scopes v1:** `chat` (send/abort/history/threads/events/ws and
+  exact `GET|PUT|DELETE /api/presence` routes),
   `approvals` (`/api/chat/approval` — separate from `chat` so watch/widget
   stay least-privilege), `jobs:read`, `devices:self`. Never grantable:
   settings, secrets/providers, extensions/skills, memory write, logs,

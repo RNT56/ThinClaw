@@ -102,6 +102,114 @@ pub struct ApprovalRequest {
     pub actor_id: Option<String>,
 }
 
+/// Short-lived presence state published by an authenticated gateway client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceState {
+    Online,
+    Away,
+    Busy,
+    Typing,
+}
+
+/// Client surface contributing one presence lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceSurface {
+    Desktop,
+    Web,
+    Ios,
+    Watchos,
+    Cli,
+    Channel,
+}
+
+/// Privacy boundary for one aggregate. Thread identifiers remain strings in
+/// the event DTO so [`SseEvent::thread_id`] can return a borrowed value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PresenceScope {
+    Principal,
+    Thread { thread_id: String },
+}
+
+impl PresenceScope {
+    pub fn thread_id(&self) -> Option<&str> {
+        match self {
+            Self::Principal => None,
+            Self::Thread { thread_id } => Some(thread_id),
+        }
+    }
+}
+
+/// Public aggregate; individual lease UUIDs and the routing principal are
+/// intentionally absent from the wire contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenceAggregate {
+    pub actor_id: String,
+    pub scope: PresenceScope,
+    pub state: PresenceState,
+    pub surfaces: Vec<PresenceSurface>,
+    pub session_count: usize,
+    pub updated_at: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceEventKind {
+    Joined,
+    Updated,
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceEventCause {
+    Publish,
+    Ttl,
+    Clear,
+    Disconnect,
+    ScopeChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenceEvent {
+    pub event: PresenceEventKind,
+    pub cause: PresenceEventCause,
+    pub presence: PresenceAggregate,
+}
+
+/// Body for `PUT /api/presence/{session_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PresencePublishRequest {
+    pub state: PresenceState,
+    pub surface: PresenceSurface,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PresencePublishResponse {
+    pub presence: PresenceAggregate,
+    pub event_emitted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PresenceClearResponse {
+    pub cleared: bool,
+    pub presence: Option<PresenceAggregate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PresenceSnapshotResponse {
+    #[serde(default)]
+    pub presences: Vec<PresenceAggregate>,
+    pub server_time: String,
+}
+
 /// The action to take on a pending approval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalAction {
@@ -210,6 +318,8 @@ pub enum SseEvent {
     },
     /// A keep-alive heartbeat.
     Heartbeat,
+    /// A privacy-filtered, principal/thread-scoped presence transition.
+    Presence(PresenceEvent),
     /// Any event type this client version does not model. The full JSON payload
     /// is preserved so callers can inspect it if needed.
     Unknown {
@@ -236,6 +346,7 @@ impl SseEvent {
             | Self::UsageUpdate { thread_id, .. }
             | Self::ApprovalNeeded { thread_id, .. }
             | Self::Error { thread_id, .. } => thread_id.as_deref(),
+            Self::Presence(event) => event.presence.scope.thread_id(),
             Self::Heartbeat | Self::Unknown { .. } => None,
         }
     }
@@ -318,6 +429,13 @@ impl SseEvent {
                 tool_name: s("tool_name").unwrap_or_default(),
                 description: s("description").unwrap_or_default(),
                 thread_id: opt("thread_id"),
+            },
+            "presence" => match serde_json::from_value::<PresenceEvent>(value.clone()) {
+                Ok(event) => Self::Presence(event),
+                Err(_) => Self::Unknown {
+                    event_type,
+                    raw: value,
+                },
             },
             "heartbeat" => Self::Heartbeat,
             _ => Self::Unknown {
@@ -418,5 +536,35 @@ mod tests {
         assert_eq!(ApprovalAction::Approve.as_str(), "approve");
         assert_eq!(ApprovalAction::Always.as_str(), "always");
         assert_eq!(ApprovalAction::Deny.as_str(), "deny");
+    }
+
+    #[test]
+    fn parses_presence_without_routing_or_lease_identifiers() {
+        let event = SseEvent::from_json(serde_json::json!({
+            "type": "presence",
+            "event": "joined",
+            "cause": "publish",
+            "presence": {
+                "actor_id": "phone",
+                "scope": { "kind": "thread", "thread_id": "thread-1" },
+                "state": "typing",
+                "surfaces": ["ios"],
+                "session_count": 1,
+                "updated_at": "now",
+                "expires_at": "later"
+            }
+        }));
+        assert!(matches!(
+            &event,
+            SseEvent::Presence(PresenceEvent {
+                event: PresenceEventKind::Joined,
+                presence: PresenceAggregate {
+                    scope: PresenceScope::Thread { thread_id },
+                    ..
+                },
+                ..
+            }) if thread_id == "thread-1"
+        ));
+        assert_eq!(event.thread_id(), Some("thread-1"));
     }
 }

@@ -3,7 +3,7 @@
 //! models. Guards against silent drift without a runtime dependency on the
 //! gateway crate (dev-dependency only).
 
-use thinclaw_client::SseEvent as ClientEvent;
+use thinclaw_client::{PresenceEventKind, PresenceScope, SseEvent as ClientEvent};
 use thinclaw_gateway::web::types::SseEvent as ServerEvent;
 
 /// Serialize a server event, parse it through the client, and assert the
@@ -144,4 +144,37 @@ fn unmodeled_server_events_become_unknown_not_errors() {
         }
         other => panic!("expected Unknown for unmodeled server event, got {other:?}"),
     }
+}
+
+#[test]
+fn client_parses_presence_without_private_routing_fields() {
+    let event = roundtrip(ServerEvent::Presence {
+        event: thinclaw_gateway::web::types::PresenceEvent {
+            event: thinclaw_gateway::web::types::PresenceEventKind::Joined,
+            cause: thinclaw_gateway::web::types::PresenceEventCause::Publish,
+            presence: thinclaw_gateway::web::types::PresenceAggregate {
+                actor_id: "phone".into(),
+                scope: thinclaw_gateway::web::types::PresenceScope::Thread {
+                    thread_id: uuid::Uuid::nil(),
+                },
+                state: thinclaw_gateway::web::types::PresenceState::Typing,
+                surfaces: vec![thinclaw_gateway::web::types::PresenceSurface::Ios],
+                session_count: 1,
+                updated_at: "now".into(),
+                expires_at: "later".into(),
+            },
+            principal_id: "routing-only".into(),
+        },
+    });
+    assert!(matches!(
+        event,
+        ClientEvent::Presence(thinclaw_client::PresenceEvent {
+            event: PresenceEventKind::Joined,
+            presence: thinclaw_client::PresenceAggregate {
+                scope: PresenceScope::Thread { thread_id },
+                ..
+            },
+            ..
+        }) if thread_id == uuid::Uuid::nil().to_string()
+    ));
 }

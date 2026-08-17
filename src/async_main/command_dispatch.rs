@@ -485,6 +485,12 @@ pub(super) async fn run_terminal_command(
                 .await
                 .map_err(anyhow::Error::from)
         }
+        Some(Command::Presence(presence_cmd)) => {
+            init_cli_tracing(cli.debug);
+            thinclaw::cli::run_presence_command(presence_cmd.clone(), context)
+                .await
+                .map_err(anyhow::Error::from)
+        }
         Some(Command::Sessions(session_cmd)) => {
             init_cli_tracing(cli.debug);
             thinclaw::cli::run_sessions_command(session_cmd.clone(), context)

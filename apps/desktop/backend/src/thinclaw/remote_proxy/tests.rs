@@ -272,7 +272,28 @@ fn fixture_response(method: &str, path: &str, body: &str) -> String {
         }
         ("GET", "/api/mcp/servers") => serde_json::json!({ "servers": [] }),
         ("GET", "/api/mcp/interactions") => serde_json::json!({ "interactions": [] }),
+        ("GET", "/api/presence") => serde_json::json!({
+            "presences": [],
+            "server_time": "2026-08-13T00:00:00Z"
+        }),
         ("POST", "/api/skills/install") => serde_json::json!({ "installed": true }),
+        _ if method == "PUT" && path.starts_with("/api/presence/") => {
+            serde_json::json!({
+                "presence": {
+                    "actor_id": "desktop",
+                    "scope": { "kind": "principal" },
+                    "state": "online",
+                    "surfaces": ["desktop"],
+                    "session_count": 1,
+                    "updated_at": "now",
+                    "expires_at": "later"
+                },
+                "event_emitted": true
+            })
+        }
+        _ if method == "DELETE" && path.starts_with("/api/presence/") => {
+            serde_json::json!({ "cleared": true })
+        }
         _ if method == "GET" && path.starts_with("/api/chat/thread/thread-1/export?") => {
             serde_json::json!({
                 "format": "markdown",
@@ -358,6 +379,47 @@ fn constructor_rejects_ambiguous_urls_and_invalid_tokens() {
     }
     assert!(RemoteGatewayProxy::new("http://127.0.0.1:3000", "").is_err());
     assert!(RemoteGatewayProxy::new("http://127.0.0.1:3000", "token\r\ninjected: yes").is_err());
+}
+
+#[tokio::test]
+async fn desktop_presence_reuses_one_authenticated_session_id() {
+    let (base_url, recorded, fixture) = start_fixture_gateway(2).await;
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").unwrap();
+
+    proxy.publish_presence().await.expect("publish presence");
+    proxy.clear_presence().await.expect("clear presence");
+    fixture.await.expect("fixture completes");
+
+    let requests = recorded.lock().await;
+    assert_eq!(requests[0].method, "PUT");
+    assert_eq!(requests[1].method, "DELETE");
+    assert_eq!(requests[0].path, requests[1].path);
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer fixture-token")
+    );
+    let payload: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(payload["state"], "online");
+    assert_eq!(payload["surface"], "desktop");
+    assert_eq!(payload["ttl_seconds"], 45);
+    assert_eq!(payload.as_object().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn desktop_presence_snapshot_uses_authenticated_runtime_surface() {
+    let (base_url, recorded, fixture) = start_fixture_gateway(1).await;
+    let proxy = RemoteGatewayProxy::new(&base_url, "fixture-token").unwrap();
+
+    let snapshot = proxy.presence_snapshot().await.expect("presence snapshot");
+    fixture.await.expect("fixture completes");
+
+    assert_eq!(snapshot["presences"], serde_json::json!([]));
+    let requests = recorded.lock().await;
+    assert_eq!(requests[0].path, "/api/presence");
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer fixture-token")
+    );
 }
 
 #[tokio::test]

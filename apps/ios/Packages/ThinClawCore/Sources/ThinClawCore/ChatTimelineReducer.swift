@@ -143,7 +143,7 @@ public struct ChatTimelineReducer: Sendable {
                 TimelineItem(
                     threadID: threadID, timestamp: now(), kind: .failure(message: message)))
 
-        case .usageUpdate, .heartbeat, .unknown:
+        case .usageUpdate, .heartbeat, .presence, .unknown:
             // Not rendered in the transcript.
             break
         }

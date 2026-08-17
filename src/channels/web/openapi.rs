@@ -70,6 +70,29 @@ impl Modify for GatewayTokenSecurity {
 struct ChatApiDoc;
 
 #[derive(OpenApi)]
+#[openapi(
+    paths(
+        super::handlers::presence::presence_snapshot_handler,
+        super::handlers::presence::presence_publish_handler,
+        super::handlers::presence::presence_clear_handler,
+    ),
+    components(schemas(
+        thinclaw_gateway::web::types::PresenceState,
+        thinclaw_gateway::web::types::PresenceSurface,
+        thinclaw_gateway::web::types::PresenceScope,
+        thinclaw_gateway::web::types::PresenceAggregate,
+        thinclaw_gateway::web::types::PresenceEventKind,
+        thinclaw_gateway::web::types::PresenceEventCause,
+        thinclaw_gateway::web::types::PresenceEvent,
+        thinclaw_gateway::web::types::PresencePublishRequest,
+        thinclaw_gateway::web::types::PresencePublishResponse,
+        thinclaw_gateway::web::types::PresenceClearResponse,
+        thinclaw_gateway::web::types::PresenceSnapshotResponse,
+    ))
+)]
+struct PresenceApiDoc;
+
+#[derive(OpenApi)]
 #[openapi(paths(
     super::handlers::jobs::jobs_list_handler,
     super::handlers::jobs::jobs_summary_handler,
@@ -139,12 +162,13 @@ pub fn gateway_openapi() -> utoipa::openapi::OpenApi {
     doc.merge(JobsApiDoc::openapi());
     doc.merge(StatusApiDoc::openapi());
     doc.merge(DevicesApiDoc::openapi());
+    doc.merge(PresenceApiDoc::openapi());
 
     doc.info.title = "ThinClaw Gateway API".to_string();
     doc.info.version = CONTRACT_VERSION.to_string();
     doc.info.description = Some(
         "The v1 mobile contract of the ThinClaw web gateway: chat, threads, \
-         approvals, read-only jobs, gateway status, and device identity \
+         approvals, transient principal/thread presence, read-only jobs, gateway status, and device identity \
          (pairing, device management, per-device tokens). Streaming events \
          are delivered over `/api/chat/events` (SSE) or `/api/chat/ws` \
          (WebSocket); both carry the `SseEvent` component schema."
@@ -282,6 +306,8 @@ mod tests {
         "/api/chat/thread/{id}",
         "/api/chat/events",
         "/api/chat/ws",
+        "/api/presence",
+        "/api/presence/{session_id}",
         "/api/jobs",
         "/api/jobs/summary",
         "/api/jobs/{id}",
@@ -342,6 +368,31 @@ mod tests {
     }
 
     #[test]
+    fn presence_component_schemas_are_registered() {
+        let doc = gateway_openapi();
+        let components = doc.components.expect("components present");
+        for name in [
+            "PresenceAggregate",
+            "PresenceEvent",
+            "PresencePublishRequest",
+            "PresencePublishResponse",
+            "PresenceClearResponse",
+            "PresenceSnapshotResponse",
+        ] {
+            assert!(
+                components.schemas.contains_key(name),
+                "missing component schema {name}"
+            );
+        }
+        let event = serde_json::to_value(&components.schemas["PresenceEvent"])
+            .expect("PresenceEvent schema serializes");
+        assert!(
+            !event.to_string().contains("principal_id"),
+            "routing ownership must not enter the public OpenAPI schema: {event}"
+        );
+    }
+
+    #[test]
     fn thread_list_assistant_thread_is_optional_plain_ref() {
         // Regression guard: `ThreadListResponse.assistant_thread` must be a
         // plain, non-nullable `$ref` to `ThreadInfo` that is simply absent from
@@ -390,5 +441,26 @@ mod tests {
         assert_eq!(json["thread_id"], "t-1");
         assert!(json.get("principal_id").is_none());
         assert!(json.get("actor_id").is_none());
+
+        let presence = SseEvent::Presence {
+            event: thinclaw_gateway::web::types::PresenceEvent {
+                event: thinclaw_gateway::web::types::PresenceEventKind::Joined,
+                cause: thinclaw_gateway::web::types::PresenceEventCause::Publish,
+                presence: thinclaw_gateway::web::types::PresenceAggregate {
+                    actor_id: "a-1".to_string(),
+                    scope: thinclaw_gateway::web::types::PresenceScope::Principal,
+                    state: thinclaw_gateway::web::types::PresenceState::Online,
+                    surfaces: vec![thinclaw_gateway::web::types::PresenceSurface::Ios],
+                    session_count: 1,
+                    updated_at: "now".to_string(),
+                    expires_at: "later".to_string(),
+                },
+                principal_id: "p-1".to_string(),
+            },
+        };
+        let json = serde_json::to_value(presence).expect("presence serializes");
+        assert_eq!(json["type"], "presence");
+        assert!(json.get("principal_id").is_none());
+        assert!(json.get("session_id").is_none());
     }
 }

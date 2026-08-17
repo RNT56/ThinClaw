@@ -7,6 +7,7 @@ use reqwest::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use tracing::{error, info, warn};
 
 use super::core::{ConnectionState, RemoteGatewayProxy};
+use super::presence::DESKTOP_PRESENCE_REFRESH_SECONDS;
 
 const MAX_SSE_LINE_BYTES: usize = 512 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
@@ -180,7 +181,15 @@ impl RemoteGatewayProxy {
     pub async fn stop_sse_subscription(&self) {
         if let Some(handle) = self.inner.sse_handle.lock().await.take() {
             handle.abort();
+            // `abort()` only schedules cancellation. Wait until the task that
+            // owns renewal has actually stopped before the final DELETE, or
+            // an in-flight PUT could arrive afterward and resurrect the lease
+            // until its TTL expires.
+            let _ = handle.await;
             info!("[remote_proxy] SSE subscription stopped");
+        }
+        if let Err(error) = self.clear_presence().await {
+            warn!("[remote_proxy] Failed to clear desktop presence: {error}");
         }
         *self.inner.state.write().await = ConnectionState::Disconnected;
     }
@@ -259,8 +268,48 @@ impl RemoteGatewayProxy {
                         &crate::thinclaw::ui_types::UiEvent::Connected { protocol: 1 },
                     );
 
-                    // Stream SSE events
-                    let stream_result = self.consume_sse_stream(response, &app_handle).await;
+                    if let Err(error) = self.publish_presence().await {
+                        warn!("[remote_proxy] Failed to publish desktop presence: {error}");
+                    }
+                    match self.presence_snapshot().await {
+                        Ok(snapshot) => {
+                            let _ = app_handle.emit(
+                                "thinclaw-event",
+                                &crate::thinclaw::ui_types::UiEvent::GatewayEvent {
+                                    event_type: "presence_snapshot".to_string(),
+                                    session_key: None,
+                                    run_id: None,
+                                    payload: snapshot,
+                                },
+                            );
+                        }
+                        Err(error) => {
+                            warn!("[remote_proxy] Failed to reconcile desktop presence: {error}");
+                        }
+                    }
+                    // Own renewal in this same task. A detached child could
+                    // survive `stop_sse_subscription`, race the DELETE, and
+                    // resurrect presence indefinitely.
+                    let mut presence_refresh = tokio::time::interval(Duration::from_secs(
+                        DESKTOP_PRESENCE_REFRESH_SECONDS,
+                    ));
+                    presence_refresh
+                        .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    presence_refresh.tick().await;
+                    let stream_result = {
+                        let stream = self.consume_sse_stream(response, &app_handle);
+                        tokio::pin!(stream);
+                        loop {
+                            tokio::select! {
+                                result = &mut stream => break result,
+                                _ = presence_refresh.tick() => {
+                                    if let Err(error) = self.publish_presence().await {
+                                        warn!("[remote_proxy] Failed to renew desktop presence: {error}");
+                                    }
+                                }
+                            }
+                        }
+                    };
 
                     match stream_result {
                         Ok(()) => {

@@ -66,6 +66,15 @@ document generated **from the Rust source** (utoipa annotations behind the
 Rule: any PR that changes a mobile-contract endpoint or DTO must regenerate
 the snapshot in the same PR (the CI check enforces it).
 
+Authenticated presence is part of that generated contract: iOS renews one
+45-second `surface: ios` lease while its paired foreground `GatewaySession` is
+running, clears it during a clean shutdown, and decodes privacy-filtered
+`presence` SSE aggregates for scope-specific subscribers. Because SSE has no
+replay, each subscriber receives an authoritative REST snapshot before buffered
+events, and all subscribed scopes reconcile again after a reconnect. Presence is ephemeral
+and never enters the transcript, App Group snapshots, widgets, or model input;
+see [`docs/PRESENCE.md`](PRESENCE.md).
+
 **Snapshot exceptions (not in the OpenAPI, hand-rolled on the client).** A few
 device-scoped `jobs:read` GET routes are wired and scoped in Rust
 (`src/channels/web/server.rs`, `crates/thinclaw-gateway/src/web/devices/scopes.rs`)

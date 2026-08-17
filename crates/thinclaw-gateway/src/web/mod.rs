@@ -17,6 +17,7 @@ pub mod nostr;
 pub mod openai_compat;
 pub mod pairing;
 pub mod ports;
+pub mod presence;
 pub mod projects;
 pub mod providers;
 pub mod rate_limiter;

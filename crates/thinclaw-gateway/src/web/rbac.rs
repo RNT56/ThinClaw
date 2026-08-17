@@ -57,6 +57,7 @@ const OPERATOR_WRITABLE_PREFIXES: &[&str] = &[
     "/api/memory",
     "/api/jobs",
     "/api/subagents",
+    "/api/presence",
 ];
 
 fn path_matches(path: &str, prefixes: &[&str]) -> bool {
@@ -222,6 +223,7 @@ mod tests {
             "/api/memory/write",
             "/api/subagents",
             "/api/subagents/00000000-0000-0000-0000-000000000000/cancel",
+            "/api/presence/00000000-0000-0000-0000-000000000000",
         ] {
             assert_eq!(
                 capability_for_request(&Method::POST, path),

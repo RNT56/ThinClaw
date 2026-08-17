@@ -89,3 +89,28 @@ fn subagent_commands_are_in_generated_help_and_completion() {
         );
     }
 }
+
+#[test]
+fn presence_commands_are_in_generated_help_and_completion() {
+    let mut root = Cli::command();
+    let presence = root
+        .find_subcommand_mut("presence")
+        .expect("presence command");
+    let help = presence.render_long_help().to_string();
+    for command in ["publish", "list", "clear"] {
+        assert!(
+            help.contains(command),
+            "missing {command} from presence help"
+        );
+    }
+    for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+        let mut command = Cli::command();
+        let mut completion = Vec::new();
+        generate(shell, &mut command, "thinclaw", &mut completion);
+        let completion = String::from_utf8(completion).expect("UTF-8 completion");
+        assert!(
+            completion.contains("presence"),
+            "missing presence from {shell:?} completion"
+        );
+    }
+}

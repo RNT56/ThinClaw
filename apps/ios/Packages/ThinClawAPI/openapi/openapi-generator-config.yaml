@@ -91,3 +91,6 @@ filter:
     - jobs_detail_handler
     - jobs_list_handler
     - jobs_summary_handler
+    - presence_clear_handler
+    - presence_publish_handler
+    - presence_snapshot_handler

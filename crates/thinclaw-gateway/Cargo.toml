@@ -31,7 +31,7 @@ thinclaw-settings = { version = "0.1.0", path = "../thinclaw-settings" }
 thinclaw-tools-core = { version = "0.1.0", path = "../thinclaw-tools-core" }
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
 thiserror = { workspace = true }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = { workspace = true }
 tracing-appender = "0.2"

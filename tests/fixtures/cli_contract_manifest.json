@@ -1472,6 +1472,29 @@
       {
         "effect": {
           "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:presence clear",
+        "path": "presence clear"
+      },
+      {
+        "effect": {
+          "effect": "read_only"
+        },
+        "id": "leaf:presence list",
+        "path": "presence list"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
+          "policy": "runtime_required"
+        },
+        "id": "leaf:presence publish",
+        "path": "presence publish"
+      },
+      {
+        "effect": {
+          "effect": "mutating",
           "policy": "owned_process_lifecycle"
         },
         "id": "leaf:run",
@@ -2818,6 +2841,9 @@
         "leaf:media comfy list-workflows",
         "leaf:media comfy setup",
         "leaf:media comfy stop",
+        "leaf:presence clear",
+        "leaf:presence list",
+        "leaf:presence publish",
         "leaf:run",
         "leaf:runtime logs levels",
         "leaf:runtime logs search",

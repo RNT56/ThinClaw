@@ -1132,6 +1132,11 @@ pub async fn start_server(
             get(chat_thread_export_handler),
         )
         .route("/api/chat/thread/{id}", delete(chat_delete_thread_handler))
+        .route("/api/presence", get(presence_snapshot_handler))
+        .route(
+            "/api/presence/{session_id}",
+            put(presence_publish_handler).delete(presence_clear_handler),
+        )
         // Autonomy
         .route("/api/autonomy/status", get(autonomy_status_handler))
         .route("/api/autonomy/bootstrap", post(autonomy_bootstrap_handler))

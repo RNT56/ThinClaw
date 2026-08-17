@@ -23,11 +23,14 @@ use crate::agent::submission::Submission;
 #[cfg(test)]
 use crate::channels::IncomingMessage;
 use crate::channels::web::handlers::chat::gateway_submission_error;
+use crate::channels::web::handlers::presence::presence_scope_authorized;
 use crate::channels::web::identity_helpers::{
     GatewayRequestIdentity, sse_event_visible_to_identity,
 };
 use crate::channels::web::server::GatewayState;
-use crate::channels::web::types::{ModelInfo, WsClientMessage, WsServerMessage};
+use crate::channels::web::types::{
+    ModelInfo, PresenceEventCause, PresencePublishRequest, WsClientMessage, WsServerMessage,
+};
 use thinclaw_gateway::web::devices::DeviceScope;
 use thinclaw_gateway::web::identity::DeviceContext;
 use thinclaw_gateway::web::rbac::{GatewayCapability, role_grants};
@@ -154,6 +157,7 @@ pub async fn handle_ws_connection(
     // Channel for the sender task to receive messages from both
     // the broadcast stream and any direct sends (like Pong)
     let (direct_tx, mut direct_rx) = mpsc::channel::<WsServerMessage>(64);
+    let presence_lease_id = state.sse.presence().open_lease();
 
     // Sender task: forward broadcast events + direct messages to WS client
     let sender_handle = tokio::spawn(async move {
@@ -204,13 +208,14 @@ pub async fn handle_ws_connection(
                 let parsed: Result<WsClientMessage, _> = serde_json::from_str(&text);
                 match parsed {
                     Ok(client_msg) => {
-                        handle_client_message(
+                        handle_client_message_with_lease(
                             client_msg,
                             &state,
                             &request_identity,
                             device_ctx.as_ref(),
                             &direct_tx,
                             browser_origin.as_deref(),
+                            Some(presence_lease_id),
                         )
                         .await;
                     }
@@ -231,12 +236,22 @@ pub async fn handle_ws_connection(
 
     // Clean up: abort sender, decrement counter
     sender_handle.abort();
+    state
+        .sse
+        .presence()
+        .clear_lease(
+            &request_identity.principal_id,
+            &request_identity.actor_id,
+            presence_lease_id,
+        )
+        .await;
     if let Some(ref tracker) = tracker_for_drop {
         tracker.decrement();
     }
 }
 
 /// Route a parsed client message to the appropriate handler.
+#[cfg(test)]
 async fn handle_client_message(
     msg: WsClientMessage,
     state: &GatewayState,
@@ -244,6 +259,27 @@ async fn handle_client_message(
     device_ctx: Option<&DeviceContext>,
     direct_tx: &mpsc::Sender<WsServerMessage>,
     browser_origin: Option<&str>,
+) {
+    handle_client_message_with_lease(
+        msg,
+        state,
+        request_identity,
+        device_ctx,
+        direct_tx,
+        browser_origin,
+        None,
+    )
+    .await;
+}
+
+async fn handle_client_message_with_lease(
+    msg: WsClientMessage,
+    state: &GatewayState,
+    request_identity: &GatewayRequestIdentity,
+    device_ctx: Option<&DeviceContext>,
+    direct_tx: &mpsc::Sender<WsServerMessage>,
+    browser_origin: Option<&str>,
+    presence_lease_id: Option<u64>,
 ) {
     // The HTTP RBAC middleware can only authorize the WebSocket upgrade (a
     // GET).  It cannot see later bidirectional frames, so enforce the same
@@ -269,6 +305,9 @@ async fn handle_client_message(
         let allowed = match &msg {
             WsClientMessage::Message { .. } => ctx.has_scope(DeviceScope::Chat),
             WsClientMessage::Approval { .. } => ctx.has_scope(DeviceScope::Approvals),
+            WsClientMessage::Presence { .. } | WsClientMessage::PresenceClear { .. } => {
+                ctx.has_scope(DeviceScope::Chat)
+            }
             WsClientMessage::Ping => true,
             _ => false,
         };
@@ -672,15 +711,99 @@ async fn handle_client_message(
                 .send(WsServerMessage::ModelListResult { models })
                 .await;
         }
+        WsClientMessage::Presence {
+            session_id,
+            state: presence_state,
+            surface,
+            thread_id,
+            ttl_seconds,
+        } => {
+            let request = PresencePublishRequest {
+                state: presence_state,
+                surface,
+                thread_id,
+                ttl_seconds,
+            };
+            if !presence_scope_authorized(state, request_identity, &request.scope()).await {
+                let _ = direct_tx
+                    .send(WsServerMessage::PresenceResult {
+                        session_id,
+                        success: false,
+                        response: None,
+                        error: Some("Presence scope not found".to_string()),
+                    })
+                    .await;
+                return;
+            }
+            let result = state
+                .sse
+                .presence()
+                .publish(
+                    &request_identity.principal_id,
+                    &request_identity.actor_id,
+                    session_id,
+                    request,
+                    presence_lease_id,
+                )
+                .await;
+            let message = match result {
+                Ok(response) => WsServerMessage::PresenceResult {
+                    session_id,
+                    success: true,
+                    response: Some(response),
+                    error: None,
+                },
+                Err(error) => WsServerMessage::PresenceResult {
+                    session_id,
+                    success: false,
+                    response: None,
+                    error: Some(error.to_string()),
+                },
+            };
+            let _ = direct_tx.send(message).await;
+        }
+        WsClientMessage::PresenceClear { session_id } => {
+            let response = if let Some(lease_id) = presence_lease_id {
+                state
+                    .sse
+                    .presence()
+                    .clear_lease_session(
+                        &request_identity.principal_id,
+                        &request_identity.actor_id,
+                        session_id,
+                        lease_id,
+                        PresenceEventCause::Clear,
+                    )
+                    .await
+            } else {
+                state
+                    .sse
+                    .presence()
+                    .clear(
+                        &request_identity.principal_id,
+                        &request_identity.actor_id,
+                        session_id,
+                        PresenceEventCause::Clear,
+                    )
+                    .await
+            };
+            let _ = direct_tx
+                .send(WsServerMessage::PresenceClearResult {
+                    session_id,
+                    response,
+                })
+                .await;
+        }
     }
 }
 
 fn websocket_message_capability(message: &WsClientMessage) -> GatewayCapability {
     match message {
         WsClientMessage::Ping | WsClientMessage::Version { .. } => GatewayCapability::ReadState,
-        WsClientMessage::Message { .. } | WsClientMessage::Approval { .. } => {
-            GatewayCapability::Chat
-        }
+        WsClientMessage::Message { .. }
+        | WsClientMessage::Approval { .. }
+        | WsClientMessage::Presence { .. }
+        | WsClientMessage::PresenceClear { .. } => GatewayCapability::Chat,
         WsClientMessage::ConfigSet { .. }
         | WsClientMessage::SecretSet { .. }
         | WsClientMessage::ModelList => GatewayCapability::ManageConfig,
@@ -755,6 +878,57 @@ mod tests {
             websocket_message_capability(&WsClientMessage::ModelList),
             GatewayCapability::ManageConfig
         );
+        assert_eq!(
+            websocket_message_capability(&WsClientMessage::PresenceClear {
+                session_id: Uuid::nil(),
+            }),
+            GatewayCapability::Chat
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_presence_publishes_owned_session_and_acks() {
+        let state = make_test_state(None).await;
+        let identity = test_request_identity("user1");
+        let (direct_tx, mut direct_rx) = mpsc::channel(16);
+        let session_id = Uuid::new_v4();
+        let lease_id = state.sse.presence().open_lease();
+
+        handle_client_message_with_lease(
+            WsClientMessage::Presence {
+                session_id,
+                state: thinclaw_gateway::web::types::PresenceState::Online,
+                surface: thinclaw_gateway::web::types::PresenceSurface::Ios,
+                thread_id: None,
+                ttl_seconds: Some(45),
+            },
+            &state,
+            &identity,
+            None,
+            &direct_tx,
+            None,
+            Some(lease_id),
+        )
+        .await;
+
+        assert!(matches!(
+            direct_rx.recv().await,
+            Some(WsServerMessage::PresenceResult {
+                session_id: id,
+                success: true,
+                ..
+            }) if id == session_id
+        ));
+        let snapshot = state
+            .sse
+            .presence()
+            .snapshot(
+                "user1",
+                &thinclaw_gateway::web::types::PresenceScope::Principal,
+            )
+            .await;
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].session_count, 1);
     }
 
     #[tokio::test]

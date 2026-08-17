@@ -39,6 +39,17 @@ struct AgentEventTests {
             AgentEvent.usageUpdate(UsageUpdate(inputTokens: 1, outputTokens: 1, threadID: id))
                 .threadID == id)
         #expect(AgentEvent.error(message: "", threadID: id).threadID == id)
+        #expect(
+            AgentEvent.presence(
+                PresenceEvent(
+                    event: .updated,
+                    cause: .publish,
+                    presence: PresenceAggregate(
+                        actorID: "actor", scope: .thread(id), state: .typing,
+                        surfaces: [.ios], sessionCount: 1, updatedAt: "now",
+                        expiresAt: "later")))
+                .threadID == id
+        )
         #expect(AgentEvent.heartbeat.threadID == nil)
         #expect(AgentEvent.unknown(type: "plan_update").threadID == nil)
     }

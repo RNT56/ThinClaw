@@ -184,7 +184,7 @@ final class AppDependencies {
     /// per-activity token while the app is asleep). It is torn down only on
     /// unpair.
     func stopSession() async {
-        await session?.shutdown()
+        await session?.suspend()
         AppLog.transport.debug("Gateway session stopped")
     }
 

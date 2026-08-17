@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::common::ModelInfo;
+use super::presence::{
+    PresenceClearResponse, PresencePublishResponse, PresenceState, PresenceSurface,
+};
 use super::sse::SseEvent;
 
 /// Message sent by a WebSocket client to the server.
@@ -55,6 +58,18 @@ pub enum WsClientMessage {
     /// Request the list of available models.
     #[serde(rename = "model_list")]
     ModelList,
+    /// Publish or renew this connection's transient presence session.
+    #[serde(rename = "presence")]
+    Presence {
+        session_id: uuid::Uuid,
+        state: PresenceState,
+        surface: PresenceSurface,
+        thread_id: Option<uuid::Uuid>,
+        ttl_seconds: Option<u64>,
+    },
+    /// Idempotently clear this connection's transient presence session.
+    #[serde(rename = "presence_clear")]
+    PresenceClear { session_id: uuid::Uuid },
 }
 
 /// Message sent by the server to a WebSocket client.
@@ -111,6 +126,20 @@ pub enum WsServerMessage {
     /// List of available models.
     #[serde(rename = "model_list_result")]
     ModelListResult { models: Vec<ModelInfo> },
+    /// Result of a presence publish/renew operation.
+    #[serde(rename = "presence_result")]
+    PresenceResult {
+        session_id: uuid::Uuid,
+        success: bool,
+        response: Option<PresencePublishResponse>,
+        error: Option<String>,
+    },
+    /// Result of an idempotent presence clear operation.
+    #[serde(rename = "presence_clear_result")]
+    PresenceClearResult {
+        session_id: uuid::Uuid,
+        response: PresenceClearResponse,
+    },
 }
 
 impl WsServerMessage {

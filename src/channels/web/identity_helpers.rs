@@ -169,6 +169,22 @@ pub(crate) async fn sse_event_visible_to_identity(
             actor_id,
             ..
         } => identity.principal_id == *principal_id && identity.actor_id == *actor_id,
+        SseEvent::Presence { event } => {
+            if identity.principal_id != event.principal_id {
+                return false;
+            }
+            if let Some(thread_id) = event.presence.scope.thread_id() {
+                conversation_event_visible_to_identity(
+                    store,
+                    state,
+                    identity,
+                    &thread_id.to_string(),
+                )
+                .await
+            } else {
+                true
+            }
+        }
         SseEvent::JobMessage { job_id, .. }
         | SseEvent::JobToolUse { job_id, .. }
         | SseEvent::JobToolResult { job_id, .. }
@@ -212,7 +228,7 @@ pub(crate) async fn sse_event_visible_to_identity(
     }
 }
 
-async fn conversation_event_visible_to_identity(
+pub(crate) async fn conversation_event_visible_to_identity(
     store: Option<&std::sync::Arc<dyn Database>>,
     state: &GatewayState,
     identity: &GatewayRequestIdentity,
@@ -732,5 +748,96 @@ mod tests {
 
         assert!(sse_event_visible_to_identity(None, &state, &allowed, &event).await);
         assert!(!sse_event_visible_to_identity(None, &state, &denied, &event).await);
+    }
+
+    fn presence_event(
+        principal_id: &str,
+        actor_id: &str,
+        scope: thinclaw_gateway::web::types::PresenceScope,
+    ) -> SseEvent {
+        SseEvent::Presence {
+            event: thinclaw_gateway::web::types::PresenceEvent {
+                event: thinclaw_gateway::web::types::PresenceEventKind::Joined,
+                cause: thinclaw_gateway::web::types::PresenceEventCause::Publish,
+                presence: thinclaw_gateway::web::types::PresenceAggregate {
+                    actor_id: actor_id.to_string(),
+                    scope,
+                    state: thinclaw_gateway::web::types::PresenceState::Online,
+                    surfaces: vec![thinclaw_gateway::web::types::PresenceSurface::Web],
+                    session_count: 1,
+                    updated_at: "2026-08-13T10:00:00Z".to_string(),
+                    expires_at: "2026-08-13T10:00:45Z".to_string(),
+                },
+                principal_id: principal_id.to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn principal_presence_is_tenant_scoped_but_multi_actor() {
+        let state = test_gateway_state("user-1", "actor-a", None);
+        let event = presence_event(
+            "user-1",
+            "actor-a",
+            thinclaw_gateway::web::types::PresenceScope::Principal,
+        );
+        let same_principal = GatewayRequestIdentity::new(
+            "user-1",
+            "actor-b",
+            GatewayAuthSource::TrustedProxy,
+            false,
+        );
+        let other_principal = GatewayRequestIdentity::new(
+            "user-2",
+            "actor-a",
+            GatewayAuthSource::TrustedProxy,
+            false,
+        );
+
+        assert!(sse_event_visible_to_identity(None, &state, &same_principal, &event).await);
+        assert!(!sse_event_visible_to_identity(None, &state, &other_principal, &event).await);
+    }
+
+    #[tokio::test]
+    async fn thread_presence_requires_exact_actor_ownership() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let conversation_id = db
+            .create_conversation("gateway", "user-1", Some("presence-thread"))
+            .await
+            .expect("create conversation");
+        db.update_conversation_identity(
+            conversation_id,
+            Some("user-1"),
+            Some("actor-a"),
+            Some(scope_id_from_key("principal:user-1")),
+            HistoryConversationKind::Direct,
+            Some("gateway://direct/user-1/actor/actor-a/presence"),
+        )
+        .await
+        .expect("set identity");
+        let store: Arc<dyn Database> = db;
+        let state = test_gateway_state("user-1", "actor-a", Some(store.clone()));
+        let event = presence_event(
+            "user-1",
+            "actor-a",
+            thinclaw_gateway::web::types::PresenceScope::Thread {
+                thread_id: conversation_id,
+            },
+        );
+        let owner = GatewayRequestIdentity::new(
+            "user-1",
+            "actor-a",
+            GatewayAuthSource::TrustedProxy,
+            false,
+        );
+        let sibling = GatewayRequestIdentity::new(
+            "user-1",
+            "actor-b",
+            GatewayAuthSource::TrustedProxy,
+            false,
+        );
+
+        assert!(sse_event_visible_to_identity(Some(&store), &state, &owner, &event).await);
+        assert!(!sse_event_visible_to_identity(Some(&store), &state, &sibling, &event).await);
     }
 }
