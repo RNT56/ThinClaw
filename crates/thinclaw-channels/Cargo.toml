@@ -12,7 +12,7 @@ thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
 anyhow = { workspace = true }
 axum = "0.8"
 async-trait = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 chrono = { workspace = true }
 ed25519-dalek = { version = "2", features = ["std"] }
 futures = { workspace = true }
