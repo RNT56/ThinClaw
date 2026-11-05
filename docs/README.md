@@ -62,6 +62,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 ### Contributors And Maintainers
 
 - [DEVELOPMENT.md](DEVELOPMENT.md)
+- [audit-2026-11/README.md](audit-2026-11/README.md) — open 2026-11 audit: findings registry and remediation workstreams
 - [RELEASING.md](RELEASING.md)
 - [BUILD_PROFILES.md](BUILD_PROFILES.md)
 - [../CLAUDE.md](../CLAUDE.md)
